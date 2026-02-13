@@ -114,7 +114,12 @@ jobs:
           # We force a consistent name here:
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
           mv "$GENERATED_FILE" "Trophy-${VERSION}-x86_64.AppImage"
-          
+
+      - name: Generate Checksum
+        run: |
+          # Generate SHA256 for any AppImage in the directory
+          sha256sum Trophy-*-x86_64.AppImage > SHA256SUMS
+        
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -136,5 +141,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: Trophy-*-x86_64.AppImage
+          files: |
+            Trophy-*-x86_64.AppImage
+            SHA256SUMS
           generate_release_notes: true
