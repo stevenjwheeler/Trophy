@@ -22,11 +22,16 @@ Page {
 
     ScrollView {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
         contentWidth: availableWidth
+        contentHeight: mainStack.height
+        anchors.topMargin: Theme.spacingLarge
+        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+        clip: true
 
-        ColumnLayout {
-            width: parent.width
+        ColumnLayout { 
+            id: mainStack
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width, 800)
             spacing: Theme.spacingLarge
 
             // Header

@@ -23,6 +23,10 @@ ListView {
         recording: modelData
     }
 
+    footer: Item {
+        height: Theme.spacingLarge
+    }
+
     ScrollBar.vertical: ScrollBar {
         policy: ScrollBar.AsNeeded
     }
