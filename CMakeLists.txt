@@ -420,7 +420,7 @@ include(CPack)
 # Testing
 if(BUILD_TESTING)
     enable_testing()
-    # add_subdirectory(tests)
+    add_subdirectory(tests)
 endif()
 
 # Print configuration summary
