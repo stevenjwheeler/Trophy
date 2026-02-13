@@ -163,6 +163,19 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 
 # Run with verbose logging
 QT_LOGGING_RULES="*.debug=true" ./trophy
+
+### Running Tests
+
+Trophy includes a comprehensive suite of unit tests using GoogleTest.
+
+```bash
+# Build with testing enabled
+cmake -B build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j$(nproc)
+
+# Run tests
+cd build && ctest --output-on-failure
+```
 ```
 
 ## License
