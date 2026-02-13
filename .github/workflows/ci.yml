@@ -52,11 +52,18 @@ jobs:
 
       - name: Configure & Build
         run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+
           cmake -B build -GNinja \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
+            -DAPP_VERSION=$VERSION \
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/gtest_install \
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
@@ -67,52 +74,47 @@ jobs:
       - name: Generate AppImage
         shell: bash
         run: |
-          # 1. Download tools
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          
+          export VERSION=$VERSION
+          export LINUXDEPLOY_OUTPUT_VERSION=$VERSION
+          echo "Building Trophy version: $VERSION"
+
+          # 2. Download tools
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
-          # 2. Install to AppDir
+          # 3. Install to AppDir
           DESTDIR=AppDir cmake --install build
           mkdir -p AppDir/usr/lib
-          cp build/libTrophy.so AppDir/usr/lib/
+          cp build/libTrophy.so AppDir/usr/lib/ || true
 
-          # 3. Enhanced Environment for Qt Plugin
+          # 4. Environment setup
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
-          
-          # Force scan of your QML directory to find "import QtQuick.Controls"
           export QML_SOURCES_PATHS=$PWD/qml
-          
-          # Manually specify modules that linuxdeploy often misses in Qt 6
           export EXTRA_QT_MODULES="quickcontrols2;multimedia"
           
-          # Ensure wayland and xcb platforms are both included for CachyOS/Arch compatibility
-          export EXTRA_QT_PLUGINS="wayland-graphics-integration-helper;wayland-shell-integration"
-
-          # 4. Run linuxdeploy
+          # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable AppDir/usr/bin/trophy \
             --library AppDir/usr/lib/libTrophy.so \
             --desktop-file packaging/trophy.desktop \
             --icon-file resources/icons/trophy.svg \
-            --deploy-deps-only AppDir/usr/lib/libTrophy.so \
             --plugin qt \
             --output appimage
 
-          # 5. Versioning & Rename
-          RAW_VERSION=$(grep -m 1 "VERSION" CMakeLists.txt | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
-          VERSION=${RAW_VERSION:-0.0.0}
-          echo "Using version: $VERSION"
+          # 6. Rename based on the exported VERSION
+          # linuxdeploy usually names it Trophy-$VERSION-x86_64.AppImage or Trophy-x86_64.AppImage
+          # We force a consistent name here:
+          GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
+          mv "$GENERATED_FILE" "Trophy-${VERSION}-x86_64.AppImage"
           
-          APPIMAGE_FILE=$(ls Trophy_*.AppImage | head -n 1)
-          if [ -f "$APPIMAGE_FILE" ]; then
-            mv "$APPIMAGE_FILE" "Trophy-${VERSION}-x86_64.AppImage"
-          else
-            echo "Warning: Could not find generated AppImage to rename"
-            exit 1
-          fi
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
