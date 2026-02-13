@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -21,17 +21,23 @@ Page {
 
     ScrollView {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
         contentWidth: availableWidth
+        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+        clip: true
 
-        ColumnLayout {
+        ColumnLayout { 
+            id: mainStack
+            anchors.horizontalCenter: parent.horizontalCenter
             width: Math.min(parent.width, 800)
             spacing: Theme.spacingLarge
 
             // Centered Header
             ColumnLayout {
+                Layout.alignment: Qt.AlignHCenter
                 Layout.fillWidth: true
                 spacing: Theme.spacingMedium
+
+                Item { Layout.preferredHeight: Theme.spacingLarge }
                 
                 Image {
                     Layout.alignment: Qt.AlignHCenter
@@ -48,14 +54,16 @@ Page {
                     font.pixelSize: 32
                     font.weight: Font.Bold
                     color: Theme.textColor
+                    horizontalAlignment: Text.AlignHCenter
                 }
                 
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("Game Recorder")
+                    text: qsTr("Game recorder and clipping for Linux")
                     font.pixelSize: Theme.fontSizeLarge
                     color: Theme.primaryColor
                     font.weight: Font.Medium
+                    horizontalAlignment: Text.AlignHCenter
                 }
 
                 Label {
@@ -63,6 +71,7 @@ Page {
                     text: qsTr("Version 0.1.0")
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.textMutedColor
+                    horizontalAlignment: Text.AlignHCenter
                 }
             }
             
@@ -81,7 +90,7 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, smart game detection, and separate audio tracks for easier editing.")
+                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, keybinded clipping, smart game detection, and separate audio tracks for easier editing.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
@@ -120,7 +129,7 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Copyright © 2024")
+                        text: qsTr("Copyright © 2026")
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
@@ -168,60 +177,13 @@ Page {
                         FeatureItem {
                             icon: "🎮"
                             title: qsTr("Auto Game Detection")
-                            description: qsTr("Steam, Proton, and custom game support")
+                            description: qsTr("Steam, Proton, and custom game support with heuristic detection")
                         }
 
                         FeatureItem {
                             icon: "💾"
                             title: qsTr("Smart Storage")
                             description: qsTr("Auto-cleanup and crash-resilient formats")
-                        }
-                    }
-                }
-            }
-
-            // Technology Stack Section
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: techLayout.implicitHeight + Theme.spacingMedium * 2
-                radius: Theme.radiusMedium
-                color: Theme.cardColor
-
-                ColumnLayout {
-                    id: techLayout
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingMedium
-                    spacing: Theme.spacingMedium
-
-                    Label {
-                        text: qsTr("🔧 Built With")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: Theme.spacingSmall
-
-                        TechItem {
-                            name: "Qt 6"
-                            description: qsTr("Modern cross-platform application framework")
-                        }
-
-                        TechItem {
-                            name: "FFmpeg"
-                            description: qsTr("Multimedia framework for encoding and muxing")
-                        }
-
-                        TechItem {
-                            name: "PipeWire"
-                            description: qsTr("Modern Linux multimedia server for audio capture")
-                        }
-
-                        TechItem {
-                            name: "C++20"
-                            description: qsTr("High-performance systems programming language")
                         }
                     }
                 }
@@ -341,6 +303,38 @@ Page {
                 }
             }
 
+            // Logo Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: logoLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: logoLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
+
+                    Label {
+                        text: qsTr("🏆 What's the logo?")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            text: qsTr("It's a trophy from the top down, which also happens to look like a recording indicator!")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+                    }
+                }
+            }
+
             // AI Disclaimer Section
             Rectangle {
                 Layout.fillWidth: true
@@ -357,7 +351,7 @@ Page {
                     spacing: Theme.spacingSmall
 
                     Label {
-                        text: qsTr("🤖 Development")
+                        text: qsTr("🤖 Development Disclosure")
                         font.pixelSize: Theme.fontSizeLarge
                         font.weight: Font.Medium
                         color: Theme.textColor
@@ -365,11 +359,29 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("This project has been developed in part with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. The architecture, design decisions, and implementation details have been validated by the project maintainer.")
+                        text: qsTr("This project has been developed in part with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. Any and all architecture, design decisions, and implementation details have been validated by the project maintainer.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
+                }
+            }
+
+            // Links
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                spacing: Theme.spacingMedium
+
+                Button {
+                    flat: true
+                    background: null
+                    HoverHandler {
+                        cursorShape: Qt.PointingHandCursor
+                    }
+                    icon.source: "qrc:/icons/github.svg"
+                    icon.color: Theme.textColor
+                    text: "GitHub"
+                    onClicked: Qt.openUrlExternally("https://github.com/stevenjwheeler/Trophy")
                 }
             }
 

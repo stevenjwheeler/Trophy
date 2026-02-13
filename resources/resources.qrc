@@ -6,5 +6,6 @@
         <file>icons/stop.svg</file>
         <file>icons/view-list.svg</file>
         <file>icons/view-grid.svg</file>
+        <file>icons/github.svg</file>
     </qresource>
 </RCC>
