@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -14,33 +14,33 @@
 
 namespace GameRecorder {
 
-struct VideoFrame;  // Forward declaration
+struct VideoFrame; // Forward declaration
 
 /**
  * @brief Encoded packet output from encoder
  */
 struct EncodedPacket {
-    std::vector<uint8_t> data;
-    int64_t pts;            // Presentation timestamp
-    int64_t dts;            // Decode timestamp
-    bool isKeyframe;
-    int streamIndex;        // For muxer
+  std::vector<uint8_t> data;
+  int64_t pts; // Presentation timestamp
+  int64_t dts; // Decode timestamp
+  bool isKeyframe;
+  int streamIndex; // For muxer
 };
 
 /**
  * @brief Encoder configuration
  */
 struct EncoderConfig {
-    int width = 1920;
-    int height = 1080;
-    int fps = 60;
-    int bitrate = 15000;        // kbps
-    int maxBitrate = 20000;     // kbps, for VBR
-    QString preset = "fast";    // Encoder-specific preset
-    QString profile = "high";   // H.264 profile
-    int keyframeInterval = 2;   // Seconds between keyframes
-    bool useVBR = true;
-    int inputPixelFormat = 0;   // AVPixelFormat of input frames
+  int width = 1920;
+  int height = 1080;
+  int fps = 60;
+  int bitrate = 15000;      // kbps
+  int maxBitrate = 20000;   // kbps, for VBR
+  QString preset = "fast";  // Encoder-specific preset
+  QString profile = "high"; // H.264 profile
+  int keyframeInterval = 2; // Seconds between keyframes
+  bool useVBR = true;
+  int inputPixelFormat = 0; // AVPixelFormat of input frames
 };
 
 /**
@@ -48,73 +48,72 @@ struct EncoderConfig {
  *
  * Implementations include NVENC, VA-API, and software (x264) encoders.
  */
-class IEncoder : public QObject
-{
-    Q_OBJECT
+class IEncoder : public QObject {
+  Q_OBJECT
 
 public:
-    enum class EncoderType {
-        NVENC_H264,
-        NVENC_HEVC,
-        VAAPI_H264,
-        VAAPI_HEVC,
-        Software_x264,
-        Software_x265
-    };
-    Q_ENUM(EncoderType)
+  enum class EncoderType {
+    NVENC_H264,
+    NVENC_HEVC,
+    VAAPI_H264,
+    VAAPI_HEVC,
+    Software_x264,
+    Software_x265
+  };
+  Q_ENUM(EncoderType)
 
-    explicit IEncoder(QObject *parent = nullptr) : QObject(parent) {}
-    ~IEncoder() override = default;
+  explicit IEncoder(QObject *parent = nullptr) : QObject(parent) {}
+  ~IEncoder() override = default;
 
-    /**
-     * @brief Initialize encoder with configuration
-     * @param config Encoder settings
-     * @return true on success
-     */
-    virtual bool initialize(const EncoderConfig &config) = 0;
+  /**
+   * @brief Initialize encoder with configuration
+   * @param config Encoder settings
+   * @return true on success
+   */
+  virtual bool initialize(const EncoderConfig &config) = 0;
 
-    /**
-     * @brief Encode a video frame
-     * @param frame Input frame to encode
-     * @param output Encoded packet output
-     * @return true if packet was produced
-     */
-    virtual bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) = 0;
+  /**
+   * @brief Encode a video frame
+   * @param frame Input frame to encode
+   * @param output Encoded packet output
+   * @return true if packet was produced
+   */
+  virtual bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) = 0;
 
-    /**
-     * @brief Flush encoder and get remaining packets
-     * @param packets Output vector for remaining packets
-     * @return Number of packets flushed
-     */
-    virtual int flush(std::vector<EncodedPacket> &packets) = 0;
+  /**
+   * @brief Flush encoder and get remaining packets
+   * @param packets Output vector for remaining packets
+   * @return Number of packets flushed
+   */
+  virtual int flush(std::vector<EncodedPacket> &packets) = 0;
 
-    /**
-     * @brief Get encoder type
-     */
-    virtual EncoderType type() const = 0;
+  /**
+   * @brief Get encoder type
+   */
+  virtual EncoderType type() const = 0;
 
-    /**
-     * @brief Get human-readable encoder name
-     */
-    virtual QString name() const = 0;
+  /**
+   * @brief Get human-readable encoder name
+   */
+  virtual QString name() const = 0;
 
-    /**
-     * @brief Check if this is a hardware encoder
-     */
-    virtual bool isHardwareEncoder() const = 0;
+  /**
+   * @brief Check if this is a hardware encoder
+   */
+  virtual bool isHardwareEncoder() const = 0;
 
-    /**
-     * @brief Get codec extradata (SPS/PPS for H.264)
-     */
-    virtual std::vector<uint8_t> extraData() const = 0;
+  /**
+   * @brief Get codec extradata (SPS/PPS for H.264)
+   */
+  virtual std::vector<uint8_t> extraData() const = 0;
 
-    /**
-     * @brief Get the codec's FFmpeg codec ID
-     */
-    virtual int codecId() const = 0;
+  /**
+   * @brief Get the codec's FFmpeg codec ID
+   */
+  virtual int codecId() const = 0;
 
 signals:
-    void encodingError(const QString &error);
+  void encodingError(const QString &error);
 };
 
 } // namespace GameRecorder

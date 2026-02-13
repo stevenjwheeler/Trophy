@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -127,6 +127,10 @@ void RecordingManager::stopRecording() {
   m_manualWindowId = 0; // Reset manual window ID
 
   setState(RecordingState::Idle);
+  if (m_storage) {
+    m_storage->refresh();
+  }
+
   emit recordingStopped(filePath);
   emit currentGameNameChanged();
 

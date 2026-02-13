@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -27,6 +27,8 @@ class GameWhitelist;
  */
 class GameDetectionService : public QObject {
   Q_OBJECT
+
+  friend class GameDetectionServiceTest;
 
   Q_PROPERTY(
       QString currentGameName READ currentGameName NOTIFY currentGameChanged)
