@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -252,6 +252,12 @@ void Application::connectSignals() {
 
   connect(m_storageManager.get(), &StorageManager::recordingDeleted,
           m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
+
+  // Ensure storage manager stays in sync with library changes
+  connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded,
+          m_storageManager.get(), &StorageManager::refresh);
+  connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved,
+          m_storageManager.get(), &StorageManager::refresh);
 }
 
 void Application::setupSystemTray() {

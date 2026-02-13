@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include "core/StorageManager.h"
+#include <QSignalSpy>
 
 using namespace GameRecorder;
 
@@ -122,7 +123,7 @@ TEST_F(StorageManagerTest, UsagePercentWithFiles) {
 
 TEST_F(StorageManagerTest, GenerateFilePathSanitization) {
   StorageManager mgr(tempDir.path());
-  QString path = mgr.generateFilePath("My Game! (2024)", "mkv");
+  QString path = mgr.generateFilePath("My Game! (2026)", "mkv");
 
   // Special chars should be replaced with underscores
   EXPECT_FALSE(path.contains("!"));
@@ -211,4 +212,28 @@ TEST_F(StorageManagerTest, EnforceStorageLimitDeletesOldest) {
   QDir dir(tempDir.path());
   auto files = dir.entryList({"*.mkv"}, QDir::Files);
   EXPECT_LE(files.size(), 1);
+}
+TEST_F(StorageManagerTest, RefreshEmitsSignalOnSizeChange) {
+  StorageManager mgr(tempDir.path());
+
+  // Track the usedSizeChanged signal
+  QSignalSpy spy(&mgr, &StorageManager::usedSizeChanged);
+
+  // 1. Initial refresh (no files) -> size 0
+  mgr.refresh();
+  // Signal might be emitted if initial size != 0, but here it's 0.
+  // Let's create a file to FORCE a change.
+
+  createDummyFile("new_rec.mkv", 1024 * 1024); // 1 MB
+
+  // 2. Refresh again -> size changes from 0 to 1MB
+  mgr.refresh();
+
+  // Should have emitted at least once
+  EXPECT_GT(spy.count(), 0);
+
+  // 3. Refresh again without changes -> NO signal should be emitted
+  spy.clear();
+  mgr.refresh();
+  EXPECT_EQ(spy.count(), 0);
 }

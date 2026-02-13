@@ -69,3 +69,14 @@ target_include_directories(test_Recording PRIVATE
     ${AVUTIL_INCLUDE_DIRS}
 )
 gtest_discover_tests(test_Recording)
+
+# --- test_GameDetectionService ---
+add_executable(test_GameDetectionService
+    test_GameDetectionService.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/ProcessHeuristics.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp
+)
+target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_GameDetectionService)
