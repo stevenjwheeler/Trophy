@@ -9,11 +9,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import GameRecorder 1.0
-
-import "styles"
-import "components"
-import "pages"
+import GameRecorder
 
 ApplicationWindow {
     id: window

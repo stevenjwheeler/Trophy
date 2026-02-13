@@ -8,7 +8,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
+import GameRecorder
 
 ListView {
     id: root

@@ -8,8 +8,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
-import "../views"
+import GameRecorder
 
 Page {
     id: root

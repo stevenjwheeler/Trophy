@@ -306,6 +306,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/pages/GameListPage.qml
         qml/views/RecordingGridView.qml
         qml/views/RecordingListView.qml
+        qml/views/RecordingListItem.qml
         qml/views/RecordingCard.qml
         qml/views/VideoPlayer.qml
     SOURCES
