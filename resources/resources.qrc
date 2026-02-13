@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>icons/trophy.svg</file>
+        <file>icons/record.svg</file>
+        <file>icons/stop.svg</file>
+        <file>icons/view-list.svg</file>
+        <file>icons/view-grid.svg</file>
+    </qresource>
+</RCC>

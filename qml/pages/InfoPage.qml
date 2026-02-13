@@ -1,0 +1,439 @@
+/*
+ * Trophy - Game recording and clipping
+ * Copyright (C) 2024
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import "../styles"
+
+Page {
+    id: root
+
+    background: Rectangle {
+        color: Theme.backgroundColor
+        bottomRightRadius: 12
+        topLeftRadius: 26
+    }
+
+    ScrollView {
+        anchors.fill: parent
+        anchors.margins: Theme.spacingLarge
+        contentWidth: availableWidth
+
+        ColumnLayout {
+            width: Math.min(parent.width, 800)
+            spacing: Theme.spacingLarge
+
+            // Centered Header
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingMedium
+                
+                Image {
+                    Layout.alignment: Qt.AlignHCenter
+                    source: "qrc:/icons/trophy.svg"
+                    Layout.preferredWidth: 96
+                    Layout.preferredHeight: 96
+                    sourceSize: Qt.size(96, 96)
+                    smooth: true
+                }
+                
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: qsTr("Trophy")
+                    font.pixelSize: 32
+                    font.weight: Font.Bold
+                    color: Theme.textColor
+                }
+                
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: qsTr("Game Recorder")
+                    font.pixelSize: Theme.fontSizeLarge
+                    color: Theme.primaryColor
+                    font.weight: Font.Medium
+                }
+
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: qsTr("Version 0.1.0")
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.textMutedColor
+                }
+            }
+            
+            // Description
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: descLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: descLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, smart game detection, and separate audio tracks for easier editing.")
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                }
+            }
+
+            // License Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: licenseLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: licenseLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    Label {
+                        text: qsTr("📜 License")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).")
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font.pixelSize: Theme.fontSizeNormal
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Copyright © 2024")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                }
+            }
+
+            // Features Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: featuresLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: featuresLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
+
+                    Label {
+                        text: qsTr("✨ Key Features")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: Theme.spacingLarge
+                        rowSpacing: Theme.spacingSmall
+
+                        FeatureItem {
+                            icon: "🎬"
+                            title: qsTr("Hardware Acceleration")
+                            description: qsTr("NVIDIA NVENC and AMD/Intel VA-API support")
+                        }
+
+                        FeatureItem {
+                            icon: "🎵"
+                            title: qsTr("Multi-Track Audio")
+                            description: qsTr("Separate game, voice chat, and mic tracks")
+                        }
+
+                        FeatureItem {
+                            icon: "🎮"
+                            title: qsTr("Auto Game Detection")
+                            description: qsTr("Steam, Proton, and custom game support")
+                        }
+
+                        FeatureItem {
+                            icon: "💾"
+                            title: qsTr("Smart Storage")
+                            description: qsTr("Auto-cleanup and crash-resilient formats")
+                        }
+                    }
+                }
+            }
+
+            // Technology Stack Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: techLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: techLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
+
+                    Label {
+                        text: qsTr("🔧 Built With")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+
+                        TechItem {
+                            name: "Qt 6"
+                            description: qsTr("Modern cross-platform application framework")
+                        }
+
+                        TechItem {
+                            name: "FFmpeg"
+                            description: qsTr("Multimedia framework for encoding and muxing")
+                        }
+
+                        TechItem {
+                            name: "PipeWire"
+                            description: qsTr("Modern Linux multimedia server for audio capture")
+                        }
+
+                        TechItem {
+                            name: "C++20"
+                            description: qsTr("High-performance systems programming language")
+                        }
+                    }
+                }
+            }
+
+            // Acknowledgments Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: ackLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: ackLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
+
+                    Label {
+                        text: qsTr("🙏 Acknowledgments")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Trophy is built on the shoulders of giants. Special thanks to:")
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font.pixelSize: Theme.fontSizeNormal
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingTiny
+
+                        Label {
+                            text: qsTr("• The FFmpeg project for multimedia processing")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• The Qt Company for the excellent Qt framework")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• The PipeWire team for modern Linux audio")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• The open-source community for inspiration and support")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+                    }
+                }
+            }
+
+            // Keyboard Shortcuts Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: shortcutsLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: shortcutsLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
+
+                    Label {
+                        text: qsTr("⌨️ Keyboard Shortcuts")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: Theme.spacingLarge
+                        rowSpacing: Theme.spacingSmall
+
+                        Label {
+                            text: "F9"
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeNormal
+                            color: Theme.primaryColor
+                            Layout.preferredWidth: 100
+                        }
+                        Label {
+                            text: qsTr("Start/Stop Recording")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: "Ctrl+Q"
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeNormal
+                            color: Theme.primaryColor
+                            Layout.preferredWidth: 100
+                        }
+                        Label {
+                            text: qsTr("Quit Application")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+                    }
+                }
+            }
+
+            // AI Disclaimer Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: disclaimerLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.withOpacity(Theme.primaryColor, 0.1)
+                border.width: 1
+                border.color: Theme.withOpacity(Theme.primaryColor, 0.3)
+
+                ColumnLayout {
+                    id: disclaimerLayout
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    Label {
+                        text: qsTr("🤖 Development")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("This project has been developed in part with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. The architecture, design decisions, and implementation details have been validated by the project maintainer.")
+                        wrapMode: Text.WordWrap
+                        color: Theme.textColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                }
+            }
+
+            Item { Layout.preferredHeight: Theme.spacingLarge }
+        }
+    }
+
+    // Feature Item Component
+    component FeatureItem: ColumnLayout {
+        property string icon: ""
+        property string title: ""
+        property string description: ""
+
+        Layout.fillWidth: true
+        spacing: Theme.spacingTiny
+
+        Label {
+            text: icon + " " + title
+            font.pixelSize: Theme.fontSizeNormal
+            font.weight: Font.Medium
+            color: Theme.textColor
+        }
+
+        Label {
+            Layout.fillWidth: true
+            text: description
+            wrapMode: Text.WordWrap
+            color: Theme.textMutedColor
+            font.pixelSize: Theme.fontSizeSmall
+        }
+    }
+
+    // Technology Item Component
+    component TechItem: RowLayout {
+        property string name: ""
+        property string description: ""
+
+        Layout.fillWidth: true
+        spacing: Theme.spacingSmall
+
+        Label {
+            text: "•"
+            color: Theme.primaryColor
+            font.pixelSize: Theme.fontSizeMedium
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+
+            Label {
+                text: name
+                font.pixelSize: Theme.fontSizeNormal
+                font.weight: Font.Medium
+                color: Theme.textColor
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: description
+                wrapMode: Text.WordWrap
+                color: Theme.textMutedColor
+                font.pixelSize: Theme.fontSizeSmall
+            }
+        }
+    }
+}

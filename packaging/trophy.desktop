@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Trophy - Game recording and clipping
+GenericName=Game Recorder
+Comment=Record gameplay on Linux with hardware acceleration
+Exec=trophy
+Icon=trophy
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Recorder;Game;
+Keywords=game;recording;capture;video;gameplay;nvenc;vaapi;
+StartupNotify=true
+StartupWMClass=trophy

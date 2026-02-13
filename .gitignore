@@ -1,0 +1,57 @@
+# --- Build Directories ---
+build/
+bin/
+lib/
+obj/
+
+# --- CMake Artifacts ---
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.cmake
+
+# --- Qt / MOC / RCC / UIC Artifacts ---
+*_autogen/
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+.qt/
+.qtc/
+*.aotstats
+.qtcreator
+
+# --- C++ / Compilers ---
+*.o
+*.a
+*.so
+*.so.*
+*.out
+*.app
+
+# --- IDEs and Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Project Specific ---
+# Ignore actual recordings made during testing
+recordings/
+*.mp4
+*.mkv
+*.log
+
+# --- Python (if using for scripts/tools) ---
+__pycache__/
+*.py[cod]
+
+# --- cache ---
+.cache/
