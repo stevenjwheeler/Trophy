@@ -195,4 +195,4 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## Disclaimer
 
-This project has been developed with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. The architecture, design decisions, and implementation details have been validated by the project maintainer.
+This project has been developed with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. Any and all architecture, design decisions, and implementation details have been validated by the project maintainer.
