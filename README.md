@@ -41,7 +41,7 @@ Trophy is designed to have minimal performance impact while still capturing high
 ### User Interface
 - **Modern QML Design** - Slick, dark-themed interface built with Qt6
 - **Dashboard** - Quick overview of current game, audio levels, and storage
-- **Video Browser** - Grid view of recordings with playback support
+- **Video Browser** - Grid and list view of recordings with playback support
 - **System Notifications** - Desktop notifications for recording start/stop
 
 ### Planned Features
@@ -141,18 +141,18 @@ Access **Settings** to configure:
 Trophy is built with a modular architecture:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    QML User Interface                    │
-├─────────────────────────────────────────────────────────┤
-│                   Qt/C++ Manager Layer                   │
-│  RecordingManager │ SettingsManager │ GameDetection     │
-├─────────────────────────────────────────────────────────┤
-│                    Service Layer                         │
-│  IVideoCaptureSource │ IEncoder │ IAudioSource │ IMuxer │
-├─────────────────────────────────────────────────────────┤
-│                 Platform Implementations                 │
-│  X11/Wayland Capture │ NVENC/VAAPI/x264 │ PipeWire/Pulse│
-└─────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                    QML User Interface                     │
+├───────────────────────────────────────────────────────────┤
+│                   Qt/C++ Manager Layer                    │
+│  RecordingManager │ SettingsManager │ GameDetection       │
+├───────────────────────────────────────────────────────────┤
+│                    Service Layer                          │
+│  IVideoCaptureSource │ IEncoder │ IAudioSource │ IMuxer   │
+├───────────────────────────────────────────────────────────┤
+│                 Platform Implementations                  │
+│  X11/Wayland Capture │ NVENC/VAAPI/x264 │ PipeWire/Pulse  │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ## Contributing
@@ -167,9 +167,9 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 
 # Run with verbose logging
 QT_LOGGING_RULES="*.debug=true" ./trophy
+```
 
 ### Running Tests
-
 Trophy includes a comprehensive suite of unit tests using GoogleTest.
 
 ```bash
@@ -179,7 +179,6 @@ cmake --build build -j$(nproc)
 
 # Run tests
 cd build && ctest --output-on-failure
-```
 ```
 
 ## License
