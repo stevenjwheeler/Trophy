@@ -148,7 +148,7 @@ Access **Settings** to configure:
 
 To ensure the integrity and authenticity of Trophy, we provide cryptographic verification for all official releases.
 
-### 1. Verify File Integrity (SHA-256)
+### Verify File Integrity (SHA-256)
 Every release includes a `SHA256SUMS` file. You can verify that your AppImage was not corrupted or tampered with during download by running:
 
 ```bash
