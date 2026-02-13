@@ -1,6 +1,10 @@
-# Trophy - Game recording and clipping
+<div align="center">
+  <img src="resources/icons/trophy.svg" width="96" height="96" />
+  <h1>Trophy</h1>
+  <p><strong>Game recorder and clipping for Linux</strong></p>
+</div>
 
-A modern, performant game session recording and clipping application for Linux with hardware-accelerated encoding, multi-track audio capture, and intelligent game detection.
+A modern, performant game session recording and clipping application for Linux with hardware-accelerated encoding, multi-track audio capture, and intelligent, heuristic driven game detection.
 
 Trophy is designed to have minimal performance impact while still capturing high definition game sessions and clips.
 
