@@ -25,6 +25,22 @@ endif()
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Get version from Git tag
+execute_process(
+    COMMAND git describe --tags --always
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+# Fallback if git fails or no tags exist
+if(NOT GIT_VERSION)
+    set(GIT_VERSION ${PROJECT_VERSION})
+endif()
+
+add_compile_definitions(APP_VERSION=\"${GIT_VERSION}\")
+
 # Options
 option(BUILD_TESTING "Build tests" ON)
 option(ENABLE_NVENC "Enable NVIDIA NVENC support" ON)

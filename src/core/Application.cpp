@@ -5,6 +5,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
 #include "Application.h"
 #include "NotificationService.h"
 #include "RecordingManager.h"
@@ -15,12 +18,12 @@
 #include "library/RecordingLibrary.h"
 #include "settings/SettingsManager.h"
 
-#include <QDebug> // Added
+#include <QDebug>
 #include <QDir>
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QStandardPaths>
-#include <chrono> // Added
+#include <chrono>
 #include <cstdio>
 
 namespace GameRecorder {
@@ -31,6 +34,7 @@ Application::Application(int &argc, char **argv)
 Application::~Application() = default;
 
 bool Application::initialize() {
+
   // Install message handler to capture all Qt messages
   qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &context,
                             const QString &msg) {
@@ -56,11 +60,22 @@ bool Application::initialize() {
     std::fflush(stderr);
   });
 
+  // Safely extract the version from the macro
+#ifdef APP_VERSION
+  QString versionStr = QString::fromUtf8(TOSTRING(APP_VERSION));
+  // Remove any escaped quotes that might be passed from CMake
+  versionStr.replace("\"", "");
+#else
+  QString versionStr = "0.0.0-unknown";
+#endif
+
+  // Set the version globally for Qt
+  setApplicationVersion(versionStr);
+
   std::fprintf(stderr,
                "[App] Initializing Trophy - Game recording and clipping %s\n",
-               applicationVersion().toUtf8().constData());
-  qInfo() << "Initializing Trophy - Game recording and clipping"
-          << applicationVersion();
+               versionStr.toUtf8().constData());
+  qInfo() << "Initializing Trophy - Game recording and clipping" << versionStr;
 
   // Initialize services in dependency order
   std::fprintf(stderr, "[App] Initializing services...\n");
@@ -74,6 +89,9 @@ bool Application::initialize() {
   std::fprintf(stderr, "[App] Creating QML engine...\n");
   m_engine = std::make_unique<QQmlApplicationEngine>();
 
+  // Set app version in QML context
+  m_engine->rootContext()->setContextProperty("AppVersion", versionStr);
+
   // Expose services to QML
   std::fprintf(stderr, "[App] Exposing services to QML...\n");
   exposeServicesToQml();
@@ -83,7 +101,6 @@ bool Application::initialize() {
   connectSignals();
 
   // Load main QML file
-  // In debug mode, try to load from filesystem for live reload
   QUrl url;
 #ifdef QT_DEBUG
   QString devPath = QCoreApplication::applicationDirPath() + "/../qml/main.qml";
@@ -136,50 +153,36 @@ bool Application::initialize() {
 }
 
 void Application::initializeServices() {
-  // Settings must be created first as other services depend on it
   m_settingsManager = std::make_unique<SettingsManager>(this);
   m_settingsManager->load();
 
-  // Storage manager for disk space management
   m_storageManager = std::make_unique<StorageManager>(
       m_settingsManager->recordingsPath(), this);
   m_storageManager->setMaxSize(m_settingsManager->maxStorageSize());
 
-  // Notification service for system notifications
   m_notificationService = std::make_unique<NotificationService>(this);
 
-  // Recording library for managing recorded videos
   m_recordingLibrary = std::make_unique<RecordingLibrary>(
       m_settingsManager->recordingsPath(), this);
 
-  // Audio mixer for multi-track audio
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
 
-  // Game detection service
   m_gameDetector = std::make_unique<GameDetectionService>(this);
 
-  // Recording manager (orchestrates recording)
   m_recordingManager = std::make_unique<RecordingManager>(this);
   m_recordingManager->setSettingsManager(m_settingsManager.get());
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
 
-  // Window service for manual selection
   m_windowService = std::make_unique<WindowService>(this);
 }
 
-void Application::registerQmlTypes() {
-  // Types are automatically registered by qt_add_qml_module in CMakeLists.txt
-  // No manual registration needed
-}
+void Application::registerQmlTypes() {}
 
 void Application::exposeServicesToQml() {
   QQmlContext *context = m_engine->rootContext();
 
-  // Expose application instance
   context->setContextProperty("app", this);
-
-  // Expose all services
   context->setContextProperty("recordingManager", m_recordingManager.get());
   context->setContextProperty("settingsManager", m_settingsManager.get());
   context->setContextProperty("storageManager", m_storageManager.get());
@@ -192,7 +195,6 @@ void Application::exposeServicesToQml() {
 }
 
 void Application::connectSignals() {
-  // Connect recording manager signals
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this,
           &Application::recordingStateChanged);
 
@@ -210,17 +212,14 @@ void Application::connectSignals() {
                 "Recording Stopped",
                 QString("Saved to %1").arg(QFileInfo(filePath).fileName()));
             m_recordingLibrary->setActiveRecordingPath("");
-            // Refresh library
             m_recordingLibrary->refresh();
           });
 
-  // Connect game detection to recording
   connect(m_gameDetector.get(), &GameDetectionService::gameDetected, this,
           [this](const QString &gameName, qint64 pid) {
             qInfo() << "Game detected:" << gameName << "PID:" << pid;
             emit currentGameChanged();
 
-            // Auto-record if enabled
             if (m_settingsManager->autoRecordEnabled()) {
               m_recordingManager->startRecording(gameName);
             }
@@ -231,13 +230,11 @@ void Application::connectSignals() {
             qInfo() << "Game closed:" << gameName;
             emit currentGameChanged();
 
-            // Stop recording if game closes
             if (m_recordingManager->isRecording()) {
               m_recordingManager->stopRecording();
             }
           });
 
-  // Connect settings changes
   connect(
       m_settingsManager.get(), &SettingsManager::recordingsPathChanged, this,
       [this]() {
@@ -253,16 +250,13 @@ void Application::connectSignals() {
   connect(m_storageManager.get(), &StorageManager::recordingDeleted,
           m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
 
-  // Ensure storage manager stays in sync with library changes
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded,
           m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved,
           m_storageManager.get(), &StorageManager::refresh);
 }
 
-void Application::setupSystemTray() {
-  // TODO: Implement system tray icon for background operation
-}
+void Application::setupSystemTray() {}
 
 bool Application::isRecording() const {
   return m_recordingManager && m_recordingManager->isRecording();

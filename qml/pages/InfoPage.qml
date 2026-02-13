@@ -8,7 +8,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
+import GameRecorder
 
 Page {
     id: root
@@ -68,7 +68,7 @@ Page {
 
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("Version 0.1.0")
+                    text: qsTr("Version %1").arg(AppVersion)
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.textMutedColor
                     horizontalAlignment: Text.AlignHCenter
