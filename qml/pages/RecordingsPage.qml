@@ -1,6 +1,6 @@
 /*
  * Trophy - Game recording and clipping
- * Copyright (C) 2024
+ * Copyright (C) 2026
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -22,7 +22,11 @@ Page {
     
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacingLarge
+
+        anchors.topMargin: Theme.spacingLarge
+        anchors.leftMargin: Theme.spacingLarge
+        anchors.rightMargin: Theme.spacingLarge
+
         spacing: Theme.spacingMedium
 
         // Header
