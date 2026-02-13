@@ -38,17 +38,36 @@ jobs:
             libavformat-dev libswscale-dev libgtest-dev wget
             libxcb-cursor0 libxkbcommon-x11-0
           version: 1.3
-      
-      - name: Prepare GTest
+          
+      - name: Restore build files from cache if exists
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Restore GTest from cache if exists
+        id: cache-gtest
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/gtest_install
+          key: ${{ runner.os }}-gtest-6.10.2-${{ hashFiles('**/CMakeLists.txt') }} 
+          restore-keys: |
+            ${{ runner.os }}-gtest-
+
+      - name: Prepare GTest if not cached
+        if: steps.cache-gtest.outputs.cache-hit != 'true'
         run: |
           cmake -GNinja -S /usr/src/googletest -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
           cmake --build gtest_build --target install
 
-      - name: Prepare Qt 6.10.2
+      - name: Prepare Qt 6.10.2 or use from cache
         uses: jurplel/install-qt-action@v3
         with:
           version: '6.10.2'
           modules: 'qtmultimedia'
+          cached: 'true'
 
       - name: Configure & Build
         run: |
