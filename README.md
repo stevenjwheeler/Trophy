@@ -8,9 +8,17 @@ A modern, performant game session recording and clipping application for Linux w
 
 Trophy is designed to have minimal performance impact while still capturing high definition game sessions and clips.
 
+[![Latest Release](https://img.shields.io/github/v/release/stevenjwheeler/trophy?color=blue&label=Latest%20Release)](https://github.com/stevenjwheeler/trophy/releases/latest)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-green.svg)
-![Qt](https://img.shields.io/badge/Qt-6.5+-41cd52.svg)
+![Qt](https://img.shields.io/badge/Qt-6.10+-41cd52.svg)
+
+## Quick Start (AppImage)
+
+The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS, Fedora, and Ubuntu) is to download the prebuilt AppImage.
+
+1. **Download:** Grab the latest `Trophy-x86_64.AppImage` from the [Releases Page](https://github.com/your-username/trophy/releases/latest).
+2. **Make it executable:** `chmod +x Trophy-*.AppImage`
 
 ## Features
 
@@ -57,7 +65,7 @@ Trophy is designed to have minimal performance impact while still capturing high
 ## Requirements
 
 ### Runtime Dependencies
-- Qt 6.5+
+- Qt 6.10+
 - FFmpeg (libavcodec, libavformat, libavutil, libswscale, libswresample)
 - PipeWire (recommended) or PulseAudio
 - For NVIDIA: nvidia-utils (NVENC support)
@@ -69,7 +77,7 @@ Trophy is designed to have minimal performance impact while still capturing high
 - Qt6 development packages
 - pkg-config
 
-## Installation
+## Building from source
 
 ### Arch Linux
 
@@ -79,7 +87,7 @@ sudo pacman -S cmake qt6-base qt6-declarative qt6-multimedia \
     ffmpeg pipewire libpulse libva pkgconf
 
 # Clone and build
-git clone https://github.com/your-username/trophy.git
+git clone https://github.com/stevenjwheeler/trophy.git
 cd trophy
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
