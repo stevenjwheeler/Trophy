@@ -144,6 +144,20 @@ Access **Settings** to configure:
 | F9 | Start/Stop recording |
 | Ctrl+Q | Quit application |
 
+## Checksum verification
+
+To ensure the integrity and authenticity of Trophy, we provide cryptographic verification for all official releases.
+
+### 1. Verify File Integrity (SHA-256)
+Every release includes a `SHA256SUMS` file. You can verify that your AppImage was not corrupted or tampered with during download by running:
+
+```bash
+# 1. Download both the AppImage and SHA256SUMS to the same folder
+# 2. Run the check
+sha256sum -c SHA256SUMS
+```
+Expected Output: `Trophy-X.X.X-x86_64.AppImage: OK`
+
 ## Architecture
 
 Trophy is built with a modular architecture:
