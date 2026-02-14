@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Trophy
     VERSION 0.0.0
     DESCRIPTION "Game recording application for Linux"
-    HOMEPAGE_URL "https://github.com/your-username/trophy"
+    HOMEPAGE_URL "https://github.com/stevenjwheeler/trophy"
     LANGUAGES CXX C
 )
 
