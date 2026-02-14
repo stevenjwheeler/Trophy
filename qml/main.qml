@@ -254,13 +254,77 @@ ApplicationWindow {
 
     Dialog {
         id: closeConfirmDialog
-        title: qsTr("Recording in Progress")
         modal: true
+        width: 400
+        height: 200
         anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        Label { text: qsTr("A recording is in progress. Stop recording and exit?") }
+        
+        background: Rectangle {
+            color: Theme.cardColor
+            radius: Theme.radiusLarge
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        header: Label {
+            text: qsTr("Recording in Progress")
+            font.pixelSize: Theme.fontSizeLarge
+            font.weight: Font.Bold
+            padding: Theme.spacingLarge
+            color: Theme.textColor
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingLarge
+            
+            Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                text: qsTr("A recording is currently in progress. Would you like to stop recording and exit Trophy?")
+                wrapMode: Text.WordWrap
+                color: Theme.textSecondaryColor
+                lineHeight: 1.2
+            }
+            
+            Item { Layout.preferredHeight: Theme.spacingSmall }
+        }
+
+        footer: RowLayout {
+            width: parent.width
+            spacing: 0
+            
+            Item { Layout.fillWidth: true }
+
+            DialogButtonBox {
+                id: closeButtonBox
+                background: Item {}
+                alignment: Qt.AlignRight
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingLarge
+                
+                onAccepted: closeConfirmDialog.accept()
+                onRejected: closeConfirmDialog.reject()
+
+                Button {
+                    text: qsTr("Cancel")
+                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                    flat: true
+                }
+                
+                Button {
+                    text: qsTr("Stop and Exit")
+                    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                    highlighted: true
+                    palette.button: Theme.errorColor
+                }
+            }
+        }
+
         onAccepted: {
-            recordingManager.stopRecording()
+            if (recordingManager) {
+                recordingManager.stopRecording()
+            }
             Qt.quit()
         }
     }
