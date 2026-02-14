@@ -27,19 +27,17 @@ ApplicationWindow {
     visible: true
     title: qsTr("Trophy - Game recording and clipping for Linux")
 
-    // Make the actual window surface transparent
     color: "transparent"
 
     property int currentPage: 0
+    property bool skipDeleteConfirmation: false 
 
     function openWindowPicker() {
         windowPicker.open()
     }
 
-    // No background - we use a clipped Rectangle as content root instead
     background: Item {}
 
-    // Single clipped Rectangle that IS the window body
     Rectangle {
         id: windowBody
         anchors.fill: parent
@@ -87,7 +85,7 @@ ApplicationWindow {
                         color: Theme.textSecondaryColor
                     }
 
-                    Item { Layout.fillWidth: true } // Spacer
+                    Item { Layout.fillWidth: true } 
 
                     Rectangle {
                         id: recordingPill
@@ -104,7 +102,6 @@ ApplicationWindow {
                             anchors.centerIn: parent
                             spacing: 10
 
-                            // Dot
                             Rectangle {
                                 width: 8
                                 height: 8
@@ -117,7 +114,6 @@ ApplicationWindow {
                                 }
                             }
 
-                            // App Name
                             Label {
                                 text: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName : ""
                                 color: "white"
@@ -126,7 +122,6 @@ ApplicationWindow {
                                 visible: text !== ""
                             }
 
-                            // Separator
                             Rectangle {
                                 width: 1
                                 height: 12
@@ -135,7 +130,6 @@ ApplicationWindow {
                                 visible: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName !== "" : false
                             }
 
-                            // Timer
                             Label {
                                 text: {
                                     var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0
@@ -149,7 +143,6 @@ ApplicationWindow {
                                 font.weight: Font.DemiBold
                             }
 
-                            // Small Stop Button
                             Button {
                                 Layout.preferredWidth: 18
                                 Layout.preferredHeight: 18
@@ -170,7 +163,6 @@ ApplicationWindow {
                         }
                     }
 
-                    // Window Control Buttons
                     Row {
                         Layout.fillHeight: true
 
@@ -192,7 +184,6 @@ ApplicationWindow {
                 }
             }
 
-            // --- MAIN CONTENT AREA ---
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -207,7 +198,6 @@ ApplicationWindow {
                     }
                 }
 
-                // Main panel
                 Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -228,11 +218,6 @@ ApplicationWindow {
         }
     }
 
-    // --- OVERLAYS & DIALOGS ---
-
-    // Old RecordingIndicator removed
-
-    // Resize handle for bottom-right corner
     MouseArea {
         width: 15
         height: 15
@@ -320,9 +305,16 @@ ApplicationWindow {
     }
 
     function confirmDelete(filePath, fileName) {
-        deleteDialog.filePath = filePath
-        deleteDialog.fileName = fileName
-        deleteDialog.open()
+        if (window.skipDeleteConfirmation) {
+            if (typeof storageManager !== "undefined" && storageManager) {
+                storageManager.deleteRecording(filePath)
+                recordingLibrary.refresh()
+            }
+        } else {
+            deleteDialog.filePath = filePath
+            deleteDialog.fileName = fileName
+            deleteDialog.open()
+        }
     }
 
     Dialog {
@@ -337,12 +329,6 @@ ApplicationWindow {
             radius: Theme.radiusLarge
             border.color: Theme.borderColor
             border.width: 1
-            
-            gradient: Gradient {
-                orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: Theme.borderColor }
-                GradientStop { position: 1.0; color: Theme.cardColor }
-            }
         }
 
         header: Label {
@@ -357,36 +343,78 @@ ApplicationWindow {
         property string fileName: ""
 
         contentItem: ColumnLayout {
-            spacing: Theme.spacingMedium
+            spacing: Theme.spacingLarge
             
             Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
                 text: qsTr("Are you sure you want to delete '%1'? This action cannot be undone.").arg(deleteDialog.fileName)
                 wrapMode: Text.WordWrap
-                Layout.fillWidth: true
                 color: Theme.textSecondaryColor
                 lineHeight: 1.2
             }
+            
+            // Spacer to ensure consistent gap between text and footer
+            Item { Layout.preferredHeight: Theme.spacingSmall }
         }
 
-        footer: DialogButtonBox {
-            background: Item {}
-            alignment: Qt.AlignRight
+        footer: RowLayout {
+            width: parent.width
+            spacing: 0
             
-            Button {
-                text: qsTr("Cancel")
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                flat: true
+            // Bottom margins to keep it away from window edges
+            Layout.margins: Theme.spacingLarge
+            
+            CheckBox {
+                id: dontAskCheckbox
+                text: qsTr("Don't ask again")
+                font.pixelSize: Theme.fontSizeSmall
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingLarge
+                
+                contentItem: Text {
+                    text: dontAskCheckbox.text
+                    font: dontAskCheckbox.font
+                    color: Theme.textSecondaryColor
+                    leftPadding: dontAskCheckbox.indicator.width + dontAskCheckbox.spacing
+                    verticalAlignment: Text.AlignVCenter
+                }
             }
-            
-            Button {
-                text: qsTr("Delete")
-                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-                highlighted: true
-                palette.button: Theme.errorColor
+
+            Item { Layout.fillWidth: true } 
+
+            DialogButtonBox {
+                id: buttonBox
+                background: Item {}
+                alignment: Qt.AlignRight
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingLarge
+                
+                // Explicitly tell the Dialog to Accept/Reject when these are clicked
+                onAccepted: deleteDialog.accept()
+                onRejected: deleteDialog.reject()
+
+                Button {
+                    text: qsTr("Cancel")
+                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                    flat: true
+                }
+                
+                Button {
+                    text: qsTr("Delete")
+                    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                    highlighted: true
+                    palette.button: Theme.errorColor
+                }
             }
         }
 
         onAccepted: {
+            if (dontAskCheckbox.checked) {
+                window.skipDeleteConfirmation = true
+            }
+
             if (recordingLibrary && typeof storageManager !== "undefined" && storageManager) {
                 storageManager.deleteRecording(filePath)
                 recordingLibrary.refresh()
