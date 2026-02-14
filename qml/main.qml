@@ -36,10 +36,13 @@ ApplicationWindow {
     }
 
     function confirmDelete(filePath, fileName) {
+        // Use the window's local property (it resets on app close)
         if (window.skipDeleteConfirmation) {
             if (typeof storageManager !== "undefined" && storageManager) {
                 storageManager.deleteRecording(filePath);
-                recordingLibrary.refresh();
+                if (typeof recordingLibrary !== "undefined")
+                    recordingLibrary.refresh();
+
             }
         } else {
             deleteDialog.filePath = filePath;
@@ -388,11 +391,14 @@ ApplicationWindow {
         confirmColor: Theme.errorColor
         showDontAsk: true
         onAccepted: {
-            if (recordingManager)
-                recordingManager.deleteFile(filePath);
+            if (typeof storageManager !== "undefined" && storageManager) {
+                storageManager.deleteRecording(filePath);
+                if (typeof recordingLibrary !== "undefined")
+                    recordingLibrary.refresh();
 
-            if (dontAskChecked && typeof settings !== "undefined")
-                settings.skipDeleteConfirmation = true;
+            }
+            if (deleteDialog.dontAskChecked)
+                window.skipDeleteConfirmation = true;
 
         }
     }
