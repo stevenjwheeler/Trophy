@@ -325,6 +325,14 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/RecordingListItem.qml
         qml/views/RecordingCard.qml
         qml/views/VideoPlayer.qml
+        qml/controls/TrophyButton.qml
+        qml/controls/TrophyComboBox.qml
+        qml/controls/TrophySlider.qml
+        qml/controls/TrophyRadioButton.qml
+        qml/controls/TrophySwitch.qml
+        qml/controls/TrophyTextField.qml
+        qml/controls/TrophyDialog.qml
+        qml/controls/TrophyWindowButton.qml
     SOURCES
         ${ALL_SOURCES}
         ${ALL_HEADERS}

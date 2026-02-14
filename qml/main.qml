@@ -5,41 +5,73 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import GameRecorder
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import GameRecorder
 
 ApplicationWindow {
     id: window
 
+    property int currentPage: 0
+    property bool skipDeleteConfirmation: false
+
+    function openWindowPicker() {
+        windowPicker.open();
+    }
+
+    function openFolder(path) {
+        if (!path)
+            return ;
+
+        var url = path;
+        if (!url.startsWith("file://")) {
+            if (!url.startsWith("/"))
+                url = "/" + url;
+
+            url = "file://" + url;
+        }
+        Qt.openUrlExternally(url);
+    }
+
+    function confirmDelete(filePath, fileName) {
+        if (window.skipDeleteConfirmation) {
+            if (typeof storageManager !== "undefined" && storageManager) {
+                storageManager.deleteRecording(filePath);
+                recordingLibrary.refresh();
+            }
+        } else {
+            deleteDialog.filePath = filePath;
+            deleteDialog.fileName = fileName;
+            deleteDialog.open();
+        }
+    }
+
     // Removes system borders/titlebar
     flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint
-
     width: 1200
     height: 800
     minimumWidth: 1200
     minimumHeight: 800
     maximumWidth: 1200
     maximumHeight: 800
-
     visible: true
     title: qsTr("Trophy - Game recording and clipping for Linux")
-
     color: "transparent"
-
-    property int currentPage: 0
-    property bool skipDeleteConfirmation: false 
-
-    function openWindowPicker() {
-        windowPicker.open()
+    onClosing: function(close) {
+        if (recordingManager && recordingManager.isRecording) {
+            closeConfirmDialog.open();
+            close.accepted = false;
+        }
     }
-
-    background: Item {}
+    Component.onCompleted: {
+        console.log("Trophy started");
+    }
 
     Rectangle {
         id: windowBody
+
         anchors.fill: parent
         radius: 12
         color: Theme.surfaceColor
@@ -55,6 +87,7 @@ ApplicationWindow {
             // --- CUSTOM TITLE BAR ---
             Rectangle {
                 id: titleBar
+
                 Layout.fillWidth: true
                 Layout.preferredHeight: 32
                 color: Theme.surfaceColor
@@ -85,10 +118,13 @@ ApplicationWindow {
                         color: Theme.textSecondaryColor
                     }
 
-                    Item { Layout.fillWidth: true } 
+                    Item {
+                        Layout.fillWidth: true
+                    }
 
                     Rectangle {
                         id: recordingPill
+
                         Layout.preferredHeight: 22
                         Layout.preferredWidth: pillRow.implicitWidth + 20
                         radius: 11
@@ -99,6 +135,7 @@ ApplicationWindow {
 
                         RowLayout {
                             id: pillRow
+
                             anchors.centerIn: parent
                             spacing: 10
 
@@ -107,11 +144,24 @@ ApplicationWindow {
                                 height: 8
                                 radius: 4
                                 color: "#FFF"
+
                                 SequentialAnimation on opacity {
                                     loops: Animation.Infinite
-                                    NumberAnimation { from: 1.0; to: 0.3; duration: 800 }
-                                    NumberAnimation { from: 0.3; to: 1.0; duration: 800 }
+
+                                    NumberAnimation {
+                                        from: 1
+                                        to: 0.3
+                                        duration: 800
+                                    }
+
+                                    NumberAnimation {
+                                        from: 0.3
+                                        to: 1
+                                        duration: 800
+                                    }
+
                                 }
+
                             }
 
                             Label {
@@ -132,11 +182,11 @@ ApplicationWindow {
 
                             Label {
                                 text: {
-                                    var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0
-                                    var dur = Math.floor(durMs / 1000)
-                                    var m = Math.floor(dur / 60)
-                                    var s = dur % 60
-                                    return m + ":" + s.toString().padStart(2, '0')
+                                    var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0;
+                                    var dur = Math.floor(durMs / 1000);
+                                    var m = Math.floor(dur / 60);
+                                    var s = dur % 60;
+                                    return m + ":" + s.toString().padStart(2, '0');
                                 }
                                 color: "white"
                                 font.pixelSize: 11
@@ -153,35 +203,46 @@ ApplicationWindow {
                                 icon.height: 12
                                 icon.color: "white"
                                 palette.button: "transparent"
-                                onClicked: if (recordingManager) recordingManager.stopRecording()
-                                
+                                onClicked: {
+                                    if (recordingManager)
+                                        recordingManager.stopRecording();
+
+                                }
+
                                 background: Rectangle {
                                     radius: 9
                                     color: parent.hovered ? "#40FFFFFF" : "transparent"
                                 }
+
                             }
+
                         }
+
                     }
 
                     Row {
                         Layout.fillHeight: true
 
-                        Button {
-                            width: 46
-                            height: 32
-                            text: "—"
-                            flat: true
+                        // --- Minimize Button ---
+                        TrophyWindowButton {
+                            symbol: "—"
+                            hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                             onClicked: window.showMinimized()
                         }
-                        Button {
-                            width: 46
-                            height: 32
-                            text: "✕"
-                            flat: true
+
+                        // --- Close Button ---
+                        TrophyWindowButton {
+                            symbol: "✕"
+                            hoverColor: Theme.errorColor
+                            hoverIconColor: "white"
+                            isCloseButton: true
                             onClicked: window.close()
                         }
+
                     }
+
                 }
+
             }
 
             RowLayout {
@@ -191,10 +252,11 @@ ApplicationWindow {
 
                 NavigationRail {
                     id: navRail
+
                     Layout.fillHeight: true
                     currentIndex: window.currentPage
                     onNavigate: function(index) {
-                        window.currentPage = index
+                        window.currentPage = index;
                     }
                 }
 
@@ -204,18 +266,38 @@ ApplicationWindow {
 
                     StackLayout {
                         id: pageStack
+
                         anchors.fill: parent
                         currentIndex: window.currentPage
 
-                        DashboardPage { id: dashboardPage }
-                        RecordingsPage { id: recordingsPage }
-                        GameListPage { id: gameListPage }
-                        SettingsPage { id: settingsPage }
-                        InfoPage { id: infoPage }
+                        DashboardPage {
+                            id: dashboardPage
+                        }
+
+                        RecordingsPage {
+                            id: recordingsPage
+                        }
+
+                        GameListPage {
+                            id: gameListPage
+                        }
+
+                        SettingsPage {
+                            id: settingsPage
+                        }
+
+                        InfoPage {
+                            id: infoPage
+                        }
+
                     }
+
                 }
+
             }
+
         }
+
     }
 
     MouseArea {
@@ -236,257 +318,83 @@ ApplicationWindow {
         sequence: "F9"
         onActivated: {
             if (recordingManager) {
-                if (recordingManager.isRecording) {
-                    recordingManager.stopRecording()
-                } else if (gameDetector && gameDetector.currentGameName !== "") {
-                    recordingManager.startRecording(gameDetector.currentGameName)
-                }
+                if (recordingManager.isRecording)
+                    recordingManager.stopRecording();
+                else if (gameDetector && gameDetector.currentGameName !== "")
+                    recordingManager.startRecording(gameDetector.currentGameName);
             }
         }
     }
 
-    onClosing: function(close) {
-        if (recordingManager && recordingManager.isRecording) {
-            closeConfirmDialog.open()
-            close.accepted = false
-        }
-    }
-
-    Dialog {
+    TrophyDialog {
         id: closeConfirmDialog
-        modal: true
-        width: 400
-        height: 200
-        anchors.centerIn: parent
-        
-        background: Rectangle {
-            color: Theme.cardColor
-            radius: Theme.radiusLarge
-            border.color: Theme.borderColor
-            border.width: 1
-        }
 
-        header: Label {
-            text: qsTr("Recording in Progress")
-            font.pixelSize: Theme.fontSizeLarge
-            font.weight: Font.Bold
-            padding: Theme.spacingLarge
-            color: Theme.textColor
-        }
-
-        contentItem: ColumnLayout {
-            spacing: Theme.spacingLarge
-            
-            Label {
-                Layout.fillWidth: true
-                Layout.leftMargin: Theme.spacingLarge
-                Layout.rightMargin: Theme.spacingLarge
-                text: qsTr("A recording is currently in progress. Would you like to stop recording and exit Trophy?")
-                wrapMode: Text.WordWrap
-                color: Theme.textSecondaryColor
-                lineHeight: 1.2
-            }
-            
-            Item { Layout.preferredHeight: Theme.spacingSmall }
-        }
-
-        footer: RowLayout {
-            width: parent.width
-            spacing: 0
-            
-            Item { Layout.fillWidth: true }
-
-            DialogButtonBox {
-                id: closeButtonBox
-                background: Item {}
-                alignment: Qt.AlignRight
-                Layout.rightMargin: Theme.spacingLarge
-                Layout.bottomMargin: Theme.spacingLarge
-                
-                onAccepted: closeConfirmDialog.accept()
-                onRejected: closeConfirmDialog.reject()
-
-                Button {
-                    text: qsTr("Cancel")
-                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                    flat: true
-                }
-                
-                Button {
-                    text: qsTr("Stop and Exit")
-                    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-                    highlighted: true
-                    palette.button: Theme.errorColor
-                }
-            }
-        }
-
+        title: qsTr("Recording in Progress")
+        message: qsTr("A recording is currently in progress. Would you like to stop recording and exit Trophy?")
+        confirmText: qsTr("Stop and Exit")
+        confirmColor: Theme.errorColor
+        showDontAsk: false
         onAccepted: {
-            if (recordingManager) {
-                recordingManager.stopRecording()
-            }
-            Qt.quit()
+            recordingManager.stopRecording();
+            Qt.quit();
         }
     }
 
     Connections {
-        target: recordingManager
         function onRecordingError(error) {
-            errorDialog.text = error
-            errorDialog.open()
+            errorDialog.text = error;
+            errorDialog.open();
         }
+
+        target: recordingManager
     }
 
     Dialog {
         id: errorDialog
+
+        property alias text: errorLabel.text
+
         title: qsTr("Error")
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Ok
-        property alias text: errorLabel.text
+
         Label {
             id: errorLabel
+
             wrapMode: Text.WordWrap
             width: 300
         }
+
     }
 
     WindowPickerDialog {
         id: windowPicker
+
         onWindowSelected: function(windowId, title) {
-            recordingManager.startRecording(title, windowId)
+            recordingManager.startRecording(title, windowId);
         }
     }
 
-    function openFolder(path) {
-        if (!path) return
-        var url = path
-        if (!url.startsWith("file://")) {
-            if (!url.startsWith("/")) url = "/" + url
-            url = "file://" + url
-        }
-        Qt.openUrlExternally(url)
-    }
-
-    function confirmDelete(filePath, fileName) {
-        if (window.skipDeleteConfirmation) {
-            if (typeof storageManager !== "undefined" && storageManager) {
-                storageManager.deleteRecording(filePath)
-                recordingLibrary.refresh()
-            }
-        } else {
-            deleteDialog.filePath = filePath
-            deleteDialog.fileName = fileName
-            deleteDialog.open()
-        }
-    }
-
-    Dialog {
+    TrophyDialog {
         id: deleteDialog
-        modal: true
-        width: 400
-        height: 220
-        anchors.centerIn: parent
-        
-        background: Rectangle {
-            color: Theme.cardColor
-            radius: Theme.radiusLarge
-            border.color: Theme.borderColor
-            border.width: 1
-        }
-
-        header: Label {
-            text: qsTr("Delete Recording")
-            font.pixelSize: Theme.fontSizeLarge
-            font.weight: Font.Bold
-            padding: Theme.spacingLarge
-            color: Theme.textColor
-        }
 
         property string filePath: ""
         property string fileName: ""
 
-        contentItem: ColumnLayout {
-            spacing: Theme.spacingLarge
-            
-            Label {
-                Layout.fillWidth: true
-                Layout.leftMargin: Theme.spacingLarge
-                Layout.rightMargin: Theme.spacingLarge
-                text: qsTr("Are you sure you want to delete '%1'? This action cannot be undone.").arg(deleteDialog.fileName)
-                wrapMode: Text.WordWrap
-                color: Theme.textSecondaryColor
-                lineHeight: 1.2
-            }
-            
-            // Spacer to ensure consistent gap between text and footer
-            Item { Layout.preferredHeight: Theme.spacingSmall }
-        }
-
-        footer: RowLayout {
-            width: parent.width
-            spacing: 0
-            
-            // Bottom margins to keep it away from window edges
-            Layout.margins: Theme.spacingLarge
-            
-            CheckBox {
-                id: dontAskCheckbox
-                text: qsTr("Don't ask again")
-                font.pixelSize: Theme.fontSizeSmall
-                Layout.leftMargin: Theme.spacingLarge
-                Layout.bottomMargin: Theme.spacingLarge
-                
-                contentItem: Text {
-                    text: dontAskCheckbox.text
-                    font: dontAskCheckbox.font
-                    color: Theme.textSecondaryColor
-                    leftPadding: dontAskCheckbox.indicator.width + dontAskCheckbox.spacing
-                    verticalAlignment: Text.AlignVCenter
-                }
-            }
-
-            Item { Layout.fillWidth: true } 
-
-            DialogButtonBox {
-                id: buttonBox
-                background: Item {}
-                alignment: Qt.AlignRight
-                Layout.rightMargin: Theme.spacingLarge
-                Layout.bottomMargin: Theme.spacingLarge
-                
-                // Explicitly tell the Dialog to Accept/Reject when these are clicked
-                onAccepted: deleteDialog.accept()
-                onRejected: deleteDialog.reject()
-
-                Button {
-                    text: qsTr("Cancel")
-                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                    flat: true
-                }
-                
-                Button {
-                    text: qsTr("Delete")
-                    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-                    highlighted: true
-                    palette.button: Theme.errorColor
-                }
-            }
-        }
-
+        title: qsTr("Delete Recording")
+        message: qsTr("Are you sure you want to delete '%1'? This cannot be undone.").arg(fileName)
+        confirmText: qsTr("Delete")
+        confirmColor: Theme.errorColor
+        showDontAsk: true
         onAccepted: {
-            if (dontAskCheckbox.checked) {
-                window.skipDeleteConfirmation = true
-            }
+            if (recordingManager)
+                recordingManager.deleteFile(filePath);
 
-            if (recordingLibrary && typeof storageManager !== "undefined" && storageManager) {
-                storageManager.deleteRecording(filePath)
-                recordingLibrary.refresh()
-            }
+            if (dontAskChecked && typeof settings !== "undefined")
+                settings.skipDeleteConfirmation = true;
+
         }
     }
 
-    Component.onCompleted: {
-        console.log("Trophy started")
-    }
 }

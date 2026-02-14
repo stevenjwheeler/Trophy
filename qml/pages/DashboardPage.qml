@@ -5,20 +5,33 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../components"
+import "../styles"
+import "../views"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
-import "../components"
-import "../views"
 
 Page {
     id: root
 
-    background: Rectangle {
-        color: Theme.backgroundColor
-        bottomRightRadius: 12
-        topLeftRadius: 26
+    function formatSize(bytes) {
+        if (!bytes)
+            return "0 B";
+
+        var kb = 1024;
+        var mb = kb * 1024;
+        var gb = mb * 1024;
+        if (bytes >= gb)
+            return (bytes / gb).toFixed(1) + " GB";
+
+        if (bytes >= mb)
+            return (bytes / mb).toFixed(0) + " MB";
+
+        if (bytes >= kb)
+            return (bytes / kb).toFixed(0) + " KB";
+
+        return bytes + " B";
     }
 
     ScrollView {
@@ -44,7 +57,9 @@ Page {
                     Layout.alignment: Qt.AlignTop
                 }
 
-                Item { Layout.fillWidth: true }
+                Item {
+                    Layout.fillWidth: true
+                }
 
                 // Compact game status card with button
                 Rectangle {
@@ -67,50 +82,69 @@ Page {
 
                             RowLayout {
                                 spacing: 8
+
                                 Rectangle {
                                     width: 10
                                     height: 10
                                     radius: 5
-                                    color: (recordingManager && recordingManager.isRecording) ?
-                                        "white" :
-                                        ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
-                                    
+                                    color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
+
                                     SequentialAnimation on opacity {
                                         running: (recordingManager && recordingManager.isRecording)
                                         loops: Animation.Infinite
-                                        NumberAnimation { from: 1.0; to: 0.4; duration: 800 }
-                                        NumberAnimation { from: 0.4; to: 1.0; duration: 800 }
+
+                                        NumberAnimation {
+                                            from: 1
+                                            to: 0.4
+                                            duration: 800
+                                        }
+
+                                        NumberAnimation {
+                                            from: 0.4
+                                            to: 1
+                                            duration: 800
+                                        }
+
                                     }
+
                                 }
+
                                 Label {
                                     text: {
-                                        if (recordingManager && recordingManager.isRecording) return qsTr("RECORDING")
-                                        if (gameDetector && gameDetector.currentGameName) return qsTr("READY")
-                                        return qsTr("IDLE")
+                                        if (recordingManager && recordingManager.isRecording)
+                                            return qsTr("RECORDING");
+
+                                        if (gameDetector && gameDetector.currentGameName)
+                                            return qsTr("READY");
+
+                                        return qsTr("IDLE");
                                     }
                                     font.pixelSize: 10
                                     font.weight: Font.Black
                                     color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                                 }
+
                             }
 
                             Label {
                                 Layout.fillWidth: true
                                 text: {
-                                    if (recordingManager && recordingManager.isRecording) {
-                                        return recordingManager.currentGameName || qsTr("Active Recording")
-                                    }
-                                    return (gameDetector && gameDetector.currentGameName) || qsTr("No game detected")
+                                    if (recordingManager && recordingManager.isRecording)
+                                        return recordingManager.currentGameName || qsTr("Active Recording");
+
+                                    return (gameDetector && gameDetector.currentGameName) || qsTr("No game detected");
                                 }
                                 font.pixelSize: Theme.fontSizeNormal
                                 font.weight: Font.Bold
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textColor
                                 elide: Text.ElideRight
                             }
+
                         }
 
                         Button {
                             id: recordBtn
+
                             Layout.preferredWidth: 44
                             Layout.preferredHeight: 44
                             icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
@@ -119,21 +153,23 @@ Page {
                             icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
                             flat: true
                             onClicked: {
-                                if (recordingManager && recordingManager.isRecording) {
-                                    recordingManager.stopRecording()
-                                } else {
-                                    window.openWindowPicker()
-                                }
+                                if (recordingManager && recordingManager.isRecording)
+                                    recordingManager.stopRecording();
+                                else
+                                    window.openWindowPicker();
                             }
-                            
+
                             background: Rectangle {
                                 radius: 22
                                 color: recordBtn.hovered ? ((recordingManager && recordingManager.isRecording) ? "#40FFFFFF" : Theme.primaryColor) : ((recordingManager && recordingManager.isRecording) ? "#20FFFFFF" : "transparent")
                                 border.color: ((recordingManager && recordingManager.isRecording) ? "white" : Theme.primaryColor)
                                 border.width: 2
                             }
+
                         }
+
                     }
+
                 }
 
                 // Compact encoder info
@@ -156,13 +192,14 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textSecondaryColor
                         }
+
                         Label {
                             text: {
                                 if (settingsManager && settingsManager.encoder === "auto") {
-                                    var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "")
-                                    return active !== "" ? "Auto (" + active + ")" : "Auto"
+                                    var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "");
+                                    return active !== "" ? "Auto (" + active + ")" : "Auto";
                                 }
-                                return settingsManager ? settingsManager.encoder : ""
+                                return settingsManager ? settingsManager.encoder : "";
                             }
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textColor
@@ -174,6 +211,7 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textSecondaryColor
                         }
+
                         Label {
                             text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"
                             font.pixelSize: Theme.fontSizeSmall
@@ -185,24 +223,27 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textSecondaryColor
                         }
+
                         Label {
                             text: settingsManager ? settingsManager.fps.toString() : "0"
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textColor
                         }
 
-
                         Label {
                             text: qsTr("Format:")
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textSecondaryColor
                         }
+
                         Label {
                             text: settingsManager ? settingsManager.containerFormat.toUpperCase() : ""
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textColor
                         }
+
                     }
+
                 }
 
                 // Compact audio levels
@@ -223,24 +264,27 @@ Page {
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Game")
-                            level: 0.0
+                            level: 0
                         }
 
                         AudioLevelMeter {
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Comms")
-                            level: 0.0
+                            level: 0
                         }
 
                         AudioLevelMeter {
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Mic")
-                            level: 0.0
+                            level: 0
                         }
+
                     }
+
                 }
+
             }
 
             // Storage usage (Small bar)
@@ -260,18 +304,21 @@ Page {
                         spacing: 2
                         Layout.preferredWidth: 120
                         Layout.alignment: Qt.AlignVCenter
+
                         Label {
                             text: qsTr("Storage Usage")
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
                             color: Theme.textSecondaryColor
                         }
+
                         Label {
                             text: (typeof storageManager !== "undefined" && storageManager) ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : "0 B / 0 B"
                             font.pixelSize: 10
                             color: Theme.textColor
                             opacity: 0.7
                         }
+
                     }
 
                     // Simple Progress Bar
@@ -290,16 +337,32 @@ Page {
                             width: parent.width * ((typeof storageManager !== "undefined" && storageManager && storageManager.maxSize > 0) ? (storageManager.usedSize / storageManager.maxSize) : 0)
                             radius: 5
                             color: {
-                                if (typeof storageManager === "undefined" || !storageManager || storageManager.maxSize <= 0) return Theme.primaryColor
-                                var p = (storageManager.usedSize / storageManager.maxSize) * 100
-                                if (p > 90) return Theme.errorColor
-                                if (p > 75) return Theme.warningColor
-                                return Theme.primaryColor
+                                if (typeof storageManager === "undefined" || !storageManager || storageManager.maxSize <= 0)
+                                    return Theme.primaryColor;
+
+                                var p = (storageManager.usedSize / storageManager.maxSize) * 100;
+                                if (p > 90)
+                                    return Theme.errorColor;
+
+                                if (p > 75)
+                                    return Theme.warningColor;
+
+                                return Theme.primaryColor;
                             }
-                            Behavior on width { NumberAnimation { duration: 500 } }
+
+                            Behavior on width {
+                                NumberAnimation {
+                                    duration: 500
+                                }
+
+                            }
+
                         }
+
                     }
+
                 }
+
             }
 
             // Recent recordings
@@ -324,13 +387,16 @@ Page {
                             color: Theme.textColor
                         }
 
-                        Item { Layout.fillWidth: true }
+                        Item {
+                            Layout.fillWidth: true
+                        }
 
-                        Button {
+                        TrophyButton {
                             text: qsTr("View All")
-                            flat: true
+                            implicitHeight: 26
                             onClicked: window.currentPage = 1
                         }
+
                     }
 
                     ListView {
@@ -341,35 +407,48 @@ Page {
                         clip: true
                         model: recordingLibrary ? recordingLibrary.recordings.slice(0, 4) : []
 
-                        delegate: RecordingCard {
-                            width: 240 // Slightly smaller for dashboard
-                            height: Theme.recordingCardHeight
-                            recording: modelData
-                            onPlay: if (modelData) Qt.openUrlExternally("file://" + modelData.filePath)
-                            onOpenFolder: if (modelData) window.openFolder(modelData.directory)
-                            onDeleteRequested: if (modelData) window.confirmDelete(modelData.filePath, modelData.fileName)
-                        }
-
                         Label {
                             anchors.centerIn: parent
                             visible: !recordingLibrary || recordingLibrary.count === 0
                             text: qsTr("No recordings yet")
                             color: Theme.textMutedColor
                         }
+
+                        delegate: RecordingCard {
+                            width: 240 // Slightly smaller for dashboard
+                            height: Theme.recordingCardHeight
+                            recording: modelData
+                            onPlay: {
+                                if (modelData)
+                                    Qt.openUrlExternally("file://" + modelData.filePath);
+
+                            }
+                            onOpenFolder: {
+                                if (modelData)
+                                    window.openFolder(modelData.directory);
+
+                            }
+                            onDeleteRequested: {
+                                if (modelData)
+                                    window.confirmDelete(modelData.filePath, modelData.fileName);
+
+                            }
+                        }
+
                     }
+
                 }
+
             }
+
         }
+
     }
 
-    function formatSize(bytes) {
-        if (!bytes) return "0 B"
-        var kb = 1024
-        var mb = kb * 1024
-        var gb = mb * 1024
-        if (bytes >= gb) return (bytes / gb).toFixed(1) + " GB"
-        if (bytes >= mb) return (bytes / mb).toFixed(0) + " MB"
-        if (bytes >= kb) return (bytes / kb).toFixed(0) + " KB"
-        return bytes + " B"
+    background: Rectangle {
+        color: Theme.backgroundColor
+        bottomRightRadius: 12
+        topLeftRadius: 26
     }
+
 }
