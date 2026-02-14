@@ -184,7 +184,7 @@ Page {
                             // Info for MKV
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("✓ MKV is crash-resistant and can be converted to MP4 later instantly.")
+                                text: qsTr("MKV is crash-resistant and can be converted later if needed.")
                                 color: Theme.textMutedColor
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
@@ -281,7 +281,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Recordings Folder")
-                        helpText: qsTr("Where your victory moments are saved.")
+                        helpText: qsTr("Where your recordings are saved.")
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -301,7 +301,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Storage Limit")
-                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit.")
+                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit if Auto-Cleanup is enabled, otherwise it will stop recording when the limit is reached.")
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -327,7 +327,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Auto-Cleanup")
-                        helpText: qsTr("Enable this to keep your drive from filling up.")
+                        helpText: qsTr("Enable this to keep your drive from filling up and automatically delete the oldest recordings when the storage limit is reached.")
 
                         Switch {
                             checked: settingsManager ? settingsManager.autoDeleteOldest : false
@@ -352,7 +352,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Auto-record")
-                        helpText: qsTr("Automatically start recording the moment a game is detected. Never miss a moment!")
+                        helpText: qsTr("Automatically start recording the entire game session the moment a game is detected. Never miss a moment!")
 
                         Switch {
                             checked: settingsManager ? settingsManager.autoRecordEnabled : false
@@ -410,15 +410,22 @@ Page {
         onAccepted: settingsManager.resetToDefaults()
     }
 
-    // Section component
+    // Updated Section component with Expand/Collapse
     component SettingsSection: Rectangle {
         property string title: ""
+        property bool collapsed: true // Default to closed
         default property alias content: contentLayout.data
 
         Layout.fillWidth: true
-        implicitHeight: sectionLayout.implicitHeight + Theme.spacingMedium * 2
+        // Set height based on whether it is collapsed or not
+        implicitHeight: collapsed ? headerLayout.height + (Theme.spacingMedium * 2) 
+                                   : sectionLayout.implicitHeight + Theme.spacingMedium * 2
+        
         radius: Theme.radiusMedium
         color: Theme.cardColor
+        clip: true // Prevents content from bleeding out during animation
+
+        Behavior on implicitHeight { NumberAnimation { duration: 200; easing.type: Easing.InOutQuad } }
 
         ColumnLayout {
             id: sectionLayout
@@ -426,23 +433,53 @@ Page {
             anchors.margins: Theme.spacingMedium
             spacing: Theme.spacingMedium
 
-            Label {
-                text: title
-                font.pixelSize: Theme.fontSizeLarge
-                font.weight: Font.Medium
-                color: Theme.textColor
+            // Clickable Header
+            MouseArea {
+                id: headerLayout
+                Layout.fillWidth: true
+                Layout.preferredHeight: headerText.implicitHeight + Theme.spacingSmall
+                cursorShape: Qt.PointingHandCursor
+                onClicked: collapsed = !collapsed
+
+                RowLayout {
+                    anchors.fill: parent
+                    
+                    Label {
+                        id: headerText
+                        text: title
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                        Layout.fillWidth: true
+                    }
+
+                    // Rotating Arrow Icon
+                    Label {
+                        text: "▼"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.textMutedColor
+                        rotation: collapsed ? 0 : 180
+                        Behavior on rotation { NumberAnimation { duration: 200 } }
+                    }
+                }
             }
 
+            // Divider - only visible when expanded
             Rectangle {
                 Layout.fillWidth: true
                 height: 1
                 color: Theme.dividerColor
+                visible: !collapsed
             }
 
+            // Content Container
             ColumnLayout {
                 id: contentLayout
                 Layout.fillWidth: true
                 spacing: Theme.spacingLarge
+                visible: !collapsed // Hide content when collapsed
+                opacity: collapsed ? 0 : 1
+                Behavior on opacity { NumberAnimation { duration: 150 } }
             }
         }
     }
