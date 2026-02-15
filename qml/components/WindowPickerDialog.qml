@@ -1,17 +1,23 @@
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 Dialog {
     id: root
+
+    signal windowSelected(var windowId, string title)
+
     title: qsTr("Select Window to Record")
     modal: true
     width: 500
     height: 600
     anchors.centerIn: Overlay.overlay
+    onOpened: {
+        if (typeof windowService !== "undefined" && windowService)
+            listView.model = windowService.getVisibleWindows();
 
-    signal windowSelected(var windowId, string title)
+    }
 
     background: Rectangle {
         color: Theme.cardColor
@@ -30,6 +36,7 @@ Dialog {
 
         ListView {
             id: listView
+
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -39,12 +46,17 @@ Dialog {
             delegate: ItemDelegate {
                 width: listView.width
                 height: 50
+                onClicked: {
+                    root.windowSelected(modelData.id, modelData.title);
+                    root.close();
+                }
 
                 contentItem: RowLayout {
                     spacing: Theme.spacingSmall
-                    
+
                     ColumnLayout {
                         spacing: 2
+
                         Label {
                             text: modelData.title || qsTr("Untitled Window")
                             color: Theme.textColor
@@ -52,6 +64,7 @@ Dialog {
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
+
                         Label {
                             text: modelData.class || ""
                             color: Theme.textMutedColor
@@ -59,22 +72,22 @@ Dialog {
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
+
                     }
+
                 }
 
                 background: Rectangle {
                     color: parent.highlighted ? Theme.primaryColor : (parent.hovered ? Theme.cardHoverColor : "transparent")
                     radius: Theme.radiusSmall
-                    opacity: parent.highlighted ? 0.2 : 1.0
+                    opacity: parent.highlighted ? 0.2 : 1
                 }
 
-                onClicked: {
-                    root.windowSelected(modelData.id, modelData.title)
-                    root.close()
-                }
             }
 
-            ScrollIndicator.vertical: ScrollIndicator { }
+            ScrollIndicator.vertical: ScrollIndicator {
+            }
+
         }
 
         Button {
@@ -82,11 +95,7 @@ Dialog {
             text: qsTr("Cancel")
             onClicked: root.close()
         }
+
     }
 
-    onOpened: {
-        if (typeof windowService !== "undefined" && windowService) {
-            listView.model = windowService.getVisibleWindows()
-        }
-    }
 }

@@ -5,33 +5,36 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 Rectangle {
     id: root
 
-    property int duration: 0  // milliseconds
+    property int duration: 0 // milliseconds
     property string gameName: ""
+
+    function formatDuration(ms) {
+        var totalSeconds = Math.floor(ms / 1000);
+        var hours = Math.floor(totalSeconds / 3600);
+        var minutes = Math.floor((totalSeconds % 3600) / 60);
+        var seconds = totalSeconds % 60;
+        if (hours > 0)
+            return hours.toString().padStart(2, '0') + ":" + minutes.toString().padStart(2, '0') + ":" + seconds.toString().padStart(2, '0');
+
+        return minutes.toString().padStart(2, '0') + ":" + seconds.toString().padStart(2, '0');
+    }
 
     implicitWidth: layout.implicitWidth + Theme.spacingMedium * 2
     implicitHeight: layout.implicitHeight + Theme.spacingSmall * 2
-
     radius: Theme.radiusMedium
     color: Theme.withOpacity(Theme.recordingColor, 0.9)
 
-    // Pulsing animation
-    SequentialAnimation on opacity {
-        running: root.visible
-        loops: Animation.Infinite
-        NumberAnimation { to: 0.7; duration: 800; easing.type: Easing.InOutQuad }
-        NumberAnimation { to: 1.0; duration: 800; easing.type: Easing.InOutQuad }
-    }
-
     RowLayout {
         id: layout
+
         anchors.centerIn: parent
         spacing: Theme.spacingSmall
 
@@ -45,9 +48,19 @@ Rectangle {
             SequentialAnimation on opacity {
                 running: root.visible
                 loops: Animation.Infinite
-                NumberAnimation { to: 0.3; duration: 500 }
-                NumberAnimation { to: 1.0; duration: 500 }
+
+                NumberAnimation {
+                    to: 0.3
+                    duration: 500
+                }
+
+                NumberAnimation {
+                    to: 1
+                    duration: 500
+                }
+
             }
+
         }
 
         // Duration
@@ -76,30 +89,37 @@ Rectangle {
             icon.color: "white"
             flat: true
             onClicked: {
-                if (typeof recordingManager !== "undefined" && recordingManager) {
-                    recordingManager.stopRecording()
-                }
+                if (typeof recordingManager !== "undefined" && recordingManager)
+                    recordingManager.stopRecording();
+
             }
-            
+
             background: Rectangle {
                 color: parent.hovered ? "rgba(255,255,255,0.2)" : "transparent"
                 radius: 4
             }
+
         }
+
     }
 
-    function formatDuration(ms) {
-        var totalSeconds = Math.floor(ms / 1000)
-        var hours = Math.floor(totalSeconds / 3600)
-        var minutes = Math.floor((totalSeconds % 3600) / 60)
-        var seconds = totalSeconds % 60
+    // Pulsing animation
+    SequentialAnimation on opacity {
+        running: root.visible
+        loops: Animation.Infinite
 
-        if (hours > 0) {
-            return hours.toString().padStart(2, '0') + ":" +
-                   minutes.toString().padStart(2, '0') + ":" +
-                   seconds.toString().padStart(2, '0')
+        NumberAnimation {
+            to: 0.7
+            duration: 800
+            easing.type: Easing.InOutQuad
         }
-        return minutes.toString().padStart(2, '0') + ":" +
-               seconds.toString().padStart(2, '0')
+
+        NumberAnimation {
+            to: 1
+            duration: 800
+            easing.type: Easing.InOutQuad
+        }
+
     }
+
 }

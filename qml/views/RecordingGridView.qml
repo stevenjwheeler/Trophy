@@ -5,32 +5,19 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 GridView {
     id: root
 
     cellWidth: Theme.recordingCardWidth + Theme.spacingMedium
     cellHeight: Theme.recordingCardHeight + Theme.spacingMedium
-
     clip: true
     boundsBehavior: Flickable.StopAtBounds
-
     model: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : []
-
-    delegate: RecordingCard {
-        width: Theme.recordingCardWidth
-        height: Theme.recordingCardHeight
-
-        recording: modelData
-
-        onPlay: if (modelData) Qt.openUrlExternally("file://" + modelData.filePath)
-        onOpenFolder: if (modelData) window.openFolder(modelData.directory)
-        onDeleteRequested: if (modelData) window.confirmDelete(modelData.filePath, modelData.fileName)
-    }
 
     // Empty state
     Label {
@@ -42,7 +29,29 @@ GridView {
         font.pixelSize: Theme.fontSizeMedium
     }
 
+    delegate: RecordingCard {
+        width: Theme.recordingCardWidth
+        height: Theme.recordingCardHeight
+        recording: modelData
+        onPlay: {
+            if (modelData) {
+                Qt.openUrlExternally("file://" + modelData.filePath);
+            }
+        }
+        onOpenFolder: {
+            if (modelData) {
+                window.openFolder(modelData.directory);
+            }
+        }
+        onDeleteRequested: {
+            if (modelData) {
+                window.confirmDelete(modelData.filePath, modelData.fileName);
+            }
+        }
+    }
+
     ScrollBar.vertical: ScrollBar {
         policy: ScrollBar.AsNeeded
     }
+
 }

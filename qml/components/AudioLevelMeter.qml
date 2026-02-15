@@ -5,17 +5,31 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 Item {
     id: root
 
     property string label: ""
-    property real level: 0.0  // 0.0 to 1.0
+    property real level: 0 // 0.0 to 1.0
     property bool muted: false
+
+    function getIcon() {
+        var labelLower = label.toLowerCase();
+        if (labelLower.includes("game"))
+            return "🎮";
+
+        if (labelLower.includes("comm") || labelLower.includes("voice"))
+            return "🎧";
+
+        if (labelLower.includes("mic"))
+            return "🎤";
+
+        return "🔊";
+    }
 
     implicitWidth: 60
     implicitHeight: 120
@@ -40,29 +54,30 @@ Item {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 anchors.margins: 2
-
-                height: (parent.height - 4) * Math.min(root.level, 1.0)
+                height: (parent.height - 4) * Math.min(root.level, 1)
                 radius: Theme.radiusSmall - 1
+                opacity: root.muted ? 0.5 : 1
 
                 gradient: Gradient {
                     GradientStop {
-                        position: 0.0
-                        color: root.muted ? Theme.errorColor :
-                               (root.level > 0.9 ? Theme.errorColor :
-                                root.level > 0.7 ? Theme.warningColor :
-                                Theme.successColor)
+                        position: 0
+                        color: root.muted ? Theme.errorColor : (root.level > 0.9 ? Theme.errorColor : root.level > 0.7 ? Theme.warningColor : Theme.successColor)
                     }
+
                     GradientStop {
-                        position: 1.0
+                        position: 1
                         color: root.muted ? Theme.errorColor : Theme.successColor
                     }
-                }
 
-                opacity: root.muted ? 0.5 : 1.0
+                }
 
                 Behavior on height {
-                    NumberAnimation { duration: 50 }
+                    NumberAnimation {
+                        duration: 50
+                    }
+
                 }
+
             }
 
             // Peak indicator lines
@@ -75,7 +90,9 @@ Item {
                     height: 1
                     color: Theme.withOpacity(Theme.borderColor, 0.5)
                 }
+
             }
+
         }
 
         // Icon label at bottom - clickable to mute
@@ -83,34 +100,33 @@ Item {
             Layout.alignment: Qt.AlignHCenter
             implicitWidth: iconLabel.implicitWidth + 4
             implicitHeight: iconLabel.implicitHeight + 4
-
             onClicked: root.muted = !root.muted
 
             contentItem: Label {
                 id: iconLabel
+
                 text: getIcon()
                 color: root.muted ? Theme.errorColor : Theme.textColor
                 font.pixelSize: Theme.fontSizeNormal
                 horizontalAlignment: Text.AlignHCenter
-                opacity: parent.hovered ? 1.0 : 0.8
+                opacity: parent.hovered ? 1 : 0.8
 
                 Behavior on color {
-                    ColorAnimation { duration: 150 }
+                    ColorAnimation {
+                        duration: 150
+                    }
+
                 }
+
             }
 
             background: Rectangle {
                 radius: Theme.radiusSmall
                 color: parent.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
             }
+
         }
+
     }
 
-    function getIcon() {
-        var labelLower = label.toLowerCase()
-        if (labelLower.includes("game")) return "🎮"
-        if (labelLower.includes("comm") || labelLower.includes("voice")) return "🎧"
-        if (labelLower.includes("mic")) return "🎤"
-        return "🔊"
-    }
 }

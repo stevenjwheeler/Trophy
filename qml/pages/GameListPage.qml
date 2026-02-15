@@ -5,19 +5,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 Page {
     id: root
-
-    background: Rectangle {
-        color: Theme.backgroundColor
-        bottomRightRadius: 12
-        topLeftRadius: 26
-    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -35,29 +29,36 @@ Page {
                 color: Theme.textColor
             }
 
-            Item { Layout.fillWidth: true }
+            Item {
+                Layout.fillWidth: true
+            }
 
             Button {
                 text: qsTr("Add Game")
                 icon.name: "list-add"
                 onClicked: addGameDialog.open()
             }
+
         }
 
         // Tabs
         TabBar {
             id: tabBar
+
             Layout.fillWidth: true
 
             TabButton {
                 text: qsTr("Detected (%1)").arg(0)
             }
+
             TabButton {
                 text: qsTr("Whitelist (%1)").arg(0)
             }
+
             TabButton {
                 text: qsTr("Blacklist (%1)").arg(0)
             }
+
         }
 
         // Content
@@ -84,12 +85,12 @@ Page {
 
                     ListView {
                         id: detectedList
+
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         spacing: Theme.spacingSmall
-
-                        model: []  // TODO: Connect to gameDetector
+                        model: [] // TODO: Connect to gameDetector
 
                         delegate: GameListItem {
                             width: detectedList.width
@@ -97,12 +98,14 @@ Page {
                             windowClass: modelData.windowClass || ""
                             isWhitelisted: false
                             isBlacklisted: false
-
                             onAddToWhitelist: gameDetector.addToWhitelist(windowClass, gameName)
                             onAddToBlacklist: gameDetector.addToBlacklist(windowClass)
                         }
+
                     }
+
                 }
+
             }
 
             // Whitelist
@@ -123,12 +126,12 @@ Page {
 
                     ListView {
                         id: whitelistView
+
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         spacing: Theme.spacingSmall
-
-                        model: []  // TODO: Connect to gameWhitelist
+                        model: [] // TODO: Connect to gameWhitelist
 
                         delegate: GameListItem {
                             width: whitelistView.width
@@ -136,11 +139,13 @@ Page {
                             windowClass: modelData.windowClass || ""
                             isWhitelisted: true
                             isBlacklisted: false
-
                             onRemove: gameDetector.removeFromWhitelist(windowClass)
                         }
+
                     }
+
                 }
+
             }
 
             // Blacklist
@@ -161,12 +166,12 @@ Page {
 
                     ListView {
                         id: blacklistView
+
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         spacing: Theme.spacingSmall
-
-                        model: []  // TODO: Connect to gameBlacklist
+                        model: [] // TODO: Connect to gameBlacklist
 
                         delegate: GameListItem {
                             width: blacklistView.width
@@ -174,22 +179,37 @@ Page {
                             windowClass: modelData.windowClass || ""
                             isWhitelisted: false
                             isBlacklisted: true
-
                             onRemove: gameDetector.removeFromBlacklist(windowClass)
                         }
+
                     }
+
                 }
+
             }
+
         }
+
     }
 
     // Add game dialog
     Dialog {
         id: addGameDialog
+
         title: qsTr("Add Game")
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: {
+            if (gameNameField.text.trim() !== "") {
+                if (whitelistRadio.checked)
+                    gameDetector.addToWhitelist(gameNameField.text, displayNameField.text);
+                else
+                    gameDetector.addToBlacklist(gameNameField.text);
+                gameNameField.text = "";
+                displayNameField.text = "";
+            }
+        }
 
         ColumnLayout {
             spacing: Theme.spacingMedium
@@ -201,6 +221,7 @@ Page {
 
             TextField {
                 id: gameNameField
+
                 Layout.preferredWidth: 300
                 placeholderText: qsTr("e.g., steam_app_12345")
             }
@@ -212,6 +233,7 @@ Page {
 
             TextField {
                 id: displayNameField
+
                 Layout.preferredWidth: 300
                 placeholderText: qsTr("e.g., My Game")
             }
@@ -221,6 +243,7 @@ Page {
 
                 RadioButton {
                     id: whitelistRadio
+
                     text: qsTr("Add to Whitelist")
                     checked: true
                 }
@@ -228,20 +251,17 @@ Page {
                 RadioButton {
                     text: qsTr("Add to Blacklist")
                 }
+
             }
+
         }
 
-        onAccepted: {
-            if (gameNameField.text.trim() !== "") {
-                if (whitelistRadio.checked) {
-                    gameDetector.addToWhitelist(gameNameField.text, displayNameField.text)
-                } else {
-                    gameDetector.addToBlacklist(gameNameField.text)
-                }
-                gameNameField.text = ""
-                displayNameField.text = ""
-            }
-        }
+    }
+
+    background: Rectangle {
+        color: Theme.backgroundColor
+        bottomRightRadius: 12
+        topLeftRadius: 26
     }
 
     component GameListItem: Rectangle {
@@ -262,6 +282,7 @@ Page {
 
         MouseArea {
             id: mouseArea
+
             anchors.fill: parent
             hoverEnabled: true
         }
@@ -283,6 +304,7 @@ Page {
                     font.pixelSize: Theme.fontSizeLarge
                     color: Theme.primaryColor
                 }
+
             }
 
             ColumnLayout {
@@ -303,6 +325,7 @@ Page {
                     font.pixelSize: Theme.fontSizeSmall
                     visible: gameItem.gameName !== "" && gameItem.gameName !== gameItem.windowClass
                 }
+
             }
 
             Row {
@@ -329,7 +352,11 @@ Page {
                     flat: true
                     onClicked: gameItem.remove()
                 }
+
             }
+
         }
+
     }
+
 }
