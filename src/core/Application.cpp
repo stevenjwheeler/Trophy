@@ -102,20 +102,8 @@ bool Application::initialize() {
 
   // Load main QML file
   QUrl url;
-#ifdef QT_DEBUG
-  QString devPath = QCoreApplication::applicationDirPath() + "/../qml/main.qml";
-  QFileInfo devFile(devPath);
-  if (devFile.exists()) {
-    url = QUrl::fromLocalFile(devFile.absoluteFilePath());
-    std::fprintf(
-        stderr,
-        "[App] DEV MODE: Loading QML from filesystem for live reload\n");
-  } else {
-    url = QUrl(QStringLiteral("qrc:/qt/qml/GameRecorder/qml/main.qml"));
-  }
-#else
   url = QUrl(QStringLiteral("qrc:/qt/qml/GameRecorder/qml/main.qml"));
-#endif
+
   std::fprintf(stderr, "[App] Loading QML from: %s\n",
                url.toString().toUtf8().constData());
 
