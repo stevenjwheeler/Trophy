@@ -138,7 +138,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Resolution")
-                        helpText: qsTr("Native captures your full screen. Downscaling (e.g. to 1080p) helps performance if your game is demanding.")
+                        helpText: qsTr("Native captures your games full resolution. Downscaling (e.g. to 720p) helps performance if your game is demanding.")
 
                         TrophyComboBox {
                             property var values: ["native", "720x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
@@ -163,7 +163,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Container Format")
-                        helpText: ""
+                        helpText: qsTr("The container format determines how your video is stored. MKV is the most versatile and recommended format.")
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -271,7 +271,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Separate Audio Tracks")
-                        helpText: qsTr("Records game audio, voice chat, and microphone into separate tracks. This makes editing much easier!")
+                        helpText: qsTr("Records game audio, voice chat, and microphone into separate audio tracks. This makes editing much easier!")
 
                         TrophySwitch {
                             checked: settingsManager ? settingsManager.separateAudioTracks : false
@@ -386,7 +386,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Storage Limit")
-                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit if Auto-Cleanup is enabled.")
+                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit if Auto-Cleanup is enabled, otherwise recording will stop when the limit is reached.")
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -398,7 +398,7 @@ Page {
                                 Layout.fillWidth: true
                                 from: 10
                                 to: 500
-                                stepSize: 10
+                                stepSize: 1
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
                                 onMoved: {
                                     if (settingsManager)
@@ -420,7 +420,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Auto-Cleanup")
-                        helpText: qsTr("Enable this to keep your drive from filling up automatically.")
+                        helpText: qsTr("Enable this to automatically delete the oldest recordings when you exceed the storage limit.")
 
                         TrophySwitch {
                             checked: settingsManager ? settingsManager.autoDeleteOldest : false
@@ -456,7 +456,7 @@ Page {
 
                     SettingItem {
                         label: qsTr("Auto-record")
-                        helpText: qsTr("Automatically start recording the moment a game is detected.")
+                        helpText: qsTr("Automatically start recording the full game session the moment a game is detected. Never miss a moment!")
 
                         TrophySwitch {
                             checked: settingsManager ? settingsManager.autoRecordEnabled : false
