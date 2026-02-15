@@ -27,6 +27,8 @@ class FFmpegEncoder : public IEncoder {
   Q_OBJECT
 
 public:
+  bool isInitialized() const { return m_initialized; }
+
   FFmpegEncoder(EncoderType type, const QString &codecName,
                 QObject *parent = nullptr);
   ~FFmpegEncoder() override;
