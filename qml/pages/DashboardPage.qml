@@ -231,13 +231,13 @@ Page {
                         }
 
                         Label {
-                            text: qsTr("Format:")
+                            text: qsTr("Resolution:")
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textSecondaryColor
                         }
 
                         Label {
-                            text: settingsManager ? settingsManager.containerFormat.toUpperCase() : ""
+                            text: settingsManager ? settingsManager.videoResolution : ""
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.textColor
                         }
