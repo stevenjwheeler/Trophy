@@ -23,7 +23,6 @@
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QStandardPaths>
-#include <chrono>
 #include <cstdio>
 
 namespace GameRecorder {
