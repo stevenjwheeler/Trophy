@@ -10,7 +10,6 @@
 #include "IVideoCaptureSource.h"
 
 #include <atomic>
-#include <memory>
 #include <thread>
 
 typedef void *XDisplayPtr;

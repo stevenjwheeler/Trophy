@@ -18,7 +18,6 @@ extern "C" {
 #include "encoding/EncoderFactory.h"
 #include "encoding/IEncoder.h"
 #include "muxing/FFmpegMuxer.h"
-#include "muxing/IMuxer.h"
 #include "settings/SettingsManager.h"
 
 #include <QDateTime>
