@@ -206,13 +206,40 @@ bool RecordingManager::buildPipeline() {
     return false;
   }
 
-  QSize nativeRes = m_captureSource->nativeResolution();
-
   EncoderConfig encConfig;
-  encConfig.width = nativeRes.width();
-  encConfig.height = nativeRes.height();
+
+  // Logic to determine target resolution
+  // Assuming your settings->resolution() returns something like "720p",
+  // "1080p", or "Native"
+  QString targetRes =
+      m_settings->videoResolution().toLower(); // Make case-insensitive
+
+  if (targetRes.contains('x')) {
+    // Handles "1280x720", "1920x1080", etc.
+    QStringList parts = targetRes.split('x');
+    if (parts.size() == 2) {
+      encConfig.width = parts[0].toInt();
+      encConfig.height = parts[1].toInt();
+    }
+  } else {
+    // Native mode
+    QSize nativeRes = m_captureSource->nativeResolution();
+    encConfig.width = nativeRes.width();
+    encConfig.height = nativeRes.height();
+
+    // CRITICAL: Ensure dimensions are even. FFmpeg/YUV420p hates odd numbers.
+    if (encConfig.width % 2 != 0)
+      encConfig.width--;
+    if (encConfig.height % 2 != 0)
+      encConfig.height--;
+  }
+
   encConfig.fps = m_settings->fps();
   encConfig.bitrate = m_settings->videoBitrate();
+
+  encConfig.maxBitrate = m_settings->maxVideoBitrate();
+  encConfig.useVBR = m_settings->useVBR();
+
   encConfig.preset = m_settings->encoderPreset();
   encConfig.inputPixelFormat = AV_PIX_FMT_BGRA;
 

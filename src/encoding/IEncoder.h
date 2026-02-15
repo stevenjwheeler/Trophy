@@ -66,6 +66,18 @@ public:
   ~IEncoder() override = default;
 
   /**
+   * @brief Get the configuration this encoder was initialized with
+   */
+  virtual EncoderConfig config() const = 0;
+
+  // Helpers that pull from the virtual config()
+  int width() const { return config().width; }
+  int height() const { return config().height; }
+  int fps() const { return config().fps; }
+  int bitrate() const { return config().bitrate; }
+  QString preset() const { return config().preset; }
+
+  /**
    * @brief Initialize encoder with configuration
    * @param config Encoder settings
    * @return true on success

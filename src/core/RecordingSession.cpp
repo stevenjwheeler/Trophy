@@ -42,10 +42,17 @@ bool RecordingSession::start() {
   StreamInfo videoStream;
   videoStream.type = StreamInfo::Type::Video;
   videoStream.codecId = m_encoder->codecId();
-  videoStream.width = m_capture->nativeResolution().width();
-  videoStream.height = m_capture->nativeResolution().height();
-  videoStream.fps = 60; // TODO: Get from config
+  videoStream.width = m_encoder->width();
+  videoStream.height = m_encoder->height();
+  videoStream.fps = m_encoder->fps();
+  videoStream.bitrate = m_encoder->bitrate();
+  videoStream.preset = m_encoder->preset();
   videoStream.extraData = m_encoder->extraData();
+
+  qDebug() << "DEBUG: Passing to Muxer - Codec:" << videoStream.codecId
+           << "Resolution:" << videoStream.width << "x" << videoStream.height
+           << "FPS:" << videoStream.fps << "Bitrate:" << videoStream.bitrate
+           << "Preset:" << videoStream.preset;
 
   if (m_muxer->addStream(videoStream) < 0) {
     emit errorOccurred("Failed to add video stream to muxer");

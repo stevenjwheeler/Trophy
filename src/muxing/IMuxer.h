@@ -26,6 +26,10 @@ struct StreamInfo {
   int codecId;                    // FFmpeg codec ID
   std::vector<uint8_t> extraData; // Codec extradata (SPS/PPS, etc.)
 
+  // Settings metadata
+  int bitrate = 0;
+  QString preset;
+
   // Video-specific
   int width = 0;
   int height = 0;

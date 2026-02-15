@@ -73,7 +73,7 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
     codecpar->codec_id = static_cast<AVCodecID>(info.codecId);
     codecpar->width = info.width;
     codecpar->height = info.height;
-    stream->time_base = {1, info.fps};
+    stream->time_base = {1, 1000000};
 
     if (!info.extraData.empty()) {
       codecpar->extradata_size = static_cast<int>(info.extraData.size());

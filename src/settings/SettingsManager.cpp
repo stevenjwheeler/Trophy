@@ -76,6 +76,8 @@ void SettingsManager::load() {
   m_encoder = video["encoder"].toString("auto");
   m_containerFormat = video["format"].toString("mkv");
   m_encoderPreset = video["preset"].toString("fast");
+  m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
+  m_useVBR = video["useVBR"].toBool(true);
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
@@ -124,6 +126,8 @@ void SettingsManager::save() {
   video["encoder"] = m_encoder;
   video["format"] = m_containerFormat;
   video["preset"] = m_encoderPreset;
+  video["maxBitrate"] = m_maxVideoBitrate;
+  video["useVBR"] = m_useVBR;
   root["video"] = video;
 
   // Audio settings
@@ -182,6 +186,8 @@ void SettingsManager::loadDefaults() {
   m_encoder = "auto";
   m_containerFormat = "mkv";
   m_encoderPreset = "fast";
+  m_maxVideoBitrate = 20000;
+  m_useVBR = true;
 
   // Audio
   m_gameAudioDevice = "default";
@@ -337,6 +343,20 @@ void SettingsManager::setAutoRecordEnabled(bool enabled) {
   if (m_autoRecordEnabled != enabled) {
     m_autoRecordEnabled = enabled;
     emit autoRecordEnabledChanged();
+  }
+}
+
+void SettingsManager::setMaxVideoBitrate(int bitrate) {
+  if (m_maxVideoBitrate != bitrate) {
+    m_maxVideoBitrate = bitrate;
+    emit maxVideoBitrateChanged();
+  }
+}
+
+void SettingsManager::setUseVBR(bool enabled) {
+  if (m_useVBR != enabled) {
+    m_useVBR = enabled;
+    emit useVBRChanged();
   }
 }
 
