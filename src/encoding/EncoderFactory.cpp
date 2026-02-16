@@ -13,11 +13,16 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace GameRecorder {
 
 std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
+  static std::vector<EncoderInfo> s_cache;
+  if (!s_cache.empty())
+    return s_cache;
+
   std::vector<EncoderInfo> encoders;
 
   // Check NVENC H.264
@@ -53,7 +58,8 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
     qInfo() << "  -" << enc.name << "(" << enc.description << ")";
   }
 
-  return encoders;
+  s_cache = encoders;
+  return s_cache;
 }
 
 std::unique_ptr<IEncoder> EncoderFactory::create(IEncoder::EncoderType type) {
@@ -185,8 +191,18 @@ bool EncoderFactory::probeVaapi() {
     return false;
   }
 
-  // TODO: More thorough VAAPI probing with actual device check
-  qInfo() << "VA-API encoder found in FFmpeg";
+  // Actually probe the hardware: try to open a VA-API device.
+  // Passing nullptr lets FFmpeg enumerate /dev/dri/renderD* automatically.
+  AVBufferRef *hwDeviceCtx = nullptr;
+  int ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
+                                   nullptr, nullptr, 0);
+  if (ret < 0) {
+    qDebug() << "VA-API probe failed: no usable VA-API device found";
+    return false;
+  }
+
+  av_buffer_unref(&hwDeviceCtx);
+  qInfo() << "VA-API is available";
   return true;
 #else
   return false;

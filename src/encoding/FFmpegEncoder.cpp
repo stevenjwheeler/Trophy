@@ -215,8 +215,9 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
 
 bool FFmpegEncoder::initializeHardwareContext() {
 #ifdef HAVE_VAAPI
+  // nullptr lets FFmpeg enumerate /dev/dri/renderD* and pick the right device
   int ret = av_hwdevice_ctx_create(&m_hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
-                                   "/dev/dri/renderD128", nullptr, 0);
+                                   nullptr, nullptr, 0);
   if (ret < 0)
     return false;
 

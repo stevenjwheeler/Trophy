@@ -58,7 +58,7 @@ Page {
                             property var values: ["auto", "nvenc_h264", "nvenc_hevc", "vaapi_h264", "vaapi_hevc", "x264"]
 
                             Layout.fillWidth: true
-                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VAAPI H.264", "VAAPI HEVC", "x264 Software"]
+                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VA-API H.264", "VA-API HEVC", "x264 Software"]
                             currentIndex: {
                                 if (!settingsManager)
                                     return 0;
@@ -67,10 +67,63 @@ Page {
                                 return index !== -1 ? index : 0;
                             }
                             onCurrentIndexChanged: {
-                                if (settingsManager)
+                                if (!settingsManager)
+                                    return;
+
+                                if (app.isEncoderAvailable(values[currentIndex])) {
                                     settingsManager.encoder = values[currentIndex];
+                                } else {
+                                    // delegateModel already changed currentIndex before onClicked
+                                    // could intercept — revert to the last valid selection.
+                                    let savedIdx = values.indexOf(settingsManager.encoder);
+                                    currentIndex = savedIdx !== -1 ? savedIdx : 0;
+                                }
+                            }
+
+                            delegate: ItemDelegate {
+                                id: encDelegate
+
+                                readonly property bool isAvailable: app.isEncoderAvailable(encoderBox.values[index])
+
+                                width: encoderBox.width - 4
+                                height: 32
+                                hoverEnabled: isAvailable
+                                onClicked: {
+                                    if (!isAvailable)
+                                        return;
+
+                                    encoderBox.currentIndex = index;
+                                    encoderBox.popup.close();
+                                }
+
+                                contentItem: RowLayout {
+                                    spacing: Theme.spacingSmall
+
+                                    Label {
+                                        text: modelData
+                                        color: !encDelegate.isAvailable ? Theme.textMutedColor : (encDelegate.highlighted || encDelegate.hovered) ? encoderBox._accent : encoderBox._text
+                                        font: encoderBox.font
+                                        elide: Text.ElideRight
+                                        verticalAlignment: Text.AlignVCenter
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Label {
+                                        text: qsTr("Not available")
+                                        color: Theme.textMutedColor
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        visible: !encDelegate.isAvailable
+                                    }
+
+                                }
+
+                                background: Rectangle {
+                                    color: encDelegate.isAvailable && encDelegate.hovered ? Qt.rgba(encoderBox._accent.r, encoderBox._accent.g, encoderBox._accent.b, 0.1) : encDelegate.highlighted ? Qt.rgba(encoderBox._accent.r, encoderBox._accent.g, encoderBox._accent.b, 0.05) : "transparent"
+                                    radius: Theme.radiusSmall - 2
+                                }
 
                             }
+
                         }
 
                     }
