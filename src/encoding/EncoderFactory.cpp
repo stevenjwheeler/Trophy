@@ -187,12 +187,10 @@ bool EncoderFactory::probeNvenc() {
 bool EncoderFactory::probeVaapi() {
 #ifdef HAVE_VAAPI
   const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
-  if (!codec) {
+  if (!codec)
     return false;
-  }
 
-  // Actually probe the hardware: try to open a VA-API device.
-  // Passing nullptr lets FFmpeg enumerate /dev/dri/renderD* automatically.
+  // Open a VA-API device (nullptr = auto-enumerate /dev/dri/renderD*)
   AVBufferRef *hwDeviceCtx = nullptr;
   int ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
                                    nullptr, nullptr, 0);
@@ -201,7 +199,60 @@ bool EncoderFactory::probeVaapi() {
     return false;
   }
 
+  // Probe encoding capability: actually try to open the codec.
+  // A device context alone does not guarantee encoding support
+  // (e.g. nvidia-vaapi-driver provides decoding only).
+  AVCodecContext *ctx = avcodec_alloc_context3(codec);
+  if (!ctx) {
+    av_buffer_unref(&hwDeviceCtx);
+    return false;
+  }
+
+  ctx->width = 1920;
+  ctx->height = 1080;
+  ctx->time_base = {1, 60};
+  ctx->framerate = {60, 1};
+  ctx->pix_fmt = AV_PIX_FMT_VAAPI;
+  ctx->bit_rate = 6000000;
+  ctx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+
+  AVBufferRef *hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
+  if (!hwFramesCtx) {
+    avcodec_free_context(&ctx);
+    av_buffer_unref(&hwDeviceCtx);
+    return false;
+  }
+
+  AVHWFramesContext *framesCtx =
+      reinterpret_cast<AVHWFramesContext *>(hwFramesCtx->data);
+  framesCtx->format = AV_PIX_FMT_VAAPI;
+  framesCtx->sw_format = AV_PIX_FMT_NV12;
+  framesCtx->width = 1920;
+  framesCtx->height = 1080;
+  framesCtx->initial_pool_size = 4;
+
+  ret = av_hwframe_ctx_init(hwFramesCtx);
+  if (ret < 0) {
+    av_buffer_unref(&hwFramesCtx);
+    avcodec_free_context(&ctx);
+    av_buffer_unref(&hwDeviceCtx);
+    qDebug() << "VA-API probe failed: could not initialise hw frames context";
+    return false;
+  }
+
+  ctx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
+  av_buffer_unref(&hwFramesCtx);
+
+  ret = avcodec_open2(ctx, codec, nullptr);
+  avcodec_free_context(&ctx); // releases ctx->hw_device_ctx and hw_frames_ctx
   av_buffer_unref(&hwDeviceCtx);
+
+  if (ret < 0) {
+    qDebug() << "VA-API probe failed: codec could not be opened (no encoding "
+                "entrypoints)";
+    return false;
+  }
+
   qInfo() << "VA-API is available";
   return true;
 #else
