@@ -136,12 +136,13 @@ void Application::initializeServices() {
 
   m_gameDetector = std::make_unique<GameDetectionService>(this);
 
+  m_windowService = std::make_unique<WindowService>(this);
+
   m_recordingManager = std::make_unique<RecordingManager>(this);
   m_recordingManager->setSettingsManager(m_settingsManager.get());
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
-
-  m_windowService = std::make_unique<WindowService>(this);
+  m_recordingManager->setWindowService(m_windowService.get());
 }
 
 void Application::registerQmlTypes() {}

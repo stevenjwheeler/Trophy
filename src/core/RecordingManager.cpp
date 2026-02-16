@@ -8,6 +8,7 @@
 #include "RecordingManager.h"
 #include "RecordingSession.h"
 #include "StorageManager.h"
+#include "WindowService.h"
 #include "audio/AudioMixer.h"
 
 extern "C" {
@@ -53,6 +54,10 @@ void RecordingManager::setStorageManager(StorageManager *storage) {
 
 void RecordingManager::setAudioMixer(AudioMixer *mixer) {
   m_audioMixer = mixer;
+}
+
+void RecordingManager::setWindowService(WindowService *ws) {
+  m_windowService = ws;
 }
 
 void RecordingManager::startRecording(const QString &gameName,
@@ -341,6 +346,15 @@ QString RecordingManager::detectedEncoderName() const {
 }
 
 void RecordingManager::updateProgress() {
+  // Poll for window title changes during manual-window recordings
+  if (m_manualWindowId != 0 && m_windowService) {
+    QString newTitle = m_windowService->getWindowTitle(m_manualWindowId);
+    if (!newTitle.isEmpty() && newTitle != m_currentGameName) {
+      m_currentGameName = newTitle;
+      emit currentGameNameChanged();
+    }
+  }
+
   emit progressUpdated(recordingDuration(), recordingSize());
 }
 

@@ -26,37 +26,38 @@ QString WindowService::fetchWindowTitle(unsigned long windowId) {
 
   Display *dpy = static_cast<Display *>(m_display);
   Window win = static_cast<Window>(windowId);
-  char *name = nullptr;
   QString title;
 
-  // Try multiple ways to get the title
-  if (XFetchName(dpy, win, &name)) {
-    title = QString::fromLocal8Bit(name);
-    XFree(name);
-  } else {
-    XTextProperty prop;
-    if (XGetWMName(dpy, win, &prop)) {
-      if (prop.value && prop.nitems > 0) {
-        title = QString::fromLocal8Bit((char *)prop.value);
-      }
-      XFree(prop.value);
+  // Prefer _NET_WM_NAME (UTF-8) — modern apps like Spotify update this
+  // dynamically (e.g. current track) while leaving WM_NAME static.
+  Atom netWmName = XInternAtom(dpy, "_NET_WM_NAME", False);
+  Atom utf8String = XInternAtom(dpy, "UTF8_STRING", False);
+  Atom type;
+  int format;
+  unsigned long nitems, after;
+  unsigned char *data = nullptr;
+
+  if (XGetWindowProperty(dpy, win, netWmName, 0, 1024, False, utf8String,
+                         &type, &format, &nitems, &after, &data) == Success) {
+    if (data) {
+      title = QString::fromUtf8((char *)data);
+      XFree(data);
     }
   }
 
-  // Also try _NET_WM_NAME (UTF8_STRING) for modern apps
+  // Fall back to legacy WM_NAME
   if (title.isEmpty()) {
-    Atom netWmName = XInternAtom(dpy, "_NET_WM_NAME", False);
-    Atom utf8String = XInternAtom(dpy, "UTF8_STRING", False);
-    Atom type;
-    int format;
-    unsigned long nitems, after;
-    unsigned char *data = nullptr;
-
-    if (XGetWindowProperty(dpy, win, netWmName, 0, 1024, False, utf8String,
-                           &type, &format, &nitems, &after, &data) == Success) {
-      if (data) {
-        title = QString::fromUtf8((char *)data);
-        XFree(data);
+    char *name = nullptr;
+    if (XFetchName(dpy, win, &name)) {
+      title = QString::fromLocal8Bit(name);
+      XFree(name);
+    } else {
+      XTextProperty prop;
+      if (XGetWMName(dpy, win, &prop)) {
+        if (prop.value && prop.nitems > 0) {
+          title = QString::fromLocal8Bit((char *)prop.value);
+        }
+        XFree(prop.value);
       }
     }
   }
