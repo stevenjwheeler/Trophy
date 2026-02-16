@@ -85,7 +85,7 @@ void RecordingManager::startRecording(const QString &gameName,
   if (!dir.exists()) {
     if (!dir.mkpath(".")) {
       emit recordingError("Failed to create output directory");
-      setState(RecordingState::Error);
+      setState(RecordingState::Idle);
       return;
     }
   }
@@ -93,7 +93,8 @@ void RecordingManager::startRecording(const QString &gameName,
   // Build the recording pipeline
   if (!buildPipeline()) {
     emit recordingError("Failed to initialize recording pipeline");
-    setState(RecordingState::Error);
+    teardownPipeline();
+    setState(RecordingState::Idle);
     return;
   }
 
@@ -347,7 +348,6 @@ void RecordingManager::onEncodingError(const QString &error) {
   qCritical() << "Encoding error:" << error;
   emit recordingError(error);
   stopRecording();
-  setState(RecordingState::Error);
 }
 
 } // namespace GameRecorder
