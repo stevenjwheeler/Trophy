@@ -399,40 +399,54 @@ Page {
 
                     }
 
-                    ListView {
+                    RowLayout {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        orientation: ListView.Horizontal
                         spacing: Theme.spacingMedium
-                        clip: true
-                        model: recordingLibrary ? recordingLibrary.recordings.slice(0, 4) : []
 
-                        Label {
-                            anchors.centerIn: parent
-                            visible: !recordingLibrary || recordingLibrary.count === 0
-                            text: qsTr("No recordings yet")
-                            color: Theme.textMutedColor
+                        ActiveRecordingCard {
+                            Layout.preferredWidth: 240
+                            Layout.preferredHeight: Theme.recordingCardHeight
+                            Layout.alignment: Qt.AlignTop
+                            visible: recordingManager && recordingManager.isRecording
                         }
 
-                        delegate: RecordingCard {
-                            width: 240 // Slightly smaller for dashboard
-                            height: Theme.recordingCardHeight
-                            recording: modelData
-                            onPlay: {
-                                if (modelData)
-                                    Qt.openUrlExternally("file://" + modelData.filePath);
+                        ListView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            orientation: ListView.Horizontal
+                            spacing: Theme.spacingMedium
+                            clip: true
+                            model: (recordingManager && recordingManager.isRecording) ? (recordingLibrary ? recordingLibrary.recordings.slice(0, 3) : []) : (recordingLibrary ? recordingLibrary.recordings.slice(0, 4) : [])
 
+                            Label {
+                                anchors.centerIn: parent
+                                visible: !recordingLibrary || (recordingLibrary.count === 0 && !(recordingManager && recordingManager.isRecording))
+                                text: qsTr("No recordings yet")
+                                color: Theme.textMutedColor
                             }
-                            onOpenFolder: {
-                                if (modelData)
-                                    window.openFolder(modelData.directory);
 
-                            }
-                            onDeleteRequested: {
-                                if (modelData)
-                                    window.confirmDelete(modelData.filePath, modelData.fileName);
+                            delegate: RecordingCard {
+                                width: 240
+                                height: Theme.recordingCardHeight
+                                recording: modelData
+                                onPlay: {
+                                    if (modelData)
+                                        Qt.openUrlExternally("file://" + modelData.filePath);
 
+                                }
+                                onOpenFolder: {
+                                    if (modelData)
+                                        window.openFolder(modelData.directory);
+
+                                }
+                                onDeleteRequested: {
+                                    if (modelData)
+                                        window.confirmDelete(modelData.filePath, modelData.fileName);
+
+                                }
                             }
+
                         }
 
                     }
