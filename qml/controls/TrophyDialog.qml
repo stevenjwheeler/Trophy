@@ -122,6 +122,7 @@ T.Dialog {
 
                 TrophyButton {
                     text: control.cancelText
+                    visible: control.cancelText.length > 0
                     onClicked: control.reject()
                 }
 

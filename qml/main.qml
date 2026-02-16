@@ -345,30 +345,19 @@ ApplicationWindow {
 
     Connections {
         function onRecordingError(error) {
-            errorDialog.text = error;
+            errorDialog.message = error;
             errorDialog.open();
         }
 
         target: recordingManager
     }
 
-    Dialog {
+    TrophyDialog {
         id: errorDialog
 
-        property alias text: errorLabel.text
-
-        title: qsTr("Error")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Ok
-
-        Label {
-            id: errorLabel
-
-            wrapMode: Text.WordWrap
-            width: 300
-        }
-
+        title: qsTr("Recording Error")
+        confirmText: qsTr("OK")
+        cancelText: ""
     }
 
     WindowPickerDialog {
