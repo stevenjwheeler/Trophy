@@ -48,6 +48,37 @@ Page {
 
                     title: qsTr("Video Recording")
 
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: warningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: warningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. To change these settings, stop recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
+
                     SettingItem {
                         label: qsTr("Video Encoder")
                         helpText: qsTr("Choose 'Auto' to let Trophy pick the best hardware encoder for your system (NVIDIA NVENC or AMD/Intel VA-API). Use 'x264' only as a fallback.")
@@ -57,6 +88,8 @@ Page {
 
                             property var values: ["auto", "nvenc_h264", "nvenc_hevc", "vaapi_h264", "vaapi_hevc", "x264"]
 
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VA-API H.264", "VA-API HEVC", "x264 Software"]
                             currentIndex: {
@@ -68,7 +101,7 @@ Page {
                             }
                             onCurrentIndexChanged: {
                                 if (!settingsManager)
-                                    return;
+                                    return ;
 
                                 if (app.isEncoderAvailable(values[currentIndex])) {
                                     settingsManager.encoder = values[currentIndex];
@@ -90,7 +123,7 @@ Page {
                                 hoverEnabled: isAvailable
                                 onClicked: {
                                     if (!isAvailable)
-                                        return;
+                                        return ;
 
                                     encoderBox.currentIndex = index;
                                     encoderBox.popup.close();
@@ -139,6 +172,8 @@ Page {
                             TrophySlider {
                                 id: bitrateSlider
 
+                                enabled: !(recordingManager && recordingManager.isRecording)
+                                opacity: enabled ? 1 : 0.5
                                 Layout.fillWidth: true
                                 from: 2000
                                 to: 50000
@@ -174,6 +209,8 @@ Page {
                                 model: [30, 60, 120, 144]
 
                                 TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: modelData + " FPS"
                                     checked: settingsManager ? settingsManager.fps === modelData : false
                                     onClicked: {
@@ -196,6 +233,8 @@ Page {
                         TrophyComboBox {
                             property var values: ["native", "720x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
 
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Native (Game Resolution)", "480p", "720p", "1080p", "1440p", "4K"]
                             currentIndex: {
@@ -226,6 +265,8 @@ Page {
                                 spacing: Theme.spacingSmall
 
                                 TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: "MKV (Recommended)"
                                     checked: settingsManager ? settingsManager.containerFormat === "mkv" : false
                                     onClicked: {
@@ -236,6 +277,8 @@ Page {
                                 }
 
                                 TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: "MP4"
                                     checked: settingsManager ? settingsManager.containerFormat === "mp4" : false
                                     onClicked: {
@@ -298,6 +341,8 @@ Page {
                         TrophyComboBox {
                             property var values: ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
 
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Ultrafast", "Superfast", "Very Fast", "Faster", "Fast", "Medium", "Slow"]
                             currentIndex: {
@@ -322,11 +367,44 @@ Page {
                 SettingsSection {
                     title: qsTr("Audio Recording")
 
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: audioWarningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: audioWarningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. To change these settings, stop recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
+
                     SettingItem {
                         label: qsTr("Separate Audio Tracks")
                         helpText: qsTr("Records game audio, voice chat, and microphone into separate audio tracks. This makes editing much easier!")
 
                         TrophySwitch {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             checked: settingsManager ? settingsManager.separateAudioTracks : false
                             onToggled: {
                                 if (settingsManager)
@@ -348,6 +426,8 @@ Page {
                                 model: [128, 192, 256, 320]
 
                                 TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: modelData + " kbps"
                                     checked: settingsManager ? settingsManager.audioBitrate === modelData : false
                                     onClicked: {
@@ -368,6 +448,8 @@ Page {
                         helpText: qsTr("Where your game sound comes from.")
 
                         TrophyComboBox {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Default Output"]
                             currentIndex: 0
@@ -380,6 +462,8 @@ Page {
                         helpText: qsTr("Your voice input device.")
 
                         TrophyComboBox {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Default Input"]
                             currentIndex: 0
@@ -411,6 +495,37 @@ Page {
                 // --- STORAGE SECTION ---
                 SettingsSection {
                     title: qsTr("Storage Management")
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: storageWarningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: storageWarningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. These settings will not take effect until the next recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
 
                     SettingItem {
                         label: qsTr("Recordings Folder")
