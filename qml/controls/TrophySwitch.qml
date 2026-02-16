@@ -13,6 +13,7 @@ Switch {
 
     implicitWidth: 44
     implicitHeight: 22
+    padding: 0
 
     // The Handle (The sliding circle)
     indicator: Rectangle {

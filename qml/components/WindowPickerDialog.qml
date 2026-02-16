@@ -1,3 +1,4 @@
+import "../controls"
 import "../styles"
 import QtQuick
 import QtQuick.Controls
@@ -8,7 +9,6 @@ Dialog {
 
     signal windowSelected(var windowId, string title)
 
-    title: qsTr("Select Window to Record")
     modal: true
     width: 500
     height: 600
@@ -21,37 +21,59 @@ Dialog {
 
     background: Rectangle {
         color: Theme.cardColor
-        radius: Theme.radiusMedium
-        border.color: Theme.borderColor
+        radius: Theme.radiusLarge
+        border.color: Theme.withOpacity(Theme.textColor, 0.1)
+        border.width: 1
+    }
+
+    header: Item {
     }
 
     contentItem: ColumnLayout {
-        spacing: Theme.spacingMedium
+        spacing: 0
 
+        // Title
         Label {
-            text: qsTr("Choose a window from the list below:")
-            color: Theme.textSecondaryColor
-            font.pixelSize: Theme.fontSizeNormal
+            Layout.fillWidth: true
+            Layout.margins: Theme.spacingLarge
+            Layout.bottomMargin: Theme.spacingSmall
+            text: qsTr("Select Window to Record")
+            font.pixelSize: Theme.fontSizeLarge
+            font.weight: Font.Bold
+            color: Theme.textColor
         }
 
+        // Divider
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: Theme.dividerColor
+        }
+
+        // List
         ListView {
             id: listView
 
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.margins: Theme.spacingSmall
             clip: true
             model: (typeof windowService !== "undefined" && windowService) ? windowService.getVisibleWindows() : []
-            spacing: 4
+            spacing: 2
 
             delegate: ItemDelegate {
                 width: listView.width
                 height: 50
+                padding: 0
                 onClicked: {
                     root.windowSelected(modelData.id, modelData.title);
                     root.close();
                 }
 
                 contentItem: RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Theme.spacingMedium
+                    anchors.rightMargin: Theme.spacingMedium
                     spacing: Theme.spacingSmall
 
                     ColumnLayout {
@@ -78,9 +100,8 @@ Dialog {
                 }
 
                 background: Rectangle {
-                    color: parent.highlighted ? Theme.primaryColor : (parent.hovered ? Theme.cardHoverColor : "transparent")
+                    color: parent.highlighted ? Theme.withOpacity(Theme.primaryColor, 0.2) : (parent.hovered ? Theme.cardHoverColor : "transparent")
                     radius: Theme.radiusSmall
-                    opacity: parent.highlighted ? 0.2 : 1
                 }
 
             }
@@ -90,10 +111,29 @@ Dialog {
 
         }
 
-        Button {
-            Layout.alignment: Qt.AlignRight
-            text: qsTr("Cancel")
-            onClicked: root.close()
+        // Divider
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: Theme.dividerColor
+        }
+
+        // Footer
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.margins: Theme.spacingLarge
+            Layout.topMargin: Theme.spacingMedium
+            Layout.bottomMargin: Theme.spacingMedium
+
+            Item {
+                Layout.fillWidth: true
+            }
+
+            TrophyButton {
+                text: qsTr("Cancel")
+                onClicked: root.close()
+            }
+
         }
 
     }
