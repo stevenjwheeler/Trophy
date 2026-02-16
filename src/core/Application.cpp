@@ -222,6 +222,10 @@ void Application::connectSignals() {
           m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved,
           m_storageManager.get(), &StorageManager::refresh);
+
+  // Keep storage bar live while recording by refreshing on each progress tick
+  connect(m_recordingManager.get(), &RecordingManager::progressUpdated, this,
+          [this](qint64, qint64) { m_storageManager->refresh(); });
 }
 
 void Application::setupSystemTray() {}
