@@ -6,7 +6,6 @@
  */
 
 import "../styles"
-import Qt5Compat.GraphicalEffects
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -79,11 +78,12 @@ Rectangle {
             color: Theme.surfaceColor
             clip: true // Clips the zoom overflow
 
-            // This wrapper scales both the image and the mask together
+            // This wrapper scales both the image together
             Item {
                 id: zoomWrapper
 
                 anchors.fill: parent
+                clip: true
                 scale: root.hovered ? 1.05 : 1 // Subtle zoom
 
                 Image {
@@ -92,19 +92,6 @@ Rectangle {
                     anchors.fill: parent
                     source: recording && recording.thumbnailPath ? "file://" + recording.thumbnailPath : ""
                     fillMode: Image.PreserveAspectCrop
-                    visible: false
-                }
-
-                OpacityMask {
-                    anchors.fill: parent
-                    source: thumbnailImage
-
-                    maskSource: Rectangle {
-                        width: thumbContainer.width
-                        height: thumbContainer.height
-                        radius: thumbContainer.radius
-                    }
-
                 }
 
                 Behavior on scale {
