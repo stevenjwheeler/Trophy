@@ -101,8 +101,10 @@ ItemDelegate {
             RoundButton {
                 width: 32
                 height: 32
-                icon.name: "media-playback-start"
+                icon.source: "qrc:/icons/play.svg"
                 icon.color: "white"
+                icon.width: 28
+                icon.height: 28
                 onClicked: Qt.openUrlExternally("file://" + root.recording.filePath)
 
                 background: Rectangle {
@@ -115,8 +117,10 @@ ItemDelegate {
             RoundButton {
                 width: 32
                 height: 32
-                icon.name: "folder-open"
+                icon.source: "qrc:/icons/folder.svg"
                 icon.color: "white"
+                icon.width: 28
+                icon.height: 28
                 onClicked: window.openFolder(root.recording.directory)
 
                 background: Rectangle {
@@ -129,8 +133,10 @@ ItemDelegate {
             RoundButton {
                 width: 32
                 height: 32
-                icon.name: "edit-delete"
+                icon.source: "qrc:/icons/trash.svg"
                 icon.color: "white"
+                icon.width: 28
+                icon.height: 28
                 onClicked: window.confirmDelete(root.recording.filePath, root.recording.fileName)
 
                 background: Rectangle {

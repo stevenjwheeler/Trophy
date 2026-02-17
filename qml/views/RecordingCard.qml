@@ -166,8 +166,10 @@ Rectangle {
 
                         width: 48
                         height: 48
-                        icon.name: "media-playback-start"
+                        icon.source: "qrc:/icons/play.svg"
                         icon.color: "white"
+                        icon.width: 32
+                        icon.height: 32
                         onClicked: root.play()
 
                         background: Rectangle {
@@ -182,8 +184,10 @@ Rectangle {
 
                         width: 36
                         height: 36
-                        icon.name: "folder-open"
+                        icon.source: "qrc:/icons/folder.svg"
                         icon.color: "white"
+                        icon.width: 28
+                        icon.height: 28
                         onClicked: root.openFolder()
 
                         background: Rectangle {
@@ -198,8 +202,10 @@ Rectangle {
 
                         width: 36
                         height: 36
-                        icon.name: "edit-delete"
+                        icon.source: "qrc:/icons/trash.svg"
                         icon.color: "white"
+                        icon.width: 28
+                        icon.height: 28
                         onClicked: root.deleteRequested()
 
                         background: Rectangle {
