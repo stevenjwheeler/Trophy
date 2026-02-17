@@ -86,8 +86,17 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
     codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     codecpar->codec_id = static_cast<AVCodecID>(info.codecId);
     codecpar->sample_rate = info.sampleRate;
-    codecpar->ch_layout.nb_channels = info.channels;
+    av_channel_layout_default(&codecpar->ch_layout, info.channels);
+    codecpar->bit_rate = info.bitrate * 1000;
     stream->time_base = {1, info.sampleRate};
+
+    if (!info.extraData.empty()) {
+      codecpar->extradata_size = static_cast<int>(info.extraData.size());
+      codecpar->extradata = static_cast<uint8_t *>(
+          av_mallocz(codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
+      memcpy(codecpar->extradata, info.extraData.data(),
+             codecpar->extradata_size);
+    }
   }
 
   m_streams.push_back(stream);

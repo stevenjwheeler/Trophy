@@ -17,11 +17,19 @@ namespace GameRecorder {
  * @brief Audio device information
  */
 struct AudioDeviceInfo {
+  Q_GADGET
+  Q_PROPERTY(QString id MEMBER id)
+  Q_PROPERTY(QString name MEMBER name)
+  Q_PROPERTY(QString description MEMBER description)
+  Q_PROPERTY(bool isInput MEMBER isInput)
+  Q_PROPERTY(bool isDefault MEMBER isDefault)
+
+public:
   QString id;
   QString name;
   QString description;
-  bool isInput;
-  bool isDefault;
+  bool isInput = false;
+  bool isDefault = false;
 };
 
 /**
@@ -61,3 +69,5 @@ private:
 };
 
 } // namespace GameRecorder
+
+Q_DECLARE_METATYPE(GameRecorder::AudioDeviceInfo)

@@ -81,6 +81,7 @@ void SettingsManager::load() {
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
+  m_audioMode = audio["audioMode"].toString("game");
   m_gameAudioDevice = audio["gameAudioDevice"].toString("default");
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
@@ -132,6 +133,7 @@ void SettingsManager::save() {
 
   // Audio settings
   QJsonObject audio;
+  audio["audioMode"] = m_audioMode;
   audio["gameAudioDevice"] = m_gameAudioDevice;
   audio["microphoneDevice"] = m_microphoneDevice;
   audio["voiceChatApp"] = m_voiceChatApp;
@@ -187,6 +189,7 @@ void SettingsManager::resetToDefaults() {
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
 
+  emit audioModeChanged();
   emit gameAudioDeviceChanged();
   emit microphoneDeviceChanged();
   emit voiceChatAppChanged();
@@ -213,6 +216,7 @@ void SettingsManager::loadDefaults() {
   m_useVBR = true;
 
   // Audio
+  m_audioMode = "game";
   m_gameAudioDevice = "default";
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
@@ -302,6 +306,14 @@ void SettingsManager::setEncoderPreset(const QString &preset) {
     m_encoderPreset = preset;
     save();
     emit encoderPresetChanged();
+  }
+}
+
+void SettingsManager::setAudioMode(const QString &mode) {
+  if (m_audioMode != mode) {
+    m_audioMode = mode;
+    save();
+    emit audioModeChanged();
   }
 }
 

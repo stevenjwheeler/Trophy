@@ -419,8 +419,36 @@ Page {
                     }
 
                     SettingItem {
+                        label: qsTr("Audio Mode")
+                        helpText: settingsManager && settingsManager.audioMode === "game"
+                                  ? qsTr("Captures the game window's audio, voice chat app, and microphone.")
+                                  : qsTr("Captures all system audio and microphone.")
+
+                        RowLayout {
+                            spacing: Theme.spacingSmall
+
+                            TrophyRadioButton {
+                                enabled: !(recordingManager && recordingManager.isRecording)
+                                opacity: enabled ? 1.0 : 0.5
+                                text: qsTr("Game")
+                                checked: settingsManager ? settingsManager.audioMode === "game" : true
+                                onClicked: if (settingsManager) settingsManager.audioMode = "game"
+                            }
+
+                            TrophyRadioButton {
+                                enabled: !(recordingManager && recordingManager.isRecording)
+                                opacity: enabled ? 1.0 : 0.5
+                                text: qsTr("Desktop")
+                                checked: settingsManager ? settingsManager.audioMode === "desktop" : false
+                                onClicked: if (settingsManager) settingsManager.audioMode = "desktop"
+                            }
+                        }
+                    }
+
+                    SettingItem {
                         label: qsTr("Separate Audio Tracks")
                         helpText: qsTr("Records game audio, voice chat, and microphone into separate audio tracks. This makes editing much easier!")
+                        visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         TrophySwitch {
                             enabled: !(recordingManager && recordingManager.isRecording)
@@ -466,19 +494,49 @@ Page {
                     SettingItem {
                         label: qsTr("Game Audio Device")
                         helpText: qsTr("Where your game sound comes from.")
+                        visible: settingsManager ? settingsManager.audioMode === "desktop" : false
 
                         TrophyComboBox {
                             id: gameAudioBox
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
-                            model: ["Default Output"]
-                            currentIndex: 0
+
+                            property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.outputDevices : []
+
+                            model: {
+                                let names = ["Default Output"]
+                                for (let d of devices) {
+                                    if (d.id !== "default") {
+                                        names.push(d.name)
+                                    }
+                                }
+                                return names
+                            }
 
                             Binding {
                                 target: gameAudioBox
                                 property: "currentIndex"
-                                value: 0
+                                value: {
+                                    if (!settingsManager || !audioDeviceEnumerator)
+                                        return 0
+                                    let devices = audioDeviceEnumerator.outputDevices
+                                    let saved = settingsManager.gameAudioDevice
+                                    for (let i = 0; i < devices.length; i++) {
+                                        if (devices[i].id === saved)
+                                            return i
+                                    }
+                                    return 0
+                                }
+                            }
+
+                            onActivated: {
+                                if (!settingsManager || !audioDeviceEnumerator)
+                                    return
+                                let devices = audioDeviceEnumerator.outputDevices
+                                if (currentIndex < devices.length) {
+                                    settingsManager.gameAudioDevice = devices[currentIndex].id
+                                }
                             }
                         }
 
@@ -493,13 +551,42 @@ Page {
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
-                            model: ["Default Input"]
-                            currentIndex: 0
+
+                            property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.inputDevices : []
+
+                            model: {
+                                let names = ["Default Input"]
+                                for (let d of devices) {
+                                    if (d.id !== "default") {
+                                        names.push(d.name)
+                                    }
+                                }
+                                return names
+                            }
 
                             Binding {
                                 target: microphoneBox
                                 property: "currentIndex"
-                                value: 0
+                                value: {
+                                    if (!settingsManager || !audioDeviceEnumerator)
+                                        return 0
+                                    let devices = audioDeviceEnumerator.inputDevices
+                                    let saved = settingsManager.microphoneDevice
+                                    for (let i = 0; i < devices.length; i++) {
+                                        if (devices[i].id === saved)
+                                            return i
+                                    }
+                                    return 0
+                                }
+                            }
+
+                            onActivated: {
+                                if (!settingsManager || !audioDeviceEnumerator)
+                                    return
+                                let devices = audioDeviceEnumerator.inputDevices
+                                if (currentIndex < devices.length) {
+                                    settingsManager.microphoneDevice = devices[currentIndex].id
+                                }
                             }
                         }
 
@@ -508,6 +595,7 @@ Page {
                     SettingItem {
                         label: qsTr("Voice Chat App")
                         helpText: qsTr("Enter the process name of your voice app (e.g. 'discord') to capture it nicely.")
+                        visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         TrophyTextField {
                             id: voiceChatAppField

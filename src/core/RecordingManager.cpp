@@ -10,6 +10,9 @@
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#ifdef HAVE_PIPEWIRE
+#include "audio/PipeWireAudioSource.h"
+#endif
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -253,10 +256,77 @@ bool RecordingManager::buildPipeline() {
     return false;
   }
 
+  // Set up audio sources in the mixer before starting the session
+#ifdef HAVE_PIPEWIRE
+  int activeAudioTrackCount = 0;
+  if (m_audioMixer) {
+    QString mode = m_settings->audioMode();
+
+    if (mode == "desktop") {
+      // Track 0: all system audio (sink monitor)
+      QString gameDeviceId = m_settings->gameAudioDevice();
+      qInfo() << "Desktop mode: using game audio device:" << gameDeviceId;
+      m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
+          gameDeviceId == "default" ? QString() : gameDeviceId), 0);
+      activeAudioTrackCount++;
+      // Track 1: microphone
+      QString micDeviceId = m_settings->microphoneDevice();
+      qInfo() << "Desktop mode: using microphone device:" << micDeviceId;
+      m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
+          micDeviceId == "default" ? QString() : micDeviceId), 1);
+      activeAudioTrackCount++;
+
+    } else { // "game" mode
+      // Track 0: specific game app audio
+      QString gameProcess;
+      if (m_manualWindowId != 0 && m_windowService)
+          gameProcess = m_windowService->getProcessNameForWindow(m_manualWindowId);
+
+      if (!gameProcess.isEmpty()) {
+        uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(gameProcess);
+        if (nodeId != 0xFFFFFFFF) {
+          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(nodeId), 0);
+          qInfo() << "Game audio: capturing" << gameProcess;
+        } else {
+          qWarning() << "No PipeWire node for" << gameProcess << "— using monitor";
+          m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(QString()), 0);
+        }
+      } else {
+        qWarning() << "No game window, falling back to monitor";
+        m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(QString()), 0);
+      }
+      activeAudioTrackCount++;
+
+      // Track 1: voice chat app
+      QString vcApp = m_settings->voiceChatApp().trimmed();
+      if (!vcApp.isEmpty()) {
+        uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(vcApp);
+        if (nodeId != 0xFFFFFFFF) {
+          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(nodeId), 1);
+          activeAudioTrackCount++;
+        } else {
+          qWarning() << "No PipeWire node for voice chat app:" << vcApp;
+        }
+      }
+
+      // Track 2: microphone
+      m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
+          m_settings->microphoneDevice() == "default" ? QString()
+                                                       : m_settings->microphoneDevice()), 2);
+      activeAudioTrackCount++;
+    }
+  }
+#else
+  int activeAudioTrackCount = 0;
+#endif
+
   // Create recording session to coordinate everything
   m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
-      m_muxer.get(), m_audioMixer);
+      m_muxer.get(), m_audioMixer,
+      m_settings->separateAudioTracks(),
+      m_settings->audioBitrate(),
+      activeAudioTrackCount);
 
   // Connect error signals
   connect(m_session.get(), &RecordingSession::errorOccurred, this,
@@ -279,6 +349,13 @@ void RecordingManager::teardownPipeline() {
   if (m_session) {
     m_session->stop();
     m_session.reset();
+  }
+
+  // Remove audio sources from mixer (they were stopped by the session)
+  if (m_audioMixer) {
+    for (int i = 0; i < AudioMixer::kTrackCount; ++i) {
+      m_audioMixer->removeSource(i);
+    }
   }
 
   m_muxer.reset();

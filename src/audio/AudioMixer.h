@@ -60,6 +60,17 @@ public:
   // Audio level metering (0.0 - 1.0)
   Q_INVOKABLE float getTrackLevel(int trackIndex) const;
 
+  /**
+   * @brief Set a callback invoked with raw audio samples for each track.
+   *
+   * Called on the PipeWire capture thread. The callback receives:
+   *   trackIndex, samples (interleaved float), frameCount, sampleRate, channels
+   */
+  using TrackAudioCallback =
+      std::function<void(int trackIndex, const float *samples, int frameCount,
+                         int sampleRate, int channels)>;
+  void setTrackAudioCallback(TrackAudioCallback callback);
+
   // Start/stop all sources
   bool startAll();
   void stopAll();
@@ -82,6 +93,7 @@ private:
   int m_channels;
   std::array<Track, kTrackCount> m_tracks;
   mutable std::mutex m_mutex;
+  TrackAudioCallback m_trackAudioCallback;
 };
 
 } // namespace GameRecorder

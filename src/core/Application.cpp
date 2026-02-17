@@ -15,6 +15,7 @@
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#include "audio/AudioDeviceEnumerator.h"
 #include "detection/GameDetectionService.h"
 #include "library/RecordingLibrary.h"
 #include "settings/SettingsManager.h"
@@ -22,6 +23,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickWindow>
 #include <QStandardPaths>
 #include <cstdio>
@@ -145,6 +147,8 @@ void Application::initializeServices() {
 
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
 
+  m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
+
   m_gameDetector = std::make_unique<GameDetectionService>(this);
 
   m_windowService = std::make_unique<WindowService>(this);
@@ -156,7 +160,9 @@ void Application::initializeServices() {
   m_recordingManager->setWindowService(m_windowService.get());
 }
 
-void Application::registerQmlTypes() {}
+void Application::registerQmlTypes() {
+  qRegisterMetaType<AudioDeviceInfo>("AudioDeviceInfo");
+}
 
 void Application::exposeServicesToQml() {
   QQmlContext *context = m_engine->rootContext();
@@ -171,6 +177,8 @@ void Application::exposeServicesToQml() {
                               m_notificationService.get());
   context->setContextProperty("audioMixer", m_audioMixer.get());
   context->setContextProperty("windowService", m_windowService.get());
+  context->setContextProperty("audioDeviceEnumerator",
+                              m_audioDeviceEnumerator.get());
 }
 
 void Application::connectSignals() {
