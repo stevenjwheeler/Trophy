@@ -92,13 +92,19 @@ Page {
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VA-API H.264", "VA-API HEVC", "x264 Software"]
-                            currentIndex: {
-                                if (!settingsManager)
-                                    return 0;
 
-                                let index = values.indexOf(settingsManager.encoder);
-                                return index !== -1 ? index : 0;
+                            Binding {
+                                target: encoderBox
+                                property: "currentIndex"
+                                value: {
+                                    if (!settingsManager)
+                                        return 0;
+
+                                    let index = encoderBox.values.indexOf(settingsManager.encoder);
+                                    return index !== -1 ? index : 0;
+                                }
                             }
+
                             onCurrentIndexChanged: {
                                 if (!settingsManager)
                                     return ;
@@ -109,7 +115,7 @@ Page {
                                     // delegateModel already changed currentIndex before onClicked
                                     // could intercept — revert to the last valid selection.
                                     let savedIdx = values.indexOf(settingsManager.encoder);
-                                    currentIndex = savedIdx !== -1 ? savedIdx : 0;
+                                    // Re-evaluate through binding instead of direct assignment
                                 }
                             }
 
@@ -231,19 +237,26 @@ Page {
                         helpText: qsTr("Native captures your games full resolution. Downscaling (e.g. to 720p) helps performance if your game is demanding.")
 
                         TrophyComboBox {
+                            id: resolutionBox
                             property var values: ["native", "720x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
 
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Native (Game Resolution)", "480p", "720p", "1080p", "1440p", "4K"]
-                            currentIndex: {
-                                if (!settingsManager)
-                                    return 0;
 
-                                let index = values.indexOf(settingsManager.videoResolution);
-                                return index !== -1 ? index : 0;
+                            Binding {
+                                target: resolutionBox
+                                property: "currentIndex"
+                                value: {
+                                    if (!settingsManager)
+                                        return 0;
+
+                                    let index = resolutionBox.values.indexOf(settingsManager.videoResolution);
+                                    return index !== -1 ? index : 0;
+                                }
                             }
+
                             onCurrentIndexChanged: {
                                 if (settingsManager)
                                     settingsManager.videoResolution = values[currentIndex];
@@ -339,19 +352,26 @@ Page {
                         helpText: qsTr("Controls how much CPU/GPU power is used. 'Fast' is a good balance for gaming.")
 
                         TrophyComboBox {
+                            id: presetBox
                             property var values: ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
 
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Ultrafast", "Superfast", "Very Fast", "Faster", "Fast", "Medium", "Slow"]
-                            currentIndex: {
-                                if (!settingsManager)
-                                    return 0;
 
-                                let index = values.indexOf(settingsManager.encoderPreset);
-                                return index !== -1 ? index : 0;
+                            Binding {
+                                target: presetBox
+                                property: "currentIndex"
+                                value: {
+                                    if (!settingsManager)
+                                        return 0;
+
+                                    let index = presetBox.values.indexOf(settingsManager.encoderPreset);
+                                    return index !== -1 ? index : 0;
+                                }
                             }
+
                             onCurrentIndexChanged: {
                                 if (settingsManager)
                                     settingsManager.encoderPreset = values[currentIndex];
@@ -448,11 +468,18 @@ Page {
                         helpText: qsTr("Where your game sound comes from.")
 
                         TrophyComboBox {
+                            id: gameAudioBox
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Default Output"]
                             currentIndex: 0
+
+                            Binding {
+                                target: gameAudioBox
+                                property: "currentIndex"
+                                value: 0
+                            }
                         }
 
                     }
@@ -462,11 +489,18 @@ Page {
                         helpText: qsTr("Your voice input device.")
 
                         TrophyComboBox {
+                            id: microphoneBox
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Default Input"]
                             currentIndex: 0
+
+                            Binding {
+                                target: microphoneBox
+                                property: "currentIndex"
+                                value: 0
+                            }
                         }
 
                     }
@@ -481,10 +515,10 @@ Page {
                             Layout.fillWidth: true
                             text: settingsManager ? settingsManager.voiceChatApp : ""
                             placeholderText: qsTr("e.g., discord, teamspeak")
-                            onTextChanged: {
-                                if (settingsManager)
+                            onEditingFinished: {
+                                if (settingsManager && settingsManager.voiceChatApp !== text) {
                                     settingsManager.voiceChatApp = text;
-
+                                }
                             }
                         }
 
@@ -654,11 +688,6 @@ Page {
                 TrophyButton {
                     text: qsTr("Reset to Defaults")
                     onClicked: resetConfirmDialog.open()
-                }
-
-                TrophyButton {
-                    text: qsTr("Save Settings")
-                    onClicked: settingsManager.save()
                 }
 
             }
