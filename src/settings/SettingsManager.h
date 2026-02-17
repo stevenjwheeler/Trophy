@@ -34,6 +34,9 @@ class SettingsManager : public QObject {
                  setContainerFormat NOTIFY containerFormatChanged)
   Q_PROPERTY(QString encoderPreset READ encoderPreset WRITE setEncoderPreset
                  NOTIFY encoderPresetChanged)
+  Q_PROPERTY(int maxVideoBitrate READ maxVideoBitrate WRITE setMaxVideoBitrate
+                 NOTIFY maxVideoBitrateChanged)
+  Q_PROPERTY(bool useVBR READ useVBR WRITE setUseVBR NOTIFY useVBRChanged)
 
   // Audio settings
   Q_PROPERTY(QString gameAudioDevice READ gameAudioDevice WRITE
@@ -76,6 +79,14 @@ public:
 
   QString videoResolution() const { return m_videoResolution; }
   void setVideoResolution(const QString &resolution);
+
+  int maxVideoBitrate() const { return m_maxVideoBitrate; }
+  void setMaxVideoBitrate(int bitrate);
+
+  bool useVBR() const { return m_useVBR; }
+  void setUseVBR(bool enabled);
+
+  QString resolution() const { return m_videoResolution; }
 
   int fps() const { return m_fps; }
   void setFps(int fps);
@@ -134,6 +145,8 @@ signals:
   void encoderChanged();
   void containerFormatChanged();
   void encoderPresetChanged();
+  void maxVideoBitrateChanged();
+  void useVBRChanged();
 
   // Audio
   void gameAudioDeviceChanged();
@@ -169,6 +182,8 @@ private:
   QString m_encoder = "auto";        // auto, nvenc, vaapi, x264
   QString m_containerFormat = "mkv"; // mkv, mp4
   QString m_encoderPreset = "fast";
+  int m_maxVideoBitrate = 20000;
+  bool m_useVBR = true;
 
   // Audio settings
   QString m_gameAudioDevice = "default";

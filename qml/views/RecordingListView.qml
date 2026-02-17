@@ -5,10 +5,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import GameRecorder
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import GameRecorder
 
 ListView {
     id: root
@@ -16,7 +16,6 @@ ListView {
     spacing: Theme.spacingSmall
     clip: true
     boundsBehavior: Flickable.StopAtBounds
-
     model: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : []
 
     delegate: RecordingListItem {
@@ -30,5 +29,5 @@ ListView {
     ScrollBar.vertical: ScrollBar {
         policy: ScrollBar.AsNeeded
     }
-}
 
+}

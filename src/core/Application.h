@@ -70,6 +70,9 @@ public:
   bool isRecording() const;
   QString currentGameName() const;
 
+  // Encoder detection (called from QML)
+  Q_INVOKABLE bool isEncoderAvailable(const QString &name) const;
+
 signals:
   void recordingStateChanged();
   void currentGameChanged();
@@ -91,6 +94,7 @@ private:
   std::unique_ptr<AudioMixer> m_audioMixer;
   std::unique_ptr<WindowService> m_windowService;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
+
 };
 
 } // namespace GameRecorder

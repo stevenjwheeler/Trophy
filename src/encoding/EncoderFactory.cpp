@@ -13,11 +13,16 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace GameRecorder {
 
 std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
+  static std::vector<EncoderInfo> s_cache;
+  if (!s_cache.empty())
+    return s_cache;
+
   std::vector<EncoderInfo> encoders;
 
   // Check NVENC H.264
@@ -53,7 +58,8 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
     qInfo() << "  -" << enc.name << "(" << enc.description << ")";
   }
 
-  return encoders;
+  s_cache = encoders;
+  return s_cache;
 }
 
 std::unique_ptr<IEncoder> EncoderFactory::create(IEncoder::EncoderType type) {
@@ -181,12 +187,73 @@ bool EncoderFactory::probeNvenc() {
 bool EncoderFactory::probeVaapi() {
 #ifdef HAVE_VAAPI
   const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
-  if (!codec) {
+  if (!codec)
+    return false;
+
+  // Open a VA-API device (nullptr = auto-enumerate /dev/dri/renderD*)
+  AVBufferRef *hwDeviceCtx = nullptr;
+  int ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
+                                   nullptr, nullptr, 0);
+  if (ret < 0) {
+    qDebug() << "VA-API probe failed: no usable VA-API device found";
     return false;
   }
 
-  // TODO: More thorough VAAPI probing with actual device check
-  qInfo() << "VA-API encoder found in FFmpeg";
+  // Probe encoding capability: actually try to open the codec.
+  // A device context alone does not guarantee encoding support
+  // (e.g. nvidia-vaapi-driver provides decoding only).
+  AVCodecContext *ctx = avcodec_alloc_context3(codec);
+  if (!ctx) {
+    av_buffer_unref(&hwDeviceCtx);
+    return false;
+  }
+
+  ctx->width = 1920;
+  ctx->height = 1080;
+  ctx->time_base = {1, 60};
+  ctx->framerate = {60, 1};
+  ctx->pix_fmt = AV_PIX_FMT_VAAPI;
+  ctx->bit_rate = 6000000;
+  ctx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
+
+  AVBufferRef *hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
+  if (!hwFramesCtx) {
+    avcodec_free_context(&ctx);
+    av_buffer_unref(&hwDeviceCtx);
+    return false;
+  }
+
+  AVHWFramesContext *framesCtx =
+      reinterpret_cast<AVHWFramesContext *>(hwFramesCtx->data);
+  framesCtx->format = AV_PIX_FMT_VAAPI;
+  framesCtx->sw_format = AV_PIX_FMT_NV12;
+  framesCtx->width = 1920;
+  framesCtx->height = 1080;
+  framesCtx->initial_pool_size = 4;
+
+  ret = av_hwframe_ctx_init(hwFramesCtx);
+  if (ret < 0) {
+    av_buffer_unref(&hwFramesCtx);
+    avcodec_free_context(&ctx);
+    av_buffer_unref(&hwDeviceCtx);
+    qDebug() << "VA-API probe failed: could not initialise hw frames context";
+    return false;
+  }
+
+  ctx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
+  av_buffer_unref(&hwFramesCtx);
+
+  ret = avcodec_open2(ctx, codec, nullptr);
+  avcodec_free_context(&ctx); // releases ctx->hw_device_ctx and hw_frames_ctx
+  av_buffer_unref(&hwDeviceCtx);
+
+  if (ret < 0) {
+    qDebug() << "VA-API probe failed: codec could not be opened (no encoding "
+                "entrypoints)";
+    return false;
+  }
+
+  qInfo() << "VA-API is available";
   return true;
 #else
   return false;

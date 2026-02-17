@@ -27,11 +27,14 @@ class FFmpegEncoder : public IEncoder {
   Q_OBJECT
 
 public:
+  bool isInitialized() const { return m_initialized; }
+
   FFmpegEncoder(EncoderType type, const QString &codecName,
                 QObject *parent = nullptr);
   ~FFmpegEncoder() override;
 
   bool initialize(const EncoderConfig &config) override;
+  EncoderConfig config() const override { return m_config; }
   bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) override;
   int flush(std::vector<EncodedPacket> &packets) override;
 
@@ -47,9 +50,13 @@ private:
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
 
+  int m_lastInputWidth = 0;
+  int m_lastInputHeight = 0;
+
   EncoderType m_type;
   QString m_codecName;
   QString m_name;
+  EncoderConfig m_config;
 
   AVCodecContext *m_codecCtx = nullptr;
   AVFrame *m_frame = nullptr;

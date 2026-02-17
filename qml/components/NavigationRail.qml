@@ -5,15 +5,16 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "../styles"
 
 Rectangle {
     id: root
 
     property int currentIndex: 0
+
     signal navigate(int index)
 
     width: Theme.navRailWidth
@@ -28,6 +29,7 @@ Rectangle {
         height: 11
         color: parent.color
     }
+
     Rectangle {
         anchors.right: parent.right
         anchors.top: parent.top
@@ -70,7 +72,9 @@ Rectangle {
         }
 
         // Spacer
-        Item { Layout.fillHeight: true }
+        Item {
+            Layout.fillHeight: true
+        }
 
         // Settings at bottom
         NavigationButton {
@@ -110,7 +114,7 @@ Rectangle {
                 Layout.alignment: Qt.AlignHCenter
                 text: navButton.iconText
                 font.pixelSize: 20
-                opacity: navButton.checked ? 1.0 : 0.7
+                opacity: navButton.checked ? 1 : 0.7
             }
 
             Label {
@@ -121,22 +125,28 @@ Rectangle {
                 font.weight: navButton.checked ? Font.Medium : Font.Normal
                 color: navButton.checked ? Theme.primaryColor : Theme.textSecondaryColor
             }
+
         }
 
         background: Rectangle {
             radius: Theme.radiusNormal
             color: {
-                if (navButton.checked) {
-                    return Theme.withOpacity(Theme.primaryColor, 0.15)
-                } else if (navButton.hovered) {
-                    return Theme.withOpacity(Theme.textColor, 0.05)
-                }
-                return "transparent"
+                if (navButton.checked)
+                    return Theme.withOpacity(Theme.primaryColor, 0.15);
+                else if (navButton.hovered)
+                    return Theme.withOpacity(Theme.textColor, 0.05);
+                return "transparent";
             }
 
             Behavior on color {
-                ColorAnimation { duration: Theme.animationFast }
+                ColorAnimation {
+                    duration: Theme.animationFast
+                }
+
             }
+
         }
+
     }
+
 }

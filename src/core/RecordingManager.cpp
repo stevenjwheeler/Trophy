@@ -8,6 +8,7 @@
 #include "RecordingManager.h"
 #include "RecordingSession.h"
 #include "StorageManager.h"
+#include "WindowService.h"
 #include "audio/AudioMixer.h"
 
 extern "C" {
@@ -18,7 +19,6 @@ extern "C" {
 #include "encoding/EncoderFactory.h"
 #include "encoding/IEncoder.h"
 #include "muxing/FFmpegMuxer.h"
-#include "muxing/IMuxer.h"
 #include "settings/SettingsManager.h"
 
 #include <QDateTime>
@@ -56,6 +56,10 @@ void RecordingManager::setAudioMixer(AudioMixer *mixer) {
   m_audioMixer = mixer;
 }
 
+void RecordingManager::setWindowService(WindowService *ws) {
+  m_windowService = ws;
+}
+
 void RecordingManager::startRecording(const QString &gameName,
                                       unsigned long windowId /*= 0*/) {
   if (m_state != RecordingState::Idle) {
@@ -86,7 +90,7 @@ void RecordingManager::startRecording(const QString &gameName,
   if (!dir.exists()) {
     if (!dir.mkpath(".")) {
       emit recordingError("Failed to create output directory");
-      setState(RecordingState::Error);
+      setState(RecordingState::Idle);
       return;
     }
   }
@@ -94,7 +98,8 @@ void RecordingManager::startRecording(const QString &gameName,
   // Build the recording pipeline
   if (!buildPipeline()) {
     emit recordingError("Failed to initialize recording pipeline");
-    setState(RecordingState::Error);
+    teardownPipeline();
+    setState(RecordingState::Idle);
     return;
   }
 
@@ -206,13 +211,40 @@ bool RecordingManager::buildPipeline() {
     return false;
   }
 
-  QSize nativeRes = m_captureSource->nativeResolution();
-
   EncoderConfig encConfig;
-  encConfig.width = nativeRes.width();
-  encConfig.height = nativeRes.height();
+
+  // Logic to determine target resolution
+  // Assuming your settings->resolution() returns something like "720p",
+  // "1080p", or "Native"
+  QString targetRes =
+      m_settings->videoResolution().toLower(); // Make case-insensitive
+
+  if (targetRes.contains('x')) {
+    // Handles "1280x720", "1920x1080", etc.
+    QStringList parts = targetRes.split('x');
+    if (parts.size() == 2) {
+      encConfig.width = parts[0].toInt();
+      encConfig.height = parts[1].toInt();
+    }
+  } else {
+    // Native mode
+    QSize nativeRes = m_captureSource->nativeResolution();
+    encConfig.width = nativeRes.width();
+    encConfig.height = nativeRes.height();
+
+    // CRITICAL: Ensure dimensions are even. FFmpeg/YUV420p hates odd numbers.
+    if (encConfig.width % 2 != 0)
+      encConfig.width--;
+    if (encConfig.height % 2 != 0)
+      encConfig.height--;
+  }
+
   encConfig.fps = m_settings->fps();
   encConfig.bitrate = m_settings->videoBitrate();
+
+  encConfig.maxBitrate = m_settings->maxVideoBitrate();
+  encConfig.useVBR = m_settings->useVBR();
+
   encConfig.preset = m_settings->encoderPreset();
   encConfig.inputPixelFormat = AV_PIX_FMT_BGRA;
 
@@ -314,6 +346,15 @@ QString RecordingManager::detectedEncoderName() const {
 }
 
 void RecordingManager::updateProgress() {
+  // Poll for window title changes during manual-window recordings
+  if (m_manualWindowId != 0 && m_windowService) {
+    QString newTitle = m_windowService->getWindowTitle(m_manualWindowId);
+    if (!newTitle.isEmpty() && newTitle != m_currentGameName) {
+      m_currentGameName = newTitle;
+      emit currentGameNameChanged();
+    }
+  }
+
   emit progressUpdated(recordingDuration(), recordingSize());
 }
 
@@ -321,7 +362,6 @@ void RecordingManager::onEncodingError(const QString &error) {
   qCritical() << "Encoding error:" << error;
   emit recordingError(error);
   stopRecording();
-  setState(RecordingState::Error);
 }
 
 } // namespace GameRecorder

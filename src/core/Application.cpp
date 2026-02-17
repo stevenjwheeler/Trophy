@@ -10,6 +10,7 @@
 
 #include "Application.h"
 #include "NotificationService.h"
+#include "encoding/EncoderFactory.h"
 #include "RecordingManager.h"
 #include "StorageManager.h"
 #include "WindowService.h"
@@ -23,7 +24,6 @@
 #include <QQmlContext>
 #include <QQuickWindow>
 #include <QStandardPaths>
-#include <chrono>
 #include <cstdio>
 
 namespace GameRecorder {
@@ -72,59 +72,33 @@ bool Application::initialize() {
   // Set the version globally for Qt
   setApplicationVersion(versionStr);
 
-  std::fprintf(stderr,
-               "[App] Initializing Trophy - Game recording and clipping %s\n",
-               versionStr.toUtf8().constData());
   qInfo() << "Initializing Trophy - Game recording and clipping" << versionStr;
 
   // Initialize services in dependency order
-  std::fprintf(stderr, "[App] Initializing services...\n");
   initializeServices();
 
   // Register QML types
-  std::fprintf(stderr, "[App] Registering QML types...\n");
   registerQmlTypes();
 
   // Create QML engine
-  std::fprintf(stderr, "[App] Creating QML engine...\n");
   m_engine = std::make_unique<QQmlApplicationEngine>();
 
   // Set app version in QML context
   m_engine->rootContext()->setContextProperty("AppVersion", versionStr);
 
   // Expose services to QML
-  std::fprintf(stderr, "[App] Exposing services to QML...\n");
   exposeServicesToQml();
 
   // Connect signals between services
-  std::fprintf(stderr, "[App] Connecting signals...\n");
   connectSignals();
 
   // Load main QML file
   QUrl url;
-#ifdef QT_DEBUG
-  QString devPath = QCoreApplication::applicationDirPath() + "/../qml/main.qml";
-  QFileInfo devFile(devPath);
-  if (devFile.exists()) {
-    url = QUrl::fromLocalFile(devFile.absoluteFilePath());
-    std::fprintf(
-        stderr,
-        "[App] DEV MODE: Loading QML from filesystem for live reload\n");
-  } else {
-    url = QUrl(QStringLiteral("qrc:/qt/qml/GameRecorder/qml/main.qml"));
-  }
-#else
   url = QUrl(QStringLiteral("qrc:/qt/qml/GameRecorder/qml/main.qml"));
-#endif
-  std::fprintf(stderr, "[App] Loading QML from: %s\n",
-               url.toString().toUtf8().constData());
 
   QObject::connect(
       m_engine.get(), &QQmlApplicationEngine::objectCreationFailed, this,
       [this, url]() {
-        std::fprintf(stderr,
-                     "[App] ERROR: QML object creation failed for: %s\n",
-                     url.toString().toUtf8().constData());
         qCritical() << "Failed to load QML:" << url;
         emit fatalError("Failed to load user interface");
         QCoreApplication::exit(1);
@@ -132,22 +106,15 @@ bool Application::initialize() {
       Qt::QueuedConnection);
 
   m_engine->load(url);
-  std::fprintf(stderr, "[App] QML load() completed\n");
 
   if (m_engine->rootObjects().isEmpty()) {
-    std::fprintf(stderr, "[App] ERROR: No root objects created from QML\n");
     qCritical() << "No root objects created from QML";
     return false;
   }
 
-  std::fprintf(stderr, "[App] Root objects created: %d\n",
-               static_cast<int>(m_engine->rootObjects().size()));
-
   // Start game detection service
-  std::fprintf(stderr, "[App] Starting game detection...\n");
   m_gameDetector->start();
 
-  std::fprintf(stderr, "[App] Application initialized successfully!\n");
   qInfo() << "Application initialized successfully";
   return true;
 }
@@ -169,12 +136,13 @@ void Application::initializeServices() {
 
   m_gameDetector = std::make_unique<GameDetectionService>(this);
 
+  m_windowService = std::make_unique<WindowService>(this);
+
   m_recordingManager = std::make_unique<RecordingManager>(this);
   m_recordingManager->setSettingsManager(m_settingsManager.get());
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
-
-  m_windowService = std::make_unique<WindowService>(this);
+  m_recordingManager->setWindowService(m_windowService.get());
 }
 
 void Application::registerQmlTypes() {}
@@ -254,6 +222,10 @@ void Application::connectSignals() {
           m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved,
           m_storageManager.get(), &StorageManager::refresh);
+
+  // Keep storage bar live while recording by refreshing on each progress tick
+  connect(m_recordingManager.get(), &RecordingManager::progressUpdated, this,
+          [this](qint64, qint64) { m_storageManager->refresh(); });
 }
 
 void Application::setupSystemTray() {}
@@ -264,6 +236,17 @@ bool Application::isRecording() const {
 
 QString Application::currentGameName() const {
   return m_gameDetector ? m_gameDetector->currentGameName() : QString();
+}
+
+bool Application::isEncoderAvailable(const QString &name) const {
+  if (name == "auto" || name == "x264")
+    return true;
+
+  for (const auto &enc : EncoderFactory::detectAvailableEncoders()) {
+    if (enc.name == name)
+      return true;
+  }
+  return false;
 }
 
 } // namespace GameRecorder

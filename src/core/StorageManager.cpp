@@ -13,7 +13,6 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QStorageInfo>
-#include <algorithm>
 
 namespace GameRecorder {
 

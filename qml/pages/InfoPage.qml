@@ -5,19 +5,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import GameRecorder
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import GameRecorder
 
 Page {
     id: root
-
-    background: Rectangle {
-        color: Theme.backgroundColor
-        bottomRightRadius: 12
-        topLeftRadius: 26
-    }
 
     ScrollView {
         anchors.fill: parent
@@ -25,8 +19,9 @@ Page {
         ScrollBar.vertical.policy: ScrollBar.AsNeeded
         clip: true
 
-        ColumnLayout { 
+        ColumnLayout {
             id: mainStack
+
             anchors.horizontalCenter: parent.horizontalCenter
             width: Math.min(parent.width, 800)
             spacing: Theme.spacingLarge
@@ -37,8 +32,10 @@ Page {
                 Layout.fillWidth: true
                 spacing: Theme.spacingMedium
 
-                Item { Layout.preferredHeight: Theme.spacingLarge }
-                
+                Item {
+                    Layout.preferredHeight: Theme.spacingLarge
+                }
+
                 Image {
                     Layout.alignment: Qt.AlignHCenter
                     source: "qrc:/icons/trophy.svg"
@@ -47,7 +44,7 @@ Page {
                     sourceSize: Qt.size(96, 96)
                     smooth: true
                 }
-                
+
                 Label {
                     Layout.alignment: Qt.AlignHCenter
                     text: qsTr("Trophy")
@@ -56,7 +53,7 @@ Page {
                     color: Theme.textColor
                     horizontalAlignment: Text.AlignHCenter
                 }
-                
+
                 Label {
                     Layout.alignment: Qt.AlignHCenter
                     text: qsTr("Game recorder and clipping for Linux")
@@ -73,8 +70,9 @@ Page {
                     color: Theme.textMutedColor
                     horizontalAlignment: Text.AlignHCenter
                 }
+
             }
-            
+
             // Description
             Rectangle {
                 Layout.fillWidth: true
@@ -84,6 +82,7 @@ Page {
 
                 ColumnLayout {
                     id: descLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
@@ -96,7 +95,9 @@ Page {
                         font.pixelSize: Theme.fontSizeNormal
                         horizontalAlignment: Text.AlignHCenter
                     }
+
                 }
+
             }
 
             // License Section
@@ -108,6 +109,7 @@ Page {
 
                 ColumnLayout {
                     id: licenseLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
@@ -133,7 +135,9 @@ Page {
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
+
                 }
+
             }
 
             // Features Section
@@ -145,6 +149,7 @@ Page {
 
                 ColumnLayout {
                     id: featuresLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
@@ -185,8 +190,11 @@ Page {
                             title: qsTr("Smart Storage")
                             description: qsTr("Auto-cleanup and crash-resilient formats")
                         }
+
                     }
+
                 }
+
             }
 
             // Acknowledgments Section
@@ -198,6 +206,7 @@ Page {
 
                 ColumnLayout {
                     id: ackLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
@@ -244,8 +253,11 @@ Page {
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
                         }
+
                     }
+
                 }
+
             }
 
             // Keyboard Shortcuts Section
@@ -257,6 +269,7 @@ Page {
 
                 ColumnLayout {
                     id: shortcutsLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
@@ -281,6 +294,7 @@ Page {
                             color: Theme.primaryColor
                             Layout.preferredWidth: 100
                         }
+
                         Label {
                             text: qsTr("Start/Stop Recording")
                             color: Theme.textColor
@@ -294,13 +308,17 @@ Page {
                             color: Theme.primaryColor
                             Layout.preferredWidth: 100
                         }
+
                         Label {
                             text: qsTr("Quit Application")
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
                         }
+
                     }
+
                 }
+
             }
 
             // Logo Section
@@ -312,6 +330,7 @@ Page {
 
                 ColumnLayout {
                     id: logoLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
@@ -331,8 +350,11 @@ Page {
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
                         }
+
                     }
+
                 }
+
             }
 
             // AI Disclaimer Section
@@ -346,6 +368,7 @@ Page {
 
                 ColumnLayout {
                     id: disclaimerLayout
+
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
@@ -364,7 +387,9 @@ Page {
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
+
                 }
+
             }
 
             // Links
@@ -375,18 +400,31 @@ Page {
                 Button {
                     flat: true
                     background: null
-                    HoverHandler {
-                        cursorShape: Qt.PointingHandCursor
-                    }
                     icon.source: "qrc:/icons/github.svg"
                     icon.color: Theme.textColor
                     text: "GitHub"
                     onClicked: Qt.openUrlExternally("https://github.com/stevenjwheeler/Trophy")
+
+                    HoverHandler {
+                        cursorShape: Qt.PointingHandCursor
+                    }
+
                 }
+
             }
 
-            Item { Layout.preferredHeight: Theme.spacingLarge }
+            Item {
+                Layout.preferredHeight: Theme.spacingLarge
+            }
+
         }
+
+    }
+
+    background: Rectangle {
+        color: Theme.backgroundColor
+        bottomRightRadius: 12
+        topLeftRadius: 26
     }
 
     // Feature Item Component
@@ -412,6 +450,7 @@ Page {
             color: Theme.textMutedColor
             font.pixelSize: Theme.fontSizeSmall
         }
+
     }
 
     // Technology Item Component
@@ -446,6 +485,9 @@ Page {
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
             }
+
         }
+
     }
+
 }

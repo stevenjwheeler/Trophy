@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Trophy
     VERSION 0.0.0
     DESCRIPTION "Game recording application for Linux"
-    HOMEPAGE_URL "https://github.com/your-username/trophy"
+    HOMEPAGE_URL "https://github.com/stevenjwheeler/trophy"
     LANGUAGES CXX C
 )
 
@@ -324,7 +324,16 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/RecordingListView.qml
         qml/views/RecordingListItem.qml
         qml/views/RecordingCard.qml
+        qml/views/ActiveRecordingCard.qml
         qml/views/VideoPlayer.qml
+        qml/controls/TrophyButton.qml
+        qml/controls/TrophyComboBox.qml
+        qml/controls/TrophySlider.qml
+        qml/controls/TrophyRadioButton.qml
+        qml/controls/TrophySwitch.qml
+        qml/controls/TrophyTextField.qml
+        qml/controls/TrophyDialog.qml
+        qml/controls/TrophyWindowButton.qml
     SOURCES
         ${ALL_SOURCES}
         ${ALL_HEADERS}

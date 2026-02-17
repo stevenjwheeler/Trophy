@@ -12,7 +12,6 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
-#include <memory>
 
 namespace GameRecorder {
 

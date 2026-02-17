@@ -13,7 +13,6 @@
 #include <QObject>
 #include <QQueue>
 #include <QString>
-#include <QThread>
 #include <atomic>
 
 namespace GameRecorder {

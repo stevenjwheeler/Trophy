@@ -18,6 +18,7 @@ namespace GameRecorder {
 class SettingsManager;
 class StorageManager;
 class AudioMixer;
+class WindowService;
 class RecordingSession;
 class IVideoCaptureSource;
 class IEncoder;
@@ -66,6 +67,7 @@ public:
   void setSettingsManager(SettingsManager *settings);
   void setStorageManager(StorageManager *storage);
   void setAudioMixer(AudioMixer *mixer);
+  void setWindowService(WindowService *ws);
 
   // State
   RecordingState state() const { return m_state; }
@@ -112,6 +114,7 @@ private:
   SettingsManager *m_settings = nullptr;
   StorageManager *m_storage = nullptr;
   AudioMixer *m_audioMixer = nullptr;
+  WindowService *m_windowService = nullptr;
 
   // Pipeline components (owned)
   std::unique_ptr<RecordingSession> m_session;

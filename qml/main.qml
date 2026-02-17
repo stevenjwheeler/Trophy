@@ -5,43 +5,76 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import GameRecorder
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import GameRecorder
 
 ApplicationWindow {
     id: window
 
+    property int currentPage: 0
+    property bool skipDeleteConfirmation: false
+
+    function openWindowPicker() {
+        windowPicker.open();
+    }
+
+    function openFolder(path) {
+        if (!path)
+            return ;
+
+        var url = path;
+        if (!url.startsWith("file://")) {
+            if (!url.startsWith("/"))
+                url = "/" + url;
+
+            url = "file://" + url;
+        }
+        Qt.openUrlExternally(url);
+    }
+
+    function confirmDelete(filePath, fileName) {
+        // Use the window's local property (it resets on app close)
+        if (window.skipDeleteConfirmation) {
+            if (typeof storageManager !== "undefined" && storageManager) {
+                storageManager.deleteRecording(filePath);
+                if (typeof recordingLibrary !== "undefined")
+                    recordingLibrary.refresh();
+
+            }
+        } else {
+            deleteDialog.filePath = filePath;
+            deleteDialog.fileName = fileName;
+            deleteDialog.open();
+        }
+    }
+
     // Removes system borders/titlebar
     flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint
-
     width: 1200
     height: 800
     minimumWidth: 1200
     minimumHeight: 800
     maximumWidth: 1200
     maximumHeight: 800
-
     visible: true
     title: qsTr("Trophy - Game recording and clipping for Linux")
-
-    // Make the actual window surface transparent
     color: "transparent"
-
-    property int currentPage: 0
-
-    function openWindowPicker() {
-        windowPicker.open()
+    onClosing: function(close) {
+        if (recordingManager && recordingManager.isRecording) {
+            closeConfirmDialog.open();
+            close.accepted = false;
+        }
+    }
+    Component.onCompleted: {
+        console.log("Trophy started");
     }
 
-    // No background - we use a clipped Rectangle as content root instead
-    background: Item {}
-
-    // Single clipped Rectangle that IS the window body
     Rectangle {
         id: windowBody
+
         anchors.fill: parent
         radius: 12
         color: Theme.surfaceColor
@@ -57,6 +90,7 @@ ApplicationWindow {
             // --- CUSTOM TITLE BAR ---
             Rectangle {
                 id: titleBar
+
                 Layout.fillWidth: true
                 Layout.preferredHeight: 32
                 color: Theme.surfaceColor
@@ -87,10 +121,13 @@ ApplicationWindow {
                         color: Theme.textSecondaryColor
                     }
 
-                    Item { Layout.fillWidth: true } // Spacer
+                    Item {
+                        Layout.fillWidth: true
+                    }
 
                     Rectangle {
                         id: recordingPill
+
                         Layout.preferredHeight: 22
                         Layout.preferredWidth: pillRow.implicitWidth + 20
                         radius: 11
@@ -101,23 +138,35 @@ ApplicationWindow {
 
                         RowLayout {
                             id: pillRow
+
                             anchors.centerIn: parent
                             spacing: 10
 
-                            // Dot
                             Rectangle {
                                 width: 8
                                 height: 8
                                 radius: 4
                                 color: "#FFF"
+
                                 SequentialAnimation on opacity {
                                     loops: Animation.Infinite
-                                    NumberAnimation { from: 1.0; to: 0.3; duration: 800 }
-                                    NumberAnimation { from: 0.3; to: 1.0; duration: 800 }
+
+                                    NumberAnimation {
+                                        from: 1
+                                        to: 0.3
+                                        duration: 800
+                                    }
+
+                                    NumberAnimation {
+                                        from: 0.3
+                                        to: 1
+                                        duration: 800
+                                    }
+
                                 }
+
                             }
 
-                            // App Name
                             Label {
                                 text: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName : ""
                                 color: "white"
@@ -126,7 +175,6 @@ ApplicationWindow {
                                 visible: text !== ""
                             }
 
-                            // Separator
                             Rectangle {
                                 width: 1
                                 height: 12
@@ -135,21 +183,19 @@ ApplicationWindow {
                                 visible: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName !== "" : false
                             }
 
-                            // Timer
                             Label {
                                 text: {
-                                    var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0
-                                    var dur = Math.floor(durMs / 1000)
-                                    var m = Math.floor(dur / 60)
-                                    var s = dur % 60
-                                    return m + ":" + s.toString().padStart(2, '0')
+                                    var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0;
+                                    var dur = Math.floor(durMs / 1000);
+                                    var m = Math.floor(dur / 60);
+                                    var s = dur % 60;
+                                    return m + ":" + s.toString().padStart(2, '0');
                                 }
                                 color: "white"
                                 font.pixelSize: 11
                                 font.weight: Font.DemiBold
                             }
 
-                            // Small Stop Button
                             Button {
                                 Layout.preferredWidth: 18
                                 Layout.preferredHeight: 18
@@ -160,39 +206,48 @@ ApplicationWindow {
                                 icon.height: 12
                                 icon.color: "white"
                                 palette.button: "transparent"
-                                onClicked: if (recordingManager) recordingManager.stopRecording()
-                                
+                                onClicked: {
+                                    if (recordingManager)
+                                        recordingManager.stopRecording();
+
+                                }
+
                                 background: Rectangle {
                                     radius: 9
                                     color: parent.hovered ? "#40FFFFFF" : "transparent"
                                 }
+
                             }
+
                         }
+
                     }
 
-                    // Window Control Buttons
                     Row {
                         Layout.fillHeight: true
 
-                        Button {
-                            width: 46
-                            height: 32
-                            text: "—"
-                            flat: true
+                        // --- Minimize Button ---
+                        TrophyWindowButton {
+                            symbol: "—"
+                            hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                             onClicked: window.showMinimized()
                         }
-                        Button {
-                            width: 46
-                            height: 32
-                            text: "✕"
-                            flat: true
+
+                        // --- Close Button ---
+                        TrophyWindowButton {
+                            symbol: "✕"
+                            hoverColor: Theme.errorColor
+                            hoverIconColor: "white"
+                            isCloseButton: true
                             onClicked: window.close()
                         }
+
                     }
+
                 }
+
             }
 
-            // --- MAIN CONTENT AREA ---
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -200,39 +255,54 @@ ApplicationWindow {
 
                 NavigationRail {
                     id: navRail
+
                     Layout.fillHeight: true
                     currentIndex: window.currentPage
                     onNavigate: function(index) {
-                        window.currentPage = index
+                        window.currentPage = index;
                     }
                 }
 
-                // Main panel
                 Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
 
                     StackLayout {
                         id: pageStack
+
                         anchors.fill: parent
                         currentIndex: window.currentPage
 
-                        DashboardPage { id: dashboardPage }
-                        RecordingsPage { id: recordingsPage }
-                        GameListPage { id: gameListPage }
-                        SettingsPage { id: settingsPage }
-                        InfoPage { id: infoPage }
+                        DashboardPage {
+                            id: dashboardPage
+                        }
+
+                        RecordingsPage {
+                            id: recordingsPage
+                        }
+
+                        GameListPage {
+                            id: gameListPage
+                        }
+
+                        SettingsPage {
+                            id: settingsPage
+                        }
+
+                        InfoPage {
+                            id: infoPage
+                        }
+
                     }
+
                 }
+
             }
+
         }
+
     }
 
-    // --- OVERLAYS & DIALOGS ---
-
-    // Old RecordingIndicator removed
-
-    // Resize handle for bottom-right corner
     MouseArea {
         width: 15
         height: 15
@@ -251,150 +321,75 @@ ApplicationWindow {
         sequence: "F9"
         onActivated: {
             if (recordingManager) {
-                if (recordingManager.isRecording) {
-                    recordingManager.stopRecording()
-                } else if (gameDetector && gameDetector.currentGameName !== "") {
-                    recordingManager.startRecording(gameDetector.currentGameName)
-                }
+                if (recordingManager.isRecording)
+                    recordingManager.stopRecording();
+                else if (gameDetector && gameDetector.currentGameName !== "")
+                    recordingManager.startRecording(gameDetector.currentGameName);
             }
         }
     }
 
-    onClosing: function(close) {
-        if (recordingManager && recordingManager.isRecording) {
-            closeConfirmDialog.open()
-            close.accepted = false
-        }
-    }
-
-    Dialog {
+    TrophyDialog {
         id: closeConfirmDialog
+
         title: qsTr("Recording in Progress")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        Label { text: qsTr("A recording is in progress. Stop recording and exit?") }
+        message: qsTr("A recording is currently in progress. Would you like to stop recording and exit Trophy?")
+        confirmText: qsTr("Stop and Exit")
+        confirmColor: Theme.errorColor
+        showDontAsk: false
         onAccepted: {
-            recordingManager.stopRecording()
-            Qt.quit()
+            recordingManager.stopRecording();
+            Qt.quit();
         }
     }
 
     Connections {
-        target: recordingManager
         function onRecordingError(error) {
-            errorDialog.text = error
-            errorDialog.open()
+            errorDialog.message = error;
+            errorDialog.open();
         }
+
+        target: recordingManager
     }
 
-    Dialog {
+    TrophyDialog {
         id: errorDialog
-        title: qsTr("Error")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Ok
-        property alias text: errorLabel.text
-        Label {
-            id: errorLabel
-            wrapMode: Text.WordWrap
-            width: 300
-        }
+
+        title: qsTr("Recording Error")
+        confirmText: qsTr("OK")
+        cancelText: ""
     }
 
     WindowPickerDialog {
         id: windowPicker
+
         onWindowSelected: function(windowId, title) {
-            recordingManager.startRecording(title, windowId)
+            recordingManager.startRecording(title, windowId);
         }
     }
 
-    function openFolder(path) {
-        if (!path) return
-        var url = path
-        if (!url.startsWith("file://")) {
-            if (!url.startsWith("/")) url = "/" + url
-            url = "file://" + url
-        }
-        Qt.openUrlExternally(url)
-    }
-
-    function confirmDelete(filePath, fileName) {
-        deleteDialog.filePath = filePath
-        deleteDialog.fileName = fileName
-        deleteDialog.open()
-    }
-
-    Dialog {
+    TrophyDialog {
         id: deleteDialog
-        modal: true
-        width: 400
-        height: 220
-        anchors.centerIn: parent
-        
-        background: Rectangle {
-            color: Theme.cardColor
-            radius: Theme.radiusLarge
-            border.color: Theme.borderColor
-            border.width: 1
-            
-            gradient: Gradient {
-                orientation: Gradient.Vertical
-                GradientStop { position: 0.0; color: Theme.borderColor }
-                GradientStop { position: 1.0; color: Theme.cardColor }
-            }
-        }
-
-        header: Label {
-            text: qsTr("Delete Recording")
-            font.pixelSize: Theme.fontSizeLarge
-            font.weight: Font.Bold
-            padding: Theme.spacingLarge
-            color: Theme.textColor
-        }
 
         property string filePath: ""
         property string fileName: ""
 
-        contentItem: ColumnLayout {
-            spacing: Theme.spacingMedium
-            
-            Label {
-                text: qsTr("Are you sure you want to delete '%1'? This action cannot be undone.").arg(deleteDialog.fileName)
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-                color: Theme.textSecondaryColor
-                lineHeight: 1.2
-            }
-        }
-
-        footer: DialogButtonBox {
-            background: Item {}
-            alignment: Qt.AlignRight
-            
-            Button {
-                text: qsTr("Cancel")
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                flat: true
-            }
-            
-            Button {
-                text: qsTr("Delete")
-                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-                highlighted: true
-                palette.button: Theme.errorColor
-            }
-        }
-
+        title: qsTr("Delete Recording")
+        message: qsTr("Are you sure you want to delete '%1'? This cannot be undone.").arg(fileName)
+        confirmText: qsTr("Delete")
+        confirmColor: Theme.errorColor
+        showDontAsk: true
         onAccepted: {
-            if (recordingLibrary && typeof storageManager !== "undefined" && storageManager) {
-                storageManager.deleteRecording(filePath)
-                recordingLibrary.refresh()
+            if (typeof storageManager !== "undefined" && storageManager) {
+                storageManager.deleteRecording(filePath);
+                if (typeof recordingLibrary !== "undefined")
+                    recordingLibrary.refresh();
+
             }
+            if (deleteDialog.dontAskChecked)
+                window.skipDeleteConfirmation = true;
+
         }
     }
 
-    Component.onCompleted: {
-        console.log("Trophy started")
-    }
 }

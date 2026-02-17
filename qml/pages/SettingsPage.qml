@@ -5,20 +5,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../controls"
+import "../styles"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import QtQuick.Dialogs
-import "../styles"
+import QtQuick.Layouts
 
 Page {
     id: root
-
-    background: Rectangle {
-        color: Theme.backgroundColor
-        bottomRightRadius: 12
-        topLeftRadius: 26
-    }
 
     ScrollView {
         anchors.fill: parent
@@ -28,13 +23,13 @@ Page {
         ScrollBar.vertical.policy: ScrollBar.AsNeeded
         clip: true
 
-        ColumnLayout { 
+        ColumnLayout {
             id: mainStack
+
             anchors.horizontalCenter: parent.horizontalCenter
             width: Math.min(parent.width, 800)
             spacing: Theme.spacingLarge
 
-            // Header
             Label {
                 text: qsTr("Settings")
                 font.pixelSize: Theme.fontSizeTitle
@@ -42,27 +37,128 @@ Page {
                 color: Theme.textColor
             }
 
-            // Settings Content
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignTop
                 spacing: Theme.spacingLarge
 
-                // Video Section
+                // --- VIDEO SECTION ---
                 SettingsSection {
+                    // Removed 'collapsed: false' so it starts closed like the others
+
                     title: qsTr("Video Recording")
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: warningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: warningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. To change these settings, stop recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
 
                     SettingItem {
                         label: qsTr("Video Encoder")
                         helpText: qsTr("Choose 'Auto' to let Trophy pick the best hardware encoder for your system (NVIDIA NVENC or AMD/Intel VA-API). Use 'x264' only as a fallback.")
 
-                        ComboBox {
-                            Layout.fillWidth: true
-                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VAAPI H.264", "VAAPI HEVC", "x264 Software"]
+                        TrophyComboBox {
+                            id: encoderBox
+
                             property var values: ["auto", "nvenc_h264", "nvenc_hevc", "vaapi_h264", "vaapi_hevc", "x264"]
-                            currentIndex: settingsManager ? values.indexOf(settingsManager.encoder) : 0
-                            onCurrentIndexChanged: if (settingsManager) settingsManager.encoder = values[currentIndex]
+
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
+                            Layout.fillWidth: true
+                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VA-API H.264", "VA-API HEVC", "x264 Software"]
+                            currentIndex: {
+                                if (!settingsManager)
+                                    return 0;
+
+                                let index = values.indexOf(settingsManager.encoder);
+                                return index !== -1 ? index : 0;
+                            }
+                            onCurrentIndexChanged: {
+                                if (!settingsManager)
+                                    return ;
+
+                                if (app.isEncoderAvailable(values[currentIndex])) {
+                                    settingsManager.encoder = values[currentIndex];
+                                } else {
+                                    // delegateModel already changed currentIndex before onClicked
+                                    // could intercept — revert to the last valid selection.
+                                    let savedIdx = values.indexOf(settingsManager.encoder);
+                                    currentIndex = savedIdx !== -1 ? savedIdx : 0;
+                                }
+                            }
+
+                            delegate: ItemDelegate {
+                                id: encDelegate
+
+                                readonly property bool isAvailable: app.isEncoderAvailable(encoderBox.values[index])
+
+                                width: encoderBox.width - 4
+                                height: 32
+                                hoverEnabled: isAvailable
+                                onClicked: {
+                                    if (!isAvailable)
+                                        return ;
+
+                                    encoderBox.currentIndex = index;
+                                    encoderBox.popup.close();
+                                }
+
+                                contentItem: RowLayout {
+                                    spacing: Theme.spacingSmall
+
+                                    Label {
+                                        text: modelData
+                                        color: !encDelegate.isAvailable ? Theme.textMutedColor : (encDelegate.highlighted || encDelegate.hovered) ? encoderBox._accent : encoderBox._text
+                                        font: encoderBox.font
+                                        elide: Text.ElideRight
+                                        verticalAlignment: Text.AlignVCenter
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Label {
+                                        text: qsTr("Not available")
+                                        color: Theme.textMutedColor
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        visible: !encDelegate.isAvailable
+                                    }
+
+                                }
+
+                                background: Rectangle {
+                                    color: encDelegate.isAvailable && encDelegate.hovered ? Qt.rgba(encoderBox._accent.r, encoderBox._accent.g, encoderBox._accent.b, 0.1) : encDelegate.highlighted ? Qt.rgba(encoderBox._accent.r, encoderBox._accent.g, encoderBox._accent.b, 0.05) : "transparent"
+                                    radius: Theme.radiusSmall - 2
+                                }
+
+                            }
+
                         }
+
                     }
 
                     SettingItem {
@@ -73,22 +169,32 @@ Page {
                             Layout.fillWidth: true
                             spacing: Theme.spacingMedium
 
-                            Slider {
+                            TrophySlider {
                                 id: bitrateSlider
+
+                                enabled: !(recordingManager && recordingManager.isRecording)
+                                opacity: enabled ? 1 : 0.5
                                 Layout.fillWidth: true
                                 from: 2000
                                 to: 50000
                                 stepSize: 1000
                                 value: settingsManager ? settingsManager.videoBitrate : 15000
-                                onMoved: if (settingsManager) settingsManager.videoBitrate = value
+                                onMoved: {
+                                    if (settingsManager)
+                                        settingsManager.videoBitrate = value;
+
+                                }
                             }
+
                             Label {
                                 text: bitrateSlider.value.toFixed(0) + " kbps"
                                 color: Theme.textColor
                                 font.weight: Font.Medium
                                 Layout.preferredWidth: 80
                             }
+
                         }
+
                     }
 
                     SettingItem {
@@ -102,31 +208,54 @@ Page {
                             Repeater {
                                 model: [30, 60, 120, 144]
 
-                                RadioButton {
+                                TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: modelData + " FPS"
                                     checked: settingsManager ? settingsManager.fps === modelData : false
-                                    onClicked: if (settingsManager) settingsManager.fps = modelData
+                                    onClicked: {
+                                        if (settingsManager)
+                                            settingsManager.fps = modelData;
+
+                                    }
                                 }
+
                             }
+
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Resolution")
-                        helpText: qsTr("Native captures your full screen. Downscaling (e.g. to 1080p) helps performance if your game is demanding.")
+                        helpText: qsTr("Native captures your games full resolution. Downscaling (e.g. to 720p) helps performance if your game is demanding.")
 
-                        ComboBox {
+                        TrophyComboBox {
+                            property var values: ["native", "720x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
+
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Native (Game Resolution)", "480p", "720p", "1080p", "1440p", "4K"]
-                            property var values: ["native", "720x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"]
-                            currentIndex: settingsManager ? values.indexOf(settingsManager.videoResolution) : 0
-                            onCurrentIndexChanged: if (settingsManager) settingsManager.videoResolution = values[currentIndex]
+                            currentIndex: {
+                                if (!settingsManager)
+                                    return 0;
+
+                                let index = values.indexOf(settingsManager.videoResolution);
+                                return index !== -1 ? index : 0;
+                            }
+                            onCurrentIndexChanged: {
+                                if (settingsManager)
+                                    settingsManager.videoResolution = values[currentIndex];
+
+                            }
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Container Format")
-                        helpText: ""
+                        helpText: qsTr("The container format determines how your video is stored. MKV is the most versatile and recommended format.")
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -135,22 +264,32 @@ Page {
                             RowLayout {
                                 spacing: Theme.spacingSmall
 
-                                RadioButton {
-                                    id: mkvRadio
+                                TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: "MKV (Recommended)"
                                     checked: settingsManager ? settingsManager.containerFormat === "mkv" : false
-                                    onClicked: if (settingsManager) settingsManager.containerFormat = "mkv"
+                                    onClicked: {
+                                        if (settingsManager)
+                                            settingsManager.containerFormat = "mkv";
+
+                                    }
                                 }
 
-                                RadioButton {
-                                    id: mp4Radio
+                                TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: "MP4"
                                     checked: settingsManager ? settingsManager.containerFormat === "mp4" : false
-                                    onClicked: if (settingsManager) settingsManager.containerFormat = "mp4"
+                                    onClicked: {
+                                        if (settingsManager)
+                                            settingsManager.containerFormat = "mp4";
+
+                                    }
                                 }
+
                             }
 
-                            // Warning for MP4
                             Rectangle {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: warningLayout.implicitHeight + Theme.spacingSmall * 2
@@ -162,13 +301,12 @@ Page {
 
                                 RowLayout {
                                     id: warningLayout
+
                                     anchors.fill: parent
                                     anchors.margins: Theme.spacingSmall
-                                    spacing: Theme.spacingSmall
 
                                     Label {
                                         text: "⚠️"
-                                        font.pixelSize: Theme.fontSizeMedium
                                     }
 
                                     Label {
@@ -178,47 +316,103 @@ Page {
                                         font.pixelSize: Theme.fontSizeSmall
                                         wrapMode: Text.WordWrap
                                     }
+
                                 }
+
                             }
 
-                            // Info for MKV
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("✓ MKV is crash-resistant and can be converted to MP4 later instantly.")
+                                text: qsTr("MKV is crash-resistant and can be converted later if needed.")
                                 color: Theme.textMutedColor
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
                                 visible: settingsManager ? settingsManager.containerFormat === "mkv" : false
                             }
+
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Encoder Preset")
                         helpText: qsTr("Controls how much CPU/GPU power is used. 'Fast' is a good balance for gaming.")
 
-                        ComboBox {
+                        TrophyComboBox {
+                            property var values: ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
+
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
                             model: ["Ultrafast", "Superfast", "Very Fast", "Faster", "Fast", "Medium", "Slow"]
-                            property var values: ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
-                            currentIndex: settingsManager ? values.indexOf(settingsManager.encoderPreset) : 0
-                            onCurrentIndexChanged: if (settingsManager) settingsManager.encoderPreset = values[currentIndex]
+                            currentIndex: {
+                                if (!settingsManager)
+                                    return 0;
+
+                                let index = values.indexOf(settingsManager.encoderPreset);
+                                return index !== -1 ? index : 0;
+                            }
+                            onCurrentIndexChanged: {
+                                if (settingsManager)
+                                    settingsManager.encoderPreset = values[currentIndex];
+
+                            }
                         }
+
                     }
+
                 }
 
-                // Audio Section
+                // --- AUDIO SECTION ---
                 SettingsSection {
                     title: qsTr("Audio Recording")
 
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: audioWarningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: audioWarningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. To change these settings, stop recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
+
                     SettingItem {
                         label: qsTr("Separate Audio Tracks")
-                        helpText: qsTr("Records game audio, voice chat, and microphone into separate tracks. This makes editing much easier!")
+                        helpText: qsTr("Records game audio, voice chat, and microphone into separate audio tracks. This makes editing much easier!")
 
-                        Switch {
+                        TrophySwitch {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             checked: settingsManager ? settingsManager.separateAudioTracks : false
-                            onToggled: if (settingsManager) settingsManager.separateAudioTracks = checked
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.separateAudioTracks = checked;
+
+                            }
                         }
+
                     }
 
                     SettingItem {
@@ -231,223 +425,376 @@ Page {
                             Repeater {
                                 model: [128, 192, 256, 320]
 
-                                RadioButton {
+                                TrophyRadioButton {
+                                    enabled: !(recordingManager && recordingManager.isRecording)
+                                    opacity: enabled ? 1 : 0.5
                                     text: modelData + " kbps"
                                     checked: settingsManager ? settingsManager.audioBitrate === modelData : false
-                                    onClicked: if (settingsManager) settingsManager.audioBitrate = modelData
+                                    onClicked: {
+                                        if (settingsManager)
+                                            settingsManager.audioBitrate = modelData;
+
+                                    }
                                 }
+
                             }
+
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Game Audio Device")
                         helpText: qsTr("Where your game sound comes from.")
 
-                        ComboBox {
+                        TrophyComboBox {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
-                            model: ["Default Output"]  // TODO: Populate from AudioDeviceEnumerator
+                            model: ["Default Output"]
                             currentIndex: 0
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Microphone")
                         helpText: qsTr("Your voice input device.")
 
-                        ComboBox {
+                        TrophyComboBox {
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
-                            model: ["Default Input"]  // TODO: Populate from AudioDeviceEnumerator
+                            model: ["Default Input"]
                             currentIndex: 0
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Voice Chat App")
                         helpText: qsTr("Enter the process name of your voice app (e.g. 'discord') to capture it nicely.")
 
-                        TextField {
+                        TrophyTextField {
+                            id: voiceChatAppField
+
                             Layout.fillWidth: true
                             text: settingsManager ? settingsManager.voiceChatApp : ""
-                            onTextChanged: if (settingsManager) settingsManager.voiceChatApp = text
                             placeholderText: qsTr("e.g., discord, teamspeak")
+                            onTextChanged: {
+                                if (settingsManager)
+                                    settingsManager.voiceChatApp = text;
+
+                            }
                         }
+
                     }
+
                 }
 
-                // Storage Section
+                // --- STORAGE SECTION ---
                 SettingsSection {
                     title: qsTr("Storage Management")
 
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: storageWarningContents.implicitHeight + Theme.spacingSmall * 2
+                        radius: Theme.radiusSmall
+                        color: Theme.withOpacity(Theme.warningColor, 0.1)
+                        border.width: 1
+                        border.color: Theme.withOpacity(Theme.warningColor, 0.3)
+                        visible: recordingManager && recordingManager.isRecording
+
+                        RowLayout {
+                            id: storageWarningContents
+
+                            anchors.fill: parent
+                            anchors.margins: Theme.spacingSmall
+
+                            Label {
+                                text: "⚠️"
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Recording in progress. These settings will not take effect until the next recording.")
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                        }
+
+                    }
+
                     SettingItem {
                         label: qsTr("Recordings Folder")
-                        helpText: qsTr("Where your victory moments are saved.")
+                        helpText: qsTr("Where your recordings are saved.")
 
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Theme.spacingSmall
 
-                            TextField {
+                            TrophyTextField {
+                                id: recordingsPathField
+
                                 Layout.fillWidth: true
                                 text: settingsManager ? settingsManager.recordingsPath : ""
                                 readOnly: true
                             }
-                            Button {
+
+                            TrophyButton {
                                 text: qsTr("Browse")
                                 onClicked: folderDialog.open()
                             }
+
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Storage Limit")
-                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit.")
+                        helpText: qsTr("Trophy will delete the oldest recordings when you exceed this limit if Auto-Cleanup is enabled, otherwise recording will stop when the limit is reached.")
 
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Theme.spacingMedium
 
-                            Slider {
+                            TrophySlider {
                                 id: storageSlider
+
                                 Layout.fillWidth: true
                                 from: 10
                                 to: 500
-                                stepSize: 10
+                                stepSize: 1
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
-                                onMoved: if (settingsManager) settingsManager.maxStorageSize = value * 1024 * 1024 * 1024
+                                onMoved: {
+                                    if (settingsManager)
+                                        settingsManager.maxStorageSize = value * 1024 * 1024 * 1024;
+
+                                }
                             }
+
                             Label {
                                 text: storageSlider.value.toFixed(0) + " GB"
                                 color: Theme.textColor
                                 font.weight: Font.Medium
                                 Layout.preferredWidth: 70
                             }
+
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Auto-Cleanup")
-                        helpText: qsTr("Enable this to keep your drive from filling up.")
+                        helpText: qsTr("Enable this to automatically delete the oldest recordings when you exceed the storage limit.")
 
-                        Switch {
+                        TrophySwitch {
                             checked: settingsManager ? settingsManager.autoDeleteOldest : false
-                            onToggled: if (settingsManager) settingsManager.autoDeleteOldest = checked
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.autoDeleteOldest = checked;
+
+                            }
                         }
+
                     }
+
                 }
 
-                // Game Detection Section
+                // --- GAME DETECTION ---
                 SettingsSection {
                     title: qsTr("Game Detection")
 
                     SettingItem {
                         label: qsTr("Auto-detect Games")
-                        helpText: qsTr("Trophy will try to detect when you launch a game to show the correct overlay/status.")
+                        helpText: qsTr("Trophy will try to detect when you launch a game.")
 
-                        Switch {
+                        TrophySwitch {
                             checked: settingsManager ? settingsManager.autoDetectGames : false
-                            onToggled: if (settingsManager) settingsManager.autoDetectGames = checked
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.autoDetectGames = checked;
+
+                            }
                         }
+
                     }
 
                     SettingItem {
                         label: qsTr("Auto-record")
-                        helpText: qsTr("Automatically start recording the moment a game is detected. Never miss a moment!")
+                        helpText: qsTr("Automatically start recording the full game session the moment a game is detected. Never miss a moment!")
 
-                        Switch {
+                        TrophySwitch {
                             checked: settingsManager ? settingsManager.autoRecordEnabled : false
-                            onToggled: if (settingsManager) settingsManager.autoRecordEnabled = checked
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.autoRecordEnabled = checked;
+
+                            }
                         }
+
                     }
+
                 }
+
             }
 
-            // Actions
+            // --- ACTIONS ---
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingMedium
                 Layout.topMargin: Theme.spacingMedium
 
-                Item { Layout.fillWidth: true }
+                Item {
+                    Layout.fillWidth: true
+                }
 
-                Button {
+                TrophyButton {
                     text: qsTr("Reset to Defaults")
-                    flat: true
                     onClicked: resetConfirmDialog.open()
                 }
 
-                Button {
+                TrophyButton {
                     text: qsTr("Save Settings")
-                    highlighted: true
                     onClicked: settingsManager.save()
                 }
+
             }
 
-            Item { Layout.preferredHeight: Theme.spacingLarge }
+            Item {
+                Layout.preferredHeight: Theme.spacingLarge
+            }
+
         }
+
     }
 
+    // --- DIALOGS ---
     FolderDialog {
         id: folderDialog
+
         title: qsTr("Select Recordings Folder")
-        currentFolder: settingsManager ? "file://" + settingsManager.recordingsPath : ""
         onAccepted: {
-            if (settingsManager) settingsManager.recordingsPath = selectedFolder.toString().replace("file://", "")
+            if (settingsManager)
+                settingsManager.recordingsPath = selectedFolder.toString().replace("file://", "");
+
         }
     }
 
-    Dialog {
+    TrophyDialog {
         id: resetConfirmDialog
+
         title: qsTr("Reset Settings")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-
-        Label {
-            text: qsTr("Are you sure you want to reset all settings to defaults?")
-        }
-
+        message: qsTr("Return all settings to their factory defaults?")
+        confirmText: qsTr("Reset")
+        confirmColor: Theme.errorColor
+        showDontAsk: false
         onAccepted: settingsManager.resetToDefaults()
     }
 
-    // Section component
+    background: Rectangle {
+        color: Theme.backgroundColor
+        bottomRightRadius: 12
+        topLeftRadius: 26
+    }
+
+    // --- COMPONENTS ---
     component SettingsSection: Rectangle {
         property string title: ""
+        property bool collapsed: true // Default to closed on start
         default property alias content: contentLayout.data
 
         Layout.fillWidth: true
-        implicitHeight: sectionLayout.implicitHeight + Theme.spacingMedium * 2
+        implicitHeight: collapsed ? headerLayout.height + (Theme.spacingMedium * 2) : sectionLayout.implicitHeight + Theme.spacingMedium * 2
         radius: Theme.radiusMedium
         color: Theme.cardColor
+        clip: true
 
         ColumnLayout {
             id: sectionLayout
+
             anchors.fill: parent
             anchors.margins: Theme.spacingMedium
             spacing: Theme.spacingMedium
 
-            Label {
-                text: title
-                font.pixelSize: Theme.fontSizeLarge
-                font.weight: Font.Medium
-                color: Theme.textColor
+            MouseArea {
+                id: headerLayout
+
+                Layout.fillWidth: true
+                Layout.preferredHeight: headerText.implicitHeight + Theme.spacingSmall
+                cursorShape: Qt.PointingHandCursor
+                onClicked: collapsed = !collapsed
+
+                RowLayout {
+                    anchors.fill: parent
+
+                    Label {
+                        id: headerText
+
+                        text: title
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        text: "▼"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.textMutedColor
+                        rotation: collapsed ? 0 : 180
+
+                        Behavior on rotation {
+                            NumberAnimation {
+                                duration: 200
+                            }
+
+                        }
+
+                    }
+
+                }
+
             }
 
             Rectangle {
                 Layout.fillWidth: true
                 height: 1
                 color: Theme.dividerColor
+                visible: !collapsed
             }
 
             ColumnLayout {
                 id: contentLayout
+
                 Layout.fillWidth: true
                 spacing: Theme.spacingLarge
+                visible: !collapsed
+                opacity: collapsed ? 0 : 1
+
+                Behavior on opacity {
+                    NumberAnimation {
+                        duration: 150
+                    }
+
+                }
+
             }
+
         }
+
+        Behavior on implicitHeight {
+            NumberAnimation {
+                duration: 200
+                easing.type: Easing.InOutQuad
+            }
+
+        }
+
     }
 
-    // Setting item component
     component SettingItem: ColumnLayout {
         property string label: ""
         property string helpText: ""
@@ -465,6 +812,7 @@ Page {
 
         ColumnLayout {
             id: controlLayout
+
             Layout.fillWidth: true
             spacing: Theme.spacingTiny
         }
@@ -477,5 +825,7 @@ Page {
             wrapMode: Text.WordWrap
             visible: helpText.length > 0
         }
+
     }
+
 }

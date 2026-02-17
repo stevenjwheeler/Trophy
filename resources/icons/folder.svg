@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+    <path
+        d="M100 160 Q100 145 115 145 H200 L230 175 H385 Q400 175 400 190 V360 Q400 375 385 375 H115 Q100 375 100 360 Z"
+        fill="#FAFAFA"
+        />
+
+    <path
+        d="M100 360 L125 210 Q125 200 140 200 H410 L385 360 Q380 375 365 375 H115 Q100 375 100 360 Z"
+        fill="#FCFDFD"
+        stroke="#E3E3E3"
+        stroke-width="2"
+        />
+    </svg>
