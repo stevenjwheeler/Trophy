@@ -10,6 +10,10 @@ WindowService::WindowService(QObject *parent) : QObject(parent) {
   m_display = XOpenDisplay(nullptr);
 }
 
+void WindowService::setTrophyWindowId(unsigned long windowId) {
+  m_trophyWindowId = windowId;
+}
+
 WindowService::~WindowService() {
   if (m_display) {
     XCloseDisplay(static_cast<Display *>(m_display));
@@ -83,6 +87,11 @@ QVariantList WindowService::getVisibleWindows() {
   if (XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren)) {
     qInfo() << "Found" << nchildren << "top-level X11 windows";
     for (unsigned int i = 0; i < nchildren; i++) {
+      // Skip Trophy's own window
+      if (children[i] == m_trophyWindowId) {
+        continue;
+      }
+
       XWindowAttributes attrs;
       if (XGetWindowAttributes(dpy, children[i], &attrs)) {
         if (attrs.map_state == IsViewable && attrs.width > 32 &&

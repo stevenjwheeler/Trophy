@@ -24,11 +24,17 @@ public:
   Q_INVOKABLE QVariantList getVisibleWindows();
   Q_INVOKABLE QString getWindowTitle(unsigned long windowId);
 
+  /**
+   * @brief Set the Trophy application window to exclude from listings
+   */
+  void setTrophyWindowId(unsigned long windowId);
+
 private:
   QString fetchWindowTitle(unsigned long windowId);
 
 private:
   void *m_display = nullptr;
+  unsigned long m_trophyWindowId = 0;
 };
 
 } // namespace GameRecorder

@@ -112,6 +112,17 @@ bool Application::initialize() {
     return false;
   }
 
+  // Set Trophy's window ID in WindowService so it filters itself out
+  QObject *rootObject = m_engine->rootObjects().first();
+  if (QQuickWindow *window = qobject_cast<QQuickWindow *>(rootObject)) {
+    // Get the X11 window ID if available
+    if (window->handle()) {
+      WId windowId = window->winId();
+      m_windowService->setTrophyWindowId(static_cast<unsigned long>(windowId));
+      qInfo() << "Set Trophy window ID for filtering:" << windowId;
+    }
+  }
+
   // Start game detection service
   m_gameDetector->start();
 
