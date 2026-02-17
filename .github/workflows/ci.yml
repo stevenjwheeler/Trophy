@@ -36,7 +36,7 @@ jobs:
             libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev 
             libwayland-dev libxcb-shm0-dev libva-dev libavcodec-dev 
             libavformat-dev libswscale-dev libgtest-dev wget
-            libxcb-cursor0 libxkbcommon-x11-0
+            libxcb-cursor0 libxkbcommon-x11-0 
           version: 1.3
           
       - name: Restore build files from cache if exists
@@ -66,7 +66,7 @@ jobs:
         uses: jurplel/install-qt-action@v3
         with:
           version: '6.10.2'
-          modules: 'qtmultimedia'
+          modules: 'qtmultimedia qt5compat qtshadertools'
           cache: 'true'
 
       - name: Configure & Build
@@ -117,7 +117,7 @@ jobs:
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
           export QML_SOURCES_PATHS=$PWD/qml
-          export EXTRA_QT_MODULES="quickcontrols2;multimedia"
+          export EXTRA_QT_MODULES="quickcontrols2;multimedia;5compat;wayland;shadertools"
           
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
@@ -128,7 +128,23 @@ jobs:
             --plugin qt \
             --output appimage
 
-          # 6. Rename based on the exported VERSION
+          # 6. SMOKE TEST: Try to run the AppImage headlessly
+          # We use timeout so it doesn't run forever; if it survives 5s without crashing, it's "good"
+          echo "Running smoke test..."
+          GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
+          chmod +x "$GENERATED_FILE"
+          xvfb-run --auto-servernum ./"$GENERATED_FILE" & 
+          APP_PID=$!
+          sleep 5
+          if ps -p $APP_PID > /dev/null; then
+             echo "App launched successfully!"
+             kill $APP_PID
+          else
+             echo "App crashed on startup! Check the logs above."
+             exit 1
+          fi
+
+          # 7. Rename based on the exported VERSION
           # linuxdeploy usually names it Trophy-$VERSION-x86_64.AppImage or Trophy-x86_64.AppImage
           # We force a consistent name here:
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
@@ -166,3 +182,25 @@ jobs:
             Trophy-*-x86_64.AppImage
             SHA256SUMS
           generate_release_notes: true
+
+  comment-pr:
+    needs: build-and-test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post AppImage Link
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run_id = context.runId;
+            const artifactsUrl = `https://github.com/${owner}/${repo}/actions/runs/${run_id}`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: owner,
+              repo: repo,
+              body: `### 🚀 Build Ready!\n\nA new **AppImage** has been generated for this PR. You can download it from the artifacts section here:\n\n[📦 Download Trophy AppImage](${artifactsUrl})`
+            })
