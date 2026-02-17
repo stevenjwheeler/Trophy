@@ -119,9 +119,6 @@ void Recording::probeVideoFile() {
   }
 
   avformat_close_input(&formatCtx);
-
-  qDebug() << "Probed" << m_fileName << ":" << m_width << "x" << m_height
-           << "duration:" << m_duration << "s";
 }
 
 } // namespace GameRecorder
