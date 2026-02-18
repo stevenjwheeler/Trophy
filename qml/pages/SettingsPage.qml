@@ -292,7 +292,7 @@ Page {
             radius: Theme.radiusSmall
             border.width: 1
             border.color: settingsManager && settingsManager.containerFormat === "mkv"
-                          ? Theme.accentColor 
+                          ? Theme.highlightedColor 
                           : Theme.withOpacity(Theme.textColor, 0.1)
 
             RowLayout {
@@ -358,7 +358,7 @@ Page {
                         font.weight: Font.Medium
                     }
                     Label {
-                        text: qsTr("Widely compatible but fragile. If recording stops unexpectedly, the entire file will be corrupted.")
+                        text: qsTr("Widely compatible but fragile. If recording stops unexpectedly, the entire file may be corrupted.")
                         color: settingsManager && settingsManager.containerFormat === "mp4" 
                                ? Theme.warningColor 
                                : Theme.textMutedColor
@@ -471,7 +471,7 @@ Page {
                                 radius: Theme.radiusSmall
                                 border.width: 1
                                 border.color: settingsManager && settingsManager.audioMode === "game"
-                                              ? Theme.accentColor 
+                                              ? Theme.highlightedColor 
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
@@ -519,7 +519,7 @@ Page {
                                 radius: Theme.radiusSmall
                                 border.width: 1
                                 border.color: settingsManager && settingsManager.audioMode === "desktop"
-                                              ? Theme.accentColor 
+                                              ? Theme.highlightedColor 
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
@@ -575,7 +575,7 @@ Page {
                                 radius: Theme.radiusSmall
                                 border.width: 1
                                 border.color: settingsManager && !settingsManager.separateAudioTracks 
-                                              ? Theme.accentColor 
+                                              ? Theme.highlightedColor 
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
@@ -623,7 +623,7 @@ Page {
                                 radius: Theme.radiusSmall
                                 border.width: 1
                                 border.color: settingsManager && settingsManager.separateAudioTracks 
-                                              ? Theme.accentColor 
+                                              ? Theme.highlightedColor 
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
