@@ -85,7 +85,7 @@ void SettingsManager::load() {
   m_gameAudioDevice = audio["gameAudioDevice"].toString("default");
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
-  m_separateAudioTracks = audio["separateTracks"].toBool(true);
+  m_separateAudioTracks = audio["separateTracks"].toBool(false);
   m_audioBitrate = audio["audioBitrate"].toInt(192);
 
   // Load storage settings
@@ -220,7 +220,7 @@ void SettingsManager::loadDefaults() {
   m_gameAudioDevice = "default";
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
-  m_separateAudioTracks = true;
+  m_separateAudioTracks = false;
   m_audioBitrate = 192;
 
   // Storage

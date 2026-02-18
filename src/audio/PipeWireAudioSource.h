@@ -29,16 +29,29 @@ public:
   // Factory methods
   static std::unique_ptr<PipeWireAudioSource>
   createMonitorSource(const QString &sinkName);
+  /**
+   * @brief Create an application audio capture source.
+   * @param nodeId   PipeWire node ID of the application's playback stream.
+   * @param nodeName PW_KEY_NODE_NAME of the node (used as target.object).
+   * @param serial   object.serial of the node (preferred by WirePlumber 0.5).
+   */
   static std::unique_ptr<PipeWireAudioSource>
-  createApplicationSource(uint32_t nodeId);
+  createApplicationSource(uint32_t nodeId,
+                          const QString &nodeName = {},
+                          const QString &serial = {});
   static std::unique_ptr<PipeWireAudioSource>
   createInputSource(const QString &deviceName);
 
   /**
    * @brief Enumerate PipeWire nodes to find one matching a process name.
-   * @return PipeWire node ID, or PW_ID_ANY (0xffffffff) if not found.
+   * @param processName  Name to search for (case-insensitive contains match).
+   * @param outNodeName  Receives PW_KEY_NODE_NAME of the found node.
+   * @param outSerial    Receives object.serial of the found node.
+   * @return PipeWire node ID, or 0xffffffff if not found.
    */
-  static uint32_t findNodeByProcessName(const QString &processName);
+  static uint32_t findNodeByProcessName(const QString &processName,
+                                        QString *outNodeName = nullptr,
+                                        QString *outSerial   = nullptr);
 
   bool initialize(const AudioConfig &config) override;
   void setCallback(AudioCallback callback) override;
@@ -58,6 +71,8 @@ private:
   QString m_displayName;
   QString m_identifier;
   uint32_t m_targetNodeId;
+  QString m_targetNodeName;  // PW_KEY_NODE_NAME for target.object hint
+  QString m_targetSerial;    // object.serial for WirePlumber 0.5 target.object
   AudioConfig m_config;
   AudioCallback m_callback;
   std::atomic<bool> m_capturing{false};

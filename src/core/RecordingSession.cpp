@@ -145,28 +145,55 @@ bool RecordingSession::start() {
         }
 
         m_audioMixer->setTrackAudioCallback(
-            [this](int, const float *samples, int frameCount, int, int channels) {
+            [this](int trackIndex, const float *samples, int frameCount, int sampleRate, int channels) {
               if (!m_running || m_paused) return;
               if (!m_mergedEncoder) return;
+              if (trackIndex < 0 || trackIndex >= m_activeTrackCount) return;
+
+              float peakSample = 0.0f;
+              for (int i = 0; i < frameCount * channels && i < 1000; ++i)
+                if (std::abs(samples[i]) > peakSample) peakSample = std::abs(samples[i]);
+              static int callCount[3] = {0, 0, 0};
+              if (callCount[trackIndex]++ % 60 == 0)
+                qDebug() << "Track" << trackIndex << ": frames=" << frameCount
+                         << "sr=" << sampleRate << "ch=" << channels
+                         << "peak=" << peakSample;
+
               std::lock_guard<std::mutex> lock(m_mergeMutex);
-              const int total = frameCount * channels;
-              if (static_cast<int>(m_mixAccumulator.size()) != total) {
-                m_mixAccumulator.assign(total, 0.0f);
-                m_tracksContributed = 0;
-              }
-              for (int i = 0; i < total; ++i)
-                m_mixAccumulator[i] += samples[i];
-              if (++m_tracksContributed >= m_activeTrackCount) {
-                for (auto &v : m_mixAccumulator)
+
+              // Append to this track's own accumulator
+              const int incoming = frameCount * channels;
+              auto &buf = m_trackAccumulators[trackIndex];
+              buf.insert(buf.end(), samples, samples + incoming);
+
+              // Mix and encode as long as ALL active tracks have a full AAC frame ready
+              const int needed = 1024 * channels;
+              while (true) {
+                bool allReady = true;
+                for (int i = 0; i < m_activeTrackCount; ++i) {
+                  if (static_cast<int>(m_trackAccumulators[i].size()) < needed) {
+                    allReady = false;
+                    break;
+                  }
+                }
+                if (!allReady) break;
+
+                std::vector<float> mixed(needed, 0.0f);
+                for (int i = 0; i < m_activeTrackCount; ++i) {
+                  for (int s = 0; s < needed; ++s)
+                    mixed[s] += m_trackAccumulators[i][s];
+                  m_trackAccumulators[i].erase(m_trackAccumulators[i].begin(),
+                                               m_trackAccumulators[i].begin() + needed);
+                }
+                for (auto &v : mixed)
                   v = std::clamp(v, -1.0f, 1.0f);
+
                 EncodedPacket packet;
-                if (m_mergedEncoder->encodeAudio(m_mixAccumulator.data(), frameCount, packet)) {
+                if (m_mergedEncoder->encodeAudio(mixed.data(), 1024, packet)) {
                   packet.streamIndex = 1;
                   m_muxer->writePacket(packet);
                   m_bytesWritten = m_muxer->bytesWritten();
                 }
-                std::fill(m_mixAccumulator.begin(), m_mixAccumulator.end(), 0.0f);
-                m_tracksContributed = 0;
               }
             });
     }

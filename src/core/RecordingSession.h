@@ -80,8 +80,9 @@ private:
   int m_audioBitrate = 192;
   int m_activeTrackCount = 0;
   std::unique_ptr<AudioEncoder> m_mergedEncoder;
-  std::vector<float> m_mixAccumulator;
-  int m_tracksContributed = 0;  // plain int, always under m_mergeMutex
+  // Per-track accumulation buffers (merged mode) — different PipeWire sources
+  // deliver different frame sizes, so each track accumulates independently.
+  std::array<std::vector<float>, kAudioTrackCount> m_trackAccumulators;
   std::mutex m_mergeMutex;
 
   std::atomic<bool> m_running{false};

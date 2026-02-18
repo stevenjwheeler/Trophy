@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/extensions/metadata.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
 
@@ -93,8 +94,10 @@ namespace {
 
 struct NodeEnumData {
   QString processName;
-  QString nodeName;  // For sink node lookup
+  QString nodeName;       // For sink node lookup by exact name
   uint32_t nodeId = PW_ID_ANY;
+  QString foundNodeName;  // PW_KEY_NODE_NAME of the matched app node
+  QString foundSerial;    // object.serial of the matched app node
   int pendingSync = 0;
   struct pw_main_loop *loop = nullptr;
   struct spa_hook registryListener = {};
@@ -118,13 +121,21 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
   // If searching by node name (e.g., "easyeffects_sink" for sink monitor)
   if (!data->nodeName.isEmpty() && pwNodeName) {
     if (QString(pwNodeName) == data->nodeName) {
-      qInfo() << "Found PipeWire sink node:" << data->nodeName << "-> ID:" << id;
+      qInfo() << "Found PipeWire node:" << data->nodeName << "-> ID:" << id;
       data->nodeId = id;
     }
     return;
   }
 
-  // Otherwise search by process name
+  // For process name search: only match application playback streams
+  // (media.class = "Stream/Output/Audio"). This avoids accidentally
+  // matching EasyEffects filter nodes or other internal nodes that may
+  // happen to share the app name but cannot deliver audio to a capture stream.
+  const char *mediaClass = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+  if (!mediaClass || strcmp(mediaClass, "Stream/Output/Audio") != 0)
+    return;
+
+  // Search by process name
   QString target = data->processName.toLower();
 
   auto matches = [&](const char *s) {
@@ -132,9 +143,14 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
   };
 
   if (matches(binary) || matches(appName) || matches(pwNodeName)) {
+    const char *serial = spa_dict_lookup(props, "object.serial");
     qInfo() << "Found PipeWire node for" << data->processName << "-> ID:" << id
-            << "binary:" << (binary ? binary : "?");
+            << "media.class: Stream/Output/Audio"
+            << "name:" << (pwNodeName ? pwNodeName : "?")
+            << "serial:" << (serial ? serial : "?");
     data->nodeId = id;
+    if (pwNodeName) data->foundNodeName = QString::fromUtf8(pwNodeName);
+    if (serial)     data->foundSerial   = QString::fromUtf8(serial);
   }
 }
 
@@ -204,9 +220,142 @@ static uint32_t findSinkByName(const QString &sinkName) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Default device query — reads PipeWire metadata for default.audio.sink/source
+// ---------------------------------------------------------------------------
+
+struct DefaultDeviceData {
+  QString sinkName;
+  QString sourceName;
+  bool gotMetadata = false;
+  int pendingSync = 0;
+  struct pw_main_loop *loop = nullptr;
+  struct pw_core *core = nullptr;
+  struct pw_registry *registry = nullptr;
+  struct pw_metadata *metadata = nullptr;
+  struct spa_hook registryListener = {};
+  struct spa_hook coreListener = {};
+  struct spa_hook metadataListener = {};
+};
+
+static int onDefaultMetaProp(void *userdata, uint32_t subject,
+                              const char *key, const char * /*type*/,
+                              const char *value) {
+  auto *data = static_cast<DefaultDeviceData *>(userdata);
+  if (!key || !value || subject != PW_ID_CORE)
+    return 0;
+
+  // value is JSON like {"name":"easyeffects_sink"} — extract the name field
+  const char *nameKey = strstr(value, "\"name\"");
+  if (!nameKey) return 0;
+  const char *colon = strchr(nameKey + 6, ':');
+  if (!colon) return 0;
+  const char *open = strchr(colon, '"');
+  if (!open) return 0;
+  const char *close = strchr(open + 1, '"');
+  if (!close) return 0;
+  QString name = QString::fromUtf8(open + 1, static_cast<int>(close - open - 1));
+
+  if (strcmp(key, "default.audio.sink") == 0)
+    data->sinkName = name;
+  else if (strcmp(key, "default.audio.source") == 0)
+    data->sourceName = name;
+
+  return 0;
+}
+
+static const struct pw_metadata_events defaultMetaEvents = {
+    .version = PW_VERSION_METADATA_EVENTS,
+    .property = onDefaultMetaProp,
+};
+
+static void onDefaultRegistryGlobal(void *userdata, uint32_t id,
+                                     uint32_t /*perms*/, const char *type,
+                                     uint32_t version,
+                                     const struct spa_dict *props) {
+  auto *data = static_cast<DefaultDeviceData *>(userdata);
+  if (strcmp(type, PW_TYPE_INTERFACE_Metadata) != 0) return;
+
+  const char *metaName = props ? spa_dict_lookup(props, "metadata.name") : nullptr;
+  if (!metaName || strcmp(metaName, "default") != 0) return;
+
+  data->metadata = static_cast<struct pw_metadata *>(
+      pw_registry_bind(data->registry, id, type, version, 0));
+  if (data->metadata) {
+    memset(&data->metadataListener, 0, sizeof(data->metadataListener));
+    pw_metadata_add_listener(data->metadata, &data->metadataListener,
+                             &defaultMetaEvents, data);
+    data->gotMetadata = true;
+  }
+}
+
+static void onDefaultCoreDone(void *userdata, uint32_t id, int seq) {
+  auto *data = static_cast<DefaultDeviceData *>(userdata);
+  if (id == PW_ID_CORE && seq == data->pendingSync)
+    pw_main_loop_quit(data->loop);
+}
+
+/**
+ * @brief Query PipeWire metadata for the default sink and source node names.
+ * @return {sinkName, sourceName} as set by KDE/WirePlumber
+ */
+static std::pair<QString, QString> queryDefaultDevices() {
+  pw_init(nullptr, nullptr);
+
+  DefaultDeviceData data;
+  data.loop = pw_main_loop_new(nullptr);
+  if (!data.loop) return {};
+
+  struct pw_context *ctx =
+      pw_context_new(pw_main_loop_get_loop(data.loop), nullptr, 0);
+  if (!ctx) { pw_main_loop_destroy(data.loop); return {}; }
+
+  data.core = pw_context_connect(ctx, nullptr, 0);
+  if (!data.core) { pw_context_destroy(ctx); pw_main_loop_destroy(data.loop); return {}; }
+
+  static const struct pw_core_events core_events = {
+      .version = PW_VERSION_CORE_EVENTS,
+      .done = onDefaultCoreDone,
+  };
+  pw_core_add_listener(data.core, &data.coreListener, &core_events, &data);
+
+  data.registry = pw_core_get_registry(data.core, PW_VERSION_REGISTRY, 0);
+
+  static const struct pw_registry_events reg_events = {
+      .version = PW_VERSION_REGISTRY_EVENTS,
+      .global = onDefaultRegistryGlobal,
+      .global_remove = nullptr,
+  };
+  pw_registry_add_listener(data.registry, &data.registryListener, &reg_events, &data);
+
+  // First sync: enumerate globals and bind to the metadata object
+  data.pendingSync = pw_core_sync(data.core, PW_ID_CORE, 0);
+  pw_main_loop_run(data.loop);
+
+  // Second sync: flush metadata property events that arrive after binding
+  if (data.gotMetadata) {
+    data.pendingSync = pw_core_sync(data.core, PW_ID_CORE, 0);
+    pw_main_loop_run(data.loop);
+  }
+
+  auto result = std::make_pair(data.sinkName, data.sourceName);
+
+  if (data.metadata)
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(data.metadata));
+  pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(data.registry));
+  pw_core_disconnect(data.core);
+  pw_context_destroy(ctx);
+  pw_main_loop_destroy(data.loop);
+
+  qInfo() << "PipeWire defaults — sink:" << result.first << "source:" << result.second;
+  return result;
+}
+
 } // namespace
 
-uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName) {
+uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
+                                                    QString *outNodeName,
+                                                    QString *outSerial) {
   pw_init(nullptr, nullptr);
 
   NodeEnumData data;
@@ -229,31 +378,27 @@ uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName) 
     return PW_ID_ANY;
   }
 
-  // Core listener to detect sync completion
   static const struct pw_core_events core_events = {
       .version = PW_VERSION_CORE_EVENTS,
       .done = enumCoreDone,
   };
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
-  // Registry listener
   struct pw_registry *registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
   static const struct pw_registry_events registry_events = {
       PW_VERSION_REGISTRY_EVENTS,
       enumRegistryGlobal,
-      nullptr, // global_remove
+      nullptr,
   };
-  pw_registry_add_listener(registry, &data.registryListener, &registry_events,
-                           &data);
+  pw_registry_add_listener(registry, &data.registryListener, &registry_events, &data);
 
-  // Trigger sync so we know when the initial dump is done
   data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-
-  // Run until sync completes (or short timeout via signal in production)
   pw_main_loop_run(data.loop);
 
   uint32_t result = data.nodeId;
+  if (outNodeName) *outNodeName = data.foundNodeName;
+  if (outSerial)   *outSerial   = data.foundSerial;
 
   pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
   pw_core_disconnect(core);
@@ -293,16 +438,24 @@ PipeWireAudioSource::createMonitorSource(const QString &sinkName) {
   src->m_identifier = sinkName;
   src->m_displayName = "Desktop Audio";
 
-  // Resolve sink name to node ID for actual PipeWire connection
-  if (!sinkName.isEmpty() && sinkName != "default") {
-    uint32_t sinkNodeId = findSinkByName(sinkName);
+  // Resolve which sink to monitor: explicit name, or look up the PipeWire default
+  QString target = sinkName;
+  if (target.isEmpty() || target == "default") {
+    auto [defaultSink, defaultSource] = queryDefaultDevices();
+    if (!defaultSink.isEmpty()) {
+      target = defaultSink;
+      qInfo() << "Monitor source: resolved PipeWire default sink to" << target;
+    }
+  }
+
+  if (!target.isEmpty() && target != "default") {
+    uint32_t sinkNodeId = findSinkByName(target);
     if (sinkNodeId != PW_ID_ANY) {
       src->m_targetNodeId = sinkNodeId;
-      qInfo() << "Monitor source will capture from sink" << sinkName
+      qInfo() << "Monitor source will capture from sink" << target
               << "(node ID:" << sinkNodeId << ")";
     } else {
-      qWarning() << "Could not find sink node:" << sinkName
-                 << "— will use default";
+      qWarning() << "Could not find sink node:" << target << "— will use PW_ID_ANY";
     }
   }
 
@@ -310,11 +463,17 @@ PipeWireAudioSource::createMonitorSource(const QString &sinkName) {
 }
 
 std::unique_ptr<PipeWireAudioSource>
-PipeWireAudioSource::createApplicationSource(uint32_t nodeId) {
+PipeWireAudioSource::createApplicationSource(uint32_t nodeId,
+                                             const QString &nodeName,
+                                             const QString &serial) {
   auto src =
       std::make_unique<PipeWireAudioSource>(SourceType::ApplicationAudio);
-  src->m_targetNodeId = nodeId;
-  src->m_identifier = QString::number(nodeId);
+  src->m_targetNodeId   = nodeId;
+  src->m_targetNodeName = nodeName;
+  src->m_targetSerial   = serial;
+  src->m_identifier     = nodeName.isEmpty() ? QString::number(nodeId) : nodeName;
+  src->m_displayName    = QString("Application Audio (%1)").arg(
+      nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
   return src;
 }
 
@@ -323,6 +482,28 @@ PipeWireAudioSource::createInputSource(const QString &deviceName) {
   auto src = std::make_unique<PipeWireAudioSource>(SourceType::Microphone);
   src->m_identifier = deviceName;
   src->m_displayName = deviceName.isEmpty() ? "Microphone" : deviceName;
+
+  // Resolve which source to capture: explicit name, or look up the PipeWire default
+  QString target = deviceName;
+  if (target.isEmpty() || target == "default") {
+    auto [defaultSink, defaultSource] = queryDefaultDevices();
+    if (!defaultSource.isEmpty()) {
+      target = defaultSource;
+      qInfo() << "Input source: resolved PipeWire default source to" << target;
+    }
+  }
+
+  if (!target.isEmpty() && target != "default") {
+    uint32_t nodeId = findSinkByName(target);
+    if (nodeId != PW_ID_ANY) {
+      src->m_targetNodeId = nodeId;
+      qInfo() << "Input source will capture from node" << target
+              << "(node ID:" << nodeId << ")";
+    } else {
+      qWarning() << "Could not find input node:" << target << "— will use PW_ID_ANY";
+    }
+  }
+
   return src;
 }
 
@@ -383,9 +564,40 @@ bool PipeWireAudioSource::start() {
       PW_KEY_MEDIA_ROLE, "Screen",
       nullptr);
 
-  // For desktop audio: capture from the sink monitor (all playing audio)
+  // Desktop audio: capture from the sink monitor (all audio going to speakers)
   if (m_type == SourceType::DesktopAudio) {
     pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+  }
+
+  // Application audio: capture the output of a specific application's stream.
+  // PW_KEY_STREAM_CAPTURE_SINK=true tells WirePlumber to route us to the OUTPUT
+  // side of the target node (what it sends to the sink) rather than treating us
+  // as a regular capture stream and routing to the mic.  If WirePlumber cannot
+  // honour the specific node target, it will fall back to the default sink
+  // monitor (all system audio) rather than the microphone.
+  //
+  // target.object and node.target are both set:
+  //  - node.target: WirePlumber ≤0.4, accepts node name or numeric ID
+  //  - target.object: WirePlumber 0.5+, accepts object serial or node name
+  if (m_type == SourceType::ApplicationAudio && m_targetNodeId != PW_ID_ANY) {
+    pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+
+    // Prefer serial (WirePlumber 0.5), then name, then numeric ID as fallback
+    const QString &bestTarget = !m_targetSerial.isEmpty()   ? m_targetSerial
+                                : !m_targetNodeName.isEmpty() ? m_targetNodeName
+                                : QString::number(m_targetNodeId);
+    const QByteArray ba = bestTarget.toUtf8();
+    pw_properties_set(props, "target.object", ba.constData());
+
+    // node.target for older WirePlumber — use name if available (more stable)
+    const QString &legacyTarget = !m_targetNodeName.isEmpty()
+                                    ? m_targetNodeName
+                                    : QString::number(m_targetNodeId);
+    const QByteArray lba = legacyTarget.toUtf8();
+    pw_properties_set(props, "node.target", lba.constData());
+
+    qInfo() << "Application audio target — node.target:" << legacyTarget
+            << "target.object:" << bestTarget;
   }
 
   d->stream = pw_stream_new(d->core, "trophy-capture", props);
@@ -432,12 +644,23 @@ bool PipeWireAudioSource::start() {
   params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &audio_info);
 
   // Connect the stream
+  qInfo() << "Connecting PipeWire stream" << m_displayName
+          << "to node" << (m_targetNodeId == PW_ID_ANY ? "PW_ID_ANY (auto)" : QString::number(m_targetNodeId));
+
+  // For application audio: use DONT_RECONNECT so WirePlumber can't override
+  // our target.object and re-route to the default source (mic).
+  enum pw_stream_flags flags =
+      static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT |
+                                        PW_STREAM_FLAG_MAP_BUFFERS);
+  if (m_type == SourceType::ApplicationAudio && m_targetNodeId != PW_ID_ANY) {
+    flags = static_cast<enum pw_stream_flags>(flags | PW_STREAM_FLAG_DONT_RECONNECT);
+  }
+
   int ret = pw_stream_connect(
       d->stream,
       PW_DIRECTION_INPUT,
-      m_targetNodeId, // PW_ID_ANY for default, specific ID for app capture
-      static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT |
-                                        PW_STREAM_FLAG_MAP_BUFFERS),
+      m_targetNodeId,
+      flags,
       params, 1);
 
   pw_thread_loop_unlock(d->loop);
