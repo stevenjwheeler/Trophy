@@ -81,10 +81,11 @@ void SettingsManager::load() {
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
+  m_audioMode = audio["audioMode"].toString("game");
   m_gameAudioDevice = audio["gameAudioDevice"].toString("default");
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
-  m_separateAudioTracks = audio["separateTracks"].toBool(true);
+  m_separateAudioTracks = audio["separateTracks"].toBool(false);
   m_audioBitrate = audio["audioBitrate"].toInt(192);
 
   // Load storage settings
@@ -132,6 +133,7 @@ void SettingsManager::save() {
 
   // Audio settings
   QJsonObject audio;
+  audio["audioMode"] = m_audioMode;
   audio["gameAudioDevice"] = m_gameAudioDevice;
   audio["microphoneDevice"] = m_microphoneDevice;
   audio["voiceChatApp"] = m_voiceChatApp;
@@ -176,6 +178,30 @@ void SettingsManager::save() {
 void SettingsManager::resetToDefaults() {
   loadDefaults();
   save();
+
+  // Emit all change signals so the UI updates
+  emit videoBitrateChanged();
+  emit videoResolutionChanged();
+  emit fpsChanged();
+  emit encoderChanged();
+  emit containerFormatChanged();
+  emit encoderPresetChanged();
+  emit maxVideoBitrateChanged();
+  emit useVBRChanged();
+
+  emit audioModeChanged();
+  emit gameAudioDeviceChanged();
+  emit microphoneDeviceChanged();
+  emit voiceChatAppChanged();
+  emit separateAudioTracksChanged();
+  emit audioBitrateChanged();
+
+  emit recordingsPathChanged();
+  emit maxStorageSizeChanged();
+  emit autoDeleteOldestChanged();
+
+  emit autoDetectGamesChanged();
+  emit autoRecordEnabledChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -190,10 +216,11 @@ void SettingsManager::loadDefaults() {
   m_useVBR = true;
 
   // Audio
+  m_audioMode = "game";
   m_gameAudioDevice = "default";
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
-  m_separateAudioTracks = true;
+  m_separateAudioTracks = false;
   m_audioBitrate = 192;
 
   // Storage
@@ -233,10 +260,11 @@ QStringList SettingsManager::availableEncoders() const {
   return encoders;
 }
 
-// Property setters with change notification
+// Property setters with change notification and auto-save
 void SettingsManager::setVideoBitrate(int bitrate) {
   if (m_videoBitrate != bitrate) {
     m_videoBitrate = bitrate;
+    save();
     emit videoBitrateChanged();
   }
 }
@@ -244,6 +272,7 @@ void SettingsManager::setVideoBitrate(int bitrate) {
 void SettingsManager::setVideoResolution(const QString &resolution) {
   if (m_videoResolution != resolution) {
     m_videoResolution = resolution;
+    save();
     emit videoResolutionChanged();
   }
 }
@@ -251,6 +280,7 @@ void SettingsManager::setVideoResolution(const QString &resolution) {
 void SettingsManager::setFps(int fps) {
   if (m_fps != fps) {
     m_fps = fps;
+    save();
     emit fpsChanged();
   }
 }
@@ -258,6 +288,7 @@ void SettingsManager::setFps(int fps) {
 void SettingsManager::setEncoder(const QString &encoder) {
   if (m_encoder != encoder) {
     m_encoder = encoder;
+    save();
     emit encoderChanged();
   }
 }
@@ -265,6 +296,7 @@ void SettingsManager::setEncoder(const QString &encoder) {
 void SettingsManager::setContainerFormat(const QString &format) {
   if (m_containerFormat != format) {
     m_containerFormat = format;
+    save();
     emit containerFormatChanged();
   }
 }
@@ -272,13 +304,23 @@ void SettingsManager::setContainerFormat(const QString &format) {
 void SettingsManager::setEncoderPreset(const QString &preset) {
   if (m_encoderPreset != preset) {
     m_encoderPreset = preset;
+    save();
     emit encoderPresetChanged();
+  }
+}
+
+void SettingsManager::setAudioMode(const QString &mode) {
+  if (m_audioMode != mode) {
+    m_audioMode = mode;
+    save();
+    emit audioModeChanged();
   }
 }
 
 void SettingsManager::setGameAudioDevice(const QString &device) {
   if (m_gameAudioDevice != device) {
     m_gameAudioDevice = device;
+    save();
     emit gameAudioDeviceChanged();
   }
 }
@@ -286,6 +328,7 @@ void SettingsManager::setGameAudioDevice(const QString &device) {
 void SettingsManager::setMicrophoneDevice(const QString &device) {
   if (m_microphoneDevice != device) {
     m_microphoneDevice = device;
+    save();
     emit microphoneDeviceChanged();
   }
 }
@@ -293,6 +336,7 @@ void SettingsManager::setMicrophoneDevice(const QString &device) {
 void SettingsManager::setVoiceChatApp(const QString &app) {
   if (m_voiceChatApp != app) {
     m_voiceChatApp = app;
+    save();
     emit voiceChatAppChanged();
   }
 }
@@ -300,6 +344,7 @@ void SettingsManager::setVoiceChatApp(const QString &app) {
 void SettingsManager::setSeparateAudioTracks(bool separate) {
   if (m_separateAudioTracks != separate) {
     m_separateAudioTracks = separate;
+    save();
     emit separateAudioTracksChanged();
   }
 }
@@ -307,6 +352,7 @@ void SettingsManager::setSeparateAudioTracks(bool separate) {
 void SettingsManager::setAudioBitrate(int bitrate) {
   if (m_audioBitrate != bitrate) {
     m_audioBitrate = bitrate;
+    save();
     emit audioBitrateChanged();
   }
 }
@@ -314,6 +360,7 @@ void SettingsManager::setAudioBitrate(int bitrate) {
 void SettingsManager::setRecordingsPath(const QString &path) {
   if (m_recordingsPath != path) {
     m_recordingsPath = path;
+    save();
     emit recordingsPathChanged();
   }
 }
@@ -321,6 +368,7 @@ void SettingsManager::setRecordingsPath(const QString &path) {
 void SettingsManager::setMaxStorageSize(qint64 bytes) {
   if (m_maxStorageSize != bytes) {
     m_maxStorageSize = bytes;
+    save();
     emit maxStorageSizeChanged();
   }
 }
@@ -328,6 +376,7 @@ void SettingsManager::setMaxStorageSize(qint64 bytes) {
 void SettingsManager::setAutoDeleteOldest(bool enabled) {
   if (m_autoDeleteOldest != enabled) {
     m_autoDeleteOldest = enabled;
+    save();
     emit autoDeleteOldestChanged();
   }
 }
@@ -335,6 +384,7 @@ void SettingsManager::setAutoDeleteOldest(bool enabled) {
 void SettingsManager::setAutoDetectGames(bool enabled) {
   if (m_autoDetectGames != enabled) {
     m_autoDetectGames = enabled;
+    save();
     emit autoDetectGamesChanged();
   }
 }
@@ -342,6 +392,7 @@ void SettingsManager::setAutoDetectGames(bool enabled) {
 void SettingsManager::setAutoRecordEnabled(bool enabled) {
   if (m_autoRecordEnabled != enabled) {
     m_autoRecordEnabled = enabled;
+    save();
     emit autoRecordEnabledChanged();
   }
 }
@@ -349,6 +400,7 @@ void SettingsManager::setAutoRecordEnabled(bool enabled) {
 void SettingsManager::setMaxVideoBitrate(int bitrate) {
   if (m_maxVideoBitrate != bitrate) {
     m_maxVideoBitrate = bitrate;
+    save();
     emit maxVideoBitrateChanged();
   }
 }
@@ -356,6 +408,7 @@ void SettingsManager::setMaxVideoBitrate(int bitrate) {
 void SettingsManager::setUseVBR(bool enabled) {
   if (m_useVBR != enabled) {
     m_useVBR = enabled;
+    save();
     emit useVBRChanged();
   }
 }

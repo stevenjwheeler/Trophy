@@ -154,6 +154,11 @@ void AudioMixer::stopAll() {
   }
 }
 
+void AudioMixer::setTrackAudioCallback(TrackAudioCallback callback) {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_trackAudioCallback = std::move(callback);
+}
+
 void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
                                  int frameCount) {
   if (trackIndex < 0 || static_cast<size_t>(trackIndex) >= m_tracks.size()) {
@@ -173,7 +178,7 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
     }
   }
 
-  // Apply volume
+  // Apply volume and mute
   if (!track.config.muted) {
     peak *= track.config.volume;
   } else {
@@ -185,12 +190,14 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   if (peak > currentPeak) {
     track.peakLevel.store(peak);
   } else {
-    // Decay at ~20dB/second
-    float decay = 0.95f;
-    track.peakLevel.store(currentPeak * decay);
+    track.peakLevel.store(currentPeak * 0.95f);
   }
 
-  // TODO: Store audio in buffer for encoder consumption
+  // Forward audio to encoder callback (called on PipeWire thread)
+  if (!track.config.muted && m_trackAudioCallback) {
+    m_trackAudioCallback(trackIndex, samples, frameCount, m_sampleRate,
+                         m_channels);
+  }
 }
 
 } // namespace GameRecorder

@@ -1,5 +1,4 @@
 import "../styles"
-import Qt5Compat.GraphicalEffects
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -46,22 +45,15 @@ T.Button {
                     sourceSize.width: width
                     sourceSize.height: height
                     fillMode: Image.PreserveAspectFit
-                    visible: false
+                    opacity: control.isBright ? 1 : 0.7
                 }
 
-                ColorOverlay {
+                // Color overlay - when isBright, use white; otherwise use text color
+                Rectangle {
                     anchors.fill: img
-                    source: img
-                    // Use isBright for high contrast, otherwise use muted text color
                     color: control.isBright ? "#ffffff" : _text
-
-                    Behavior on color {
-                        ColorAnimation {
-                            duration: 100
-                        }
-
-                    }
-
+                    opacity: 0
+                    visible: false
                 }
 
             }

@@ -10,6 +10,9 @@
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#ifdef HAVE_PIPEWIRE
+#include "audio/PipeWireAudioSource.h"
+#endif
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -253,10 +256,120 @@ bool RecordingManager::buildPipeline() {
     return false;
   }
 
+  // Set up audio sources in the mixer before starting the session
+#ifdef HAVE_PIPEWIRE
+  int activeAudioTrackCount = 0;
+  if (m_audioMixer) {
+    QString mode = m_settings->audioMode();
+
+    if (mode == "desktop") {
+      // Track 0: all system audio (sink monitor)
+      QString gameDeviceId = m_settings->gameAudioDevice();
+      qInfo() << "Desktop mode: using game audio device:" << gameDeviceId;
+      m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
+          gameDeviceId == "default" ? QString() : gameDeviceId), 0);
+      activeAudioTrackCount++;
+      // Track 1: microphone
+      QString micDeviceId = m_settings->microphoneDevice();
+      qInfo() << "Desktop mode: using microphone device:" << micDeviceId;
+      m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
+          micDeviceId == "default" ? QString() : micDeviceId), 1);
+      activeAudioTrackCount++;
+
+    } else { // "game" mode
+      // Separate mode uses fixed positions so the MKV always has 3 named audio
+      // streams (game=0, voice=1, mic=2) regardless of what's running.
+      // Merged mode uses contiguous positions so the accumulator has no gaps.
+      const bool isSeparate = m_settings->separateAudioTracks();
+      int nextContiguous = 0;
+      int activeSources = 0;
+
+      // === Game audio (always at track 0) ===
+      QString gameProcess;
+      QString windowClass;
+      if (m_manualWindowId != 0 && m_windowService) {
+          gameProcess = m_windowService->getProcessNameForWindow(m_manualWindowId);
+          windowClass = m_windowService->getWindowClassForWindow(m_manualWindowId);
+      }
+
+      {
+        const int gameTrack = isSeparate ? 0 : nextContiguous++;
+        uint32_t nodeId = 0xFFFFFFFFu;
+
+        QString nodeName, nodeSerial;
+
+        // Try PID-based process name first
+        if (!gameProcess.isEmpty()) {
+          nodeId = PipeWireAudioSource::findNodeByProcessName(gameProcess, &nodeName, &nodeSerial);
+          if (nodeId != 0xFFFFFFFFu)
+            qInfo() << "Game audio: found node via process name" << gameProcess;
+        }
+
+        // Fall back to X11 window class name (handles Spotify and similar apps
+        // whose _NET_WM_PID points to a kernel worker thread)
+        if (nodeId == 0xFFFFFFFFu && !windowClass.isEmpty()) {
+          qInfo() << "Trying window class name for PipeWire lookup:" << windowClass;
+          nodeId = PipeWireAudioSource::findNodeByProcessName(windowClass, &nodeName, &nodeSerial);
+          if (nodeId != 0xFFFFFFFFu)
+            qInfo() << "Game audio: found node via window class" << windowClass;
+        }
+
+        if (nodeId != 0xFFFFFFFFu) {
+          m_audioMixer->addSource(
+              PipeWireAudioSource::createApplicationSource(nodeId, nodeName, nodeSerial),
+              gameTrack);
+        } else {
+          qWarning() << "No PipeWire node found for process" << gameProcess
+                     << "/ class" << windowClass << "— using monitor";
+          QString gameDeviceId = m_settings->gameAudioDevice();
+          qInfo() << "Game mode monitor fallback: using game audio device:" << gameDeviceId;
+          m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
+              gameDeviceId == "default" ? QString() : gameDeviceId), gameTrack);
+        }
+        activeSources++;
+      }
+
+      // === Voice chat (track 1 in separate; next contiguous slot in merged) ===
+      QString vcApp = m_settings->voiceChatApp().trimmed();
+      if (!vcApp.isEmpty()) {
+        QString vcNodeName, vcSerial;
+        uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(vcApp, &vcNodeName, &vcSerial);
+        if (nodeId != 0xFFFFFFFF) {
+          const int voiceTrack = isSeparate ? 1 : nextContiguous++;
+          m_audioMixer->addSource(
+              PipeWireAudioSource::createApplicationSource(nodeId, vcNodeName, vcSerial),
+              voiceTrack);
+          activeSources++;
+        } else {
+          qWarning() << "No PipeWire node for voice chat app:" << vcApp;
+        }
+      }
+
+      // === Microphone (track 2 in separate; next contiguous slot in merged) ===
+      {
+        const int micTrack = isSeparate ? 2 : nextContiguous++;
+        m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
+            m_settings->microphoneDevice() == "default" ? QString()
+                                                         : m_settings->microphoneDevice()), micTrack);
+        activeSources++;
+      }
+
+      // Separate: always 3 streams so the file layout is consistent.
+      // Merged: only wait for the sources that are actually running.
+      activeAudioTrackCount = isSeparate ? 3 : activeSources;
+    }
+  }
+#else
+  int activeAudioTrackCount = 0;
+#endif
+
   // Create recording session to coordinate everything
   m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
-      m_muxer.get(), m_audioMixer);
+      m_muxer.get(), m_audioMixer,
+      m_settings->separateAudioTracks(),
+      m_settings->audioBitrate(),
+      activeAudioTrackCount);
 
   // Connect error signals
   connect(m_session.get(), &RecordingSession::errorOccurred, this,
@@ -279,6 +392,13 @@ void RecordingManager::teardownPipeline() {
   if (m_session) {
     m_session->stop();
     m_session.reset();
+  }
+
+  // Remove audio sources from mixer (they were stopped by the session)
+  if (m_audioMixer) {
+    for (int i = 0; i < AudioMixer::kTrackCount; ++i) {
+      m_audioMixer->removeSource(i);
+    }
   }
 
   m_muxer.reset();

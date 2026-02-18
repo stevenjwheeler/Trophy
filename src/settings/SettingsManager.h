@@ -39,6 +39,8 @@ class SettingsManager : public QObject {
   Q_PROPERTY(bool useVBR READ useVBR WRITE setUseVBR NOTIFY useVBRChanged)
 
   // Audio settings
+  Q_PROPERTY(QString audioMode READ audioMode WRITE setAudioMode NOTIFY
+                 audioModeChanged)
   Q_PROPERTY(QString gameAudioDevice READ gameAudioDevice WRITE
                  setGameAudioDevice NOTIFY gameAudioDeviceChanged)
   Q_PROPERTY(QString microphoneDevice READ microphoneDevice WRITE
@@ -101,6 +103,9 @@ public:
   void setEncoderPreset(const QString &preset);
 
   // Audio settings
+  QString audioMode() const { return m_audioMode; }
+  void setAudioMode(const QString &mode);
+
   QString gameAudioDevice() const { return m_gameAudioDevice; }
   void setGameAudioDevice(const QString &device);
 
@@ -149,6 +154,7 @@ signals:
   void useVBRChanged();
 
   // Audio
+  void audioModeChanged();
   void gameAudioDeviceChanged();
   void microphoneDeviceChanged();
   void voiceChatAppChanged();
@@ -186,6 +192,7 @@ private:
   bool m_useVBR = true;
 
   // Audio settings
+  QString m_audioMode = "game";
   QString m_gameAudioDevice = "default";
   QString m_microphoneDevice = "default";
   QString m_voiceChatApp = "discord";

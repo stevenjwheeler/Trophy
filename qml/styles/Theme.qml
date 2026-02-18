@@ -18,6 +18,7 @@ QtObject {
     readonly property color primaryColor: "#e94560"
     readonly property color primaryHoverColor: "#ff6b6b"
     readonly property color secondaryColor: "#0f3460"
+    readonly property color highlightedColor: '#1c62b8'
     readonly property color textColor: "#eaeaea"
     readonly property color textSecondaryColor: "#a0a0a0"
     readonly property color textMutedColor: "#6c6c6c"

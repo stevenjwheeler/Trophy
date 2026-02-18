@@ -21,6 +21,7 @@ class GameDetectionService;
 class NotificationService;
 class AudioMixer;
 class WindowService;
+class AudioDeviceEnumerator;
 } // namespace GameRecorder
 
 namespace GameRecorder {
@@ -93,6 +94,7 @@ private:
   std::unique_ptr<NotificationService> m_notificationService;
   std::unique_ptr<AudioMixer> m_audioMixer;
   std::unique_ptr<WindowService> m_windowService;
+  std::unique_ptr<AudioDeviceEnumerator> m_audioDeviceEnumerator;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
 
 };

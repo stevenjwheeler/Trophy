@@ -76,6 +76,10 @@ private:
 
   int64_t m_sampleCount = 0;
   bool m_initialized = false;
+
+  // Frame accumulation buffer (AAC requires exactly 1024 samples per frame)
+  std::vector<float> m_accumBuffer;
+  int m_requiredFrameSize = 1024;  // AAC standard frame size
 };
 
 } // namespace GameRecorder
