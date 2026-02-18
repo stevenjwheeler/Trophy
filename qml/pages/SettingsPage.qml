@@ -563,7 +563,6 @@ Page {
 
                     SettingItem {
                         label: qsTr("Audio Track Configuration")
-                        visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -574,8 +573,8 @@ Page {
                                 color: "transparent"
                                 radius: Theme.radiusSmall
                                 border.width: 1
-                                border.color: settingsManager && !settingsManager.separateAudioTracks 
-                                              ? Theme.highlightedColor 
+                                border.color: settingsManager && !settingsManager.separateAudioTracks
+                                              ? Theme.highlightedColor
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
@@ -593,7 +592,13 @@ Page {
                                             font.weight: Font.Medium
                                         }
                                         Label {
-                                            text: qsTr("Game and voice chat audio mixed together, mic audio in a separate track.")
+                                            text: {
+                                                let mode = settingsManager ? settingsManager.audioMode : "game"
+                                                if (mode === "desktop")
+                                                    return qsTr("System audio and microphone mixed together into one track.")
+                                                else
+                                                    return qsTr("Game, voice chat and microphone all mixed together into one track.")
+                                            }
                                             color: Theme.textMutedColor
                                             font.pixelSize: Theme.fontSizeSmall
                                             wrapMode: Text.WordWrap
@@ -607,7 +612,7 @@ Page {
                                         onClicked: if (settingsManager) settingsManager.separateAudioTracks = false
                                     }
                                 }
-                                
+
                                 // Make the whole rectangle clickable
                                 MouseArea {
                                     anchors.fill: parent
@@ -622,8 +627,8 @@ Page {
                                 color: "transparent"
                                 radius: Theme.radiusSmall
                                 border.width: 1
-                                border.color: settingsManager && settingsManager.separateAudioTracks 
-                                              ? Theme.highlightedColor 
+                                border.color: settingsManager && settingsManager.separateAudioTracks
+                                              ? Theme.highlightedColor
                                               : Theme.withOpacity(Theme.textColor, 0.1)
 
                                 RowLayout {
@@ -641,7 +646,13 @@ Page {
                                             font.weight: Font.Medium
                                         }
                                         Label {
-                                            text: qsTr("Records game, voice chat and mic audio to separate tracks.\nUseful if you plan to edit your videos or adjust volume levels later.")
+                                            text: {
+                                                let mode = settingsManager ? settingsManager.audioMode : "game"
+                                                if (mode === "desktop")
+                                                    return qsTr("System audio and microphone on separate tracks.\n⚠ In media players, you must switch audio tracks to hear both.")
+                                                else
+                                                    return qsTr("Game, voice chat and microphone on separate tracks.\n⚠ In media players, you must switch audio tracks to hear all audio.")
+                                            }
                                             color: Theme.textMutedColor
                                             font.pixelSize: Theme.fontSizeSmall
                                             wrapMode: Text.WordWrap
