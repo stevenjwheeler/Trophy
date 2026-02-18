@@ -196,6 +196,7 @@ bool EncoderFactory::probeVaapi() {
                                    nullptr, nullptr, 0);
   if (ret < 0) {
     qDebug() << "VA-API probe failed: no usable VA-API device found";
+    qInfo() << "VA-API is not available";
     return false;
   }
 
@@ -237,6 +238,7 @@ bool EncoderFactory::probeVaapi() {
     avcodec_free_context(&ctx);
     av_buffer_unref(&hwDeviceCtx);
     qDebug() << "VA-API probe failed: could not initialise hw frames context";
+    qInfo() << "VA-API is not available";
     return false;
   }
 
@@ -250,6 +252,7 @@ bool EncoderFactory::probeVaapi() {
   if (ret < 0) {
     qDebug() << "VA-API probe failed: codec could not be opened (no encoding "
                 "entrypoints)";
+    qInfo() << "VA-API is not available";
     return false;
   }
 
