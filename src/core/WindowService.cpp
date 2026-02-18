@@ -115,6 +115,21 @@ QString WindowService::getProcessNameForWindow(unsigned long windowId) {
   return QString::fromUtf8(commFile.readAll()).trimmed();
 }
 
+QString WindowService::getWindowClassForWindow(unsigned long windowId) {
+  if (!m_display || windowId == 0)
+    return QString();
+
+  Display *dpy = static_cast<Display *>(m_display);
+  XClassHint classHint;
+  if (!XGetClassHint(dpy, static_cast<Window>(windowId), &classHint))
+    return QString();
+
+  QString cls = QString::fromLocal8Bit(classHint.res_class);
+  XFree(classHint.res_name);
+  XFree(classHint.res_class);
+  return cls;
+}
+
 QVariantList WindowService::getVisibleWindows() {
   QVariantList windowList;
   if (!m_display) {

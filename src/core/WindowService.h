@@ -30,6 +30,11 @@ public:
   QString getProcessNameForWindow(unsigned long windowId);
 
   /**
+   * @brief Get the X11 WM_CLASS resource class for a window (e.g. "Spotify")
+   */
+  QString getWindowClassForWindow(unsigned long windowId);
+
+  /**
    * @brief Set the Trophy application window to exclude from listings
    */
   void setTrophyWindowId(unsigned long windowId);
