@@ -49,8 +49,6 @@ class SettingsManager : public QObject {
                  voiceChatAppChanged)
   Q_PROPERTY(bool separateAudioTracks READ separateAudioTracks WRITE
                  setSeparateAudioTracks NOTIFY separateAudioTracksChanged)
-  Q_PROPERTY(int audioBitrate READ audioBitrate WRITE setAudioBitrate NOTIFY
-                 audioBitrateChanged)
 
   // Storage settings
   Q_PROPERTY(QString recordingsPath READ recordingsPath WRITE setRecordingsPath
@@ -118,9 +116,6 @@ public:
   bool separateAudioTracks() const { return m_separateAudioTracks; }
   void setSeparateAudioTracks(bool separate);
 
-  int audioBitrate() const { return m_audioBitrate; }
-  void setAudioBitrate(int bitrate);
-
   // Storage settings
   QString recordingsPath() const { return m_recordingsPath; }
   void setRecordingsPath(const QString &path);
@@ -159,7 +154,6 @@ signals:
   void microphoneDeviceChanged();
   void voiceChatAppChanged();
   void separateAudioTracksChanged();
-  void audioBitrateChanged();
 
   // Storage
   void recordingsPathChanged();
@@ -197,7 +191,6 @@ private:
   QString m_microphoneDevice = "default";
   QString m_voiceChatApp = "discord";
   bool m_separateAudioTracks = true;
-  int m_audioBitrate = 192; // kbps
 
   // Storage settings
   QString m_recordingsPath;

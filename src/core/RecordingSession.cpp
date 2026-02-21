@@ -7,12 +7,17 @@
 
 #include "RecordingSession.h"
 #include "audio/AudioMixer.h"
+#include "audio/PipeWireAudioSource.h"
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/IEncoder.h"
 #include "muxing/IMuxer.h"
 
 #include <QDebug>
 #include <algorithm>
+
+extern "C" {
+#include <pipewire/pipewire.h>
+}
 
 namespace GameRecorder {
 
@@ -234,6 +239,16 @@ bool RecordingSession::start() {
     m_audioMixer->startAll();
   }
 
+  // Set up periodic checking for newly-appeared audio nodes
+  if (!m_gameProcess.isEmpty() || !m_voiceChatApp.isEmpty()) {
+    m_audioNodeCheckTimer = new QTimer(this);
+    m_audioNodeCheckTimer->setInterval(3000);  // Check every 3 seconds
+    connect(m_audioNodeCheckTimer, &QTimer::timeout, this,
+            &RecordingSession::checkForNewAudioNodes);
+    m_audioNodeCheckTimer->start();
+    checkForNewAudioNodes();  // Immediate first check
+  }
+
   // Start video encoding thread
   m_encodingThread = std::thread([this]() { encodingLoop(); });
 
@@ -246,6 +261,13 @@ void RecordingSession::stop() {
   }
 
   qInfo() << "Stopping recording session...";
+
+  // Stop audio node checking
+  if (m_audioNodeCheckTimer) {
+    m_audioNodeCheckTimer->stop();
+    m_audioNodeCheckTimer->deleteLater();
+    m_audioNodeCheckTimer = nullptr;
+  }
 
   if (m_capture) {
     m_capture->stopCapture();
@@ -341,6 +363,63 @@ void RecordingSession::encodingLoop() {
   }
 
   qInfo() << "Encoding thread stopped";
+}
+
+void RecordingSession::checkForNewAudioNodes() {
+  if (!m_running || !m_audioMixer) {
+    return;
+  }
+
+  bool allConnected = true;
+
+  // Check for game audio (track 0)
+  if (!m_sourceConnected[0] && (!m_gameProcess.isEmpty() || !m_windowClass.isEmpty())) {
+    allConnected = false;
+    uint32_t nodeId = PW_ID_ANY;
+    QString nodeName, nodeSerial;
+
+    // Try process name first
+    if (!m_gameProcess.isEmpty()) {
+      nodeId = PipeWireAudioSource::findNodeByProcessName(m_gameProcess, &nodeName,
+                                                          &nodeSerial);
+    }
+
+    // Fall back to window class
+    if (nodeId == PW_ID_ANY && !m_windowClass.isEmpty()) {
+      nodeId = PipeWireAudioSource::findNodeByProcessName(m_windowClass, &nodeName,
+                                                          &nodeSerial);
+    }
+
+    if (nodeId != PW_ID_ANY) {
+      qInfo() << "Game audio node appeared, connecting:" << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
+      m_audioMixer->addSource(
+          PipeWireAudioSource::createApplicationSource(nodeId, nodeName, nodeSerial),
+          0);
+      m_sourceConnected[0] = true;
+    }
+  }
+
+  // Check for voice chat audio (track 1)
+  if (!m_sourceConnected[1] && !m_voiceChatApp.isEmpty()) {
+    allConnected = false;
+    QString nodeName, nodeSerial;
+    uint32_t nodeId =
+        PipeWireAudioSource::findNodeByProcessName(m_voiceChatApp, &nodeName, &nodeSerial);
+
+    if (nodeId != PW_ID_ANY) {
+      qInfo() << "Voice chat app node appeared, connecting:" << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
+      m_audioMixer->addSource(
+          PipeWireAudioSource::createApplicationSource(nodeId, nodeName, nodeSerial),
+          1);
+      m_sourceConnected[1] = true;
+    }
+  }
+
+  // Stop checking once all expected sources are connected
+  if (allConnected && m_audioNodeCheckTimer) {
+    m_audioNodeCheckTimer->stop();
+    qInfo() << "All expected audio nodes connected, stopping node checks";
+  }
 }
 
 } // namespace GameRecorder

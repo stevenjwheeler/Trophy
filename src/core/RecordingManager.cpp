@@ -259,6 +259,12 @@ bool RecordingManager::buildPipeline() {
   // Set up audio sources in the mixer before starting the session
 #ifdef HAVE_PIPEWIRE
   int activeAudioTrackCount = 0;
+  QString gameProcess;
+  QString windowClass;
+  QString vcApp;
+  bool gameSourceAdded = false;
+  bool vcSourceAdded = false;
+
   if (m_audioMixer) {
     QString mode = m_settings->audioMode();
 
@@ -285,8 +291,6 @@ bool RecordingManager::buildPipeline() {
       int activeSources = 0;
 
       // === Game audio (always at track 0) ===
-      QString gameProcess;
-      QString windowClass;
       if (m_manualWindowId != 0 && m_windowService) {
           gameProcess = m_windowService->getProcessNameForWindow(m_manualWindowId);
           windowClass = m_windowService->getWindowClassForWindow(m_manualWindowId);
@@ -318,19 +322,16 @@ bool RecordingManager::buildPipeline() {
           m_audioMixer->addSource(
               PipeWireAudioSource::createApplicationSource(nodeId, nodeName, nodeSerial),
               gameTrack);
+          activeSources++;
+          gameSourceAdded = true;
         } else {
           qWarning() << "No PipeWire node found for process" << gameProcess
-                     << "/ class" << windowClass << "— using monitor";
-          QString gameDeviceId = m_settings->gameAudioDevice();
-          qInfo() << "Game mode monitor fallback: using game audio device:" << gameDeviceId;
-          m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
-              gameDeviceId == "default" ? QString() : gameDeviceId), gameTrack);
+                     << "/ class" << windowClass << "— game audio track will be silent";
         }
-        activeSources++;
       }
 
       // === Voice chat (track 1 in separate; next contiguous slot in merged) ===
-      QString vcApp = m_settings->voiceChatApp().trimmed();
+      vcApp = m_settings->voiceChatApp().trimmed();
       if (!vcApp.isEmpty()) {
         QString vcNodeName, vcSerial;
         uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(vcApp, &vcNodeName, &vcSerial);
@@ -340,6 +341,7 @@ bool RecordingManager::buildPipeline() {
               PipeWireAudioSource::createApplicationSource(nodeId, vcNodeName, vcSerial),
               voiceTrack);
           activeSources++;
+          vcSourceAdded = true;
         } else {
           qWarning() << "No PipeWire node for voice chat app:" << vcApp;
         }
@@ -368,8 +370,19 @@ bool RecordingManager::buildPipeline() {
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
       m_muxer.get(), m_audioMixer,
       m_settings->separateAudioTracks(),
-      m_settings->audioBitrate(),
+      192,  // Audio bitrate: hard-coded to 192 kbps (CD quality)
       activeAudioTrackCount);
+
+  // Set app names for periodic node checking during recording
+  m_session->setGameApps(gameProcess, windowClass);
+  m_session->setVoiceChatApp(vcApp);
+
+#ifdef HAVE_PIPEWIRE
+  // If sources were already found and added during buildPipeline, mark them as
+  // connected so the node-check timer doesn't replace the already-running sources.
+  if (gameSourceAdded) m_session->markSourceConnected(0);
+  if (vcSourceAdded)   m_session->markSourceConnected(1);
+#endif
 
   // Connect error signals
   connect(m_session.get(), &RecordingSession::errorOccurred, this,

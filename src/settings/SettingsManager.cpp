@@ -86,7 +86,6 @@ void SettingsManager::load() {
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
   m_separateAudioTracks = audio["separateTracks"].toBool(false);
-  m_audioBitrate = audio["audioBitrate"].toInt(192);
 
   // Load storage settings
   QJsonObject storage = root["storage"].toObject();
@@ -138,7 +137,6 @@ void SettingsManager::save() {
   audio["microphoneDevice"] = m_microphoneDevice;
   audio["voiceChatApp"] = m_voiceChatApp;
   audio["separateTracks"] = m_separateAudioTracks;
-  audio["audioBitrate"] = m_audioBitrate;
   root["audio"] = audio;
 
   // Storage settings
@@ -194,7 +192,6 @@ void SettingsManager::resetToDefaults() {
   emit microphoneDeviceChanged();
   emit voiceChatAppChanged();
   emit separateAudioTracksChanged();
-  emit audioBitrateChanged();
 
   emit recordingsPathChanged();
   emit maxStorageSizeChanged();
@@ -221,7 +218,6 @@ void SettingsManager::loadDefaults() {
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
   m_separateAudioTracks = false;
-  m_audioBitrate = 192;
 
   // Storage
   m_recordingsPath =
@@ -346,14 +342,6 @@ void SettingsManager::setSeparateAudioTracks(bool separate) {
     m_separateAudioTracks = separate;
     save();
     emit separateAudioTracksChanged();
-  }
-}
-
-void SettingsManager::setAudioBitrate(int bitrate) {
-  if (m_audioBitrate != bitrate) {
-    m_audioBitrate = bitrate;
-    save();
-    emit audioBitrateChanged();
   }
 }
 

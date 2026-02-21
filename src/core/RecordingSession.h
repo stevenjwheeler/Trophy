@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -54,6 +55,19 @@ public:
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
 
+  // Set app names to watch for (called by RecordingManager during setup)
+  void setGameApps(const QString &processName, const QString &windowClass) {
+    m_gameProcess = processName;
+    m_windowClass = windowClass;
+  }
+  void setVoiceChatApp(const QString &appName) { m_voiceChatApp = appName; }
+
+  // Mark a track as already having a source so the node-check timer won't re-add it
+  void markSourceConnected(int trackIndex) {
+    if (trackIndex >= 0 && trackIndex < kAudioTrackCount)
+      m_sourceConnected[trackIndex] = true;
+  }
+
 signals:
   void errorOccurred(const QString &error);
   void frameEncoded(qint64 frameNumber);
@@ -61,6 +75,7 @@ signals:
 private:
   void encodingLoop();
   void audioLoop();
+  void checkForNewAudioNodes();
 
   // Track index to muxer stream index: audio stream N = track N + 1
   static constexpr int kAudioTrackCount = 3;
@@ -97,6 +112,13 @@ private:
   std::mutex m_queueMutex;
   std::condition_variable m_queueCv;
   const size_t MAX_QUEUE_SIZE = 30; // ~0.5s of buffer at 60fps
+
+  // Audio node reconnection tracking
+  QTimer *m_audioNodeCheckTimer = nullptr;
+  QString m_gameProcess;      // Game process name to watch for
+  QString m_windowClass;      // X11 window class to watch for
+  QString m_voiceChatApp;     // Voice chat app name to watch for
+  std::array<bool, kAudioTrackCount> m_sourceConnected{};  // Track which sources are connected
 };
 
 } // namespace GameRecorder

@@ -6,6 +6,7 @@
  */
 
 #include "AudioDeviceEnumerator.h"
+#include "PipeWireAudioSource.h"
 #include <QDebug>
 
 #ifdef HAVE_PIPEWIRE
@@ -54,6 +55,12 @@ void AudioDeviceEnumerator::refresh() {
   }
 
   emit devicesChanged();
+}
+
+void AudioDeviceEnumerator::refreshAudioApps() {
+  m_audioApps = PipeWireAudioSource::enumerateAudioApps();
+  emit audioAppsChanged();
+  qInfo() << "Audio apps enumeration: found" << m_audioApps.size() << "apps";
 }
 
 QString AudioDeviceEnumerator::defaultInputDevice() const {

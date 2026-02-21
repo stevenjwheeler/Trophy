@@ -53,6 +53,20 @@ void AudioMixer::addSource(std::unique_ptr<IAudioSource> source,
 
     qInfo() << "Audio source added to track" << trackIndex << ":"
             << track.source->displayName();
+
+    // If the mixer is already running (e.g., a source added mid-recording by
+    // the node-check timer), initialize and start it immediately.
+    if (m_started) {
+      AudioConfig config;
+      config.sampleRate = m_sampleRate;
+      config.channels = m_channels;
+      if (track.source->initialize(config)) {
+        if (!track.source->start())
+          qWarning() << "Failed to start late-added audio source on track" << trackIndex;
+      } else {
+        qWarning() << "Failed to initialize late-added audio source on track" << trackIndex;
+      }
+    }
   }
 }
 
@@ -119,6 +133,7 @@ float AudioMixer::getTrackLevel(int trackIndex) const {
 bool AudioMixer::startAll() {
   std::lock_guard<std::mutex> lock(m_mutex);
 
+  m_started = true;
   bool allStarted = true;
   for (auto &track : m_tracks) {
     if (track.source) {
@@ -147,6 +162,7 @@ bool AudioMixer::startAll() {
 void AudioMixer::stopAll() {
   std::lock_guard<std::mutex> lock(m_mutex);
 
+  m_started = false;
   for (auto &track : m_tracks) {
     if (track.source) {
       track.source->stop();
@@ -192,6 +208,9 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   } else {
     track.peakLevel.store(currentPeak * 0.95f);
   }
+
+  // Emit level change signal for UI updates
+  emit trackLevelChanged(trackIndex, track.peakLevel.load());
 
   // Forward audio to encoder callback (called on PipeWire thread)
   if (!track.config.muted && m_trackAudioCallback) {

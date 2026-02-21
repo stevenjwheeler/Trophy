@@ -261,26 +261,38 @@ Page {
                         Layout.alignment: Qt.AlignVCenter
 
                         AudioLevelMeter {
+                            id: gameAudioMeter
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Game")
-                            level: 0
+                            level: audioMixer ? audioMixer.getTrackLevel(0) : 0
                         }
 
                         AudioLevelMeter {
+                            id: commsAudioMeter
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Comms")
-                            level: 0
+                            level: audioMixer ? audioMixer.getTrackLevel(1) : 0
                         }
 
                         AudioLevelMeter {
+                            id: micAudioMeter
                             Layout.fillHeight: true
                             Layout.preferredWidth: 30
                             label: qsTr("Mic")
-                            level: 0
+                            level: audioMixer ? audioMixer.getTrackLevel(2) : 0
                         }
 
+                    }
+
+                    Connections {
+                        target: audioMixer
+                        function onTrackLevelChanged(trackIndex, level) {
+                            if (trackIndex === 0) gameAudioMeter.level = level;
+                            else if (trackIndex === 1) commsAudioMeter.level = level;
+                            else if (trackIndex === 2) micAudioMeter.level = level;
+                        }
                     }
 
                 }

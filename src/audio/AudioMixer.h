@@ -91,6 +91,7 @@ private:
 
   int m_sampleRate;
   int m_channels;
+  bool m_started = false;  // True after startAll() is called
   std::array<Track, kTrackCount> m_tracks;
   mutable std::mutex m_mutex;
   TrackAudioCallback m_trackAudioCallback;

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "IAudioSource.h"
+#include <QVariantList>
 #include <atomic>
 #include <memory>
 
@@ -52,6 +53,12 @@ public:
   static uint32_t findNodeByProcessName(const QString &processName,
                                         QString *outNodeName = nullptr,
                                         QString *outSerial   = nullptr);
+
+  /**
+   * @brief Enumerate all active audio applications.
+   * @return List of QVariantMap objects with keys: "name", "binary", "nodeId"
+   */
+  static QVariantList enumerateAudioApps();
 
   bool initialize(const AudioConfig &config) override;
   void setCallback(AudioCallback callback) override;

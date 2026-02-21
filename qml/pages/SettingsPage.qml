@@ -678,17 +678,36 @@ Page {
                     }
 
                     SettingItem {
-                        label: qsTr("Audio Bitrate")
-                        helpText: qsTr("192 kbps is CD quality and recommended for most users.")
-                        RowLayout {
-                            spacing: Theme.spacingSmall
-                            Repeater {
-                                model: [128, 192, 256, 320]
-                                TrophyRadioButton {
-                                    enabled: !(recordingManager && recordingManager.isRecording)
-                                    text: modelData + " kbps"
-                                    checked: settingsManager ? settingsManager.audioBitrate === modelData : false
-                                    onClicked: if (settingsManager) settingsManager.audioBitrate = modelData
+                        label: qsTr("Microphone")
+                        helpText: qsTr("Your voice input device.")
+
+                        TrophyComboBox {
+                            id: microphoneBox
+                            Layout.fillWidth: true
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.inputDevices : []
+
+                            model: {
+                                let names = ["Default Input"];
+                                for (let d of devices) { if (d.id !== "default") names.push(d.name); }
+                                names;
+                            }
+
+                            Binding {
+                                target: microphoneBox
+                                property: "currentIndex"
+                                value: (function() {
+                                    if (!settingsManager || !audioDeviceEnumerator) return 0;
+                                    let devs = audioDeviceEnumerator.inputDevices;
+                                    let saved = settingsManager.microphoneDevice;
+                                    for (let i = 0; i < devs.length; i++) { if (devs[i].id === saved) return i; }
+                                    return 0;
+                                })()
+                            }
+
+                            onActivated: {
+                                if (settingsManager && audioDeviceEnumerator && currentIndex < devices.length) {
+                                    settingsManager.microphoneDevice = devices[currentIndex].id;
                                 }
                             }
                         }
@@ -734,51 +753,66 @@ Page {
                     }
 
                     SettingItem {
-                        label: qsTr("Microphone")
-                        helpText: qsTr("Your voice input device.")
-
-                        TrophyComboBox {
-                            id: microphoneBox
-                            Layout.fillWidth: true
-                            enabled: !(recordingManager && recordingManager.isRecording)
-                            property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.inputDevices : []
-
-                            model: {
-                                let names = ["Default Input"];
-                                for (let d of devices) { if (d.id !== "default") names.push(d.name); }
-                                names;
-                            }
-
-                            Binding {
-                                target: microphoneBox
-                                property: "currentIndex"
-                                value: (function() {
-                                    if (!settingsManager || !audioDeviceEnumerator) return 0;
-                                    let devs = audioDeviceEnumerator.inputDevices;
-                                    let saved = settingsManager.microphoneDevice;
-                                    for (let i = 0; i < devs.length; i++) { if (devs[i].id === saved) return i; }
-                                    return 0;
-                                })()
-                            }
-
-                            onActivated: {
-                                if (settingsManager && audioDeviceEnumerator && currentIndex < devices.length) {
-                                    settingsManager.microphoneDevice = devices[currentIndex].id;
-                                }
-                            }
-                        }
-                    }
-
-                    SettingItem {
                         label: qsTr("Voice Chat App")
-                        helpText: qsTr("Process name (e.g. 'discord') for dedicated capture.")
+                        helpText: qsTr("Select from running audio applications.")
                         visible: settingsManager ? settingsManager.audioMode === "game" : true
 
-                        TrophyTextField {
+                        RowLayout {
                             Layout.fillWidth: true
-                            text: settingsManager ? settingsManager.voiceChatApp : ""
-                            placeholderText: qsTr("e.g., discord, teamspeak")
-                            onEditingFinished: if (settingsManager) settingsManager.voiceChatApp = text
+                            spacing: Theme.spacingSmall
+
+                            TrophyComboBox {
+                                id: voiceChatAppBox
+                                Layout.fillWidth: true
+                                enabled: !(recordingManager && recordingManager.isRecording)
+                                property var apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
+
+                                model: {
+                                    let names = ["None"];
+                                    for (let a of apps) {
+                                        names.push(a.name);
+                                    }
+                                    names;
+                                }
+
+                                Binding {
+                                    target: voiceChatAppBox
+                                    property: "currentIndex"
+                                    value: (function() {
+                                        if (!settingsManager || !audioDeviceEnumerator) return 0;
+                                        let apps = audioDeviceEnumerator.audioApps;
+                                        let saved = settingsManager.voiceChatApp;
+                                        if (!saved || saved === "") return 0;
+                                        for (let i = 0; i < apps.length; i++) {
+                                            if (apps[i].binary === saved) return i + 1;
+                                        }
+                                        return 0;
+                                    })()
+                                }
+
+                                onActivated: {
+                                    if (settingsManager && audioDeviceEnumerator) {
+                                        if (currentIndex === 0) {
+                                            settingsManager.voiceChatApp = "";
+                                        } else if (currentIndex > 0 && currentIndex <= apps.length) {
+                                            settingsManager.voiceChatApp = apps[currentIndex - 1].binary;
+                                        }
+                                    }
+                                }
+
+                                Connections {
+                                    target: audioDeviceEnumerator
+                                    function onAudioAppsChanged() {
+                                        voiceChatAppBox.apps = audioDeviceEnumerator.audioApps;
+                                    }
+                                }
+                            }
+
+                            TrophyButton {
+                                text: qsTr("Refresh")
+                                enabled: audioDeviceEnumerator && !(recordingManager && recordingManager.isRecording)
+                                onClicked: if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+                            }
                         }
                     }
                 }
