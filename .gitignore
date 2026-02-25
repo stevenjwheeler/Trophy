@@ -56,3 +56,11 @@ __pycache__/
 # --- cache ---
 .cache/
 TODO.md
+
+# --- SonarQube ---
+.sonar/
+.scannerwork/
+.sonarqube/
+.sonar-scanner/
+.sonar-scanner.properties
+sonar-project.properties
