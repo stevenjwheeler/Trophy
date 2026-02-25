@@ -26,6 +26,7 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - **Full sessions or clips** - Records full sessions from open to close, or custom clip lengths using a hotkey
 - **Hardware-Accelerated Encoding** - Supports NVIDIA NVENC and AMD/Intel VA-API for minimal performance impact
 - **Software Fallback** - x264 encoding when hardware acceleration isn't available
+- **Multi-platform support** - Supports recording X11, Wayland and XWayland windows
 - **Multiple Container Formats** - MKV (crash-resilient) and MP4 output options
 - **Configurable Quality** - Adjustable bitrate, resolution, frame rate, and encoder presets
 
