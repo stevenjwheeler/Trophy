@@ -416,6 +416,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+# Coverage configuration (only when requested)
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
+
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Coverage reporting enabled")
+        target_compile_options(${PROJECT_NAME} PUBLIC --coverage -fprofile-arcs -ftest-coverage)
+        target_link_libraries(${PROJECT_NAME} PUBLIC --coverage)
+        
+        # Also apply to the App and Tests
+        target_compile_options(${PROJECT_NAME}App PRIVATE --coverage)
+        target_link_libraries(${PROJECT_NAME}App PRIVATE --coverage)
+    endif()
+endif()
+
 # Installation
 include(GNUInstallDirs)
 
