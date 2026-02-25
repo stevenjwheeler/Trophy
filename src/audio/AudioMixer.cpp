@@ -20,6 +20,12 @@ AudioMixer::AudioMixer(int sampleRate, int channels, QObject *parent)
   m_tracks[0].config = {0, "Game Audio", 1.0f, false};
   m_tracks[1].config = {1, "Voice Chat", 1.0f, false};
   m_tracks[2].config = {2, "Microphone", 1.0f, false};
+  // Atomic copies start at defaults (1.0 volume, unmuted) — already set by
+  // the in-class member initializers, but be explicit for clarity.
+  for (auto &track : m_tracks) {
+    track.atomicVolume.store(track.config.volume, std::memory_order_relaxed);
+    track.atomicMuted.store(track.config.muted, std::memory_order_relaxed);
+  }
 
   qInfo() << "AudioMixer initialized:" << sampleRate << "Hz," << channels
           << "channels";
@@ -89,7 +95,9 @@ void AudioMixer::setTrackVolume(int trackIndex, float volume) {
     return;
   }
 
-  m_tracks[trackIndex].config.volume = std::clamp(volume, 0.0f, 2.0f);
+  float clamped = std::clamp(volume, 0.0f, 2.0f);
+  m_tracks[trackIndex].config.volume = clamped;
+  m_tracks[trackIndex].atomicVolume.store(clamped, std::memory_order_relaxed);
   emit trackConfigChanged(trackIndex);
 }
 
@@ -99,6 +107,7 @@ void AudioMixer::setTrackMuted(int trackIndex, bool muted) {
   }
 
   m_tracks[trackIndex].config.muted = muted;
+  m_tracks[trackIndex].atomicMuted.store(muted, std::memory_order_relaxed);
   emit trackConfigChanged(trackIndex);
 }
 
@@ -194,9 +203,12 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
     }
   }
 
-  // Apply volume and mute
-  if (!track.config.muted) {
-    peak *= track.config.volume;
+  // Apply volume and mute — read from atomics for lock-free access on the
+  // PipeWire callback thread (config fields are written from the UI thread).
+  const bool muted = track.atomicMuted.load(std::memory_order_relaxed);
+  const float volume = track.atomicVolume.load(std::memory_order_relaxed);
+  if (!muted) {
+    peak *= volume;
   } else {
     peak = 0.0f;
   }
@@ -213,7 +225,7 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   emit trackLevelChanged(trackIndex, track.peakLevel.load());
 
   // Forward audio to encoder callback (called on PipeWire thread)
-  if (!track.config.muted && m_trackAudioCallback) {
+  if (!muted && m_trackAudioCallback) {
     m_trackAudioCallback(trackIndex, samples, frameCount, m_sampleRate,
                          m_channels);
   }
