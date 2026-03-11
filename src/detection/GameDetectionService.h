@@ -7,56 +7,51 @@
 
 #pragma once
 
+#include <QMap>
 #include <QObject>
 #include <QSet>
-#include <QString>
-#include <QStringList>
 #include <QTimer>
+#include <memory>
 
 namespace GameRecorder {
 
 class ProcessHeuristics;
 class GameWhitelist;
+class GameDetectionServiceTest; // Forward declaration for unit testing
 
-/**
- * @brief Detects running games and monitors focus
- *
- * Uses a combination of window monitoring, process heuristics,
- * and user-defined rules to identify games.
- */
 class GameDetectionService : public QObject {
   Q_OBJECT
 
-  friend class GameDetectionServiceTest;
-
+  // Property system for UI/QML synchronization
   Q_PROPERTY(
       QString currentGameName READ currentGameName NOTIFY currentGameChanged)
+  Q_PROPERTY(bool isGameRunning READ isGameRunning NOTIFY currentGameChanged)
   Q_PROPERTY(
       qint64 currentGamePid READ currentGamePid NOTIFY currentGameChanged)
-  Q_PROPERTY(bool isGameRunning READ isGameRunning NOTIFY currentGameChanged)
   Q_PROPERTY(QStringList recentGames READ recentGames NOTIFY recentGamesChanged)
 
 public:
   explicit GameDetectionService(QObject *parent = nullptr);
-  ~GameDetectionService() override;
+  ~GameDetectionService();
 
   void start();
   void stop();
 
+  // Getters for properties
+  bool isGameRunning() const {
+    return m_currentGamePid > 0 && !m_currentGameName.isEmpty();
+  }
   QString currentGameName() const { return m_currentGameName; }
   qint64 currentGamePid() const { return m_currentGamePid; }
-  bool isGameRunning() const { return !m_currentGameName.isEmpty(); }
   QStringList recentGames() const { return m_recentGames; }
 
-  // Whitelist/Blacklist management
-  Q_INVOKABLE void addToWhitelist(const QString &windowClass,
-                                  const QString &displayName = QString());
-  Q_INVOKABLE void addToBlacklist(const QString &windowClass);
-  Q_INVOKABLE void removeFromWhitelist(const QString &windowClass);
-  Q_INVOKABLE void removeFromBlacklist(const QString &windowClass);
-
-  Q_INVOKABLE QStringList whitelist() const;
-  Q_INVOKABLE QStringList blacklist() const;
+  // Whitelist/Blacklist Management
+  void addToWhitelist(const QString &windowClass, const QString &displayName);
+  void addToBlacklist(const QString &windowClass);
+  void removeFromWhitelist(const QString &windowClass);
+  void removeFromBlacklist(const QString &windowClass);
+  QStringList whitelist() const;
+  QStringList blacklist() const;
 
 signals:
   void gameDetected(const QString &gameName, qint64 pid);
@@ -68,18 +63,28 @@ private slots:
   void checkForGames();
 
 private:
+  // Grant the test class access to private members (fixes your build errors)
+  friend class GameDetectionServiceTest;
+
+  // Internal identification helpers
+  uint getSteamAppId(qint64 pid);
+  QString getSteamAppName(uint appId);
+  QString formatDisplayName(const QString &rawName);
+
   void updateCurrentGame(const QString &gameName, qint64 pid);
   void addToRecentGames(const QString &gameName);
 
-  std::unique_ptr<ProcessHeuristics> m_heuristics;
-  std::unique_ptr<GameWhitelist> m_whitelist;
-  QTimer *m_pollTimer = nullptr;
-
+  bool m_running = false;
   QString m_currentGameName;
   qint64 m_currentGamePid = 0;
   QStringList m_recentGames;
-  bool m_running = false;
+
+  QTimer *m_pollTimer;
   QSet<qint64> m_nonGamePids;
+  QMap<uint, QString> m_steamNameCache; // Optimized name lookup
+
+  std::unique_ptr<ProcessHeuristics> m_heuristics;
+  std::unique_ptr<GameWhitelist> m_whitelist;
 };
 
 } // namespace GameRecorder

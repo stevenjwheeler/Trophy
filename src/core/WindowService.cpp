@@ -42,8 +42,8 @@ QString WindowService::fetchWindowTitle(unsigned long windowId) {
   unsigned long nitems, after;
   unsigned char *data = nullptr;
 
-  if (XGetWindowProperty(dpy, win, netWmName, 0, 1024, False, utf8String,
-                         &type, &format, &nitems, &after, &data) == Success) {
+  if (XGetWindowProperty(dpy, win, netWmName, 0, 1024, False, utf8String, &type,
+                         &format, &nitems, &after, &data) == Success) {
     if (data) {
       title = QString::fromUtf8((char *)data);
       XFree(data);
@@ -132,69 +132,106 @@ QString WindowService::getWindowClassForWindow(unsigned long windowId) {
 
 QVariantList WindowService::getVisibleWindows() {
   QVariantList windowList;
-  if (!m_display) {
-    qWarning() << "Failed to open X11 display for window listing";
+  if (!m_display)
     return windowList;
-  }
 
   Display *dpy = static_cast<Display *>(m_display);
   Window root = DefaultRootWindow(dpy);
   Window root_ret, parent_ret;
-  Window *children;
-  unsigned int nchildren;
+  Window *children = nullptr;
+  unsigned int nchildren = 0;
 
-  qInfo() << "Scanning X11 windows...";
+  if (!XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren)) {
+    return windowList;
+  }
 
-  if (XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren)) {
-    qInfo() << "Found" << nchildren << "top-level X11 windows";
-    for (unsigned int i = 0; i < nchildren; i++) {
-      // Skip Trophy's own window
-      if (children[i] == m_trophyWindowId) {
-        continue;
+  // Temporary storage: PID -> List of candidate windows
+  QMap<unsigned long, QList<QVariantMap>> pidGroups;
+
+  for (unsigned int i = 0; i < nchildren; i++) {
+    if (children[i] == m_trophyWindowId)
+      continue;
+
+    XClassHint classHint;
+    if (!XGetClassHint(dpy, children[i], &classHint))
+      continue;
+    QString windowClass = QString::fromLocal8Bit(classHint.res_class);
+    XFree(classHint.res_name);
+    XFree(classHint.res_class);
+
+    // 1. Immediate Steam Client Filter (The main app)
+    if (windowClass.toLower() == "steam" &&
+        fetchWindowTitle(children[i]) == "Steam")
+      continue;
+
+    QString title = fetchWindowTitle(children[i]);
+    if (title.isEmpty())
+      continue;
+
+    XWindowAttributes attrs;
+    if (!XGetWindowAttributes(dpy, children[i], &attrs) || attrs.width < 320 ||
+        attrs.height < 200)
+      continue;
+
+    unsigned long pid = getPidForWindow((unsigned long)children[i]);
+    if (pid == 0)
+      continue;
+
+    QVariantMap info;
+    info["id"] = (qlonglong)children[i];
+    info["title"] = title;
+    info["class"] = windowClass;
+    info["pid"] = (qlonglong)pid;
+
+    pidGroups[pid].append(info);
+  }
+
+  if (children)
+    XFree(children);
+
+  // 2. The Winner Selection Logic
+  for (auto it = pidGroups.begin(); it != pidGroups.end(); ++it) {
+    QList<QVariantMap> &candidates = it.value();
+
+    if (candidates.size() == 1) {
+      // Only one window for this PID? Make sure it's not a generic "Steam"
+      // label
+      if (candidates[0]["title"].toString() != "Steam") {
+        windowList.append(candidates[0]);
       }
+    } else {
+      // Multiple windows for one PID (The "RACCOIN" vs "Steam" situation)
+      QVariantMap bestWindow;
+      int bestScore = -1;
 
-      XWindowAttributes attrs;
-      if (XGetWindowAttributes(dpy, children[i], &attrs)) {
-        if (attrs.map_state == IsViewable && attrs.width > 32 &&
-            attrs.height > 32) {
+      for (const QVariantMap &win : candidates) {
+        QString title = win["title"].toString();
+        int score = 0;
 
-          QString title = fetchWindowTitle(children[i]);
+        // Penalty for generic names
+        if (title == "Steam")
+          score -= 10;
 
-          // If still no title, might be a shell/launcher, or just unnamed
-          if (title.isEmpty()) {
-            title = QString("Window %1").arg((qlonglong)children[i]);
-          }
+        // Bonus for length (Games usually have longer names than "Steam")
+        score += title.length();
 
-          XClassHint classHint;
-          bool hasClass = false;
-          QString windowClass;
-          if (XGetClassHint(dpy, children[i], &classHint)) {
-            windowClass = QString::fromLocal8Bit(classHint.res_class);
-            XFree(classHint.res_name);
-            XFree(classHint.res_class);
-            hasClass = !windowClass.isEmpty();
-          }
-
-          // Filter out windows that have no title and no class (usually system
-          // noise)
-          if (title.startsWith("Window ") && !hasClass) {
-            continue;
-          }
-
-          unsigned long pid = getPidForWindow((unsigned long)children[i]);
-
-          QVariantMap info;
-          info["id"] = (qlonglong)children[i];
-          info["title"] = title;
-          info["class"] = windowClass;
-          info["pid"] = (qlonglong)pid;
-
-          qInfo() << "Detected window:" << title << "[" << windowClass << "]";
-          windowList.append(info);
+        if (score > bestScore) {
+          bestScore = score;
+          bestWindow = win;
         }
       }
+
+      if (!bestWindow.isEmpty()) {
+        windowList.append(bestWindow);
+      }
     }
-    XFree(children);
+  }
+
+  // Final debug log of the survivors
+  for (const QVariant &v : windowList) {
+    QVariantMap m = v.toMap();
+    qDebug() << "Detected window:" << m["title"].toString() << "["
+             << m["class"].toString() << "]";
   }
 
   return windowList;

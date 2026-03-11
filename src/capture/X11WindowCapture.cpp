@@ -152,7 +152,10 @@ void X11WindowCapture::setFrameCallback(FrameCallback callback) {
 }
 
 bool X11WindowCapture::startCapture() {
-  if (m_capturing || !m_display || !m_shmImage) {
+  if (m_capturing) {
+    return true;
+  }
+  if (!m_display || !m_shmImage) {
     return false;
   }
 
@@ -160,6 +163,7 @@ bool X11WindowCapture::startCapture() {
   m_captureThread = std::thread([this]() { captureLoop(); });
 
   emit captureStarted();
+  emit ready();
   qInfo() << "X11 capture started";
   return true;
 }

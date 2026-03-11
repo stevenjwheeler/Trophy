@@ -42,6 +42,7 @@ class Application : public QGuiApplication {
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY recordingStateChanged)
   Q_PROPERTY(
       QString currentGameName READ currentGameName NOTIFY currentGameChanged)
+  Q_PROPERTY(bool isWayland READ isWayland CONSTANT)
 
 public:
   explicit Application(int &argc, char **argv);
@@ -70,9 +71,13 @@ public:
   // Property getters
   bool isRecording() const;
   QString currentGameName() const;
+  bool isWayland() const;
 
   // Encoder detection (called from QML)
   Q_INVOKABLE bool isEncoderAvailable(const QString &name) const;
+
+  // Keyboard modifiers helper
+  Q_INVOKABLE bool isControlModifierPressed() const;
 
 signals:
   void recordingStateChanged();

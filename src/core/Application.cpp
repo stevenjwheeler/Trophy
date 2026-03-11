@@ -10,13 +10,14 @@
 
 #include "Application.h"
 #include "NotificationService.h"
-#include "encoding/EncoderFactory.h"
 #include "RecordingManager.h"
 #include "StorageManager.h"
 #include "WindowService.h"
-#include "audio/AudioMixer.h"
 #include "audio/AudioDeviceEnumerator.h"
+#include "audio/AudioMixer.h"
+#include "capture/CaptureFactory.h"
 #include "detection/GameDetectionService.h"
+#include "encoding/EncoderFactory.h"
 #include "library/RecordingLibrary.h"
 #include "settings/SettingsManager.h"
 
@@ -121,7 +122,7 @@ bool Application::initialize() {
     if (window->handle()) {
       WId windowId = window->winId();
       m_windowService->setTrophyWindowId(static_cast<unsigned long>(windowId));
-      qInfo() << "Set Trophy window ID for filtering:" << windowId;
+      qDebug() << "Set Trophy window ID for filtering:" << windowId;
     }
   }
 
@@ -158,6 +159,7 @@ void Application::initializeServices() {
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
   m_recordingManager->setWindowService(m_windowService.get());
+  m_recordingManager->setGameDetectionService(m_gameDetector.get());
 }
 
 void Application::registerQmlTypes() {
@@ -257,6 +259,11 @@ QString Application::currentGameName() const {
   return m_gameDetector ? m_gameDetector->currentGameName() : QString();
 }
 
+bool Application::isWayland() const {
+  return CaptureFactory::detectDisplayServer() ==
+         CaptureFactory::DisplayServer::Wayland;
+}
+
 bool Application::isEncoderAvailable(const QString &name) const {
   if (name == "auto" || name == "x264")
     return true;
@@ -266,6 +273,10 @@ bool Application::isEncoderAvailable(const QString &name) const {
       return true;
   }
   return false;
+}
+
+bool Application::isControlModifierPressed() const {
+  return (QGuiApplication::keyboardModifiers() & Qt::ControlModifier) != 0;
 }
 
 } // namespace GameRecorder

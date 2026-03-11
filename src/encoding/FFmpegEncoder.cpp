@@ -118,7 +118,13 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   m_codecCtx->time_base = {1, 1000000};
   m_codecCtx->framerate = {config.fps, 1};
   m_codecCtx->gop_size = config.fps * 2;
-  m_codecCtx->max_b_frames = 2;
+  
+  // Decide on B-frames based on encoder type and preset
+  if (isHardwareEncoder() || preset() == "ultrafast" || preset() == "superfast" || preset() == "zerolatency") {
+    m_codecCtx->max_b_frames = 0;
+  } else {
+    m_codecCtx->max_b_frames = 2;
+  }
 
   // 2. Bitrate Configuration
   int64_t bps = static_cast<int64_t>(config.bitrate) * 1000;
@@ -351,7 +357,12 @@ bool FFmpegEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {
   output.data.resize(packet->size);
   memcpy(output.data.data(), packet->data, packet->size);
   output.pts = packet->pts;
-  output.dts = packet->dts;
+  output.dts = (packet->dts == AV_NOPTS_VALUE) ? packet->pts : packet->dts;
+  
+  // Ensure pts >= dts to avoid muxer warnings/errors in some containers
+  if (output.pts < output.dts) {
+    output.pts = output.dts;
+  }
   output.isKeyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
   output.streamIndex = 0;
   av_packet_unref(packet);
