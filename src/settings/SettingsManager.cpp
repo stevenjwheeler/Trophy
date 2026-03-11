@@ -101,6 +101,9 @@ void SettingsManager::load() {
   QJsonObject detection = root["detection"].toObject();
   m_autoDetectGames = detection["autoDetect"].toBool(true);
   m_autoRecordEnabled = detection["autoRecord"].toBool(false);
+  
+  // Load Wayland restore token
+  m_waylandRestoreToken = root["waylandRestoreToken"].toString();
 
   qInfo() << "Settings loaded from" << filePath;
   emit settingsLoaded();
@@ -152,6 +155,8 @@ void SettingsManager::save() {
   detection["autoDetect"] = m_autoDetectGames;
   detection["autoRecord"] = m_autoRecordEnabled;
   root["detection"] = detection;
+
+  root["waylandRestoreToken"] = m_waylandRestoreToken;
 
   // Write atomically using QSaveFile
   QSaveFile file(filePath);
@@ -399,6 +404,18 @@ void SettingsManager::setUseVBR(bool enabled) {
     save();
     emit useVBRChanged();
   }
+}
+
+void SettingsManager::setWaylandRestoreToken(const QString &token) {
+  if (m_waylandRestoreToken != token) {
+    m_waylandRestoreToken = token;
+    save();
+    emit waylandRestoreTokenChanged();
+  }
+}
+
+void SettingsManager::clearWaylandToken() {
+  setWaylandRestoreToken("");
 }
 
 } // namespace GameRecorder

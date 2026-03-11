@@ -10,6 +10,7 @@
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#include <qlogging.h>
 #ifdef HAVE_PIPEWIRE
 #include "audio/PipeWireAudioSource.h"
 #endif
@@ -19,6 +20,7 @@ extern "C" {
 }
 #include "capture/CaptureFactory.h"
 #include "capture/IVideoCaptureSource.h"
+#include "detection/GameDetectionService.h"
 #include "encoding/EncoderFactory.h"
 #include "encoding/IEncoder.h"
 #include "muxing/FFmpegMuxer.h"
@@ -63,12 +65,20 @@ void RecordingManager::setWindowService(WindowService *ws) {
   m_windowService = ws;
 }
 
+void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
+  m_gameDetector = detector;
+}
+
 void RecordingManager::startRecording(const QString &gameName,
-                                      unsigned long windowId /*= 0*/) {
+                                      unsigned long windowId /*= 0*/,
+                                      bool forceX11 /*= false*/) {
   if (m_state != RecordingState::Idle) {
     qWarning() << "Cannot start recording: not in Idle state";
     return;
   }
+
+  qDebug() << "startRecording called. gameName:" << gameName
+           << "windowId:" << windowId << "forceX11:" << forceX11;
 
   m_manualWindowId = windowId;
 
@@ -77,7 +87,16 @@ void RecordingManager::startRecording(const QString &gameName,
     return;
   }
 
-  m_currentGameName = gameName.isEmpty() ? "Recording" : gameName;
+  m_isManualRecording = gameName.isEmpty();
+
+  if (m_isManualRecording && m_manualWindowId != 0 && m_windowService) {
+    m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
+    if (m_currentGameName.isEmpty()) {
+      m_currentGameName = "Recording";
+    }
+  } else {
+    m_currentGameName = gameName.isEmpty() ? "Recording" : gameName;
+  }
   emit currentGameNameChanged();
 
   setState(RecordingState::Initializing);
@@ -98,7 +117,106 @@ void RecordingManager::startRecording(const QString &gameName,
     }
   }
 
-  // Build the recording pipeline
+  // 1. Create and initialize capture source
+  if (m_manualWindowId != 0 || forceX11) {
+    qInfo() << "Manual window ID provided or forceX11 requested, forcing X11 "
+               "capture source";
+    m_captureSource = CaptureFactory::createX11Source();
+  } else {
+    m_captureSource = CaptureFactory::createBestSource();
+  }
+
+  // Distinguish manual vs automatic for restore token usage
+  bool isManual = gameName.isEmpty();
+
+  if (!m_captureSource) {
+    emit recordingError("Failed to create capture source");
+    setState(RecordingState::Idle);
+    return;
+  }
+
+  // Connect ready signal to finish the pipeline
+  connect(m_captureSource.get(), &IVideoCaptureSource::ready, this,
+          &RecordingManager::finishPipelineAndStart, Qt::QueuedConnection);
+  connect(m_captureSource.get(), &IVideoCaptureSource::captureError, this,
+          &RecordingManager::onEncodingError, Qt::QueuedConnection);
+
+  CaptureConfig capConfig;
+  capConfig.targetFps = m_settings->fps();
+  capConfig.windowId = m_manualWindowId;
+
+  // Use restore token only for automatic recordings, always prompt for manual
+  if (!isManual) {
+    capConfig.waylandRestoreToken = m_settings->waylandRestoreToken();
+  }
+
+  if (!m_captureSource->initialize(capConfig)) {
+    emit recordingError("Failed to initialize capture source");
+    teardownPipeline();
+    setState(RecordingState::Idle);
+    return;
+  }
+
+  qInfo() << "Capture source initialized, starting capture...";
+  if (!m_captureSource->startCapture()) {
+    emit recordingError("Failed to start capture source");
+    teardownPipeline();
+    setState(RecordingState::Idle);
+    return;
+  }
+
+  // We wait for the 'ready' signal to initialize the rest of the pipeline
+  qInfo() << "Waiting for capture source to be ready...";
+}
+
+void RecordingManager::finishPipelineAndStart() {
+  if (m_state != RecordingState::Initializing) {
+    return;
+  }
+
+  qInfo() << "Capture source ready, finishing pipeline...";
+
+  if (m_captureSource) {
+    QString label = m_captureSource->sourceLabel();
+
+    // Wayland Fallback: If XDG Portal/PipeWire hides the application name,
+    // query the GameDetectionService for the foreground active game.
+    if (label.isEmpty() || label.toLower().contains("kwin") ||
+        label.toLower().contains("wayland") || label == "Unknown Game") {
+      if (m_gameDetector && m_gameDetector->isGameRunning()) {
+        label = m_gameDetector->currentGameName();
+        qInfo() << "RecordingManager: Using GameDetectionService name fallback:"
+                << label;
+      } else {
+        qWarning()
+            << "RecordingManager: Wayland captured generic node, but no "
+               "game is currently detected. Falling back to generic system "
+               "audio routing.";
+      }
+    }
+
+    if (m_isManualRecording) {
+      if (!label.isEmpty()) {
+        m_currentGameName = label;
+        emit currentGameNameChanged();
+        m_currentFilePath = generateOutputPath();
+      } else if (m_manualWindowId != 0 && m_windowService) {
+        // Fallback for X11 manual capture where capture source provides empty
+        // label
+        m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
+        if (!m_currentGameName.isEmpty()) {
+          emit currentGameNameChanged();
+          m_currentFilePath = generateOutputPath();
+        }
+      }
+    } else {
+      qInfo() << "RecordingManager: Automatic recording, keeping detected game "
+                 "name:"
+              << m_currentGameName;
+      // Do nothing, preserving the game name passed into startRecording
+    }
+  }
+
   if (!buildPipeline()) {
     emit recordingError("Failed to initialize recording pipeline");
     teardownPipeline();
@@ -106,7 +224,7 @@ void RecordingManager::startRecording(const QString &gameName,
     return;
   }
 
-  // Start recording
+  // Start timers and fully enter recording state
   m_recordingTimer.start();
   m_progressTimer->start();
 
@@ -175,18 +293,9 @@ void RecordingManager::setState(RecordingState newState) {
 }
 
 bool RecordingManager::buildPipeline() {
-  qInfo() << "Building recording pipeline...";
-
-  // Create capture source based on display server
-  if (m_manualWindowId != 0) {
-    qInfo() << "Manual window ID provided, forcing X11 capture source";
-    m_captureSource = CaptureFactory::createX11Source();
-  } else {
-    m_captureSource = CaptureFactory::createBestSource();
-  }
+  qInfo() << "Building encoding pipeline...";
 
   if (!m_captureSource) {
-    qCritical() << "Failed to create capture source";
     return false;
   }
 
@@ -198,21 +307,10 @@ bool RecordingManager::buildPipeline() {
     return false;
   }
 
-  qInfo() << "Using encoder:" << m_videoEncoder->name();
-
   // Create muxer
   m_muxer = std::make_unique<FFmpegMuxer>();
 
-  // Configure components
-  CaptureConfig capConfig;
-  capConfig.targetFps = m_settings->fps();
-  // Use manual window ID if provided, otherwise default to 0 (root window)
-  capConfig.windowId = m_manualWindowId;
-
-  if (!m_captureSource->initialize(capConfig)) {
-    qCritical() << "Failed to initialize capture source";
-    return false;
-  }
+  // Muxer doesn't need much early configuration, but capture and encoder do
 
   EncoderConfig encConfig;
 
@@ -272,14 +370,18 @@ bool RecordingManager::buildPipeline() {
       // Track 0: all system audio (sink monitor)
       QString gameDeviceId = m_settings->gameAudioDevice();
       qInfo() << "Desktop mode: using game audio device:" << gameDeviceId;
-      m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
-          gameDeviceId == "default" ? QString() : gameDeviceId), 0);
+      m_audioMixer->addSource(
+          PipeWireAudioSource::createMonitorSource(
+              gameDeviceId == "default" ? QString() : gameDeviceId),
+          0);
       activeAudioTrackCount++;
       // Track 1: microphone
       QString micDeviceId = m_settings->microphoneDevice();
       qInfo() << "Desktop mode: using microphone device:" << micDeviceId;
-      m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
-          micDeviceId == "default" ? QString() : micDeviceId), 1);
+      m_audioMixer->addSource(
+          PipeWireAudioSource::createInputSource(
+              micDeviceId == "default" ? QString() : micDeviceId),
+          1);
       activeAudioTrackCount++;
 
     } else { // "game" mode
@@ -291,9 +393,14 @@ bool RecordingManager::buildPipeline() {
       int activeSources = 0;
 
       // === Game audio (always at track 0) ===
+      uint32_t targetPid = 0;
       if (m_manualWindowId != 0 && m_windowService) {
-          gameProcess = m_windowService->getProcessNameForWindow(m_manualWindowId);
-          windowClass = m_windowService->getWindowClassForWindow(m_manualWindowId);
+        gameProcess =
+            m_windowService->getProcessNameForWindow(m_manualWindowId);
+        windowClass =
+            m_windowService->getWindowClassForWindow(m_manualWindowId);
+      } else if (m_captureSource) {
+        targetPid = m_captureSource->sourcePid();
       }
 
       {
@@ -302,9 +409,30 @@ bool RecordingManager::buildPipeline() {
 
         QString nodeName, nodeSerial;
 
-        // Try PID-based process name first
-        if (!gameProcess.isEmpty()) {
-          nodeId = PipeWireAudioSource::findNodeByProcessName(gameProcess, &nodeName, &nodeSerial);
+        // Try PID search first if we have one (more accurate on Wayland)
+        if (targetPid != 0) {
+          nodeId = PipeWireAudioSource::findNodeByPid(targetPid, &nodeName,
+                                                      &nodeSerial);
+          if (nodeId != 0xFFFFFFFFu)
+            qInfo() << "Game audio: found node via PID" << targetPid;
+        }
+
+        // Try process name / app id from capture source
+        if (nodeId == 0xFFFFFFFFu && m_captureSource) {
+          QString hint = m_captureSource->sourceProcessName();
+          if (!hint.isEmpty()) {
+            nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                                &nodeSerial);
+            if (nodeId != 0xFFFFFFFFu)
+              qInfo() << "Game audio: found node via capture source hint"
+                      << hint;
+          }
+        }
+
+        // Try derived process name (standard behavior)
+        if (nodeId == 0xFFFFFFFFu && !gameProcess.isEmpty()) {
+          nodeId = PipeWireAudioSource::findNodeByProcessName(
+              gameProcess, &nodeName, &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
             qInfo() << "Game audio: found node via process name" << gameProcess;
         }
@@ -312,34 +440,45 @@ bool RecordingManager::buildPipeline() {
         // Fall back to X11 window class name (handles Spotify and similar apps
         // whose _NET_WM_PID points to a kernel worker thread)
         if (nodeId == 0xFFFFFFFFu && !windowClass.isEmpty()) {
-          qInfo() << "Trying window class name for PipeWire lookup:" << windowClass;
-          nodeId = PipeWireAudioSource::findNodeByProcessName(windowClass, &nodeName, &nodeSerial);
+          qInfo() << "Trying window class name for PipeWire lookup:"
+                  << windowClass;
+          nodeId = PipeWireAudioSource::findNodeByProcessName(
+              windowClass, &nodeName, &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
             qInfo() << "Game audio: found node via window class" << windowClass;
         }
 
         if (nodeId != 0xFFFFFFFFu) {
-          m_audioMixer->addSource(
-              PipeWireAudioSource::createApplicationSource(nodeId, nodeName, nodeSerial),
-              gameTrack);
+          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
+                                      nodeId, nodeName, nodeSerial),
+                                  gameTrack);
           activeSources++;
           gameSourceAdded = true;
         } else {
-          qWarning() << "No PipeWire node found for process" << gameProcess
-                     << "/ class" << windowClass << "— game audio track will be silent";
+          // Fallback to default monitor (whole system audio) if no specific
+          // game found
+          qWarning() << "Game audio: no specific node found, falling back to "
+                        "default monitor for track"
+                     << gameTrack;
+          m_audioMixer->addSource(
+              PipeWireAudioSource::createMonitorSource(QString()), gameTrack);
+          gameSourceAdded = true;
+          activeSources++;
         }
       }
 
-      // === Voice chat (track 1 in separate; next contiguous slot in merged) ===
+      // === Voice chat (track 1 in separate; next contiguous slot in merged)
+      // ===
       vcApp = m_settings->voiceChatApp().trimmed();
       if (!vcApp.isEmpty()) {
         QString vcNodeName, vcSerial;
-        uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(vcApp, &vcNodeName, &vcSerial);
+        uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(
+            vcApp, &vcNodeName, &vcSerial);
         if (nodeId != 0xFFFFFFFF) {
           const int voiceTrack = isSeparate ? 1 : nextContiguous++;
-          m_audioMixer->addSource(
-              PipeWireAudioSource::createApplicationSource(nodeId, vcNodeName, vcSerial),
-              voiceTrack);
+          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
+                                      nodeId, vcNodeName, vcSerial),
+                                  voiceTrack);
           activeSources++;
           vcSourceAdded = true;
         } else {
@@ -347,12 +486,15 @@ bool RecordingManager::buildPipeline() {
         }
       }
 
-      // === Microphone (track 2 in separate; next contiguous slot in merged) ===
+      // === Microphone (track 2 in separate; next contiguous slot in merged)
+      // ===
       {
         const int micTrack = isSeparate ? 2 : nextContiguous++;
         m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
-            m_settings->microphoneDevice() == "default" ? QString()
-                                                         : m_settings->microphoneDevice()), micTrack);
+                                    m_settings->microphoneDevice() == "default"
+                                        ? QString()
+                                        : m_settings->microphoneDevice()),
+                                micTrack);
         activeSources++;
       }
 
@@ -368,9 +510,8 @@ bool RecordingManager::buildPipeline() {
   // Create recording session to coordinate everything
   m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
-      m_muxer.get(), m_audioMixer,
-      m_settings->separateAudioTracks(),
-      192,  // Audio bitrate: hard-coded to 192 kbps (CD quality)
+      m_muxer.get(), m_audioMixer, m_settings->separateAudioTracks(),
+      192, // Audio bitrate: hard-coded to 192 kbps (CD quality)
       activeAudioTrackCount);
 
   // Set app names for periodic node checking during recording
@@ -379,9 +520,12 @@ bool RecordingManager::buildPipeline() {
 
 #ifdef HAVE_PIPEWIRE
   // If sources were already found and added during buildPipeline, mark them as
-  // connected so the node-check timer doesn't replace the already-running sources.
-  if (gameSourceAdded) m_session->markSourceConnected(0);
-  if (vcSourceAdded)   m_session->markSourceConnected(1);
+  // connected so the node-check timer doesn't replace the already-running
+  // sources.
+  if (gameSourceAdded)
+    m_session->markSourceConnected(0);
+  if (vcSourceAdded)
+    m_session->markSourceConnected(1);
 #endif
 
   // Connect error signals
@@ -492,9 +636,15 @@ void RecordingManager::updateProgress() {
 }
 
 void RecordingManager::onEncodingError(const QString &error) {
-  qCritical() << "Encoding error:" << error;
+  qCritical() << "Pipeline error:" << error;
   emit recordingError(error);
-  stopRecording();
+
+  if (m_state == RecordingState::Initializing) {
+    teardownPipeline();
+    setState(RecordingState::Idle);
+  } else {
+    stopRecording();
+  }
 }
 
 } // namespace GameRecorder

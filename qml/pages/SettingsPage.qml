@@ -415,7 +415,20 @@ Page {
 
                             }
                         }
+                    }
 
+                    SettingItem {
+                        label: qsTr("Wayland Permissions")
+                        helpText: qsTr("Wayland uses security tokens to remember your screen sharing choices. If you want to select a DIFFERENT monitor or window, reset the permissions here.")
+
+                        TrophyButton {
+                            text: qsTr("Reset Screen Capture Permissions")
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            onClicked: {
+                                settingsManager.clearWaylandToken();
+                                notificationService.showNotification(qsTr("Wayland Reset"), qsTr("Permissions cleared. You will be prompted to select a source next time you record."));
+                            }
+                        }
                     }
 
                 }

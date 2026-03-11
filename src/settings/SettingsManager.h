@@ -63,6 +63,9 @@ class SettingsManager : public QObject {
                  NOTIFY autoDetectGamesChanged)
   Q_PROPERTY(bool autoRecordEnabled READ autoRecordEnabled WRITE
                  setAutoRecordEnabled NOTIFY autoRecordEnabledChanged)
+  
+  // Wayland Restore Token
+  Q_PROPERTY(QString waylandRestoreToken READ waylandRestoreToken WRITE setWaylandRestoreToken NOTIFY waylandRestoreTokenChanged)
 
 public:
   explicit SettingsManager(QObject *parent = nullptr);
@@ -133,9 +136,13 @@ public:
   bool autoRecordEnabled() const { return m_autoRecordEnabled; }
   void setAutoRecordEnabled(bool enabled);
 
+  QString waylandRestoreToken() const { return m_waylandRestoreToken; }
+  void setWaylandRestoreToken(const QString &token);
+
   // Utility
   Q_INVOKABLE QString settingsFilePath() const;
   Q_INVOKABLE QStringList availableEncoders() const;
+  Q_INVOKABLE void clearWaylandToken();
 
 signals:
   // Video
@@ -163,6 +170,7 @@ signals:
   // Detection
   void autoDetectGamesChanged();
   void autoRecordEnabledChanged();
+  void waylandRestoreTokenChanged();
 
   // General
   void settingsLoaded();
@@ -200,6 +208,9 @@ private:
   // Detection settings
   bool m_autoDetectGames = true;
   bool m_autoRecordEnabled = false;
+  
+  // Wayland Restore Token
+  QString m_waylandRestoreToken;
 };
 
 } // namespace GameRecorder

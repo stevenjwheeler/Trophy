@@ -55,6 +55,17 @@ public:
                                         QString *outSerial   = nullptr);
 
   /**
+   * @brief Enumerate PipeWire nodes to find one matching a process ID.
+   * @param pid         Process ID to search for.
+   * @param outNodeName Receives PW_KEY_NODE_NAME of the found node.
+   * @param outSerial   Receives object.serial of the found node.
+   * @return PipeWire node ID, or 0xffffffff if not found.
+   */
+  static uint32_t findNodeByPid(uint32_t pid,
+                                QString *outNodeName = nullptr,
+                                QString *outSerial   = nullptr);
+
+  /**
    * @brief Enumerate all active audio applications.
    * @return List of QVariantMap objects with keys: "name", "binary", "nodeId"
    */
@@ -69,6 +80,8 @@ public:
   QString displayName() const override { return m_displayName; }
   QString identifier() const override { return m_identifier; }
   float peakLevel() const override { return m_peakLevel; }
+  void setVolume(float volume) override { m_volume.store(volume); }
+  float volume() const override { return m_volume.load(); }
 
 private:
   struct Private;
@@ -84,6 +97,7 @@ private:
   AudioCallback m_callback;
   std::atomic<bool> m_capturing{false};
   std::atomic<float> m_peakLevel{0.0f};
+  std::atomic<float> m_volume{1.0f};
 };
 
 } // namespace GameRecorder

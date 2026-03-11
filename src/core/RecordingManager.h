@@ -21,6 +21,7 @@ class AudioMixer;
 class WindowService;
 class RecordingSession;
 class IVideoCaptureSource;
+class GameDetectionService;
 class IEncoder;
 class IMuxer;
 
@@ -68,6 +69,7 @@ public:
   void setStorageManager(StorageManager *storage);
   void setAudioMixer(AudioMixer *mixer);
   void setWindowService(WindowService *ws);
+  void setGameDetectionService(GameDetectionService *detector);
 
   // State
   RecordingState state() const { return m_state; }
@@ -81,7 +83,8 @@ public:
 
   // Recording control
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
-                                  unsigned long windowId = 0);
+                                  unsigned long windowId = 0,
+                                  bool forceX11 = false);
   Q_INVOKABLE void stopRecording();
   Q_INVOKABLE void pauseRecording();
   Q_INVOKABLE void resumeRecording();
@@ -98,6 +101,7 @@ signals:
 private slots:
   void onEncodingError(const QString &error);
   void updateProgress();
+  void finishPipelineAndStart();
 
 private:
   void setState(RecordingState newState);
@@ -109,12 +113,14 @@ private:
   QString m_currentGameName;
   QString m_currentFilePath;
   unsigned long m_manualWindowId = 0;
+  bool m_isManualRecording = false;
 
   // Dependencies (not owned)
   SettingsManager *m_settings = nullptr;
   StorageManager *m_storage = nullptr;
   AudioMixer *m_audioMixer = nullptr;
   WindowService *m_windowService = nullptr;
+  GameDetectionService *m_gameDetector = nullptr;
 
   // Pipeline components (owned)
   std::unique_ptr<RecordingSession> m_session;

@@ -119,6 +119,7 @@ private:
   QString m_windowClass;      // X11 window class to watch for
   QString m_voiceChatApp;     // Voice chat app name to watch for
   std::array<bool, kAudioTrackCount> m_sourceConnected{};  // Track which sources are connected
+  std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };
 
 } // namespace GameRecorder

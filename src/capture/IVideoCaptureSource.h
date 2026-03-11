@@ -47,6 +47,7 @@ struct CaptureConfig {
   int maxWidth = 0;  // 0 = native resolution
   int maxHeight = 0; // 0 = native resolution
   bool captureMouseCursor = true;
+  QString waylandRestoreToken;
 };
 
 /**
@@ -120,10 +121,27 @@ public:
    */
   virtual QString name() const = 0;
 
+  /**
+   * @brief Get human-readable label of the selected content (e.g. window title)
+   */
+  virtual QString sourceLabel() const { return QString(); }
+
+  /**
+   * @brief Get PID of the captured application if available
+   */
+  virtual uint32_t sourcePid() const { return 0; }
+
+  /**
+   * @brief Get process name or ID of the captured application for audio routing
+   * This can be an app_id (like org.mozilla.firefox) or a binary name.
+   */
+  virtual QString sourceProcessName() const { return QString(); }
+
 signals:
   void captureStarted();
   void captureStopped();
   void captureError(const QString &error);
+  void ready();
 };
 
 } // namespace GameRecorder
