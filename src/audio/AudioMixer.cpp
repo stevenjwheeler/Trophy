@@ -11,6 +11,7 @@
 #include <QDebug>
 #include <algorithm>
 #include <cmath>
+#include <qlogging.h>
 
 namespace GameRecorder {
 
@@ -27,8 +28,8 @@ AudioMixer::AudioMixer(int sampleRate, int channels, QObject *parent)
     track.atomicMuted.store(track.config.muted, std::memory_order_relaxed);
   }
 
-  qInfo() << "AudioMixer initialized:" << sampleRate << "Hz," << channels
-          << "channels";
+  qDebug() << "AudioMixer initialized:" << sampleRate << "Hz," << channels
+           << "channels";
 }
 
 AudioMixer::~AudioMixer() { stopAll(); }
@@ -68,9 +69,11 @@ void AudioMixer::addSource(std::unique_ptr<IAudioSource> source,
       config.channels = m_channels;
       if (track.source->initialize(config)) {
         if (!track.source->start())
-          qWarning() << "Failed to start late-added audio source on track" << trackIndex;
+          qWarning() << "Failed to start late-added audio source on track"
+                     << trackIndex;
       } else {
-        qWarning() << "Failed to initialize late-added audio source on track" << trackIndex;
+        qWarning() << "Failed to initialize late-added audio source on track"
+                   << trackIndex;
       }
     }
   }

@@ -39,6 +39,8 @@ public:
   QString displayName() const override { return m_displayName; }
   QString identifier() const override { return m_identifier; }
   float peakLevel() const override { return m_peakLevel; }
+  void setVolume(float volume) override { m_volume.store(volume); }
+  float volume() const override { return m_volume.load(); }
 
 private:
   void captureLoop();
@@ -50,6 +52,7 @@ private:
   AudioCallback m_callback;
   std::atomic<bool> m_capturing{false};
   std::atomic<float> m_peakLevel{0.0f};
+  std::atomic<float> m_volume{1.0f};
   std::thread m_captureThread;
 };
 

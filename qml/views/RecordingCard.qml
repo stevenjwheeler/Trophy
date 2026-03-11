@@ -9,6 +9,7 @@ import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 
 Rectangle {
     id: root
@@ -74,9 +75,13 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: Theme.spacingSmall
-            radius: Theme.radiusSmall
             color: Theme.surfaceColor
-            clip: true // Clips the zoom overflow
+            
+            layer.enabled: true
+            layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: thumbContainer
+            }
 
             // This wrapper scales both the image together
             Item {
