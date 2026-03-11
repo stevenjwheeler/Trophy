@@ -17,8 +17,18 @@ ApplicationWindow {
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
 
-    function openWindowPicker() {
-        windowPicker.open();
+    function openWindowPicker(forceX11) {
+        console.log("openWindowPicker called. forceX11:", forceX11, "app.isWayland:", app.isWayland);
+        if (app.isWayland && forceX11 !== true) {
+            // On Wayland, the system portal handles window/screen selection.
+            // Calling startRecording() without a windowId will trigger the Portal popup.
+            recordingManager.startRecording();
+        } else {
+            console.log("Opening windowPicker dialog. forceX11Capture will be set to:", forceX11);
+            // For X11, or if forceX11 is activated on Wayland, show our custom window picker
+            windowPicker.forceX11Capture = (forceX11 === true);
+            windowPicker.open();
+        }
     }
 
     function openFolder(path) {
@@ -67,9 +77,6 @@ ApplicationWindow {
             closeConfirmDialog.open();
             close.accepted = false;
         }
-    }
-    Component.onCompleted: {
-        console.log("Trophy started");
     }
 
     Rectangle {
@@ -363,8 +370,11 @@ ApplicationWindow {
     WindowPickerDialog {
         id: windowPicker
 
+        property bool forceX11Capture: false
+
         onWindowSelected: function(windowId, title) {
-            recordingManager.startRecording(title, windowId);
+            console.log("Window selected id:", windowId, "title:", title, "forceX11Capture:", forceX11Capture);
+            recordingManager.startRecording(title, windowId, forceX11Capture);
         }
     }
 

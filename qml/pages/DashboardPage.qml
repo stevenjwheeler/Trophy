@@ -153,10 +153,13 @@ Page {
                             icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
                             flat: true
                             onClicked: {
-                                if (recordingManager && recordingManager.isRecording)
+                                if (recordingManager && recordingManager.isRecording) {
                                     recordingManager.stopRecording();
-                                else
-                                    window.openWindowPicker();
+                                } else {
+                                    var hasCtrl = app.isControlModifierPressed();
+                                    console.log("Dashboard record clicked! hasCtrl:", hasCtrl);
+                                    window.openWindowPicker(hasCtrl);
+                                }
                             }
 
                             background: Rectangle {
