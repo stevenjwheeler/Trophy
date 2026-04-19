@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QThreadPool>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -49,7 +50,14 @@ void Recording::setThumbnailPath(const QString &path) {
 
 void Recording::loadMetadata() {
   parseFileNameForGameName();
-  probeVideoFile();
+
+  // Run probing in a background thread to prevent UI freezing
+  QThreadPool::globalInstance()->start([this]() {
+    probeVideoFile();
+    // Notify on the main thread
+    QMetaObject::invokeMethod(this, &Recording::metadataChanged,
+                              Qt::QueuedConnection);
+  });
 }
 
 void Recording::parseFileNameForGameName() {

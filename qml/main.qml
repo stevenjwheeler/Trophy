@@ -402,4 +402,9 @@ ApplicationWindow {
         }
     }
 
+    SetupWizard {
+        id: setupWizard
+        visible: settingsManager ? !settingsManager.setupCompleted : false
+    }
+
 }

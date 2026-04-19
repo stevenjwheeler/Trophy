@@ -37,6 +37,8 @@ class SettingsManager : public QObject {
   Q_PROPERTY(int maxVideoBitrate READ maxVideoBitrate WRITE setMaxVideoBitrate
                  NOTIFY maxVideoBitrateChanged)
   Q_PROPERTY(bool useVBR READ useVBR WRITE setUseVBR NOTIFY useVBRChanged)
+  Q_PROPERTY(bool useDmaBuf READ useDmaBuf WRITE setUseDmaBuf NOTIFY
+                 useDmaBufChanged)
 
   // Audio settings
   Q_PROPERTY(QString audioMode READ audioMode WRITE setAudioMode NOTIFY
@@ -63,8 +65,12 @@ class SettingsManager : public QObject {
                  NOTIFY autoDetectGamesChanged)
   Q_PROPERTY(bool autoRecordEnabled READ autoRecordEnabled WRITE
                  setAutoRecordEnabled NOTIFY autoRecordEnabledChanged)
+  Q_PROPERTY(bool setupCompleted READ setupCompleted WRITE setSetupCompleted
+                 NOTIFY setupCompletedChanged)
   
-  // Wayland Restore Token
+  // Wayland Restore Tokens
+  Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
+  // Deprecated single token (kept for migration)
   Q_PROPERTY(QString waylandRestoreToken READ waylandRestoreToken WRITE setWaylandRestoreToken NOTIFY waylandRestoreTokenChanged)
 
 public:
@@ -119,6 +125,9 @@ public:
   bool separateAudioTracks() const { return m_separateAudioTracks; }
   void setSeparateAudioTracks(bool separate);
 
+  bool useDmaBuf() const { return m_useDmaBuf; }
+  void setUseDmaBuf(bool enabled);
+
   // Storage settings
   QString recordingsPath() const { return m_recordingsPath; }
   void setRecordingsPath(const QString &path);
@@ -136,8 +145,16 @@ public:
   bool autoRecordEnabled() const { return m_autoRecordEnabled; }
   void setAutoRecordEnabled(bool enabled);
 
+  bool setupCompleted() const { return m_setupCompleted; }
+  void setSetupCompleted(bool completed);
+
   QString waylandRestoreToken() const { return m_waylandRestoreToken; }
   void setWaylandRestoreToken(const QString &token);
+
+  QVariantMap waylandRestoreTokens() const { return m_waylandRestoreTokens; }
+  Q_INVOKABLE QString getRestoreToken(const QString &key) const;
+  Q_INVOKABLE void setRestoreToken(const QString &key, const QString &token);
+  Q_INVOKABLE void removeRestoreToken(const QString &key);
 
   // Utility
   Q_INVOKABLE QString settingsFilePath() const;
@@ -154,6 +171,7 @@ signals:
   void encoderPresetChanged();
   void maxVideoBitrateChanged();
   void useVBRChanged();
+  void useDmaBufChanged();
 
   // Audio
   void audioModeChanged();
@@ -170,7 +188,9 @@ signals:
   // Detection
   void autoDetectGamesChanged();
   void autoRecordEnabledChanged();
+  void setupCompletedChanged();
   void waylandRestoreTokenChanged();
+  void waylandRestoreTokensChanged();
 
   // General
   void settingsLoaded();
@@ -192,6 +212,7 @@ private:
   QString m_encoderPreset = "fast";
   int m_maxVideoBitrate = 20000;
   bool m_useVBR = true;
+  bool m_useDmaBuf = true;
 
   // Audio settings
   QString m_audioMode = "game";
@@ -208,9 +229,11 @@ private:
   // Detection settings
   bool m_autoDetectGames = true;
   bool m_autoRecordEnabled = false;
+  bool m_setupCompleted = false;
   
-  // Wayland Restore Token
-  QString m_waylandRestoreToken;
+  // Wayland Restore Tokens
+  QString m_waylandRestoreToken; // Deprecated
+  QVariantMap m_waylandRestoreTokens;
 };
 
 } // namespace GameRecorder

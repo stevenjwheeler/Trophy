@@ -18,10 +18,7 @@ set(TEST_LINK_LIBS
 )
 
 # --- Existing Tests ---
-add_executable(test_ProcessHeuristics test_ProcessHeuristics.cpp ${CMAKE_SOURCE_DIR}/src/detection/ProcessHeuristics.cpp)
-target_include_directories(test_ProcessHeuristics PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_ProcessHeuristics PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_ProcessHeuristics)
+# test_ProcessHeuristics removed (Heuristics replaced by Vulkan Layer)
 
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
@@ -43,9 +40,9 @@ target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMA
 target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES})
 gtest_discover_tests(test_Recording)
 
-add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/ProcessHeuristics.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp)
+add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp)
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS})
+target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_GameDetectionService)
 
 # --- test_EncoderTest (The New Matrix Test) ---

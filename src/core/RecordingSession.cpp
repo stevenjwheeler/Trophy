@@ -42,7 +42,7 @@ bool RecordingSession::start() {
     return false;
   }
 
-  qInfo() << "Starting recording session to:" << m_outputPath;
+  qDebug() << "Starting recording session to:" << m_outputPath;
 
   if (!m_muxer->initialize(m_outputPath)) {
     emit errorOccurred("Failed to initialize muxer");
@@ -77,7 +77,7 @@ bool RecordingSession::start() {
       // One encoder + one muxer stream per track (even if empty initially, for
       // consistent MKV layout)
       const QStringList trackNames = {"Game Audio", "Voice Chat", "Microphone"};
-      qInfo() << "Separate tracks mode: initializing" << kAudioTrackCount
+      qDebug() << "Separate tracks mode: initializing" << kAudioTrackCount
               << "audio tracks";
 
       for (int i = 0; i < kAudioTrackCount; ++i) {
@@ -164,7 +164,7 @@ bool RecordingSession::start() {
         s.extraData = m_mergedEncoder->extraData();
         int idx = m_muxer->addStream(s);
         if (idx >= 0)
-          qInfo() << "Added merged audio stream" << idx;
+          qDebug() << "Added merged audio stream" << idx;
       }
 
       m_audioMixer->setTrackAudioCallback(
@@ -287,7 +287,7 @@ void RecordingSession::stop() {
     return;
   }
 
-  qInfo() << "Stopping recording session...";
+  qDebug() << "Stopping recording session...";
 
   // Stop audio node checking
   if (m_audioNodeCheckTimer) {
@@ -344,7 +344,7 @@ void RecordingSession::stop() {
     m_bytesWritten = m_muxer->bytesWritten();
   }
 
-  qInfo() << "Recording session stopped. Frames:" << m_frameCount
+  qDebug() << "Recording session stopped. Frames:" << m_frameCount
           << "Size:" << m_bytesWritten << "bytes";
 }
 
@@ -353,7 +353,7 @@ void RecordingSession::pause() { m_paused = true; }
 void RecordingSession::resume() { m_paused = false; }
 
 void RecordingSession::encodingLoop() {
-  qInfo() << "Encoding thread started";
+  qDebug() << "Encoding thread started";
 
   while (true) {
     QueuedFrame frame(VideoFrame{nullptr, 0, 0, 0, 0, 0});
@@ -392,7 +392,7 @@ void RecordingSession::encodingLoop() {
     }
   }
 
-  qInfo() << "Encoding thread stopped";
+  qDebug() << "Encoding thread stopped";
 }
 
 void RecordingSession::checkForNewAudioNodes() {
@@ -403,26 +403,19 @@ void RecordingSession::checkForNewAudioNodes() {
   bool allConnected = true;
 
   // Check for game audio (track 0)
-  if (!m_sourceConnected[0] &&
-      (!m_gameProcess.isEmpty() || !m_windowClass.isEmpty())) {
+  if (!m_sourceConnected[0] && !m_gameProcess.isEmpty()) {
     allConnected = false;
     uint32_t nodeId = PW_ID_ANY;
     QString nodeName, nodeSerial;
 
-    // Try process name first
+    // Try process name
     if (!m_gameProcess.isEmpty()) {
       nodeId = PipeWireAudioSource::findNodeByProcessName(
           m_gameProcess, &nodeName, &nodeSerial);
     }
 
-    // Fall back to window class
-    if (nodeId == PW_ID_ANY && !m_windowClass.isEmpty()) {
-      nodeId = PipeWireAudioSource::findNodeByProcessName(
-          m_windowClass, &nodeName, &nodeSerial);
-    }
-
     if (nodeId != PW_ID_ANY) {
-      qInfo() << "Game audio node appeared, connecting:"
+      qDebug() << "Game audio node appeared, connecting:"
               << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
       m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
                                   nodeId, nodeName, nodeSerial),
@@ -439,7 +432,7 @@ void RecordingSession::checkForNewAudioNodes() {
         m_voiceChatApp, &nodeName, &nodeSerial);
 
     if (nodeId != PW_ID_ANY) {
-      qInfo() << "Voice chat app node appeared, connecting:"
+      qDebug() << "Voice chat app node appeared, connecting:"
               << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
       m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
                                   nodeId, nodeName, nodeSerial),
@@ -451,7 +444,7 @@ void RecordingSession::checkForNewAudioNodes() {
   // Stop checking once all expected sources are connected
   if (allConnected && m_audioNodeCheckTimer) {
     m_audioNodeCheckTimer->stop();
-    qInfo() << "All expected audio nodes connected, stopping node checks";
+    qDebug() << "All expected audio nodes connected, stopping node checks";
   }
 }
 

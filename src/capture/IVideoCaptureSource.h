@@ -25,16 +25,29 @@ struct VideoFrame {
   int stride;          // Bytes per row (may include padding)
   int64_t timestamp;   // Presentation timestamp in microseconds
   int pixelFormat;     // FFmpeg AVPixelFormat value
+
+  // DMA-BUF metadata
+  bool isDmaBuf = false;
+  int dmaBufFd = -1;
+  uint32_t drmFormat = 0;
+  uint64_t drmModifier = 0;
+  int dmaBufStride = 0;
+  int dmaBufOffset = 0;
 };
 
 /**
  * @brief Frame with owned data for queuing
+ *
+ * For DMA-BUF frames the pixel data lives in GPU memory (no CPU pointer);
+ * we simply copy the metadata and leave ownedData empty.
  */
 struct QueuedFrame : public VideoFrame {
   std::vector<uint8_t> ownedData;
   QueuedFrame(const VideoFrame &other) : VideoFrame(other) {
-    ownedData.assign(other.data, other.data + (other.stride * other.height));
-    data = ownedData.data();
+    if (!other.isDmaBuf && other.data && other.stride > 0 && other.height > 0) {
+      ownedData.assign(other.data, other.data + (other.stride * other.height));
+      data = ownedData.data();
+    }
   }
 };
 
@@ -47,6 +60,7 @@ struct CaptureConfig {
   int maxWidth = 0;  // 0 = native resolution
   int maxHeight = 0; // 0 = native resolution
   bool captureMouseCursor = true;
+  bool useDmaBuf = true;
   QString waylandRestoreToken;
 };
 
@@ -65,7 +79,7 @@ struct CaptureCapabilities {
 /**
  * @brief Abstract interface for video capture sources
  *
- * Implementations include X11WindowCapture and WaylandPortalCapture.
+ * Implementations include WaylandPortalCapture.
  * The capture source delivers frames via a callback mechanism.
  */
 class IVideoCaptureSource : public QObject {
@@ -137,11 +151,21 @@ public:
    */
   virtual QString sourceProcessName() const { return QString(); }
 
+  /**
+   * @brief Emitted when a new Wayland restore token is received from the portal.
+   * @param token The new restore token.
+   */
 signals:
   void captureStarted();
   void captureStopped();
   void captureError(const QString &error);
   void ready();
+
+  /**
+   * @brief Emitted when a new Wayland restore token is received from the portal.
+   * @param token The new restore token.
+   */
+  void restoreTokenUpdated(const QString &token);
 };
 
 } // namespace GameRecorder

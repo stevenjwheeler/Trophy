@@ -23,10 +23,13 @@
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/type.h>
 #include <spa/param/props.h>
+#include <spa/param/buffers.h>
 #include <spa/utils/result.h>
+#include <spa/pod/iter.h>
 
 extern "C" {
 #include <libavutil/pixfmt.h>
+#include <libdrm/drm_fourcc.h>
 }
 
 namespace GameRecorder {
@@ -95,9 +98,12 @@ bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
   m_config = config;
   m_restoreToken = config.waylandRestoreToken;
   m_resolution = QSize(0, 0); // Will be updated by PipeWire
+  m_useDmaBuf = config.useDmaBuf;
+  m_dmaBufNegotiated = false;
 
   qDebug() << "Wayland Portal capture initialized. Restore token available:"
-           << !m_restoreToken.isEmpty();
+           << !m_restoreToken.isEmpty()
+           << "DMA-BUF:" << (m_useDmaBuf ? "enabled" : "disabled");
   return true;
 }
 
@@ -120,7 +126,7 @@ void WaylandPortalCapture::stopCapture() {
   stopPipeWireStream();
   m_capturing = false;
   emit captureStopped();
-  qInfo() << "Wayland Portal capture stopped";
+  qDebug() << "Wayland Portal capture stopped";
 }
 
 bool WaylandPortalCapture::isCapturing() const { return m_capturing; }
@@ -275,6 +281,7 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
 
   if (results.contains("restore_token")) {
     m_restoreToken = results["restore_token"].toString();
+    emit restoreTokenUpdated(m_restoreToken);
   }
 
   QVariant streamsVar = results["streams"];
@@ -523,21 +530,57 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   pw_stream_add_listener(m_pw_stream, &m_pw_stream_listener, &stream_events,
                          this);
 
-  uint8_t buffer[1024];
+  uint8_t buffer[2048];
   spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
-  const spa_pod *params[1];
-  spa_video_info_raw info =
-      SPA_VIDEO_INFO_RAW_INIT(.format = SPA_VIDEO_FORMAT_BGRx);
-  params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+  if (m_useDmaBuf) {
+    // --- DMA-BUF negotiation ---
+    // Offer the compositor two format choices:
+    //   1. XRGB8888 via DMA-BUF (preferred – zero-copy)
+    //   2. BGRx via shared memory (MemFd fallback)
+    //
+    // The compositor picks the first format it supports. If it doesn't
+    // support DMA-BUF it falls back to the second choice automatically.
 
-  int res = pw_stream_connect(m_pw_stream, PW_DIRECTION_INPUT, nodeId,
-                              (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT |
-                                                PW_STREAM_FLAG_MAP_BUFFERS),
-                              params, 1);
+    // Build format 1: XRGB8888 (DMA-BUF)
+    const spa_pod *params[2];
+    params[0] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
+        &b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_xRGB),
+        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_FLAGS_Long(0)));
 
-  if (res < 0) {
-    qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+    // Build format 2: BGRx (shared memory fallback)
+    params[1] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
+        &b,
+        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+        SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
+
+    int res = pw_stream_connect(m_pw_stream, PW_DIRECTION_INPUT, nodeId,
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT |
+                                                  PW_STREAM_FLAG_MAP_BUFFERS),
+                                params, 2);
+    if (res < 0) {
+      qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+    }
+  } else {
+    // DMA-BUF disabled by user – always use shared memory
+    const spa_pod *params[1];
+    spa_video_info_raw info =
+        SPA_VIDEO_INFO_RAW_INIT(.format = SPA_VIDEO_FORMAT_BGRx);
+    params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &info);
+
+    int res = pw_stream_connect(m_pw_stream, PW_DIRECTION_INPUT, nodeId,
+                                (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT |
+                                                  PW_STREAM_FLAG_MAP_BUFFERS),
+                                params, 1);
+    if (res < 0) {
+      qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+    }
   }
 
   pw_thread_loop_unlock(m_pw_loop);
@@ -587,16 +630,54 @@ void WaylandPortalCapture::on_stream_state_changed(void *data,
 void WaylandPortalCapture::on_stream_param_changed(
     void *data, unsigned int id, const struct spa_pod *param) {
   WaylandPortalCapture *self = static_cast<WaylandPortalCapture *>(data);
-  if (!param || id != SPA_PARAM_Format)
+  if (!param)
     return;
 
-  spa_video_info_raw info;
-  if (spa_format_video_raw_parse(param, &info) < 0)
-    return;
+  if (id == SPA_PARAM_Format) {
+    // Check whether the compositor negotiated a DMA-BUF modifier-aware format.
+    // If so, SPA_FORMAT_VIDEO_modifier will be present in the format object.
+    spa_video_info_raw info;
+    if (spa_format_video_raw_parse(param, &info) < 0)
+      return;
 
-  self->m_resolution = QSize(info.size.width, info.size.height);
-  qDebug() << "Wayland Portal: Negotiated resolution:" << self->m_resolution;
-  emit self->ready();
+    // A modifier of DRM_FORMAT_MOD_INVALID means the compositor was NOT able
+    // to negotiate a modifier-aware (DMA-BUF) path – treat as shm.
+    self->m_dmaBufNegotiated = self->m_useDmaBuf &&
+                               (info.modifier != DRM_FORMAT_MOD_INVALID);
+
+    // Store the actual negotiated modifier for use per-frame.
+    self->m_negotiatedModifier = self->m_dmaBufNegotiated
+                                     ? info.modifier
+                                     : DRM_FORMAT_MOD_LINEAR;
+
+    self->m_resolution = QSize(info.size.width, info.size.height);
+    qDebug() << "Wayland Portal: Negotiated resolution:" << self->m_resolution
+             << "DMA-BUF active:" << self->m_dmaBufNegotiated;
+
+    // ---- Stage 2: Buffer-type negotiation ----
+    // Now that we know the compositor CAN export DMA-BUF, explicitly request
+    // DMA-BUF buffer objects. Without this step KWin still sends MemFd buffers
+    // even though the format modifier was accepted.
+    if (self->m_dmaBufNegotiated) {
+      uint8_t bufBuf[512];
+      spa_pod_builder bb = SPA_POD_BUILDER_INIT(bufBuf, sizeof(bufBuf));
+
+      // Offer DmaBuf as primary, MemFd as fallback – KWin will pick DmaBuf.
+      const spa_pod *bufParams[1];
+      bufParams[0] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
+          &bb,
+          SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+          SPA_PARAM_BUFFERS_buffers,  SPA_POD_CHOICE_RANGE_Int(4, 1, 32),
+          SPA_PARAM_BUFFERS_blocks,   SPA_POD_Int(1),
+          SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
+              (1 << SPA_DATA_DmaBuf) | (1 << SPA_DATA_MemFd))));
+
+      pw_stream_update_params(self->m_pw_stream, bufParams, 1);
+      qDebug() << "Wayland Portal: Requested DMA-BUF buffer objects from compositor";
+    }
+
+    emit self->ready();
+  }
 }
 
 void WaylandPortalCapture::on_stream_process(void *data) {
@@ -606,23 +687,47 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     return;
 
   spa_buffer *buf = b->buffer;
-  if (!buf->datas[0].data) {
-    pw_stream_queue_buffer(self->m_pw_stream, b);
-    return;
-  }
+  const auto &d = buf->datas[0];
+
+  // --- Timestamp (shared by both paths) ---
+  const int64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
 
   VideoFrame frame;
-  frame.data = static_cast<const uint8_t *>(buf->datas[0].data);
-  frame.width = self->m_resolution.width();
-  frame.height = self->m_resolution.height();
-  frame.stride = buf->datas[0].chunk->stride;
-  frame.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count();
-  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.width     = self->m_resolution.width();
+  frame.height    = self->m_resolution.height();
+  frame.timestamp = ts;
 
-  if (self->m_callback) {
-    self->m_callback(frame);
+  if (self->m_dmaBufNegotiated && d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
+    // ---- Zero-copy DMA-BUF path ----
+    frame.isDmaBuf    = true;
+    frame.dmaBufFd    = static_cast<int>(d.fd);
+    frame.dmaBufStride  = d.chunk->stride;
+    frame.dmaBufOffset  = static_cast<int>(d.chunk->offset);
+    // The modifier was captured during format negotiation and stored as
+    // m_resolution is to the geometry. We expose it via the DRM format
+    // constant for XRGB8888 (the format we requested).
+    frame.drmFormat   = DRM_FORMAT_XRGB8888;
+    frame.drmModifier = self->m_negotiatedModifier;
+    frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
+    frame.data        = nullptr;
+    frame.stride      = frame.dmaBufStride;
+
+    if (self->m_callback)
+      self->m_callback(frame);
+  } else if (d.data) {
+    // ---- Shared-memory (MemFd / mmap) path ----
+    frame.isDmaBuf    = false;
+    frame.data        = static_cast<const uint8_t *>(d.data);
+    frame.stride      = d.chunk->stride;
+    frame.pixelFormat = AV_PIX_FMT_BGRA;
+
+    if (self->m_callback)
+      self->m_callback(frame);
+  } else {
+    // No valid data pointer and no FD — skip silently.
+    qWarning() << "PipeWire: buffer has neither DMA-BUF fd nor mapped data";
   }
 
   pw_stream_queue_buffer(self->m_pw_stream, b);

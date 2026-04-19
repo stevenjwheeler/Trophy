@@ -13,6 +13,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
@@ -54,10 +55,10 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
 
   m_config = config;
 
-  qInfo() << "Initializing encoder:" << m_name;
-  qInfo() << "  Target Resolution:" << config.width << "x" << config.height;
-  qInfo() << "  FPS:" << config.fps;
-  qInfo() << "  Bitrate:" << config.bitrate << "kbps";
+  qDebug() << "Initializing encoder:" << m_name;
+  qDebug() << "  Target Resolution:" << config.width << "x" << config.height;
+  qDebug() << "  FPS:" << config.fps;
+  qDebug() << "  Bitrate:" << config.bitrate << "kbps";
 
   m_lastInputWidth = 0;
   m_lastInputHeight = 0;
@@ -96,7 +97,7 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   m_frameCount = 0;
   m_initialized = true;
 
-  qInfo() << "Encoder initialized successfully";
+  qDebug() << "Encoder initialized successfully";
   return true;
 }
 
@@ -256,84 +257,146 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame,
   if (!m_initialized)
     return false;
 
-  // 1. Re-init scaler if source window size changed
-  if (!m_swsCtx || m_lastInputWidth != frame.width ||
-      m_lastInputHeight != frame.height) {
-    if (m_swsCtx)
-      sws_freeContext(m_swsCtx);
-
-    // Determine the target format for the scaler based on encoder type
-    AVPixelFormat targetFmt =
-        (m_codecCtx->hw_device_ctx || m_type == EncoderType::NVENC_H264 ||
-         m_type == EncoderType::NVENC_HEVC)
-            ? AV_PIX_FMT_NV12
-            : AV_PIX_FMT_YUV420P;
-
-    m_swsCtx = sws_getContext(frame.width, frame.height, AV_PIX_FMT_BGRA,
-                              m_config.width, m_config.height, targetFmt,
-                              SWS_BICUBIC, nullptr, nullptr, nullptr);
-
-    m_lastInputWidth = frame.width;
-    m_lastInputHeight = frame.height;
-
-    if (!m_swsCtx)
-      return false;
-  }
-
-  // 2. Ensure frame is ready to be written to
-  if (av_frame_make_writable(m_frame) < 0)
-    return false;
-
-  // 3. Setup pointers for the Scaler
-  const uint8_t *srcData[4] = {frame.data, nullptr, nullptr, nullptr};
-  int srcLinesize[4] = {static_cast<int>(frame.stride), 0, 0, 0};
-
-  // 4. Perform scaling
-  // We use m_frame->data and m_frame->linesize directly.
-  // If these are "bad", swscaler logs the error you see.
-  int sliceHeight = sws_scale(m_swsCtx, srcData, srcLinesize, 0, frame.height,
-                              m_frame->data, m_frame->linesize);
-
-  if (sliceHeight <= 0) {
-    qWarning() << "Scaling failed!";
-    return false;
-  }
-
-  // 5. Handle Timestamps
+  // --- Timestamps ---
   if (m_firstTimestamp < 0)
     m_firstTimestamp = frame.timestamp;
-  m_frame->pts = frame.timestamp - m_firstTimestamp;
 
-  AVFrame *inputFrame = m_frame;
+  AVFrame *inputFrame = nullptr;
 
-  // 6. Hardware Transfer (GPU)
-  if (m_codecCtx->hw_frames_ctx) {
+  // =========================================================
+  // Path A: DMA-BUF zero-copy (hardware frames only)
+  // =========================================================
+  if (frame.isDmaBuf && m_codecCtx->hw_frames_ctx) {
+    // 1. Build an AVDRMFrameDescriptor from the FD the compositor gave us.
+    auto *drmDesc = new AVDRMFrameDescriptor{};
+    drmDesc->nb_objects = 1;
+    drmDesc->objects[0].fd = frame.dmaBufFd;
+    drmDesc->objects[0].size = 0; // Let FFmpeg infer
+    drmDesc->objects[0].format_modifier = frame.drmModifier;
+
+    drmDesc->nb_layers = 1;
+    drmDesc->layers[0].format = frame.drmFormat;
+    drmDesc->layers[0].nb_planes = 1;
+    drmDesc->layers[0].planes[0].object_index = 0;
+    drmDesc->layers[0].planes[0].offset = frame.dmaBufOffset;
+    drmDesc->layers[0].planes[0].pitch = frame.dmaBufStride;
+
+    // 2. Wrap the descriptor in an AVFrame with format DRM_PRIME.
+    AVFrame *drmFrame = av_frame_alloc();
+    if (!drmFrame) {
+      delete drmDesc;
+      return false;
+    }
+    drmFrame->format = AV_PIX_FMT_DRM_PRIME;
+    drmFrame->width  = frame.width;
+    drmFrame->height = frame.height;
+    drmFrame->pts    = frame.timestamp - m_firstTimestamp;
+    drmFrame->data[0] = reinterpret_cast<uint8_t *>(drmDesc);
+    drmFrame->buf[0] = av_buffer_create(
+        drmFrame->data[0], sizeof(*drmDesc),
+        [](void *, uint8_t *p) { delete reinterpret_cast<AVDRMFrameDescriptor *>(p); },
+        nullptr, 0);
+
+    // 3. Map DRM Prime -> VAAPI (or other hw context) frame.
     if (!m_hwFrame) {
       m_hwFrame = av_frame_alloc();
-      m_hwFrame->width = m_codecCtx->width;
-      m_hwFrame->height = m_codecCtx->height;
-      m_hwFrame->format = m_codecCtx->pix_fmt;
-      if (av_hwframe_get_buffer(m_codecCtx->hw_frames_ctx, m_hwFrame, 0) < 0)
-        return false;
     }
-    if (av_hwframe_transfer_data(m_hwFrame, m_frame, 0) < 0)
+    if (av_hwframe_get_buffer(m_codecCtx->hw_frames_ctx, m_hwFrame, 0) < 0) {
+      av_frame_free(&drmFrame);
       return false;
-    m_hwFrame->pts = m_frame->pts;
+    }
+    if (av_hwframe_map(m_hwFrame, drmFrame, AV_HWFRAME_MAP_READ) < 0) {
+      // Mapping failed – this compositor / driver combo doesn't support
+      // importing our DMA-BUF directly. Warn and fall through to shm path.
+      qWarning() << "FFmpegEncoder: DMA-BUF hwframe_map failed, "
+                    "falling back to software scaling for this frame";
+      av_frame_free(&drmFrame);
+      goto shm_fallback;
+    }
+    m_hwFrame->pts = drmFrame->pts;
+    av_frame_free(&drmFrame);
     inputFrame = m_hwFrame;
+    goto send_to_encoder;
   }
 
-  // 7. Send to Encoder
-  int ret = avcodec_send_frame(m_codecCtx, inputFrame);
-  if (ret < 0)
-    return false;
+shm_fallback:
+  // =========================================================
+  // Path B: Software (shared-memory / sws_scale) path
+  // =========================================================
+  {
+    // Re-init scaler if source window size changed
+    if (!m_swsCtx || m_lastInputWidth != frame.width ||
+        m_lastInputHeight != frame.height) {
+      if (m_swsCtx)
+        sws_freeContext(m_swsCtx);
 
-  ret = avcodec_receive_packet(m_codecCtx, m_packet);
-  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-    return false;
-  if (ret < 0)
-    return false;
+      AVPixelFormat targetFmt =
+          (m_codecCtx->hw_device_ctx || m_type == EncoderType::NVENC_H264 ||
+           m_type == EncoderType::NVENC_HEVC)
+              ? AV_PIX_FMT_NV12
+              : AV_PIX_FMT_YUV420P;
 
-  return processPacket(m_packet, output);
+      m_swsCtx = sws_getContext(frame.width, frame.height, AV_PIX_FMT_BGRA,
+                                m_config.width, m_config.height, targetFmt,
+                                SWS_BICUBIC, nullptr, nullptr, nullptr);
+
+      m_lastInputWidth  = frame.width;
+      m_lastInputHeight = frame.height;
+
+      if (!m_swsCtx)
+        return false;
+    }
+
+    if (av_frame_make_writable(m_frame) < 0)
+      return false;
+
+    const uint8_t *srcData[4] = {frame.data, nullptr, nullptr, nullptr};
+    int srcLinesize[4] = {static_cast<int>(frame.stride), 0, 0, 0};
+
+    int sliceHeight = sws_scale(m_swsCtx, srcData, srcLinesize, 0, frame.height,
+                                m_frame->data, m_frame->linesize);
+    if (sliceHeight <= 0) {
+      qWarning() << "Scaling failed!";
+      return false;
+    }
+
+    m_frame->pts = frame.timestamp - m_firstTimestamp;
+    inputFrame = m_frame;
+
+    // Transfer to hardware surface if needed (e.g. VA-API)
+    if (m_codecCtx->hw_frames_ctx) {
+      if (!m_hwFrame) {
+        m_hwFrame = av_frame_alloc();
+        m_hwFrame->width  = m_codecCtx->width;
+        m_hwFrame->height = m_codecCtx->height;
+        m_hwFrame->format = m_codecCtx->pix_fmt;
+        if (av_hwframe_get_buffer(m_codecCtx->hw_frames_ctx, m_hwFrame, 0) < 0)
+          return false;
+      }
+      if (av_hwframe_transfer_data(m_hwFrame, m_frame, 0) < 0)
+        return false;
+      m_hwFrame->pts = m_frame->pts;
+      inputFrame = m_hwFrame;
+    }
+  }
+
+send_to_encoder:
+  // =========================================================
+  // Common: send frame to codec
+  // =========================================================
+  {
+    int ret = avcodec_send_frame(m_codecCtx, inputFrame);
+    if (ret < 0)
+      return false;
+
+    ret = avcodec_receive_packet(m_codecCtx, m_packet);
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+      return false;
+    if (ret < 0)
+      return false;
+
+    return processPacket(m_packet, output);
+  }
 }
 
 int FFmpegEncoder::flush(std::vector<EncodedPacket> &packets) {

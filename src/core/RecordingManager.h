@@ -83,8 +83,7 @@ public:
 
   // Recording control
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
-                                  unsigned long windowId = 0,
-                                  bool forceX11 = false);
+                                  unsigned long windowId = 0);
   Q_INVOKABLE void stopRecording();
   Q_INVOKABLE void pauseRecording();
   Q_INVOKABLE void resumeRecording();

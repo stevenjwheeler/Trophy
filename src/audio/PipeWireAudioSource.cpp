@@ -182,7 +182,7 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
     bool isNumeric = false;
     uint32_t numericId = data->nodeName.toUInt(&isNumeric);
     if (isNumeric && numericId == id) {
-      qInfo() << "Found PipeWire node by ID:" << id;
+      qDebug() << "Found PipeWire node by ID:" << id;
       data->nodeId = id;
       return;
     }
@@ -210,7 +210,7 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
     const char *pidStr = spa_dict_lookup(props, PW_KEY_APP_PROCESS_ID);
     if (pidStr && QString(pidStr).toUInt() == data->targetPid) {
       const char *serial = spa_dict_lookup(props, "object.serial");
-      qInfo() << "Found PipeWire node for PID" << data->targetPid
+      qDebug() << "Found PipeWire node for PID" << data->targetPid
               << "-> ID:" << id;
       data->nodeId = id;
       if (pwNodeName)
@@ -233,7 +233,7 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
   if (matches(binary) || matches(appName) || matches(pwNodeName) ||
       matches(appId)) {
     const char *serial = spa_dict_lookup(props, "object.serial");
-    qInfo() << "Found PipeWire node for" << data->processName << "-> ID:" << id
+    qDebug() << "Found PipeWire node for" << data->processName << "-> ID:" << id
             << "media.class: Stream/Output/Audio"
             << "name:" << (pwNodeName ? pwNodeName : "?")
             << "serial:" << (serial ? serial : "?");
@@ -288,20 +288,23 @@ static uint32_t findNodeByName(const QString &nodeName,
     return PW_ID_ANY;
   }
 
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = enumCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = enumCoreDone;
+    return e;
+  }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events registry_events = {
-      PW_VERSION_REGISTRY_EVENTS,
-      enumRegistryGlobal,
-      nullptr,
-  };
+  static const struct pw_registry_events registry_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = enumRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
@@ -372,10 +375,12 @@ static int onDefaultMetaProp(void *userdata, uint32_t subject, const char *key,
   return 0;
 }
 
-static const struct pw_metadata_events defaultMetaEvents = {
-    .version = PW_VERSION_METADATA_EVENTS,
-    .property = onDefaultMetaProp,
-};
+static const struct pw_metadata_events defaultMetaEvents = [] {
+  struct pw_metadata_events e = {};
+  e.version = PW_VERSION_METADATA_EVENTS;
+  e.property = onDefaultMetaProp;
+  return e;
+}();
 
 static void onDefaultRegistryGlobal(void *userdata, uint32_t id,
                                     uint32_t /*perms*/, const char *type,
@@ -432,19 +437,22 @@ static std::pair<QString, QString> queryDefaultDevices() {
     return {};
   }
 
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = onDefaultCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = onDefaultCoreDone;
+    return e;
+  }();
   pw_core_add_listener(data.core, &data.coreListener, &core_events, &data);
 
   data.registry = pw_core_get_registry(data.core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events reg_events = {
-      .version = PW_VERSION_REGISTRY_EVENTS,
-      .global = onDefaultRegistryGlobal,
-      .global_remove = nullptr,
-  };
+  static const struct pw_registry_events reg_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = onDefaultRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(data.registry, &data.registryListener, &reg_events,
                            &data);
 
@@ -497,20 +505,23 @@ uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
     return PW_ID_ANY;
   }
 
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = enumCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = enumCoreDone;
+    return e;
+  }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events registry_events = {
-      PW_VERSION_REGISTRY_EVENTS,
-      enumRegistryGlobal,
-      nullptr,
-  };
+  static const struct pw_registry_events registry_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = enumRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
@@ -558,20 +569,23 @@ uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
     return PW_ID_ANY;
   }
 
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = enumCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = enumCoreDone;
+    return e;
+  }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events registry_events = {
-      PW_VERSION_REGISTRY_EVENTS,
-      enumRegistryGlobal,
-      nullptr,
-  };
+  static const struct pw_registry_events registry_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = enumRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
@@ -675,20 +689,23 @@ QVariantList PipeWireAudioSource::enumerateAudioApps() {
     return {};
   }
 
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = enumAppsCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = enumAppsCoreDone;
+    return e;
+  }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events registry_events = {
-      PW_VERSION_REGISTRY_EVENTS,
-      enumAppsRegistryGlobal,
-      nullptr,
-  };
+  static const struct pw_registry_events registry_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = enumAppsRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
@@ -902,7 +919,7 @@ bool PipeWireAudioSource::start() {
     const QByteArray lba = legacyTarget.toUtf8();
     pw_properties_set(props, "node.target", lba.constData());
 
-    qInfo() << "Application audio target — node.target:" << legacyTarget
+    qDebug() << "Application audio target — node.target:" << legacyTarget
             << "target.object:" << bestTarget;
 
   } else if (m_type == SourceType::Microphone && m_targetNodeId != PW_ID_ANY) {
@@ -1014,7 +1031,7 @@ bool PipeWireAudioSource::start() {
 
   m_capturing = true;
   emit captureStarted();
-  qInfo() << "PipeWire audio capture started:" << m_displayName;
+  qDebug() << "PipeWire audio capture started:" << m_displayName;
   return true;
 }
 
@@ -1047,7 +1064,7 @@ void PipeWireAudioSource::stop() {
   }
 
   emit captureStopped();
-  qInfo() << "PipeWire audio capture stopped:" << m_displayName;
+  qDebug() << "PipeWire audio capture stopped:" << m_displayName;
 }
 
 bool PipeWireAudioSource::isCapturing() const { return m_capturing; }

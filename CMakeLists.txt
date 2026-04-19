@@ -56,7 +56,11 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     Multimedia
     DBus
     Concurrent
+    Network
 )
+
+# Find Vulkan (for the detection layer)
+find_package(Vulkan REQUIRED)
 
 qt_standard_project_setup()
 
@@ -73,22 +77,11 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 
-# Find PipeWire (optional, with fallback to PulseAudio)
-pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+# Find PipeWire (Required)
+pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 if(PIPEWIRE_FOUND)
     message(STATUS "PipeWire found: ${PIPEWIRE_VERSION}")
     add_compile_definitions(HAVE_PIPEWIRE)
-else()
-    message(STATUS "PipeWire not found, will use PulseAudio only")
-endif()
-
-# Find PulseAudio
-pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
-if(PULSE_FOUND)
-    message(STATUS "PulseAudio found: ${PULSE_VERSION}")
-    add_compile_definitions(HAVE_PULSEAUDIO)
-else()
-    message(WARNING "PulseAudio not found")
 endif()
 
 # Find VA-API (optional)
@@ -102,17 +95,7 @@ if(ENABLE_VAAPI)
     endif()
 endif()
 
-# Find X11 (for X11 capture support)
-find_package(X11 COMPONENTS Xext)
-if(X11_FOUND)
-    message(STATUS "X11 found")
-    add_compile_definitions(HAVE_X11)
-    if(X11_Xext_FOUND)
-        add_compile_definitions(HAVE_XEXT)
-    endif()
-else()
-    message(STATUS "X11 not found, X11 capture disabled")
-endif()
+# Find PipeWire (for Wayland/PipeWire capture)
 
 # Check for NVENC (just check if headers exist)
 if(ENABLE_NVENC)
@@ -150,9 +133,6 @@ set(CAPTURE_SOURCES
     src/capture/CaptureFactory.cpp
 )
 
-if(X11_FOUND)
-    list(APPEND CAPTURE_SOURCES src/capture/X11WindowCapture.cpp)
-endif()
 
 if(PIPEWIRE_FOUND)
     list(APPEND CAPTURE_SOURCES src/capture/WaylandPortalCapture.cpp)
@@ -161,15 +141,8 @@ endif()
 set(AUDIO_SOURCES
     src/audio/AudioMixer.cpp
     src/audio/AudioDeviceEnumerator.cpp
+    src/audio/PipeWireAudioSource.cpp
 )
-
-if(PIPEWIRE_FOUND)
-    list(APPEND AUDIO_SOURCES src/audio/PipeWireAudioSource.cpp)
-endif()
-
-if(PULSE_FOUND)
-    list(APPEND AUDIO_SOURCES src/audio/PulseAudioSource.cpp)
-endif()
 
 set(ENCODING_SOURCES
     src/encoding/EncoderFactory.cpp
@@ -183,13 +156,9 @@ set(MUXING_SOURCES
 
 set(DETECTION_SOURCES
     src/detection/GameDetectionService.cpp
-    src/detection/ProcessHeuristics.cpp
     src/detection/GameWhitelist.cpp
 )
 
-if(X11_FOUND)
-    list(APPEND DETECTION_SOURCES src/detection/X11WindowMonitor.cpp)
-endif()
 
 list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp)
 
@@ -218,9 +187,6 @@ set(CAPTURE_HEADERS
     src/capture/CaptureFactory.h
 )
 
-if(X11_FOUND)
-    list(APPEND CAPTURE_HEADERS src/capture/X11WindowCapture.h)
-endif()
 
 if(PIPEWIRE_FOUND)
     list(APPEND CAPTURE_HEADERS src/capture/WaylandPortalCapture.h)
@@ -230,15 +196,8 @@ set(AUDIO_HEADERS
     src/audio/IAudioSource.h
     src/audio/AudioMixer.h
     src/audio/AudioDeviceEnumerator.h
+    src/audio/PipeWireAudioSource.h
 )
-
-if(PIPEWIRE_FOUND)
-    list(APPEND AUDIO_HEADERS src/audio/PipeWireAudioSource.h)
-endif()
-
-if(PULSE_FOUND)
-    list(APPEND AUDIO_HEADERS src/audio/PulseAudioSource.h)
-endif()
 
 set(ENCODING_HEADERS
     src/encoding/IEncoder.h
@@ -254,13 +213,9 @@ set(MUXING_HEADERS
 
 set(DETECTION_HEADERS
     src/detection/GameDetectionService.h
-    src/detection/ProcessHeuristics.h
     src/detection/GameWhitelist.h
 )
 
-if(X11_FOUND)
-    list(APPEND DETECTION_HEADERS src/detection/X11WindowMonitor.h)
-endif()
 
 list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h)
 
@@ -315,6 +270,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/StorageUsageBar.qml
         qml/components/NavigationRail.qml
         qml/components/WindowPickerDialog.qml
+        qml/components/SetupWizard.qml
         qml/pages/DashboardPage.qml
         qml/pages/RecordingsPage.qml
         qml/pages/InfoPage.qml
@@ -385,26 +341,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     PkgConfig::AVUTIL
     PkgConfig::SWSCALE
     PkgConfig::SWRESAMPLE
+    Qt6::Network
 )
 
 if(PIPEWIRE_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::PIPEWIRE)
 endif()
 
-if(PULSE_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::PULSE)
-endif()
-
 if(VAAPI_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::VAAPI)
 endif()
 
-if(X11_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE X11::X11)
-    if(X11_Xext_FOUND)
-        target_link_libraries(${PROJECT_NAME} PRIVATE X11::Xext)
-    endif()
-endif()
 
 # Compiler warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -415,6 +362,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wno-unused-parameter
     )
 endif()
+
+# Vulkan Layer
+add_library(trophy_layer SHARED src/vulkan_layer/trophy_layer.cpp)
+target_include_directories(trophy_layer PRIVATE ${Vulkan_INCLUDE_DIRS})
+set_target_properties(trophy_layer PROPERTIES 
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/vulkan_layer
+)
+
+# Generate JSON manifest
+set(LIBRARY_PATH "trophy_layer.so")
+configure_file(
+    src/vulkan_layer/trophy_layer.json.in
+    ${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json
+    @ONLY
+)
+
+install(TARGETS trophy_layer DESTINATION ${CMAKE_INSTALL_LIBDIR}/vulkan/layer)
+install(FILES ${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/vulkan/implicit_layer.d)
 
 # Installation
 include(GNUInstallDirs)
@@ -457,8 +423,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "")
 message(STATUS "Features:")
 message(STATUS "  PipeWire: ${PIPEWIRE_FOUND}")
-message(STATUS "  PulseAudio: ${PULSE_FOUND}")
+message(STATUS "  VA-API: ${VAAPI_FOUND}")
 message(STATUS "  VA-API: ${VAAPI_FOUND}")
 message(STATUS "  NVENC: ${HAVE_NVENC_IN_FFMPEG}")
-message(STATUS "  X11 capture: ${X11_FOUND}")
 message(STATUS "")

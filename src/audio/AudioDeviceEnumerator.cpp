@@ -27,11 +27,7 @@ void AudioDeviceEnumerator::refresh() {
   m_inputDevices.clear();
   m_outputDevices.clear();
 
-#ifdef HAVE_PIPEWIRE
   enumeratePipeWire();
-#else
-  enumeratePulseAudio();
-#endif
 
   // Add default devices if none found
   if (m_inputDevices.isEmpty()) {
@@ -236,21 +232,24 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
   }
 
   // Core listener
-  static const struct pw_core_events core_events = {
-      .version = PW_VERSION_CORE_EVENTS,
-      .done = enumCoreDone,
-  };
+  static const struct pw_core_events core_events = [] {
+    struct pw_core_events e = {};
+    e.version = PW_VERSION_CORE_EVENTS;
+    e.done = enumCoreDone;
+    return e;
+  }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   // Registry listener
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
-  static const struct pw_registry_events registry_events = {
-      PW_VERSION_REGISTRY_EVENTS,
-      enumRegistryGlobal,
-      nullptr, // global_remove
-  };
+  static const struct pw_registry_events registry_events = [] {
+    struct pw_registry_events e = {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = enumRegistryGlobal;
+    return e;
+  }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
@@ -291,9 +290,5 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
 #endif
 }
 
-void AudioDeviceEnumerator::enumeratePulseAudio() {
-  // TODO: Enumerate devices using PulseAudio API
-  qDebug() << "PulseAudio device enumeration (stub)";
-}
 
 } // namespace GameRecorder

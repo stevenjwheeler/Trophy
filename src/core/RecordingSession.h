@@ -55,10 +55,9 @@ public:
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
 
-  // Set app names to watch for (called by RecordingManager during setup)
-  void setGameApps(const QString &processName, const QString &windowClass) {
+  // Set app name to watch for (called by RecordingManager during setup)
+  void setGameApps(const QString &processName) {
     m_gameProcess = processName;
-    m_windowClass = windowClass;
   }
   void setVoiceChatApp(const QString &appName) { m_voiceChatApp = appName; }
 
@@ -116,7 +115,6 @@ private:
   // Audio node reconnection tracking
   QTimer *m_audioNodeCheckTimer = nullptr;
   QString m_gameProcess;      // Game process name to watch for
-  QString m_windowClass;      // X11 window class to watch for
   QString m_voiceChatApp;     // Voice chat app name to watch for
   std::array<bool, kAudioTrackCount> m_sourceConnected{};  // Track which sources are connected
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index

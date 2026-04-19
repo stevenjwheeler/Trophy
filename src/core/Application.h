@@ -90,6 +90,7 @@ private:
   void exposeServicesToQml();
   void connectSignals();
   void setupSystemTray();
+  void ensureVulkanLayerRegistered();
 
   std::unique_ptr<RecordingManager> m_recordingManager;
   std::unique_ptr<SettingsManager> m_settingsManager;
@@ -101,6 +102,8 @@ private:
   std::unique_ptr<WindowService> m_windowService;
   std::unique_ptr<AudioDeviceEnumerator> m_audioDeviceEnumerator;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
+  QString m_pendingAutoRecordGame;
+  QTimer *m_detectionDebounceTimer = nullptr;
 
 };
 

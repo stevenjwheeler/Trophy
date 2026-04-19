@@ -11,6 +11,7 @@
 #include <atomic>
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
+#include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
 
 namespace GameRecorder {
@@ -80,6 +81,9 @@ private:
   QString m_sourceLabel;
   uint32_t m_sourcePid = 0;
   QString m_sourceAppId;
+  bool m_useDmaBuf = true;        // Set from CaptureConfig
+  bool m_dmaBufNegotiated = false; // Whether compositor accepted DMA-BUF
+  uint64_t m_negotiatedModifier = 0; // DRM modifier agreed during format negotiation
 };
 
 } // namespace GameRecorder

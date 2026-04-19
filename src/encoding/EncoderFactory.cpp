@@ -172,7 +172,7 @@ bool EncoderFactory::probeNvenc() {
   }
 
   // Single point of truth for the Info log
-  qInfo() << "NVENC is" << (success ? "available" : "not available");
+  qDebug() << "NVENC is" << (success ? "available" : "not available");
   return success;
 #else
   return false;
@@ -213,7 +213,7 @@ bool EncoderFactory::probeVaapi() {
     }();
   }
 
-  qInfo() << "VA-API is" << (success ? "available" : "not available");
+  qDebug() << "VA-API is" << (success ? "available" : "not available");
   return success;
 #else
   return false;

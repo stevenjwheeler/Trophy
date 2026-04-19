@@ -67,7 +67,6 @@ signals:
 
 private:
   void enumeratePipeWire();
-  void enumeratePulseAudio();
 
   QList<AudioDeviceInfo> m_inputDevices;
   QList<AudioDeviceInfo> m_outputDevices;

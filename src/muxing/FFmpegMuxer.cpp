@@ -168,7 +168,7 @@ bool FFmpegMuxer::writeHeader() {
   }
 
   m_headerWritten = true;
-  qInfo() << "Container header written";
+  qDebug() << "Container header written";
   return true;
 }
 
@@ -244,7 +244,7 @@ bool FFmpegMuxer::finalize() {
 
   cleanup();
 
-  qInfo() << "Muxer finalized. Total bytes:" << m_bytesWritten;
+  qDebug() << "Muxer finalized. Total bytes:" << m_bytesWritten;
   return true;
 }
 

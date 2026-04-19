@@ -36,7 +36,7 @@ void SettingsManager::load() {
   QFile file(filePath);
 
   if (!file.exists()) {
-    qInfo() << "Settings file not found, using defaults";
+    qDebug() << "Settings file not found, using defaults";
     loadDefaults();
     save(); // Create the file with defaults
     return;
@@ -78,6 +78,7 @@ void SettingsManager::load() {
   m_encoderPreset = video["preset"].toString("fast");
   m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
   m_useVBR = video["useVBR"].toBool(true);
+  m_useDmaBuf = video["useDmaBuf"].toBool(true);
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
@@ -101,11 +102,15 @@ void SettingsManager::load() {
   QJsonObject detection = root["detection"].toObject();
   m_autoDetectGames = detection["autoDetect"].toBool(true);
   m_autoRecordEnabled = detection["autoRecord"].toBool(false);
+  m_setupCompleted = detection["setupCompleted"].toBool(false);
   
-  // Load Wayland restore token
+  // Load Wayland restore tokens
   m_waylandRestoreToken = root["waylandRestoreToken"].toString();
+  if (root.contains("waylandRestoreTokens")) {
+    m_waylandRestoreTokens = root["waylandRestoreTokens"].toObject().toVariantMap();
+  }
 
-  qInfo() << "Settings loaded from" << filePath;
+  qDebug() << "Settings loaded from" << filePath;
   emit settingsLoaded();
 }
 
@@ -131,6 +136,7 @@ void SettingsManager::save() {
   video["preset"] = m_encoderPreset;
   video["maxBitrate"] = m_maxVideoBitrate;
   video["useVBR"] = m_useVBR;
+  video["useDmaBuf"] = m_useDmaBuf;
   root["video"] = video;
 
   // Audio settings
@@ -154,9 +160,11 @@ void SettingsManager::save() {
   QJsonObject detection;
   detection["autoDetect"] = m_autoDetectGames;
   detection["autoRecord"] = m_autoRecordEnabled;
+  detection["setupCompleted"] = m_setupCompleted;
   root["detection"] = detection;
 
   root["waylandRestoreToken"] = m_waylandRestoreToken;
+  root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
 
   // Write atomically using QSaveFile
   QSaveFile file(filePath);
@@ -174,7 +182,7 @@ void SettingsManager::save() {
     return;
   }
 
-  qInfo() << "Settings saved to" << filePath;
+  qDebug() << "Settings saved to" << filePath;
   emit settingsSaved();
 }
 
@@ -204,6 +212,7 @@ void SettingsManager::resetToDefaults() {
 
   emit autoDetectGamesChanged();
   emit autoRecordEnabledChanged();
+  emit setupCompletedChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -216,6 +225,7 @@ void SettingsManager::loadDefaults() {
   m_encoderPreset = "fast";
   m_maxVideoBitrate = 20000;
   m_useVBR = true;
+  m_useDmaBuf = true;
 
   // Audio
   m_audioMode = "game";
@@ -237,7 +247,7 @@ void SettingsManager::loadDefaults() {
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
-  qInfo() << "Migrating settings from version" << fromVersion << "to"
+  qDebug() << "Migrating settings from version" << fromVersion << "to"
           << SETTINGS_VERSION;
 
   // Future migrations go here
@@ -406,6 +416,14 @@ void SettingsManager::setUseVBR(bool enabled) {
   }
 }
 
+void SettingsManager::setUseDmaBuf(bool enabled) {
+  if (m_useDmaBuf != enabled) {
+    m_useDmaBuf = enabled;
+    save();
+    emit useDmaBufChanged();
+  }
+}
+
 void SettingsManager::setWaylandRestoreToken(const QString &token) {
   if (m_waylandRestoreToken != token) {
     m_waylandRestoreToken = token;
@@ -415,7 +433,39 @@ void SettingsManager::setWaylandRestoreToken(const QString &token) {
 }
 
 void SettingsManager::clearWaylandToken() {
-  setWaylandRestoreToken("");
+  m_waylandRestoreToken = "";
+  m_waylandRestoreTokens.clear();
+  save();
+  emit waylandRestoreTokenChanged();
+  emit waylandRestoreTokensChanged();
+}
+
+QString SettingsManager::getRestoreToken(const QString &key) const {
+  return m_waylandRestoreTokens.value(key).toString();
+}
+
+void SettingsManager::setRestoreToken(const QString &key, const QString &token) {
+  if (m_waylandRestoreTokens.value(key).toString() != token) {
+    m_waylandRestoreTokens[key] = token;
+    save();
+    emit waylandRestoreTokensChanged();
+  }
+}
+
+void SettingsManager::removeRestoreToken(const QString &key) {
+  if (m_waylandRestoreTokens.contains(key)) {
+    m_waylandRestoreTokens.remove(key);
+    save();
+    emit waylandRestoreTokensChanged();
+  }
+}
+
+void SettingsManager::setSetupCompleted(bool completed) {
+  if (m_setupCompleted != completed) {
+    m_setupCompleted = completed;
+    save();
+    emit setupCompletedChanged();
+  }
 }
 
 } // namespace GameRecorder

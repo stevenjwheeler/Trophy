@@ -58,7 +58,7 @@ void AudioMixer::addSource(std::unique_ptr<IAudioSource> source,
       onAudioReceived(trackIndex, frame.samples, frame.frameCount);
     });
 
-    qInfo() << "Audio source added to track" << trackIndex << ":"
+    qDebug() << "Audio source added to track" << trackIndex << ":"
             << track.source->displayName();
 
     // If the mixer is already running (e.g., a source added mid-recording by

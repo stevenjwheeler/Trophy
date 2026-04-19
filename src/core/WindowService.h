@@ -30,7 +30,7 @@ public:
   QString getProcessNameForWindow(unsigned long windowId);
 
   /**
-   * @brief Get the X11 WM_CLASS resource class for a window (e.g. "Spotify")
+   * @brief Get the application class for a window (e.g. "Spotify")
    */
   QString getWindowClassForWindow(unsigned long windowId);
 
@@ -44,7 +44,6 @@ private:
   unsigned long getPidForWindow(unsigned long windowId);
 
 private:
-  void *m_display = nullptr;
   unsigned long m_trophyWindowId = 0;
 };
 

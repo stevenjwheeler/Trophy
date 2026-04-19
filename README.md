@@ -4,9 +4,10 @@
   <p><strong>Game recorder and clipping for Linux</strong></p>
 </div>
 
-A modern, performant game session recording and clipping application for Linux with hardware-accelerated encoding, multi-track audio capture, and intelligent, heuristic driven game detection.
+Trophy is a modern, performant game session recording and clipping application for Linux, built exclusively for Wayland. It features hardware-accelerated encoding, multi-track audio capture, and intelligent, heuristic-driven game detection.
 
-Trophy is designed to have minimal performance impact while still capturing high definition game sessions and clips.
+> [!WARNING]
+> **Native X11 sessions are not supported.** Trophy is designed specifically for Wayland. While XWayland applications can be recorded perfectly fine, the application must be run within a Wayland compositor (like KWin/KDE, GNOME Shell, or Hyprland).
 
 [![Latest Release](https://img.shields.io/github/v/release/stevenjwheeler/trophy?color=blue&label=Latest%20Release)](https://github.com/stevenjwheeler/trophy/releases/latest)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
@@ -26,7 +27,7 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - **Full sessions or clips** - Records full sessions from open to close, or custom clip lengths using a hotkey
 - **Hardware-Accelerated Encoding** - Supports NVIDIA NVENC and AMD/Intel VA-API for minimal performance impact
 - **Software Fallback** - x264 encoding when hardware acceleration isn't available
-- **Multi-platform support** - Supports recording X11, Wayland and XWayland windows
+- **Wayland Focused** - Supports recording native Wayland and XWayland windows via PipeWire
 - **Multiple Container Formats** - MKV (crash-resilient) and MP4 output options
 - **Configurable Quality** - Adjustable bitrate, resolution, frame rate, and encoder presets
 
@@ -37,8 +38,10 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - **Real-Time Level Meters** - Visual feedback for all audio sources
 
 ### Game Detection
-- **Automatic Detection** - Identifies games using Steam integration, window patterns, and process heuristics
-- **Steam & Proton Support** - Detects native and Windows games running through Proton/Wine
+- **Vulkan Detection Layer** - High-fidelity detection using a custom Vulkan implicit layer
+- **Instant Response** - Games are detected the moment `vkCreateInstance` is called
+- **Zero-Config** - Trophy automatically registers its detection layer on first launch
+- **Steam & Proton Support** - Definitively identifies Windows games running through Proton
 - **Whitelist/Blacklist** - User-defined rules for custom game recognition
 - **Auto-Record Option** - Automatically start recording when a game launches
 
@@ -68,14 +71,16 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 ### Runtime Dependencies
 - Qt 6.10+
 - FFmpeg (libavcodec, libavformat, libavutil, libswscale, libswresample)
-- PipeWire (recommended) or PulseAudio
+- PipeWire (Required)
 - For NVIDIA: nvidia-utils (NVENC support)
 - For AMD/Intel: libva (VA-API support)
+- Vulkan Loader & Headers (for game detection)
 
 ### Build Dependencies
 - CMake 3.21+
 - C++20 compiler (GCC 11+ or Clang 13+)
 - Qt6 development packages
+- Vulkan SDK or Headers
 - pkg-config
 
 ## Building from source
@@ -174,7 +179,7 @@ Trophy is built with a modular architecture:
 │  IVideoCaptureSource │ IEncoder │ IAudioSource │ IMuxer   │
 ├───────────────────────────────────────────────────────────┤
 │                 Platform Implementations                  │
-│  X11/Wayland Capture │ NVENC/VAAPI/x264 │ PipeWire/Pulse  │
+│  Wayland Capture  │ NVENC/VAAPI/x264 │    PipeWire     │
 └───────────────────────────────────────────────────────────┘
 ```
 

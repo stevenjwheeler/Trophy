@@ -25,14 +25,14 @@ class Recording : public QObject {
   Q_PROPERTY(QString filePath READ filePath CONSTANT)
   Q_PROPERTY(QString fileName READ fileName CONSTANT)
   Q_PROPERTY(QString directory READ directory CONSTANT)
-  Q_PROPERTY(QString gameName READ gameName CONSTANT)
+  Q_PROPERTY(QString gameName READ gameName NOTIFY metadataChanged)
   Q_PROPERTY(QDateTime date READ date CONSTANT)
-  Q_PROPERTY(qint64 duration READ duration CONSTANT)
+  Q_PROPERTY(qint64 duration READ duration NOTIFY metadataChanged)
   Q_PROPERTY(qint64 size READ size CONSTANT)
   Q_PROPERTY(
       QString thumbnailPath READ thumbnailPath NOTIFY thumbnailPathChanged)
-  Q_PROPERTY(int width READ width CONSTANT)
-  Q_PROPERTY(int height READ height CONSTANT)
+  Q_PROPERTY(int width READ width NOTIFY metadataChanged)
+  Q_PROPERTY(int height READ height NOTIFY metadataChanged)
 
 public:
   explicit Recording(const QString &filePath, QObject *parent = nullptr);
@@ -58,6 +58,7 @@ public:
 
 signals:
   void thumbnailPathChanged();
+  void metadataChanged();
 
 private:
   void parseFileNameForGameName();

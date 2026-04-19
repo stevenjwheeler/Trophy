@@ -125,7 +125,9 @@ Page {
                                     // delegateModel already changed currentIndex before onClicked
                                     // could intercept — revert to the last valid selection.
                                     let savedIdx = values.indexOf(settingsManager.encoder);
-                                    // Re-evaluate through binding instead of direct assignment
+                                    if (savedIdx !== -1 && currentIndex !== savedIdx) {
+                                        currentIndex = savedIdx;
+                                    }
                                 }
                             }
 
@@ -133,6 +135,7 @@ Page {
                                 id: encDelegate
 
                                 readonly property bool isAvailable: app.isEncoderAvailable(encoderBox.values[index])
+                                enabled: isAvailable
 
                                 width: encoderBox.width - 4
                                 height: 32
@@ -196,9 +199,12 @@ Page {
                                 stepSize: 1000
                                 value: settingsManager ? settingsManager.videoBitrate : 15000
                                 onMoved: {
-                                    if (settingsManager)
+                                    if (!pressed && settingsManager)
                                         settingsManager.videoBitrate = value;
-
+                                }
+                                onPressedChanged: {
+                                    if (!pressed && settingsManager)
+                                        settingsManager.videoBitrate = value;
                                 }
                             }
 
@@ -413,6 +419,20 @@ Page {
                                 if (settingsManager)
                                     settingsManager.encoderPreset = values[currentIndex];
 
+                            }
+                        }
+                    }
+
+                    SettingItem {
+                        label: qsTr("Zero-Copy Capture (DMA-BUF)")
+                        helpText: qsTr("Enable hardware-accelerated zero-copy capture for significantly lower CPU usage. Disable this if you experience green screens or crashes during capture.")
+
+                        TrophySwitch {
+                            checked: settingsManager ? settingsManager.useDmaBuf : true
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.useDmaBuf = checked;
                             }
                         }
                     }
@@ -910,19 +930,22 @@ Page {
                                 id: storageSlider
 
                                 Layout.fillWidth: true
-                                from: 10
+                                from: 0
                                 to: 500
                                 stepSize: 1
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
                                 onMoved: {
-                                    if (settingsManager)
+                                    if (!pressed && settingsManager)
                                         settingsManager.maxStorageSize = value * 1024 * 1024 * 1024;
-
+                                }
+                                onPressedChanged: {
+                                    if (!pressed && settingsManager)
+                                        settingsManager.maxStorageSize = value * 1024 * 1024 * 1024;
                                 }
                             }
 
                             Label {
-                                text: storageSlider.value.toFixed(0) + " GB"
+                                text: storageSlider.value === 0 ? qsTr("No Limit") : storageSlider.value.toFixed(0) + " GB"
                                 color: Theme.textColor
                                 font.weight: Font.Medium
                                 Layout.preferredWidth: 70
@@ -935,6 +958,8 @@ Page {
                     SettingItem {
                         label: qsTr("Auto-Cleanup")
                         helpText: qsTr("Enable this to automatically delete the oldest recordings when you exceed the storage limit.")
+                        enabled: storageSlider.value > 0
+                        opacity: enabled ? 1.0 : 0.5
 
                         TrophySwitch {
                             checked: settingsManager ? settingsManager.autoDeleteOldest : false
@@ -1003,6 +1028,14 @@ Page {
 
                 Item {
                     Layout.fillWidth: true
+                }
+
+                TrophyButton {
+                    text: qsTr("Restart Setup Wizard")
+                    onClicked: {
+                        if (settingsManager)
+                            settingsManager.setupCompleted = false;
+                    }
                 }
 
                 TrophyButton {

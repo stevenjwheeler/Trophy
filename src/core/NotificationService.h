@@ -30,7 +30,8 @@ public:
   void setEnabled(bool enabled);
 
   Q_INVOKABLE void showNotification(const QString &title, const QString &body,
-                                    const QString &icon = QString());
+                                    const QString &icon = QString(),
+                                    int timeout = 5000, int urgency = 1);
 
   Q_INVOKABLE void showRecordingStarted(const QString &gameName);
   Q_INVOKABLE void showRecordingStopped(const QString &filePath);
@@ -39,6 +40,10 @@ public:
 signals:
   void enabledChanged();
   void notificationClicked(const QString &action);
+
+private slots:
+  void onActionInvoked(uint id, const QString &action);
+  void onNotificationClosed(uint id, uint reason);
 
 private:
   bool m_enabled = true;
