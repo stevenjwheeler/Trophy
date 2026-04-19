@@ -7,15 +7,16 @@
 
 #pragma once
 
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QMap>
 #include <QObject>
 #include <QSet>
-#include <QTimer>
 #include <memory>
 
 namespace GameRecorder {
 
-class ProcessHeuristics;
+class GameWhitelist;
 class GameWhitelist;
 class GameDetectionServiceTest; // Forward declaration for unit testing
 
@@ -60,7 +61,9 @@ signals:
   void recentGamesChanged();
 
 private slots:
-  void checkForGames();
+  void onNewConnection();
+  void onSocketReadyRead();
+  void onSocketDisconnected();
 
 private:
   // Grant the test class access to private members (fixes your build errors)
@@ -79,11 +82,10 @@ private:
   qint64 m_currentGamePid = 0;
   QStringList m_recentGames;
 
-  QTimer *m_pollTimer;
-  QSet<qint64> m_nonGamePids;
-  QMap<uint, QString> m_steamNameCache; // Optimized name lookup
+  QLocalServer *m_server;
+  QMap<QLocalSocket *, qint64> m_activeConnections;
+  QMap<qint64, QString> m_pidToGameName;
 
-  std::unique_ptr<ProcessHeuristics> m_heuristics;
   std::unique_ptr<GameWhitelist> m_whitelist;
 };
 

@@ -1,46 +1,21 @@
-/*
- * Trophy - Game recording and clipping
- * Copyright (C) 2026
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 #include "GameDetectionService.h"
 #include "GameWhitelist.h"
-#include "ProcessHeuristics.h"
 
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QRegularExpression>
 #include <QStandardPaths>
-#include <QTextStream>
 
 namespace GameRecorder {
 
-// Filter for management processes, wrappers, and Windows-on-Linux shims
-static const QSet<QString> IGNORED_PROCESS_NAMES = {
-    "reaper",           "pressure-vessel-reaper",
-    "steamwebhelper",   "steam.exe",
-    "steamservice.exe", "explorer.exe",
-    "services.exe",     "winedevice.exe",
-    "plugplay.exe",     "gamemoded",
-    "wine-preloader",   "wine64-preloader",
-    "svchost.exe",      "srt-bwrap",
-    "pv-adverb",        "rpcss.exe",
-    "tabtip.exe",       "xalia.exe",
-    "conhost.exe",      "mount.ntfs",
-    "python3",          "python",
-    "python.exe",       "python3.exe",
-    "kwin_wayland",     "kwin_wayland.exe",
-    "kwin_wayland.exe", "kwin_wayland.exe"};
-
 GameDetectionService::GameDetectionService(QObject *parent)
-    : QObject(parent), m_heuristics(std::make_unique<ProcessHeuristics>()),
-      m_whitelist(std::make_unique<GameWhitelist>()) {
-  m_pollTimer = new QTimer(this);
-  m_pollTimer->setInterval(2000);
-  connect(m_pollTimer, &QTimer::timeout, this,
-          &GameDetectionService::checkForGames);
+    : QObject(parent), m_whitelist(std::make_unique<GameWhitelist>()) {
+  m_server = new QLocalServer(this);
+  connect(m_server, &QLocalServer::newConnection, this,
+          &GameDetectionService::onNewConnection);
 
   m_whitelist->load();
 }
@@ -50,63 +25,226 @@ GameDetectionService::~GameDetectionService() { stop(); }
 void GameDetectionService::start() {
   if (m_running)
     return;
-  qInfo() << "Starting game detection service";
+  qInfo() << "Starting game detection service (Vulkan Layer mode)";
+  
+  // Remove existing socket file if it exists
+  QLocalServer::removeServer("/tmp/trophy-detection.sock");
+  
+  if (!m_server->listen("/tmp/trophy-detection.sock")) {
+    qCritical() << "Failed to start detection server:" << m_server->errorString();
+    return;
+  }
+  
   m_running = true;
-  m_pollTimer->start();
-  checkForGames();
 }
 
 void GameDetectionService::stop() {
   if (!m_running)
     return;
   qInfo() << "Stopping game detection service";
+  m_server->close();
   m_running = false;
-  m_pollTimer->stop();
+  
+  for (QLocalSocket *socket : m_activeConnections.keys()) {
+    socket->disconnect();
+    socket->close();
+    socket->deleteLater();
+  }
+  m_activeConnections.clear();
+  m_pidToGameName.clear();
+}
+
+void GameDetectionService::onNewConnection() {
+  QLocalSocket *socket = m_server->nextPendingConnection();
+  if (!socket)
+    return;
+
+  connect(socket, &QLocalSocket::readyRead, this,
+          &GameDetectionService::onSocketReadyRead);
+  connect(socket, &QLocalSocket::disconnected, this,
+          &GameDetectionService::onSocketDisconnected);
+}
+
+void GameDetectionService::onSocketReadyRead() {
+  QLocalSocket *socket = qobject_cast<QLocalSocket *>(sender());
+  if (!socket)
+    return;
+
+  while (socket->canReadLine()) {
+    QString line = QString::fromUtf8(socket->readLine()).trimmed();
+    QStringList parts = line.split(':');
+
+    if (parts.size() >= 2) {
+      QString command = parts[0];
+      qint64 pid = parts[1].toLongLong();
+
+      if (command == "START" && parts.size() >= 3) {
+        QString gameName = parts[2];
+        uint steamAppId = (parts.size() >= 4) ? parts[3].toUInt() : 0;
+
+        if (steamAppId > 0) {
+          QString steamName = getSteamAppName(steamAppId);
+          if (!steamName.isEmpty()) {
+            gameName = steamName;
+          }
+        }
+
+        if (m_whitelist->isBlacklisted(gameName)) {
+          qDebug() << "Ignoring blacklisted process:" << gameName << "(PID:" << pid << ")";
+          return;
+        }
+
+        m_activeConnections[socket] = pid;
+
+        bool isBetterName = true;
+        if (m_pidToGameName.contains(pid)) {
+          QString existingName = m_pidToGameName[pid];
+          // Don't overwrite a specific name with a generic one
+          if (gameName == "Unknown Vulkan Game" && existingName != "Unknown Vulkan Game") {
+            isBetterName = false;
+          }
+        }
+
+        if (isBetterName) {
+
+          bool isNewName = true;
+          for (const QString &name : m_pidToGameName.values()) {
+              if (name == gameName && m_pidToGameName.key(name) != pid) {
+                  isNewName = false;
+                  break;
+              }
+          }
+
+          m_pidToGameName[pid] = gameName;
+          
+          if (isNewName) {
+            qDebug() << "Vulkan game started:" << gameName << "(PID:" << pid << ")";
+            updateCurrentGame(gameName, pid);
+          } else {
+            qDebug() << "Additional process for existing game detected:" << gameName << "(PID:" << pid << ")";
+          }
+        } else {
+          qDebug() << "Ignoring redundant/generic start message for PID" << pid << ":" << gameName;
+        }
+      } else if (command == "STOP") {
+        m_activeConnections.remove(socket);
+        
+        // Only remove the PID if this was the last connection for it
+        bool pidStillActive = false;
+        for (qint64 activePid : m_activeConnections.values()) {
+            if (activePid == pid) {
+                pidStillActive = true;
+                break;
+            }
+        }
+
+        if (!pidStillActive) {
+          m_pidToGameName.remove(pid);
+          if (m_currentGamePid == pid) {
+            if (!m_pidToGameName.isEmpty()) {
+              qint64 nextPid = m_pidToGameName.keys().last();
+              updateCurrentGame(m_pidToGameName[nextPid], nextPid);
+            } else {
+              updateCurrentGame("", 0);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+void GameDetectionService::onSocketDisconnected() {
+  QLocalSocket *socket = qobject_cast<QLocalSocket *>(sender());
+  if (!socket)
+    return;
+
+  if (m_activeConnections.contains(socket)) {
+    qint64 pid = m_activeConnections.value(socket);
+    m_activeConnections.remove(socket);
+    
+    // Only remove the PID if this was the last connection for it
+    bool pidStillActive = false;
+    for (qint64 activePid : m_activeConnections.values()) {
+        if (activePid == pid) {
+            pidStillActive = true;
+            break;
+        }
+    }
+
+    if (!pidStillActive) {
+      m_pidToGameName.remove(pid);
+      if (m_currentGamePid == pid) {
+        if (!m_pidToGameName.isEmpty()) {
+          qint64 nextPid = m_pidToGameName.keys().last();
+          updateCurrentGame(m_pidToGameName[nextPid], nextPid);
+        } else {
+          updateCurrentGame("", 0);
+        }
+      }
+    }
+  }
+  socket->deleteLater();
 }
 
 uint GameDetectionService::getSteamAppId(qint64 pid) {
-  QFile envFile(QString("/proc/%1/environ").arg(pid));
-  if (!envFile.open(QIODevice::ReadOnly))
-    return 0;
-
-  // Read initial chunk (AppID is usually near the start of environment)
-  QByteArray envData = envFile.read(4096);
-  envFile.close();
-
-  QList<QByteArray> envVars = envData.split('\0');
-  for (const QByteArray &var : envVars) {
-    if (var.startsWith("SteamAppId=")) {
-      return var.mid(11).toUInt();
-    }
-  }
-  return 0;
+  Q_UNUSED(pid)
+  return 0; // No longer used, but kept for interface compatibility if needed
 }
 
 QString GameDetectionService::getSteamAppName(uint appId) {
   if (appId == 0)
     return QString();
 
-  if (m_steamNameCache.contains(appId)) {
-    return m_steamNameCache.value(appId);
+  QString home = QDir::homePath();
+  QString mainSteamPath = "";
+  
+  // Common main steam locations
+  QStringList mainPaths = {
+      home + "/.steam/steam",
+      home + "/.local/share/Steam",
+      home + "/.var/app/com.valvesoftware.Steam/.steam/steam" // Flatpak
+  };
+
+  for (const QString &p : mainPaths) {
+      if (QFile::exists(p + "/steamapps/libraryfolders.vdf")) {
+          mainSteamPath = p;
+          break;
+      }
   }
 
-  // Typical path for CachyOS/Arch Steam installs
-  QString steamPath = QDir::homePath() + "/.local/share/Steam/steamapps/";
-  QString manifestPath = steamPath + QString("appmanifest_%1.acf").arg(appId);
+  if (mainSteamPath.isEmpty()) return QString();
 
-  QFile file(manifestPath);
-  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-    return QString();
+  QStringList libraryPaths;
+  libraryPaths << mainSteamPath;
 
-  QTextStream in(&file);
-  while (!in.atEnd()) {
-    QString line = in.readLine().trimmed();
-    if (line.startsWith("\"name\"", Qt::CaseInsensitive)) {
-      QStringList parts = line.split("\"", Qt::SkipEmptyParts);
-      if (parts.size() >= 2) {
-        QString title = parts.last();
-        m_steamNameCache.insert(appId, title);
-        return title;
+  // Parse libraryfolders.vdf to find other drives
+  QFile libFile(mainSteamPath + "/steamapps/libraryfolders.vdf");
+  if (libFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+      QString content = QString::fromUtf8(libFile.readAll());
+      QRegularExpression pathRe("\"path\"\\s+\"([^\"]+)\"");
+      QRegularExpressionMatchIterator it = pathRe.globalMatch(content);
+      while (it.hasNext()) {
+          QRegularExpressionMatch match = it.next();
+          QString path = match.captured(1);
+          if (!libraryPaths.contains(path)) {
+              libraryPaths << path;
+          }
+      }
+  }
+
+  // Scan all found libraries for the app manifest
+  for (const QString &libPath : libraryPaths) {
+    QString acfPath = libPath + QString("/steamapps/appmanifest_%1.acf").arg(appId);
+    if (QFile::exists(acfPath)) {
+      QFile file(acfPath);
+      if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QString content = QString::fromUtf8(file.readAll());
+        QRegularExpression nameRe("\"name\"\\s+\"([^\"]+)\"");
+        QRegularExpressionMatch match = nameRe.match(content);
+        if (match.hasMatch()) {
+          return match.captured(1);
+        }
       }
     }
   }
@@ -114,86 +252,7 @@ QString GameDetectionService::getSteamAppName(uint appId) {
 }
 
 QString GameDetectionService::formatDisplayName(const QString &rawName) {
-  QString name = rawName;
-  if (name.endsWith(".exe", Qt::CaseInsensitive))
-    name.chop(4);
-
-  name.replace('_', ' ');
-  name.replace('-', ' ');
-
-  if (!name.isEmpty()) {
-    name[0] = name[0].toUpper();
-  }
-  return name.trimmed();
-}
-
-void GameDetectionService::checkForGames() {
-  QDir procDir("/proc");
-  QStringList entries = procDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-
-  QString bestGame;
-  qint64 bestPid = 0;
-  float bestScore = 0.0f;
-  QSet<qint64> nextNonGamePids;
-
-  for (const QString &entry : entries) {
-    bool ok;
-    qint64 pid = entry.toLongLong(&ok);
-    if (!ok)
-      continue;
-
-    if (m_nonGamePids.contains(pid)) {
-      nextNonGamePids.insert(pid);
-      continue;
-    }
-
-    ProcessHeuristics::ProcessInfo info = m_heuristics->getProcessInfo(pid);
-    if (info.name.isEmpty())
-      continue;
-
-    if (IGNORED_PROCESS_NAMES.contains(info.name.toLower())) {
-      nextNonGamePids.insert(pid);
-      continue;
-    }
-
-    if (m_whitelist->isBlacklisted(info.windowClass) ||
-        m_whitelist->isBlacklisted(info.name)) {
-      nextNonGamePids.insert(pid);
-      continue;
-    }
-
-    uint steamAppId = getSteamAppId(pid);
-    float score = m_heuristics->gameConfidence(info);
-
-    if (info.name.endsWith(".exe", Qt::CaseInsensitive)) {
-      score += 0.2f;
-    }
-
-    if (score > 0.5f) {
-      if (score > bestScore) {
-        bestPid = pid;
-        bestScore = score;
-
-        QString officialName = getSteamAppName(steamAppId);
-
-        if (!officialName.isEmpty()) {
-          bestGame = officialName;
-        } else if (!info.steamGameName.isEmpty()) {
-          bestGame = info.steamGameName;
-        } else {
-          bestGame = formatDisplayName(info.name);
-        }
-      }
-    } else {
-      nextNonGamePids.insert(pid);
-    }
-  }
-
-  m_nonGamePids = std::move(nextNonGamePids);
-
-  if (bestGame != m_currentGameName || bestPid != m_currentGamePid) {
-    updateCurrentGame(bestGame, bestPid);
-  }
+  return rawName;
 }
 
 void GameDetectionService::updateCurrentGame(const QString &gameName,
@@ -205,21 +264,16 @@ void GameDetectionService::updateCurrentGame(const QString &gameName,
   m_currentGameName = gameName;
   m_currentGamePid = pid;
 
-  // This is what the UI listens to!
   emit currentGameChanged();
 
   if (gameName.isEmpty()) {
     if (!oldGame.isEmpty()) {
       emit gameClosed(oldGame);
-      qInfo() << "Game closed:" << oldGame;
     }
   } else {
-    // Only announce a "New" detection if the name actually changed
-    // or if there was nothing running before
     if (oldGame != gameName) {
       addToRecentGames(gameName);
       emit gameDetected(gameName, pid);
-      qInfo() << "Game detected:" << gameName << "PID:" << pid;
     }
   }
 }
