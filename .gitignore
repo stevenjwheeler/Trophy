@@ -59,8 +59,8 @@ TODO.md
 
 # --- SonarQube ---
 .sonar/
-.scannerwork/
 .sonarqube/
+.scannerwork/
 .sonar-scanner/
 .sonar-scanner.properties
 sonar-project.properties

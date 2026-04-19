@@ -363,24 +363,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
-# Vulkan Layer
-add_library(trophy_layer SHARED src/vulkan_layer/trophy_layer.cpp)
-target_include_directories(trophy_layer PRIVATE ${Vulkan_INCLUDE_DIRS})
-set_target_properties(trophy_layer PROPERTIES 
-    PREFIX ""
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/vulkan_layer
-)
+# Coverage configuration (only when requested)
+option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 
-# Generate JSON manifest
-set(LIBRARY_PATH "trophy_layer.so")
-configure_file(
-    src/vulkan_layer/trophy_layer.json.in
-    ${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json
-    @ONLY
-)
-
-install(TARGETS trophy_layer DESTINATION ${CMAKE_INSTALL_LIBDIR}/vulkan/layer)
-install(FILES ${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/vulkan/implicit_layer.d)
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Coverage reporting enabled")
+        target_compile_options(${PROJECT_NAME} PUBLIC --coverage -fprofile-arcs -ftest-coverage)
+        target_link_libraries(${PROJECT_NAME} PUBLIC --coverage)
+        
+        # Also apply to the App and Tests
+        target_compile_options(${PROJECT_NAME}App PRIVATE --coverage)
+        target_link_libraries(${PROJECT_NAME}App PRIVATE --coverage)
+    endif()
+endif()
 
 # Installation
 include(GNUInstallDirs)
