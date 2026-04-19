@@ -67,7 +67,6 @@ void RecordingLibrary::setSortOrder(int order) {
 }
 
 void RecordingLibrary::refresh() {
-  m_recordings.clear();
   scanDirectory();
   updateFilteredRecordings();
 }
@@ -82,10 +81,12 @@ Recording *RecordingLibrary::getRecording(const QString &filePath) const {
 }
 
 void RecordingLibrary::deleteRecording(const QString &filePath) {
+  m_ignoreNextChange = true;
   QFile file(filePath);
   if (file.remove()) {
     removeRecording(filePath);
   } else {
+    m_ignoreNextChange = false;
     qWarning() << "Failed to delete recording:" << filePath
                << file.errorString();
   }
@@ -98,6 +99,10 @@ void RecordingLibrary::setActiveRecordingPath(const QString &path) {
 
 void RecordingLibrary::onDirectoryChanged(const QString &path) {
   Q_UNUSED(path)
+  if (m_ignoreNextChange) {
+    m_ignoreNextChange = false;
+    return;
+  }
   refresh();
 }
 
@@ -116,7 +121,11 @@ void RecordingLibrary::scanDirectory() {
   QDir dir(m_libraryPath);
 
   if (!dir.exists()) {
-    qInfo() << "Library path does not exist:" << m_libraryPath;
+    qDebug() << "Library path does not exist:" << m_libraryPath;
+    if (!m_recordings.empty()) {
+      m_recordings.clear();
+      updateFilteredRecordings();
+    }
     return;
   }
 
@@ -129,8 +138,24 @@ void RecordingLibrary::scanDirectory() {
   QStringList filters = {"*.mkv", "*.mp4", "*.webm"};
   QFileInfoList files = dir.entryInfoList(filters, QDir::Files, QDir::Time);
 
-  qInfo() << "Found" << files.size() << "recordings in" << m_libraryPath;
+  // Identify files to remove
+  QStringList currentFiles;
+  for (const QFileInfo &fileInfo : files) {
+    currentFiles << fileInfo.absoluteFilePath();
+  }
 
+  std::vector<QString> toRemove;
+  for (const auto &rec : m_recordings) {
+    if (!currentFiles.contains(rec->filePath())) {
+      toRemove.push_back(rec->filePath());
+    }
+  }
+
+  for (const auto &path : toRemove) {
+    removeRecording(path);
+  }
+
+  // Add new files
   for (const QFileInfo &fileInfo : files) {
     addRecording(fileInfo.absoluteFilePath());
   }

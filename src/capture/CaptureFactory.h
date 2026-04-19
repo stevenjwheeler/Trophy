@@ -36,10 +36,6 @@ public:
    */
   static std::unique_ptr<IVideoCaptureSource> createBestSource();
 
-  /**
-   * @brief Create an X11 capture source explicitly (even on Wayland)
-   */
-  static std::unique_ptr<IVideoCaptureSource> createX11Source();
 
   /**
    * @brief Create a capture source for a specific display server
@@ -53,6 +49,11 @@ public:
    * @brief Get display server name as string
    */
   static QString displayServerName(DisplayServer server);
+
+  /**
+   * @brief Check if PipeWire is available for capture
+   */
+  static bool isPipeWireAvailable();
 };
 
 } // namespace GameRecorder

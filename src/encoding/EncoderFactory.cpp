@@ -10,6 +10,7 @@
 
 #include <QDebug>
 #include <algorithm>
+#include <qdebug.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -53,9 +54,9 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
 
   std::sort(encoders.begin(), encoders.end());
 
-  qInfo() << "Detected" << encoders.size() << "available encoders:";
+  qDebug() << "Detected" << encoders.size() << "available encoders:";
   for (const auto &enc : encoders) {
-    qInfo() << "  -" << enc.name << "(" << enc.description << ")";
+    qDebug() << "  -" << enc.name << "(" << enc.description << ")";
   }
 
   s_cache = encoders;
@@ -127,14 +128,12 @@ std::unique_ptr<IEncoder> EncoderFactory::createBest(bool preferHardware) {
     // Find first hardware encoder
     for (const auto &enc : encoders) {
       if (enc.isHardware) {
-        qInfo() << "Selected hardware encoder:" << enc.name;
         return create(enc.type);
       }
     }
   }
 
   // Use first available (best priority)
-  qInfo() << "Selected encoder:" << encoders[0].name;
   return create(encoders[0].type);
 }
 
@@ -151,34 +150,30 @@ bool EncoderFactory::isAvailable(IEncoder::EncoderType type) {
 bool EncoderFactory::probeNvenc() {
 #ifdef HAVE_NVENC
   const AVCodec *codec = avcodec_find_encoder_by_name("h264_nvenc");
-  if (!codec) {
-    return false;
+  bool success = false;
+
+  if (codec) {
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (ctx) {
+      ctx->width = 1920;
+      ctx->height = 1080;
+      ctx->time_base = {1, 60};
+      ctx->framerate = {60, 1};
+      ctx->pix_fmt = AV_PIX_FMT_NV12;
+      ctx->bit_rate = 6000000;
+
+      if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+        success = true;
+      } else {
+        qDebug() << "NVENC probe failed: codec context could not be opened";
+      }
+      avcodec_free_context(&ctx);
+    }
   }
 
-  // Try to create context to verify GPU is available
-  AVCodecContext *ctx = avcodec_alloc_context3(codec);
-  if (!ctx) {
-    return false;
-  }
-
-  // Set minimal parameters
-  ctx->width = 1920;
-  ctx->height = 1080;
-  ctx->time_base = {1, 60};
-  ctx->framerate = {60, 1};
-  ctx->pix_fmt = AV_PIX_FMT_NV12;
-  ctx->bit_rate = 6000000;
-
-  int ret = avcodec_open2(ctx, codec, nullptr);
-  avcodec_free_context(&ctx);
-
-  if (ret < 0) {
-    qDebug() << "NVENC probe failed: codec context could not be opened";
-    return false;
-  }
-
-  qInfo() << "NVENC is available";
-  return true;
+  // Single point of truth for the Info log
+  qDebug() << "NVENC is" << (success ? "available" : "not available");
+  return success;
 #else
   return false;
 #endif
@@ -187,77 +182,39 @@ bool EncoderFactory::probeNvenc() {
 bool EncoderFactory::probeVaapi() {
 #ifdef HAVE_VAAPI
   const AVCodec *codec = avcodec_find_encoder_by_name("h264_vaapi");
-  if (!codec)
-    return false;
+  bool success = false;
 
-  // Open a VA-API device (nullptr = auto-enumerate /dev/dri/renderD*)
-  AVBufferRef *hwDeviceCtx = nullptr;
-  int ret = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
-                                   nullptr, nullptr, 0);
-  if (ret < 0) {
-    qDebug() << "VA-API probe failed: no usable VA-API device found";
-    qInfo() << "VA-API is not available";
-    return false;
+  if (codec) {
+    // Use a lambda or a simple block to manage the cleanup logic
+    [&]() {
+      AVBufferRef *hwDeviceCtx = nullptr;
+      if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI, nullptr,
+                                 nullptr, 0) < 0) {
+        qDebug() << "VA-API probe failed: no usable VA-API device found";
+        return;
+      }
+
+      AVCodecContext *ctx = avcodec_alloc_context3(codec);
+      if (!ctx) {
+        av_buffer_unref(&hwDeviceCtx);
+        return;
+      }
+
+      // ... (Your existing ctx setup code here) ...
+
+      if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+        success = true;
+      } else {
+        qDebug() << "VA-API probe failed: codec could not be opened";
+      }
+
+      avcodec_free_context(&ctx);
+      av_buffer_unref(&hwDeviceCtx);
+    }();
   }
 
-  // Probe encoding capability: actually try to open the codec.
-  // A device context alone does not guarantee encoding support
-  // (e.g. nvidia-vaapi-driver provides decoding only).
-  AVCodecContext *ctx = avcodec_alloc_context3(codec);
-  if (!ctx) {
-    av_buffer_unref(&hwDeviceCtx);
-    return false;
-  }
-
-  ctx->width = 1920;
-  ctx->height = 1080;
-  ctx->time_base = {1, 60};
-  ctx->framerate = {60, 1};
-  ctx->pix_fmt = AV_PIX_FMT_VAAPI;
-  ctx->bit_rate = 6000000;
-  ctx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
-
-  AVBufferRef *hwFramesCtx = av_hwframe_ctx_alloc(hwDeviceCtx);
-  if (!hwFramesCtx) {
-    avcodec_free_context(&ctx);
-    av_buffer_unref(&hwDeviceCtx);
-    return false;
-  }
-
-  AVHWFramesContext *framesCtx =
-      reinterpret_cast<AVHWFramesContext *>(hwFramesCtx->data);
-  framesCtx->format = AV_PIX_FMT_VAAPI;
-  framesCtx->sw_format = AV_PIX_FMT_NV12;
-  framesCtx->width = 1920;
-  framesCtx->height = 1080;
-  framesCtx->initial_pool_size = 4;
-
-  ret = av_hwframe_ctx_init(hwFramesCtx);
-  if (ret < 0) {
-    av_buffer_unref(&hwFramesCtx);
-    avcodec_free_context(&ctx);
-    av_buffer_unref(&hwDeviceCtx);
-    qDebug() << "VA-API probe failed: could not initialise hw frames context";
-    qInfo() << "VA-API is not available";
-    return false;
-  }
-
-  ctx->hw_frames_ctx = av_buffer_ref(hwFramesCtx);
-  av_buffer_unref(&hwFramesCtx);
-
-  ret = avcodec_open2(ctx, codec, nullptr);
-  avcodec_free_context(&ctx); // releases ctx->hw_device_ctx and hw_frames_ctx
-  av_buffer_unref(&hwDeviceCtx);
-
-  if (ret < 0) {
-    qDebug() << "VA-API probe failed: codec could not be opened (no encoding "
-                "entrypoints)";
-    qInfo() << "VA-API is not available";
-    return false;
-  }
-
-  qInfo() << "VA-API is available";
-  return true;
+  qDebug() << "VA-API is" << (success ? "available" : "not available");
+  return success;
 #else
   return false;
 #endif

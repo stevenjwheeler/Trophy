@@ -94,7 +94,7 @@ void StorageManager::enforceStorageLimit() {
   refresh();
 
   while (m_usedSize > m_maxSize) {
-    qInfo() << "Storage limit exceeded:" << formatSize(m_usedSize) << "/"
+    qDebug() << "Storage limit exceeded:" << formatSize(m_usedSize) << "/"
             << formatSize(m_maxSize);
 
     deleteOldestRecording();
@@ -129,7 +129,7 @@ bool StorageManager::deleteRecording(const QString &filePath) {
 
   QFile file(filePath);
   if (file.remove()) {
-    qInfo() << "Deleted recording:" << filePath;
+    qDebug() << "Deleted recording:" << filePath;
     emit recordingDeleted(filePath);
     refresh();
     return true;
@@ -213,7 +213,7 @@ void StorageManager::deleteOldestRecording() {
   }
 
   QString oldest = recordings.first();
-  qInfo() << "Auto-deleting oldest recording:" << oldest;
+  qDebug() << "Auto-deleting oldest recording:" << oldest;
   deleteRecording(oldest);
 }
 

@@ -11,6 +11,7 @@
 #include <QDebug>
 #include <algorithm>
 #include <cmath>
+#include <qlogging.h>
 
 namespace GameRecorder {
 
@@ -20,9 +21,15 @@ AudioMixer::AudioMixer(int sampleRate, int channels, QObject *parent)
   m_tracks[0].config = {0, "Game Audio", 1.0f, false};
   m_tracks[1].config = {1, "Voice Chat", 1.0f, false};
   m_tracks[2].config = {2, "Microphone", 1.0f, false};
+  // Atomic copies start at defaults (1.0 volume, unmuted) — already set by
+  // the in-class member initializers, but be explicit for clarity.
+  for (auto &track : m_tracks) {
+    track.atomicVolume.store(track.config.volume, std::memory_order_relaxed);
+    track.atomicMuted.store(track.config.muted, std::memory_order_relaxed);
+  }
 
-  qInfo() << "AudioMixer initialized:" << sampleRate << "Hz," << channels
-          << "channels";
+  qDebug() << "AudioMixer initialized:" << sampleRate << "Hz," << channels
+           << "channels";
 }
 
 AudioMixer::~AudioMixer() { stopAll(); }
@@ -51,8 +58,24 @@ void AudioMixer::addSource(std::unique_ptr<IAudioSource> source,
       onAudioReceived(trackIndex, frame.samples, frame.frameCount);
     });
 
-    qInfo() << "Audio source added to track" << trackIndex << ":"
+    qDebug() << "Audio source added to track" << trackIndex << ":"
             << track.source->displayName();
+
+    // If the mixer is already running (e.g., a source added mid-recording by
+    // the node-check timer), initialize and start it immediately.
+    if (m_started) {
+      AudioConfig config;
+      config.sampleRate = m_sampleRate;
+      config.channels = m_channels;
+      if (track.source->initialize(config)) {
+        if (!track.source->start())
+          qWarning() << "Failed to start late-added audio source on track"
+                     << trackIndex;
+      } else {
+        qWarning() << "Failed to initialize late-added audio source on track"
+                   << trackIndex;
+      }
+    }
   }
 }
 
@@ -75,7 +98,9 @@ void AudioMixer::setTrackVolume(int trackIndex, float volume) {
     return;
   }
 
-  m_tracks[trackIndex].config.volume = std::clamp(volume, 0.0f, 2.0f);
+  float clamped = std::clamp(volume, 0.0f, 2.0f);
+  m_tracks[trackIndex].config.volume = clamped;
+  m_tracks[trackIndex].atomicVolume.store(clamped, std::memory_order_relaxed);
   emit trackConfigChanged(trackIndex);
 }
 
@@ -85,6 +110,7 @@ void AudioMixer::setTrackMuted(int trackIndex, bool muted) {
   }
 
   m_tracks[trackIndex].config.muted = muted;
+  m_tracks[trackIndex].atomicMuted.store(muted, std::memory_order_relaxed);
   emit trackConfigChanged(trackIndex);
 }
 
@@ -119,6 +145,7 @@ float AudioMixer::getTrackLevel(int trackIndex) const {
 bool AudioMixer::startAll() {
   std::lock_guard<std::mutex> lock(m_mutex);
 
+  m_started = true;
   bool allStarted = true;
   for (auto &track : m_tracks) {
     if (track.source) {
@@ -147,6 +174,7 @@ bool AudioMixer::startAll() {
 void AudioMixer::stopAll() {
   std::lock_guard<std::mutex> lock(m_mutex);
 
+  m_started = false;
   for (auto &track : m_tracks) {
     if (track.source) {
       track.source->stop();
@@ -178,9 +206,12 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
     }
   }
 
-  // Apply volume and mute
-  if (!track.config.muted) {
-    peak *= track.config.volume;
+  // Apply volume and mute — read from atomics for lock-free access on the
+  // PipeWire callback thread (config fields are written from the UI thread).
+  const bool muted = track.atomicMuted.load(std::memory_order_relaxed);
+  const float volume = track.atomicVolume.load(std::memory_order_relaxed);
+  if (!muted) {
+    peak *= volume;
   } else {
     peak = 0.0f;
   }
@@ -193,8 +224,11 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
     track.peakLevel.store(currentPeak * 0.95f);
   }
 
+  // Emit level change signal for UI updates
+  emit trackLevelChanged(trackIndex, track.peakLevel.load());
+
   // Forward audio to encoder callback (called on PipeWire thread)
-  if (!track.config.muted && m_trackAudioCallback) {
+  if (!muted && m_trackAudioCallback) {
     m_trackAudioCallback(trackIndex, samples, frameCount, m_sampleRate,
                          m_channels);
   }

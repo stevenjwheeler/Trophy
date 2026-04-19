@@ -14,7 +14,17 @@
 
 namespace GameRecorder {
 
-NotificationService::NotificationService(QObject *parent) : QObject(parent) {}
+NotificationService::NotificationService(QObject *parent) : QObject(parent) {
+  QDBusConnection::sessionBus().connect(
+      "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+      "org.freedesktop.Notifications", "ActionInvoked", this,
+      SLOT(onActionInvoked(uint, QString)));
+
+  QDBusConnection::sessionBus().connect(
+      "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+      "org.freedesktop.Notifications", "NotificationClosed", this,
+      SLOT(onNotificationClosed(uint, uint)));
+}
 
 NotificationService::~NotificationService() = default;
 
@@ -27,7 +37,8 @@ void NotificationService::setEnabled(bool enabled) {
 
 void NotificationService::showNotification(const QString &title,
                                            const QString &body,
-                                           const QString &icon) {
+                                           const QString &icon, int timeout,
+                                           int urgency) {
   if (!m_enabled) {
     return;
   }
@@ -44,24 +55,42 @@ void NotificationService::showNotification(const QString &title,
   QString appIcon = icon.isEmpty() ? "trophy" : icon;
 
   QVariantMap hints;
-  hints["urgency"] = QVariant::fromValue<uchar>(1); // Normal urgency
+  hints["urgency"] = QVariant::fromValue<uchar>(static_cast<uchar>(urgency));
+  hints["resident"] = true; // Stay in the notification center
+
+  QStringList actions;
+  if (urgency > 1) { // Only add buttons for high-priority authorization
+    actions << "authorize" << "Authorize Capture";
+  }
 
   QDBusReply<uint> reply =
       notify.call("Notify",
-                  "Trophy - Game recording and clipping", // app_name
-                  m_lastNotificationId, // replaces_id (0 for new)
+                  "Trophy",             // app_name (keep it short)
+                  m_lastNotificationId, // replaces_id
                   appIcon,              // app_icon
                   title,                // summary
                   body,                 // body
-                  QStringList(),        // actions
+                  actions,              // actions
                   hints,                // hints
-                  5000                  // timeout (ms)
+                  timeout               // timeout (ms)
       );
 
   if (reply.isValid()) {
     m_lastNotificationId = reply.value();
   } else {
     qWarning() << "Failed to send notification:" << reply.error().message();
+  }
+}
+
+void NotificationService::onActionInvoked(uint id, const QString &action) {
+  if (id == m_lastNotificationId || m_lastNotificationId == 0) {
+    emit notificationClicked(action);
+  }
+}
+
+void NotificationService::onNotificationClosed(uint id, uint reason) {
+  if (id == m_lastNotificationId) {
+    m_lastNotificationId = 0;
   }
 }
 

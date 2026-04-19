@@ -48,7 +48,7 @@ bool FFmpegMuxer::initialize(const QString &outputPath) {
     return false;
   }
 
-  qInfo() << "Muxer initialized for" << formatName << "output";
+  qDebug() << "Muxer initialized for" << formatName << "output";
   return true;
 }
 
@@ -113,8 +113,8 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
 
   m_streams.push_back(stream);
 
-  qInfo() << "Added stream" << stream->id
-          << (info.type == StreamInfo::Type::Video ? "video" : "audio");
+  qDebug() << "Added stream" << stream->id
+           << (info.type == StreamInfo::Type::Video ? "video" : "audio");
 
   return stream->id;
 }
@@ -168,7 +168,7 @@ bool FFmpegMuxer::writeHeader() {
   }
 
   m_headerWritten = true;
-  qInfo() << "Container header written";
+  qDebug() << "Container header written";
   return true;
 }
 
@@ -244,7 +244,7 @@ bool FFmpegMuxer::finalize() {
 
   cleanup();
 
-  qInfo() << "Muxer finalized. Total bytes:" << m_bytesWritten;
+  qDebug() << "Muxer finalized. Total bytes:" << m_bytesWritten;
   return true;
 }
 

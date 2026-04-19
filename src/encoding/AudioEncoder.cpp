@@ -97,8 +97,8 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   m_sampleCount = 0;
   m_initialized = true;
 
-  qInfo() << "Audio encoder initialized:" << config.codec << config.sampleRate
-          << "Hz," << config.channels << "ch," << config.bitrate << "kbps";
+  qDebug() << "Audio encoder initialized:" << config.codec << config.sampleRate
+           << "Hz," << config.channels << "ch," << config.bitrate << "kbps";
 
   return true;
 }
@@ -113,10 +113,12 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
   int totalIncomingSamples = frameCount * channels;
 
   // Accumulate samples into buffer
-  m_accumBuffer.insert(m_accumBuffer.end(), samples, samples + totalIncomingSamples);
+  m_accumBuffer.insert(m_accumBuffer.end(), samples,
+                       samples + totalIncomingSamples);
 
   // Process complete frames from the accumulator
-  while (static_cast<int>(m_accumBuffer.size()) >= m_requiredFrameSize * channels) {
+  while (static_cast<int>(m_accumBuffer.size()) >=
+         m_requiredFrameSize * channels) {
     if (av_frame_make_writable(m_frame) < 0) {
       emit encodingError("Failed to make audio frame writable");
       return false;
@@ -150,13 +152,15 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
     if (ret == AVERROR(EAGAIN)) {
       // Encoder needs more frames, remove processed samples and continue
       m_accumBuffer.erase(m_accumBuffer.begin(),
-                          m_accumBuffer.begin() + m_requiredFrameSize * channels);
+                          m_accumBuffer.begin() +
+                              m_requiredFrameSize * channels);
       continue;
     }
     if (ret < 0) {
       // Error or EOF
       m_accumBuffer.erase(m_accumBuffer.begin(),
-                          m_accumBuffer.begin() + m_requiredFrameSize * channels);
+                          m_accumBuffer.begin() +
+                              m_requiredFrameSize * channels);
       return false;
     }
 

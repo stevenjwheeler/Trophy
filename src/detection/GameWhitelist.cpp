@@ -17,7 +17,11 @@
 
 namespace GameRecorder {
 
-GameWhitelist::GameWhitelist() = default;
+GameWhitelist::GameWhitelist() {
+  m_blacklist << "xalia" << "xalia.exe" << "steam" << "Steam" << "discord" 
+              << "Discord" << "obs" << "obs64" << "Unknown Vulkan Game"
+              << "vkcube" << "vkcube-wayland";
+}
 
 GameWhitelist::~GameWhitelist() = default;
 
@@ -62,10 +66,12 @@ void GameWhitelist::load() {
   }
 
   // Load blacklist
-  m_blacklist.clear();
   QJsonArray blacklistArr = root["blacklist"].toArray();
   for (const QJsonValue &val : blacklistArr) {
-    m_blacklist.append(val.toString());
+    QString entry = val.toString();
+    if (!m_blacklist.contains(entry)) {
+        m_blacklist.append(entry);
+    }
   }
 
   qInfo() << "Loaded" << m_whitelist.size() << "whitelisted and"

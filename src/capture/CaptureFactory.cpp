@@ -8,12 +8,10 @@
 #include "CaptureFactory.h"
 #include <QDebug>
 #include <QProcessEnvironment>
+#include <QDBusInterface>
+#include <QDBusConnection>
 
 #include "IVideoCaptureSource.h"
-
-#ifdef HAVE_X11
-#include "X11WindowCapture.h"
-#endif
 
 #ifdef HAVE_PIPEWIRE
 #include "WaylandPortalCapture.h"
@@ -49,30 +47,22 @@ CaptureFactory::DisplayServer CaptureFactory::detectDisplayServer() {
 
 std::unique_ptr<IVideoCaptureSource> CaptureFactory::createBestSource() {
   DisplayServer server = detectDisplayServer();
-  qInfo() << "Detected display server:" << displayServerName(server);
+  qDebug() << "Detected display server:" << displayServerName(server);
 
   return createSource(server);
 }
 
-std::unique_ptr<IVideoCaptureSource> CaptureFactory::createX11Source() {
-  return createSource(DisplayServer::X11);
-}
 
 std::unique_ptr<IVideoCaptureSource>
 CaptureFactory::createSource(DisplayServer server) {
   switch (server) {
   case DisplayServer::X11:
-#ifdef HAVE_X11
-    qInfo() << "Creating X11 capture source";
-    return std::make_unique<X11WindowCapture>();
-#else
-    qWarning() << "X11 support not compiled in";
+    qWarning() << "X11 capture is no longer supported";
     return nullptr;
-#endif
 
   case DisplayServer::Wayland:
 #ifdef HAVE_PIPEWIRE
-    qInfo() << "Creating Wayland Portal capture source";
+    qDebug() << "Creating Wayland Portal capture source";
     return std::make_unique<WaylandPortalCapture>();
 #else
     qWarning() << "Wayland/PipeWire support not compiled in";
@@ -96,6 +86,20 @@ QString CaptureFactory::displayServerName(DisplayServer server) {
   default:
     return "Unknown";
   }
+}
+
+bool CaptureFactory::isPipeWireAvailable() {
+#ifndef HAVE_PIPEWIRE
+  return false;
+#else
+  // On Wayland, we need the ScreenCast portal.
+  // We can check if the interface exists on D-Bus.
+  QDBusInterface portal("org.freedesktop.portal.Desktop",
+                         "/org/freedesktop/portal/desktop",
+                         "org.freedesktop.portal.ScreenCast",
+                         QDBusConnection::sessionBus());
+  return portal.isValid();
+#endif
 }
 
 } // namespace GameRecorder

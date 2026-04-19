@@ -105,6 +105,16 @@ public:
    */
   virtual float peakLevel() const = 0;
 
+  /**
+   * @brief Set capture volume (multiplier, 0.0 - 1.0 or higher for gain)
+   */
+  virtual void setVolume(float volume) = 0;
+
+  /**
+   * @brief Get current volume multiplier
+   */
+  virtual float volume() const = 0;
+
 signals:
   void captureStarted();
   void captureStopped();

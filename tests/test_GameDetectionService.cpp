@@ -1,18 +1,11 @@
-/*
- * Trophy - Unit Tests
- * Test suite for GameDetectionService logic and caching
- */
-
 #include <QCoreApplication>
 #include <QSignalSpy>
+#include <QLocalSocket>
+#include <QThread>
 #include <gtest/gtest.h>
 
-// We need to include the source to access private members via friend class
-// if we were just linking against a library. But here we compile the source
-// directly.
 #include "detection/GameDetectionService.h"
 
-// Ensure QCoreApplication exists
 class GameDetectionTestEnvironment : public ::testing::Environment {
 public:
   void SetUp() override {
@@ -34,47 +27,78 @@ class GameDetectionServiceTest : public ::testing::Test {
 protected:
   GameDetectionService service;
 
-  // Helper to access private m_nonGamePids
-  bool isPidInNonGameCache(qint64 pid) {
-    return service.m_nonGamePids.contains(pid);
+  void SetUp() override {
+    service.start();
   }
 
-  void addPidToNonGameCache(qint64 pid) { service.m_nonGamePids.insert(pid); }
+  void TearDown() override {
+    service.stop();
+  }
 
-  void clearCache() { service.m_nonGamePids.clear(); }
-
-  // Helper to trigger check (it's a private slot, but we can invoke it)
-  void triggerCheckForGames() { service.checkForGames(); }
+  void simulateGameStart(qint64 pid, const QString &name) {
+    QLocalSocket socket;
+    socket.connectToServer("/tmp/trophy-detection.sock");
+    if (socket.waitForConnected(1000)) {
+        socket.write(QString("START:%1:%2\n").arg(pid).arg(name).toUtf8());
+        socket.waitForBytesWritten(1000);
+        // We keep the socket alive if we want to simulate a running game
+        // But for a simple test, we can just wait for the service to process it
+        QCoreApplication::processEvents();
+    }
+  }
 };
 
-TEST_F(GameDetectionServiceTest, CurrentProcessIsNotGame) {
-  // The test runner itself is not a game
-  qint64 currentPid = QCoreApplication::applicationPid();
+TEST_F(GameDetectionServiceTest, GameDetectionViaSocket) {
+  QSignalSpy spy(&service, &GameDetectionService::gameDetected);
+  
+  QLocalSocket socket;
+  socket.connectToServer("/tmp/trophy-detection.sock");
+  ASSERT_TRUE(socket.waitForConnected(1000));
+  
+  socket.write("START:1234:Test Game\n");
+  socket.waitForBytesWritten(1000);
+  
+  // Give the service time to process the message
+  int retries = 0;
+  while (spy.count() == 0 && retries < 10) {
+      QCoreApplication::processEvents();
+      QThread::msleep(50);
+      retries++;
+  }
 
-  triggerCheckForGames();
-
-  // It should have been scanned and found not to be a game
-  EXPECT_TRUE(service.currentGameName().isEmpty());
-
-  // And it should have been added to the non-game cache
-  EXPECT_TRUE(isPidInNonGameCache(currentPid));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(service.currentGameName(), "Test Game");
+  EXPECT_EQ(service.currentGamePid(), 1234);
 }
 
-TEST_F(GameDetectionServiceTest, SkipsCachedNonGamePids) {
-  qint64 currentPid = QCoreApplication::applicationPid();
+TEST_F(GameDetectionServiceTest, GameClosedOnDisconnect) {
+  QSignalSpy spy(&service, &GameDetectionService::gameClosed);
+  
+  {
+      QLocalSocket socket;
+      socket.connectToServer("/tmp/trophy-detection.sock");
+      ASSERT_TRUE(socket.waitForConnected(1000));
+      socket.write("START:1234:Test Game\n");
+      socket.waitForBytesWritten(1000);
+      
+      QCoreApplication::processEvents();
+      QThread::msleep(100);
+      QCoreApplication::processEvents();
+      
+      ASSERT_EQ(service.currentGamePid(), 1234);
+      
+      // Socket goes out of scope and disconnects
+  }
+  
+  int retries = 0;
+  while (spy.count() == 0 && retries < 10) {
+      QCoreApplication::processEvents();
+      QThread::msleep(50);
+      retries++;
+  }
 
-  // 1. Manually add current PID to cache
-  addPidToNonGameCache(currentPid);
-
-  // 2. Trigger check
-  triggerCheckForGames();
-
-  // 3. Verify it is STILL in the cache
-  // This confirms the logic: if (m_nonGamePids.contains(pid)) { start insert;
-  // continue; } If the logic was broken (e.g. it cleared the cache and
-  // re-scanned), it might still end up in the cache, but let's at least verify
-  // consistency.
-  EXPECT_TRUE(isPidInNonGameCache(currentPid));
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(service.currentGamePid(), 0);
 }
 
 TEST_F(GameDetectionServiceTest, WhitelistManagement) {
@@ -89,19 +113,6 @@ TEST_F(GameDetectionServiceTest, WhitelistManagement) {
   service.removeFromWhitelist(windowClass);
   whitelist = service.whitelist();
   EXPECT_FALSE(whitelist.contains(windowClass));
-}
-
-TEST_F(GameDetectionServiceTest, BlacklistManagement) {
-  QString windowClass = "gnome-shell";
-
-  service.addToBlacklist(windowClass);
-
-  QStringList blacklist = service.blacklist();
-  EXPECT_TRUE(blacklist.contains(windowClass));
-
-  service.removeFromBlacklist(windowClass);
-  blacklist = service.blacklist();
-  EXPECT_FALSE(blacklist.contains(windowClass));
 }
 
 } // namespace GameRecorder

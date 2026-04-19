@@ -84,6 +84,10 @@ private:
     TrackConfig config;
     std::unique_ptr<IAudioSource> source;
     std::atomic<float> peakLevel{0.0f};
+    // Atomic copies of config.volume and config.muted for lock-free reads
+    // on the PipeWire callback thread (onAudioReceived).
+    std::atomic<float> atomicVolume{1.0f};
+    std::atomic<bool>  atomicMuted{false};
     std::vector<float> buffer;
   };
 
@@ -91,6 +95,7 @@ private:
 
   int m_sampleRate;
   int m_channels;
+  bool m_started = false;  // True after startAll() is called
   std::array<Track, kTrackCount> m_tracks;
   mutable std::mutex m_mutex;
   TrackAudioCallback m_trackAudioCallback;

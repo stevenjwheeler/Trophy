@@ -78,7 +78,6 @@ TEST_F(SettingsManagerTest, DefaultAudioSettings) {
   EXPECT_EQ(mgr->microphoneDevice(), "default");
   EXPECT_EQ(mgr->voiceChatApp(), "discord");
   EXPECT_TRUE(mgr->separateAudioTracks());
-  EXPECT_EQ(mgr->audioBitrate(), 192);
 }
 
 TEST_F(SettingsManagerTest, DefaultStorageSettings) {

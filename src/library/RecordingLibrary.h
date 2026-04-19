@@ -88,6 +88,7 @@ private:
   QList<Recording *> m_filteredRecordings;
   QFileSystemWatcher m_watcher;
   std::unique_ptr<ThumbnailGenerator> m_thumbnailGenerator;
+  bool m_ignoreNextChange = false;
 };
 
 } // namespace GameRecorder

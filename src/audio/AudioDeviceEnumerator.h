@@ -10,6 +10,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QVariantList>
 
 namespace GameRecorder {
 
@@ -44,6 +45,7 @@ class AudioDeviceEnumerator : public QObject {
                  devicesChanged)
   Q_PROPERTY(QList<AudioDeviceInfo> outputDevices READ outputDevices NOTIFY
                  devicesChanged)
+  Q_PROPERTY(QVariantList audioApps READ audioApps NOTIFY audioAppsChanged)
 
 public:
   explicit AudioDeviceEnumerator(QObject *parent = nullptr);
@@ -51,21 +53,24 @@ public:
 
   QList<AudioDeviceInfo> inputDevices() const { return m_inputDevices; }
   QList<AudioDeviceInfo> outputDevices() const { return m_outputDevices; }
+  QVariantList audioApps() const { return m_audioApps; }
 
   Q_INVOKABLE void refresh();
+  Q_INVOKABLE void refreshAudioApps();
 
   Q_INVOKABLE QString defaultInputDevice() const;
   Q_INVOKABLE QString defaultOutputDevice() const;
 
 signals:
   void devicesChanged();
+  void audioAppsChanged();
 
 private:
   void enumeratePipeWire();
-  void enumeratePulseAudio();
 
   QList<AudioDeviceInfo> m_inputDevices;
   QList<AudioDeviceInfo> m_outputDevices;
+  QVariantList m_audioApps;
 };
 
 } // namespace GameRecorder

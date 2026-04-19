@@ -36,7 +36,7 @@ void SettingsManager::load() {
   QFile file(filePath);
 
   if (!file.exists()) {
-    qInfo() << "Settings file not found, using defaults";
+    qDebug() << "Settings file not found, using defaults";
     loadDefaults();
     save(); // Create the file with defaults
     return;
@@ -78,6 +78,7 @@ void SettingsManager::load() {
   m_encoderPreset = video["preset"].toString("fast");
   m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
   m_useVBR = video["useVBR"].toBool(true);
+  m_useDmaBuf = video["useDmaBuf"].toBool(true);
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
@@ -86,7 +87,6 @@ void SettingsManager::load() {
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
   m_separateAudioTracks = audio["separateTracks"].toBool(false);
-  m_audioBitrate = audio["audioBitrate"].toInt(192);
 
   // Load storage settings
   QJsonObject storage = root["storage"].toObject();
@@ -102,8 +102,15 @@ void SettingsManager::load() {
   QJsonObject detection = root["detection"].toObject();
   m_autoDetectGames = detection["autoDetect"].toBool(true);
   m_autoRecordEnabled = detection["autoRecord"].toBool(false);
+  m_setupCompleted = detection["setupCompleted"].toBool(false);
+  
+  // Load Wayland restore tokens
+  m_waylandRestoreToken = root["waylandRestoreToken"].toString();
+  if (root.contains("waylandRestoreTokens")) {
+    m_waylandRestoreTokens = root["waylandRestoreTokens"].toObject().toVariantMap();
+  }
 
-  qInfo() << "Settings loaded from" << filePath;
+  qDebug() << "Settings loaded from" << filePath;
   emit settingsLoaded();
 }
 
@@ -129,6 +136,7 @@ void SettingsManager::save() {
   video["preset"] = m_encoderPreset;
   video["maxBitrate"] = m_maxVideoBitrate;
   video["useVBR"] = m_useVBR;
+  video["useDmaBuf"] = m_useDmaBuf;
   root["video"] = video;
 
   // Audio settings
@@ -138,7 +146,6 @@ void SettingsManager::save() {
   audio["microphoneDevice"] = m_microphoneDevice;
   audio["voiceChatApp"] = m_voiceChatApp;
   audio["separateTracks"] = m_separateAudioTracks;
-  audio["audioBitrate"] = m_audioBitrate;
   root["audio"] = audio;
 
   // Storage settings
@@ -153,7 +160,11 @@ void SettingsManager::save() {
   QJsonObject detection;
   detection["autoDetect"] = m_autoDetectGames;
   detection["autoRecord"] = m_autoRecordEnabled;
+  detection["setupCompleted"] = m_setupCompleted;
   root["detection"] = detection;
+
+  root["waylandRestoreToken"] = m_waylandRestoreToken;
+  root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
 
   // Write atomically using QSaveFile
   QSaveFile file(filePath);
@@ -171,7 +182,7 @@ void SettingsManager::save() {
     return;
   }
 
-  qInfo() << "Settings saved to" << filePath;
+  qDebug() << "Settings saved to" << filePath;
   emit settingsSaved();
 }
 
@@ -194,7 +205,6 @@ void SettingsManager::resetToDefaults() {
   emit microphoneDeviceChanged();
   emit voiceChatAppChanged();
   emit separateAudioTracksChanged();
-  emit audioBitrateChanged();
 
   emit recordingsPathChanged();
   emit maxStorageSizeChanged();
@@ -202,6 +212,7 @@ void SettingsManager::resetToDefaults() {
 
   emit autoDetectGamesChanged();
   emit autoRecordEnabledChanged();
+  emit setupCompletedChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -214,6 +225,7 @@ void SettingsManager::loadDefaults() {
   m_encoderPreset = "fast";
   m_maxVideoBitrate = 20000;
   m_useVBR = true;
+  m_useDmaBuf = true;
 
   // Audio
   m_audioMode = "game";
@@ -221,7 +233,6 @@ void SettingsManager::loadDefaults() {
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
   m_separateAudioTracks = false;
-  m_audioBitrate = 192;
 
   // Storage
   m_recordingsPath =
@@ -236,7 +247,7 @@ void SettingsManager::loadDefaults() {
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
-  qInfo() << "Migrating settings from version" << fromVersion << "to"
+  qDebug() << "Migrating settings from version" << fromVersion << "to"
           << SETTINGS_VERSION;
 
   // Future migrations go here
@@ -349,14 +360,6 @@ void SettingsManager::setSeparateAudioTracks(bool separate) {
   }
 }
 
-void SettingsManager::setAudioBitrate(int bitrate) {
-  if (m_audioBitrate != bitrate) {
-    m_audioBitrate = bitrate;
-    save();
-    emit audioBitrateChanged();
-  }
-}
-
 void SettingsManager::setRecordingsPath(const QString &path) {
   if (m_recordingsPath != path) {
     m_recordingsPath = path;
@@ -410,6 +413,58 @@ void SettingsManager::setUseVBR(bool enabled) {
     m_useVBR = enabled;
     save();
     emit useVBRChanged();
+  }
+}
+
+void SettingsManager::setUseDmaBuf(bool enabled) {
+  if (m_useDmaBuf != enabled) {
+    m_useDmaBuf = enabled;
+    save();
+    emit useDmaBufChanged();
+  }
+}
+
+void SettingsManager::setWaylandRestoreToken(const QString &token) {
+  if (m_waylandRestoreToken != token) {
+    m_waylandRestoreToken = token;
+    save();
+    emit waylandRestoreTokenChanged();
+  }
+}
+
+void SettingsManager::clearWaylandToken() {
+  m_waylandRestoreToken = "";
+  m_waylandRestoreTokens.clear();
+  save();
+  emit waylandRestoreTokenChanged();
+  emit waylandRestoreTokensChanged();
+}
+
+QString SettingsManager::getRestoreToken(const QString &key) const {
+  return m_waylandRestoreTokens.value(key).toString();
+}
+
+void SettingsManager::setRestoreToken(const QString &key, const QString &token) {
+  if (m_waylandRestoreTokens.value(key).toString() != token) {
+    m_waylandRestoreTokens[key] = token;
+    save();
+    emit waylandRestoreTokensChanged();
+  }
+}
+
+void SettingsManager::removeRestoreToken(const QString &key) {
+  if (m_waylandRestoreTokens.contains(key)) {
+    m_waylandRestoreTokens.remove(key);
+    save();
+    emit waylandRestoreTokensChanged();
+  }
+}
+
+void SettingsManager::setSetupCompleted(bool completed) {
+  if (m_setupCompleted != completed) {
+    m_setupCompleted = completed;
+    save();
+    emit setupCompletedChanged();
   }
 }
 

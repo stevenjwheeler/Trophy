@@ -39,7 +39,9 @@ protected:
   QString createFile(const QString &name, qint64 size = 8192) {
     QString path = tempDir.path() + "/" + name;
     QFile f(path);
-    f.open(QIODevice::WriteOnly);
+    if (!f.open(QIODevice::WriteOnly)) {
+      return QString();
+    }
     f.write(QByteArray(size, '\0'));
     f.close();
     return path;
@@ -160,7 +162,9 @@ TEST_F(RecordingTest, ThumbnailAutoDetection) {
   QString thumbPath =
       tempDir.path() + "/.thumbnails/TestGame_2026-01-15_20-30-00.jpg";
   QFile tf(thumbPath);
-  tf.open(QIODevice::WriteOnly);
+  if (!tf.open(QIODevice::WriteOnly)) {
+    return;
+  }
   tf.write("fake thumbnail data");
   tf.close();
 
