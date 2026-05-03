@@ -239,10 +239,11 @@ Page {
                         Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
                     }
                     Label {
-                        text: (typeof storageManager !== "undefined" && storageManager) ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : "0 B / 0 B"
+                        text: (typeof storageManager !== "undefined" && storageManager) ? (storageManager.maxSize > 0 ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : (formatSize(storageManager.usedSize) + " / " + qsTr("Unlimited"))) : "0 B / 0 B"
                         font.pixelSize: 10; color: Theme.textColor; opacity: 0.7
                     }
                     Rectangle {
+                        visible: (typeof storageManager !== "undefined" && storageManager && storageManager.maxSize > 0)
                         Layout.fillWidth: true; Layout.preferredHeight: 10; radius: 5; color: Theme.surfaceColor; border.color: Theme.borderColor; border.width: 1; clip: true
                         Rectangle {
                             height: parent.height
@@ -365,7 +366,7 @@ Page {
                                     function getRelativeTime(d) {
                                         var diffMins = Math.floor((new Date() - new Date(d)) / 60000)
                                         if (diffMins < 1) return "Just now"
-                                        if (diffMins < 60) return diffMins + " min ago"
+                                        if (diffMins < 60) return diffMins + " mins ago"
                                         return Math.floor(diffMins / 60) + " hours ago"
                                     }
                                 }

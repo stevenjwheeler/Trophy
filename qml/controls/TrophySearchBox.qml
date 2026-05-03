@@ -104,8 +104,9 @@ Item {
         id: dropdown
 
         width: root.width
-        height: Math.min(resultsList.contentHeight + 20, 300)
+        height: Math.min(resultsList.contentHeight + 21, 300)
         y: root.height + 5
+        padding: 0
 
         background: Rectangle {
             radius: Theme.radiusNormal
@@ -146,12 +147,12 @@ Item {
                             height: 8
                             radius: 4
                             color: model.type === "clip" ? Theme.primaryColor : Theme.secondaryColor
-                            Layout.alignment: Qt.AlignTop
-                            Layout.topMargin: 4
+                            Layout.alignment: Qt.AlignVCenter
                         }
 
                         ColumnLayout {
                             Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
                             spacing: 2
 
                             Label {

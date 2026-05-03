@@ -9,6 +9,7 @@ import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 
 Rectangle {
     id: root
@@ -24,8 +25,7 @@ Rectangle {
     color: Theme.cardColor
     clip: true
     
-    // This is the magic for rounded clipping in Qt Quick
-    layer.enabled: true
+    layer.enabled: false
 
     signal play()
     signal openFolder()
@@ -63,7 +63,7 @@ Rectangle {
                 root.play();
             }
         }
-        z: 0 // Keep it behind everything else
+        z: 0 
     }
 
     ColumnLayout {
@@ -71,29 +71,63 @@ Rectangle {
         spacing: 0
         z: 1
 
-        // Thumbnail Section
-        Rectangle {
+        // --- THUMBNAIL SECTION ---
+        Item {
+            id: thumbnailContainer
             Layout.fillWidth: true
             Layout.preferredHeight: 100
-            color: "black"
             
+            // This keeps the bottom edge razor sharp where it meets the info section
+            clip: true
+
+            // 1. The Source Image
             Image {
-                anchors.fill: parent
+                id: sourceImage
+                width: parent.width
+                height: parent.height
                 source: root.recording && root.recording.thumbnailPath ? "file://" + root.recording.thumbnailPath : "qrc:/icons/video.svg"
                 fillMode: Image.PreserveAspectCrop
                 opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
+                visible: false 
                 
-                Behavior on scale {
-                    NumberAnimation { duration: 400; easing.type: Easing.OutCubic }
-                }
                 scale: root.hovered ? 1.05 : 1.0
+                Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
             }
 
-            // Hover Buttons Overlay
+            // 2. The Shape Mask
             Rectangle {
+                id: sourceMask
+                width: parent.width
+                // Push bottom radius out of bounds so the clip catches it
+                height: parent.height + root.radius 
+                topLeftRadius: root.radius
+                topRightRadius: root.radius
+                color: "black" 
+                visible: false 
+                
+                // CRITICAL FIX: The mask MUST be a layer for MultiEffect to read its alpha channel
+                layer.enabled: true 
+            }
+
+            // 3. The Masking Engine
+            MultiEffect {
                 anchors.fill: parent
-                color: "#80000000"
+                source: sourceImage
+                maskEnabled: true
+                maskSource: sourceMask
+            }
+
+            // 4. Hover Buttons Overlay
+            Item {
+                anchors.fill: parent
                 visible: root.hovered && !root.isSelectionModeActive
+
+                Rectangle {
+                    width: parent.width
+                    height: parent.height + root.radius
+                    radius: root.radius
+                    color: "#80000000"
+                }
 
                 Row {
                     anchors.centerIn: parent
@@ -122,7 +156,7 @@ Rectangle {
                 }
             }
 
-            // Duration badge
+            // 5. Duration badge
             Rectangle {
                 anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: Theme.spacingSmall
                 visible: !root.hovered && root.recording
@@ -136,7 +170,7 @@ Rectangle {
             }
         }
 
-        // Info Section
+        // --- INFO SECTION ---
         ColumnLayout {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: Theme.spacingSmall; spacing: 2
             Label {
@@ -155,7 +189,7 @@ Rectangle {
         }
     }
 
-    // Selection Circle Overlay
+    // --- SELECTION CIRCLE OVERLAY ---
     Rectangle {
         id: selectionCircle
         anchors.top: parent.top
@@ -177,6 +211,7 @@ Rectangle {
             visible: root.isSelected
             rotation: 45
             anchors.verticalCenterOffset: -2
+            anchors.horizontalCenterOffset: -1
             
             Rectangle {
                 width: 2
@@ -205,7 +240,7 @@ Rectangle {
         }
     }
 
-    // Border overlay (Highest Z to ensure it's on top of the image)
+    // --- BORDER OVERLAY ---
     Rectangle {
         anchors.fill: parent
         radius: root.radius
