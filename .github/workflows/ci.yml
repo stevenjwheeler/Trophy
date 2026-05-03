@@ -32,12 +32,28 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: |
-            build-essential cmake ninja-build ccache xvfb libfuse2t64
+            # Core Build Tools
+            build-essential cmake ninja-build ccache xvfb libfuse2t64 wget
+            
+            # Qt & UI Dependencies
             libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev 
-            libwayland-dev libxcb-shm0-dev libva-dev libavcodec-dev 
-            libavformat-dev libswscale-dev libgtest-dev wget
-            libxcb-cursor0 libxkbcommon-x11-0 
-          version: 1.3
+            libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0
+            
+            # Vulkan (Fixed the previous error)
+            libvulkan-dev
+            
+            # PipeWire & DRM (Required by your CMake logic)
+            libpipewire-0.3-dev libspa-0.2-dev libdrm-dev
+            
+            # FFmpeg Libraries (For your pkg_check_modules calls)
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
+            
+            # Hardware Acceleration (Optional but checked in your CMake)
+            libva-dev libva-drm2
+            
+            # Testing
+            libgtest-dev
+          version: 1.4
           
       - name: Restore build files from cache if exists
         uses: actions/cache@v4
