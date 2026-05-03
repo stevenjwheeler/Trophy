@@ -150,19 +150,25 @@ jobs:
             --plugin qt \
             --output appimage
 
-          # 6. SMOKE TEST: Try to run the AppImage headlessly
-          # We use timeout so it doesn't run forever; if it survives 5s without crashing, it's "good"
+          # 6. SMOKE TEST
           echo "Running smoke test..."
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
           chmod +x "$GENERATED_FILE"
-          xvfb-run --auto-servernum ./"$GENERATED_FILE" & 
+          
+          # Setup minimal environment
+          export XDG_RUNTIME_DIR=/tmp/runtime-ci
+          mkdir -p $XDG_RUNTIME_DIR
+          
+          # Use offscreen to bypass the "No X11 support" check
+          QT_QPA_PLATFORM=offscreen ./"$GENERATED_FILE" & 
+          
           APP_PID=$!
           sleep 5
           if ps -p $APP_PID > /dev/null; then
-             echo "App launched successfully!"
+             echo "App launched successfully (Headless mode)!"
              kill $APP_PID
           else
-             echo "App crashed on startup! Check the logs above."
+             echo "App crashed! Check if Wayland-only checks are blocking CI."
              exit 1
           fi
 
