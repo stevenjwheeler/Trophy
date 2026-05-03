@@ -26,7 +26,9 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 ### Recording
 - **Full sessions or clips** - Records full sessions from open to close, or custom clip lengths using a hotkey
 - **Hardware-Accelerated Encoding** - Supports NVIDIA NVENC and AMD/Intel VA-API for minimal performance impact
+- **Multiple encoder options** - AV1, HEVC, and H.264 hardware encoding
 - **Software Fallback** - x264 encoding when hardware acceleration isn't available
+- **Zero-Copy Capture** - DMA-BUF support for minimal performance impact
 - **Wayland Focused** - Supports recording native Wayland and XWayland windows via PipeWire
 - **Multiple Container Formats** - MKV (crash-resilient) and MP4 output options
 - **Configurable Quality** - Adjustable bitrate, resolution, frame rate, and encoder presets
@@ -34,7 +36,6 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 ### Audio
 - **Multi-Track Recording** - Separate tracks for game audio, voice chat, and microphone
 - **PipeWire Integration** - Modern Linux audio with application-specific capture
-- **PulseAudio Fallback** - Broad compatibility with older systems
 - **Real-Time Level Meters** - Visual feedback for all audio sources
 
 ### Game Detection
@@ -52,8 +53,7 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 
 ### User Interface
 - **Modern QML Design** - Slick, dark-themed interface built with Qt6
-- **Dashboard** - Quick overview of current game, audio levels, and storage
-- **Video Browser** - Grid and list view of recordings with playback support
+- **Dashboard** - Quick overview of recordings, current game, audio levels, current settings, and storage
 - **System Notifications** - Desktop notifications for recording start/stop
 
 ### Planned Features
@@ -61,9 +61,10 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - Instant replay / clip last N seconds
 - Stream integration (Twitch, YouTube)
 - Post-recording editing (trim, cut)
+- Integrated video player
+- Detection for OpenGL and other games
 
 ## Screenshots
-
 *Coming soon*
 
 ## Requirements
@@ -179,7 +180,7 @@ Trophy is built with a modular architecture:
 │  IVideoCaptureSource │ IEncoder │ IAudioSource │ IMuxer   │
 ├───────────────────────────────────────────────────────────┤
 │                 Platform Implementations                  │
-│  Wayland Capture  │ NVENC/VAAPI/x264 │    PipeWire     │
+│  Wayland Capture   │  NVENC/VAAPI/x264  │   PipeWire      │
 └───────────────────────────────────────────────────────────┘
 ```
 
