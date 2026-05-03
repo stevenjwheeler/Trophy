@@ -32,19 +32,19 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 struct WaylandStream {
   uint32_t nodeId;
   QVariantMap options;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend
 
-Q_DECLARE_METATYPE(GameRecorder::WaylandStream)
+Q_DECLARE_METATYPE(TrophyBackend::WaylandStream)
 
 inline QDBusArgument &operator<<(QDBusArgument &argument,
-                                 const GameRecorder::WaylandStream &stream) {
+                                 const TrophyBackend::WaylandStream &stream) {
   argument.beginStructure();
   argument << stream.nodeId << stream.options;
   argument.endStructure();
@@ -52,7 +52,7 @@ inline QDBusArgument &operator<<(QDBusArgument &argument,
 }
 
 inline const QDBusArgument &operator>>(const QDBusArgument &argument,
-                                       GameRecorder::WaylandStream &stream) {
+                                       TrophyBackend::WaylandStream &stream) {
   argument.beginStructure();
   argument >> stream.nodeId >> stream.options;
   argument.endStructure();
@@ -81,7 +81,7 @@ struct NodeLookupData {
 };
 } // namespace
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 WaylandPortalCapture::WaylandPortalCapture(QObject *parent)
     : IVideoCaptureSource(parent) {
@@ -733,4 +733,4 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   pw_stream_queue_buffer(self->m_pw_stream, b);
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

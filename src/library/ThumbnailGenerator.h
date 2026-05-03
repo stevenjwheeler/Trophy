@@ -15,7 +15,7 @@
 #include <QString>
 #include <atomic>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Generates thumbnails for video recordings
@@ -54,4 +54,4 @@ private:
   QFuture<void> m_future;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

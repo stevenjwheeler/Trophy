@@ -17,7 +17,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
   static std::vector<EncoderInfo> s_cache;
@@ -25,6 +25,10 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
     return s_cache;
 
   std::vector<EncoderInfo> encoders;
+
+  // Temporarily silence FFmpeg logs during hardware probing to avoid noise on unsupported systems
+  int oldLevel = av_log_get_level();
+  av_log_set_level(AV_LOG_QUIET);
 
   // Check NVENC H.264
   if (probeNvenc()) {
@@ -35,6 +39,11 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
 
     encoders.push_back({IEncoder::EncoderType::NVENC_HEVC, "nvenc_hevc",
                         "NVENC HEVC", true, 11});
+
+    if (avcodec_find_encoder_by_name("av1_nvenc")) {
+      encoders.push_back({IEncoder::EncoderType::NVENC_AV1, "nvenc_av1",
+                          "NVENC AV1", true, 12});
+    }
   }
 
   // Check VA-API
@@ -44,6 +53,11 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
 
     encoders.push_back({IEncoder::EncoderType::VAAPI_HEVC, "vaapi_hevc",
                         "VA-API HEVC", true, 21});
+
+    if (avcodec_find_encoder_by_name("av1_vaapi")) {
+      encoders.push_back({IEncoder::EncoderType::VAAPI_AV1, "vaapi_av1",
+                          "VA-API AV1", true, 22});
+    }
   }
 
   // Software x264 is always available as fallback
@@ -53,6 +67,7 @@ std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
   }
 
   std::sort(encoders.begin(), encoders.end());
+  av_log_set_level(oldLevel);
 
   qDebug() << "Detected" << encoders.size() << "available encoders:";
   for (const auto &enc : encoders) {
@@ -73,17 +88,20 @@ std::unique_ptr<IEncoder> EncoderFactory::create(IEncoder::EncoderType type) {
   case IEncoder::EncoderType::NVENC_HEVC:
     codecName = "hevc_nvenc";
     break;
+  case IEncoder::EncoderType::NVENC_AV1:
+    codecName = "av1_nvenc";
+    break;
   case IEncoder::EncoderType::VAAPI_H264:
     codecName = "h264_vaapi";
     break;
   case IEncoder::EncoderType::VAAPI_HEVC:
     codecName = "hevc_vaapi";
     break;
+  case IEncoder::EncoderType::VAAPI_AV1:
+    codecName = "av1_vaapi";
+    break;
   case IEncoder::EncoderType::Software_x264:
     codecName = "libx264";
-    break;
-  case IEncoder::EncoderType::Software_x265:
-    codecName = "libx265";
     break;
   }
 
@@ -102,11 +120,17 @@ std::unique_ptr<IEncoder> EncoderFactory::create(const QString &name) {
   if (name == "nvenc_hevc") {
     return create(IEncoder::EncoderType::NVENC_HEVC);
   }
+  if (name == "nvenc_av1") {
+    return create(IEncoder::EncoderType::NVENC_AV1);
+  }
   if (name == "vaapi_h264" || name == "vaapi") {
     return create(IEncoder::EncoderType::VAAPI_H264);
   }
   if (name == "vaapi_hevc") {
     return create(IEncoder::EncoderType::VAAPI_HEVC);
+  }
+  if (name == "vaapi_av1") {
+    return create(IEncoder::EncoderType::VAAPI_AV1);
   }
   if (name == "x264" || name == "software") {
     return create(IEncoder::EncoderType::Software_x264);
@@ -200,12 +224,29 @@ bool EncoderFactory::probeVaapi() {
         return;
       }
 
-      // ... (Your existing ctx setup code here) ...
+      ctx->width = 1920;
+      ctx->height = 1080;
+      ctx->time_base = {1, 60};
+      ctx->framerate = {60, 1};
+      ctx->pix_fmt = AV_PIX_FMT_VAAPI;
 
-      if (avcodec_open2(ctx, codec, nullptr) >= 0) {
-        success = true;
-      } else {
-        qDebug() << "VA-API probe failed: codec could not be opened";
+      // Create a minimal hardware frames context
+      AVBufferRef *hw_frames_ref = av_hwframe_ctx_alloc(hwDeviceCtx);
+      if (hw_frames_ref) {
+        AVHWFramesContext *frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
+        frames_ctx->format = AV_PIX_FMT_VAAPI;
+        frames_ctx->sw_format = AV_PIX_FMT_NV12;
+        frames_ctx->width = ctx->width;
+        frames_ctx->height = ctx->height;
+        frames_ctx->initial_pool_size = 1;
+
+        if (av_hwframe_ctx_init(hw_frames_ref) >= 0) {
+          ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
+          if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+            success = true;
+          }
+        }
+        av_buffer_unref(&hw_frames_ref);
       }
 
       avcodec_free_context(&ctx);
@@ -225,4 +266,4 @@ bool EncoderFactory::probeX264() {
   return codec != nullptr;
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

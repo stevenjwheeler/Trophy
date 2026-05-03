@@ -13,11 +13,26 @@ import QtQuick.Layouts
 GridView {
     id: root
 
-    cellWidth: Theme.recordingCardWidth + Theme.spacingMedium
+    property int skip: 0
+
+    property int minCellWidth: 280
+    cellWidth: {
+        var availableWidth = width - leftMargin - rightMargin;
+        var cols = Math.floor(availableWidth / minCellWidth);
+        if (cols <= 0) cols = 1;
+        return availableWidth / cols;
+    }
     cellHeight: Theme.recordingCardHeight + Theme.spacingMedium
-    clip: true
-    boundsBehavior: Flickable.StopAtBounds
-    model: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : []
+    clip: false
+    boundsBehavior: Flickable.DragAndOvershootBounds
+    boundsMovement: Flickable.FollowBoundsBehavior
+    model: {
+        var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
+        if (skip > 0 && full.length > skip) {
+            return full.slice(skip);
+        }
+        return full;
+    }
 
     // Empty state
     Label {
@@ -30,7 +45,7 @@ GridView {
     }
 
     delegate: RecordingCard {
-        width: Theme.recordingCardWidth
+        width: root.cellWidth - Theme.spacingMedium
         height: Theme.recordingCardHeight
         recording: modelData
         onPlay: {

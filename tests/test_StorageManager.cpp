@@ -13,7 +13,7 @@
 #include "core/StorageManager.h"
 #include <QSignalSpy>
 
-using namespace GameRecorder;
+using namespace TrophyBackend;
 
 // Ensure QCoreApplication exists for Qt functionality
 class StorageManagerTestEnvironment : public ::testing::Environment {

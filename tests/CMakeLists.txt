@@ -17,17 +17,31 @@ set(TEST_LINK_LIBS
     Qt6::Test
 )
 
-# --- Existing Tests ---
-# test_ProcessHeuristics removed (Heuristics replaced by Vulkan Layer)
-
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_StorageManager PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_StorageManager)
 
-add_executable(test_SettingsManager test_SettingsManager.cpp ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp)
-target_include_directories(test_SettingsManager PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_SettingsManager PRIVATE ${TEST_LINK_LIBS})
+add_executable(test_SettingsManager test_SettingsManager.cpp 
+    ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp 
+    ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
+    ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.cpp
+)
+target_include_directories(test_SettingsManager PRIVATE 
+    ${TEST_INCLUDE_DIRS} 
+    ${AVCODEC_INCLUDE_DIRS} 
+    ${AVUTIL_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${SWSCALE_INCLUDE_DIRS}
+)
+target_link_libraries(test_SettingsManager PRIVATE 
+    ${TEST_LINK_LIBS} 
+    ${AVCODEC_LIBRARIES} 
+    ${AVUTIL_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+)
 gtest_discover_tests(test_SettingsManager)
 
 add_executable(test_GameWhitelist test_GameWhitelist.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp)

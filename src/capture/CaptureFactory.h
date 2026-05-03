@@ -10,7 +10,7 @@
 #include <QString>
 #include <memory>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class IVideoCaptureSource;
 
@@ -56,4 +56,4 @@ public:
   static bool isPipeWireAvailable();
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

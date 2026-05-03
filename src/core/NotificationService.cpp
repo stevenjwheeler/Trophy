@@ -12,7 +12,7 @@
 #include <QDBusReply>
 #include <QFileInfo>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 NotificationService::NotificationService(QObject *parent) : QObject(parent) {
   QDBusConnection::sessionBus().connect(
@@ -112,4 +112,4 @@ void NotificationService::showError(const QString &message) {
   showNotification("Recording Error", message, "dialog-error");
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

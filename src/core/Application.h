@@ -12,7 +12,7 @@
 #include <memory>
 
 // Forward declarations
-namespace GameRecorder {
+namespace TrophyBackend {
 class RecordingManager;
 class SettingsManager;
 class StorageManager;
@@ -22,26 +22,19 @@ class NotificationService;
 class AudioMixer;
 class WindowService;
 class AudioDeviceEnumerator;
-} // namespace GameRecorder
+} // namespace TrophyBackend
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Main application class that owns all core services
- *
- * Application is responsible for:
- * - Creating and managing the QML engine
- * - Instantiating and owning all service objects
- * - Exposing services to QML via context properties
- * - Handling application lifecycle
  */
 class Application : public QGuiApplication {
   Q_OBJECT
 
   // Properties exposed to QML
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY recordingStateChanged)
-  Q_PROPERTY(
-      QString currentGameName READ currentGameName NOTIFY currentGameChanged)
+  Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY currentGameChanged)
   Q_PROPERTY(bool isWayland READ isWayland CONSTANT)
 
 public:
@@ -54,19 +47,18 @@ public:
    */
   bool initialize();
 
+  /**
+   * @brief Sets the path to the main QML file for development/live-reload
+   */
+  void setMainQmlPath(const QString &path) { m_mainQmlPath = path; }
+
   // Service accessors
-  RecordingManager *recordingManager() const {
-    return m_recordingManager.get();
-  }
+  RecordingManager *recordingManager() const { return m_recordingManager.get(); }
   SettingsManager *settingsManager() const { return m_settingsManager.get(); }
   StorageManager *storageManager() const { return m_storageManager.get(); }
-  RecordingLibrary *recordingLibrary() const {
-    return m_recordingLibrary.get();
-  }
+  RecordingLibrary *recordingLibrary() const { return m_recordingLibrary.get(); }
   GameDetectionService *gameDetector() const { return m_gameDetector.get(); }
-  NotificationService *notificationService() const {
-    return m_notificationService.get();
-  }
+  NotificationService *notificationService() const { return m_notificationService.get(); }
 
   // Property getters
   bool isRecording() const;
@@ -102,9 +94,10 @@ private:
   std::unique_ptr<WindowService> m_windowService;
   std::unique_ptr<AudioDeviceEnumerator> m_audioDeviceEnumerator;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
+  
+  QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;
   QTimer *m_detectionDebounceTimer = nullptr;
-
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

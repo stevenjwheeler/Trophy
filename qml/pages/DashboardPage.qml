@@ -15,375 +15,250 @@ import QtQuick.Layouts
 Page {
     id: root
 
-    function formatSize(bytes) {
-        if (!bytes)
-            return "0 B";
+    function formatDuration(seconds) {
+        if (!seconds || seconds <= 0)
+            return "00:00";
 
+        var m = Math.floor(seconds / 60);
+        var s = seconds % 60;
+        return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
+    }
+
+    function formatSize(bytes) {
+        if (!bytes || bytes <= 0) return "0 B";
         var kb = 1024;
         var mb = kb * 1024;
         var gb = mb * 1024;
-        if (bytes >= gb)
-            return (bytes / gb).toFixed(1) + " GB";
-
-        if (bytes >= mb)
-            return (bytes / mb).toFixed(0) + " MB";
-
-        if (bytes >= kb)
-            return (bytes / kb).toFixed(0) + " KB";
-
+        if (bytes >= gb) return (bytes / gb).toFixed(1) + " GB";
+        if (bytes >= mb) return (bytes / mb).toFixed(1) + " MB";
+        if (bytes >= kb) return (bytes / kb).toFixed(0) + " KB";
         return bytes + " B";
     }
 
-    ScrollView {
+    function scrollToRecording(index) {
+        recordingsGrid.positionViewAtIndex(index, GridView.Beginning);
+    }
+
+    RowLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacingLarge
-        contentWidth: availableWidth
+        spacing: Theme.spacingLarge
 
+        // Left side: Header and Grid
         ColumnLayout {
-            width: parent.width
+            Layout.fillWidth: true
+            Layout.fillHeight: true
             spacing: Theme.spacingMedium
 
-            // Header with status cards
+            // Header
             RowLayout {
                 Layout.fillWidth: true
+                Layout.preferredHeight: 40
                 spacing: Theme.spacingMedium
 
-                // Dashboard title
                 Label {
                     text: qsTr("Dashboard")
                     font.pixelSize: Theme.fontSizeTitle
                     font.weight: Font.Bold
                     color: Theme.textColor
-                    Layout.alignment: Qt.AlignTop
                 }
 
-                Item {
-                    Layout.fillWidth: true
-                }
-
-                // Compact game status card with button
-                Rectangle {
-                    Layout.preferredWidth: 320
-                    Layout.preferredHeight: 80
-                    radius: Theme.radiusMedium
-                    color: (recordingManager && recordingManager.isRecording) ? "#E6CF3131" : Theme.cardColor
-                    Layout.alignment: Qt.AlignTop
-                    border.color: (recordingManager && recordingManager.isRecording) ? "#FF5F5F" : "transparent"
-                    border.width: 1
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacingMedium
-                        spacing: Theme.spacingMedium
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 4
-
-                            RowLayout {
-                                spacing: 8
-
-                                Rectangle {
-                                    width: 10
-                                    height: 10
-                                    radius: 5
-                                    color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
-
-                                    SequentialAnimation on opacity {
-                                        running: (recordingManager && recordingManager.isRecording)
-                                        loops: Animation.Infinite
-
-                                        NumberAnimation {
-                                            from: 1
-                                            to: 0.4
-                                            duration: 800
-                                        }
-
-                                        NumberAnimation {
-                                            from: 0.4
-                                            to: 1
-                                            duration: 800
-                                        }
-
-                                    }
-
-                                }
-
-                                Label {
-                                    text: {
-                                        if (recordingManager && recordingManager.isRecording)
-                                            return qsTr("RECORDING");
-
-                                        if (gameDetector && gameDetector.currentGameName)
-                                            return qsTr("READY");
-
-                                        return qsTr("IDLE");
-                                    }
-                                    font.pixelSize: 10
-                                    font.weight: Font.Black
-                                    color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
-                                }
-
-                            }
-
-                            Label {
-                                Layout.fillWidth: true
-                                text: {
-                                    if (recordingManager && recordingManager.isRecording)
-                                        return recordingManager.currentGameName || qsTr("Active Recording");
-
-                                    return (gameDetector && gameDetector.currentGameName) || qsTr("No game detected");
-                                }
-                                font.pixelSize: Theme.fontSizeNormal
-                                font.weight: Font.Bold
-                                color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textColor
-                                elide: Text.ElideRight
-                            }
-
-                        }
-
-                        Button {
-                            id: recordBtn
-
-                            Layout.preferredWidth: 44
-                            Layout.preferredHeight: 44
-                            icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
-                            icon.width: 24
-                            icon.height: 24
-                            icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
-                            flat: true
-                            onClicked: {
-                                if (recordingManager && recordingManager.isRecording) {
-                                    recordingManager.stopRecording();
-                                } else {
-                                    var hasCtrl = app.isControlModifierPressed();
-                                    console.log("Dashboard record clicked! hasCtrl:", hasCtrl);
-                                    window.openWindowPicker(hasCtrl);
-                                }
-                            }
-
-                            background: Rectangle {
-                                radius: 22
-                                color: recordBtn.hovered ? ((recordingManager && recordingManager.isRecording) ? "#40FFFFFF" : Theme.primaryColor) : ((recordingManager && recordingManager.isRecording) ? "#20FFFFFF" : "transparent")
-                                border.color: ((recordingManager && recordingManager.isRecording) ? "white" : Theme.primaryColor)
-                                border.width: 2
-                            }
-
-                        }
-
-                    }
-
-                }
-
-                // Compact encoder info
-                Rectangle {
-                    Layout.preferredWidth: 200
-                    Layout.preferredHeight: 80
-                    radius: Theme.radiusMedium
-                    color: Theme.cardColor
-                    Layout.alignment: Qt.AlignTop
-
-                    GridLayout {
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacingSmall
-                        columns: 2
-                        columnSpacing: Theme.spacingSmall
-                        rowSpacing: 2
-
-                        Label {
-                            text: qsTr("Encoder:")
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textSecondaryColor
-                        }
-
-                        Label {
-                            text: {
-                                if (settingsManager && settingsManager.encoder === "auto") {
-                                    var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "");
-                                    return active !== "" ? "Auto (" + active + ")" : "Auto";
-                                }
-                                return settingsManager ? settingsManager.encoder : "";
-                            }
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textColor
-                            elide: Text.ElideRight
-                        }
-
-                        Label {
-                            text: qsTr("Bitrate:")
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textSecondaryColor
-                        }
-
-                        Label {
-                            text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textColor
-                        }
-
-                        Label {
-                            text: qsTr("FPS:")
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textSecondaryColor
-                        }
-
-                        Label {
-                            text: settingsManager ? settingsManager.fps.toString() : "0"
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textColor
-                        }
-
-                        Label {
-                            text: qsTr("Resolution:")
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textSecondaryColor
-                        }
-
-                        Label {
-                            text: settingsManager ? settingsManager.videoResolution : ""
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.textColor
-                        }
-
-                    }
-
-                }
-
-                // Compact audio levels
-                Rectangle {
-                    Layout.preferredWidth: 100
-                    Layout.preferredHeight: 80
-                    radius: Theme.radiusMedium
-                    color: "transparent"
-                    Layout.alignment: Qt.AlignTop
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        spacing: 4
-                        Layout.alignment: Qt.AlignVCenter
-
-                        AudioLevelMeter {
-                            id: gameAudioMeter
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 30
-                            label: qsTr("Game")
-                            level: audioMixer ? audioMixer.getTrackLevel(0) : 0
-                        }
-
-                        AudioLevelMeter {
-                            id: commsAudioMeter
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 30
-                            label: qsTr("Comms")
-                            level: audioMixer ? audioMixer.getTrackLevel(1) : 0
-                        }
-
-                        AudioLevelMeter {
-                            id: micAudioMeter
-                            Layout.fillHeight: true
-                            Layout.preferredWidth: 30
-                            label: qsTr("Mic")
-                            level: audioMixer ? audioMixer.getTrackLevel(2) : 0
-                        }
-
-                    }
-
-                    Connections {
-                        target: audioMixer
-                        function onTrackLevelChanged(trackIndex, level) {
-                            if (trackIndex === 0) gameAudioMeter.level = level;
-                            else if (trackIndex === 1) commsAudioMeter.level = level;
-                            else if (trackIndex === 2) micAudioMeter.level = level;
-                        }
-                    }
-
-                }
-
+                Item { Layout.fillWidth: true }
             }
 
-            // Storage usage (Small bar)
+            // Grid Section
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: Theme.spacingSmall
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: Theme.radiusMedium
+                    color: Theme.recordingGridBackgroundColor
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMedium
+                        spacing: Theme.spacingSmall
+
+                        // Header
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 40
+                            spacing: Theme.spacingMedium
+
+                            Label {
+                                text: qsTr("Recent Captures")
+                                font.pixelSize: Theme.fontSizeMedium
+                                font.weight: Font.Medium
+                                color: Theme.textColor
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            RowLayout {
+                                spacing: Theme.spacingSmall
+                                visible: window.selectedRecordings && window.selectedRecordings.length > 0
+
+                                TrophyButton {
+                                    text: qsTr("Export Selected (%1)").arg(window.selectedRecordings.length)
+                                    icon.source: "qrc:/icons/folder.svg"
+                                    implicitHeight: 28
+                                    onClicked: window.exportSelected()
+                                }
+
+                                TrophyButton {
+                                    text: qsTr("Delete Selected")
+                                    icon.source: "qrc:/icons/trash.svg"
+                                    implicitHeight: 28
+                                    baseColor: Theme.errorColor
+                                    onClicked: window.deleteSelected()
+                                }
+                                
+                                TrophyButton {
+                                    text: qsTr("Cancel")
+                                    implicitHeight: 28
+                                    onClicked: window.clearSelection()
+                                }
+                            }
+                        }
+
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+
+
+                            ScrollBar.vertical: ScrollBar {
+                                policy: ScrollBar.AlwaysOff
+                                width: 0
+                            }
+
+                            RecordingGridView {
+                                id: recordingsGrid
+                                width: parent.width
+                                height: parent.height
+                                skip: 0
+                                leftMargin: Theme.spacingSmall
+                                rightMargin: Theme.spacingSmall
+                                topMargin: Theme.spacingSmall
+                                bottomMargin: Theme.spacingSmall
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right sidebar
+        ColumnLayout {
+            Layout.preferredWidth: parent.width * 0.3
+            Layout.maximumWidth: 320
+            Layout.minimumWidth: 280
+            Layout.fillHeight: true
+            spacing: Theme.spacingMedium
+
+            // Game status card
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 60
+                Layout.preferredHeight: 80
                 radius: Theme.radiusMedium
-                color: Theme.cardColor
+                color: (recordingManager && recordingManager.isRecording) ? "#E6CF3131" : Theme.cardColor
+                border.color: (recordingManager && recordingManager.isRecording) ? "#FF5F5F" : "transparent"
+                border.width: 1
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: Theme.spacingMedium
-                    anchors.rightMargin: Theme.spacingMedium
-                    spacing: Theme.spacingLarge
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingMedium
 
                     ColumnLayout {
-                        spacing: 2
-                        Layout.preferredWidth: 120
-                        Layout.alignment: Qt.AlignVCenter
+                        Layout.fillWidth: true
+                        spacing: 4
 
-                        Label {
-                            text: qsTr("Storage Usage")
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                            color: Theme.textSecondaryColor
+                        RowLayout {
+                            spacing: 8
+                            Rectangle {
+                                width: 10; height: 10; radius: 5
+                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
+                                SequentialAnimation on opacity {
+                                    running: (recordingManager && recordingManager.isRecording)
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 1; to: 0.4; duration: 800 }
+                                    NumberAnimation { from: 0.4; to: 1; duration: 800 }
+                                }
+                            }
+                            Label {
+                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING") : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
+                                font.pixelSize: 10; font.weight: Font.Black
+                                color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
+                            }
                         }
 
                         Label {
-                            text: (typeof storageManager !== "undefined" && storageManager) ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : "0 B / 0 B"
-                            font.pixelSize: 10
-                            color: Theme.textColor
-                            opacity: 0.7
+                            Layout.fillWidth: true
+                            text: (recordingManager && recordingManager.isRecording) ? (recordingManager.currentGameName || qsTr("Active Recording")) : ((gameDetector && gameDetector.currentGameName) || qsTr("No game detected"))
+                            font.pixelSize: Theme.fontSizeNormal; font.weight: Font.Bold
+                            color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textColor
+                            elide: Text.ElideRight
                         }
-
                     }
 
-                    // Simple Progress Bar
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 10
-                        Layout.alignment: Qt.AlignVCenter
-                        radius: 5
-                        color: Theme.surfaceColor
-                        border.color: Theme.borderColor
-                        border.width: 1
-                        clip: true
+                    Button {
+                        id: recordBtn
+                        Layout.preferredWidth: 44; Layout.preferredHeight: 44
+                        icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
+                        icon.width: 24; icon.height: 24
+                        icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
+                        flat: true
+                        onClicked: (recordingManager && recordingManager.isRecording) ? recordingManager.stopRecording() : window.openWindowPicker()
+                        background: Rectangle {
+                            radius: 22
+                            color: recordBtn.hovered ? ((recordingManager && recordingManager.isRecording) ? "#40FFFFFF" : Theme.primaryColor) : ((recordingManager && recordingManager.isRecording) ? "#20FFFFFF" : "transparent")
+                            border.color: ((recordingManager && recordingManager.isRecording) ? "white" : Theme.primaryColor)
+                            border.width: 2
+                        }
+                    }
+                }
+            }
 
+            // Storage Usage
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 100
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: Theme.spacingMedium; spacing: Theme.spacingSmall
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Storage Usage"); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                        Item { Layout.fillWidth: true }
+                        Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                    }
+                    Label {
+                        text: (typeof storageManager !== "undefined" && storageManager) ? (storageManager.maxSize > 0 ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : (formatSize(storageManager.usedSize) + " / " + qsTr("Unlimited"))) : "0 B / 0 B"
+                        font.pixelSize: 10; color: Theme.textColor; opacity: 0.7
+                    }
+                    Rectangle {
+                        visible: (typeof storageManager !== "undefined" && storageManager && storageManager.maxSize > 0)
+                        Layout.fillWidth: true; Layout.preferredHeight: 10; radius: 5; color: Theme.surfaceColor; border.color: Theme.borderColor; border.width: 1; clip: true
                         Rectangle {
                             height: parent.height
                             width: parent.width * ((typeof storageManager !== "undefined" && storageManager && storageManager.maxSize > 0) ? (storageManager.usedSize / storageManager.maxSize) : 0)
-                            radius: 5
-                            color: {
-                                if (typeof storageManager === "undefined" || !storageManager || storageManager.maxSize <= 0)
-                                    return Theme.primaryColor;
-
-                                var p = (storageManager.usedSize / storageManager.maxSize) * 100;
-                                if (p > 90)
-                                    return Theme.errorColor;
-
-                                if (p > 75)
-                                    return Theme.warningColor;
-
-                                return Theme.primaryColor;
-                            }
-
-                            Behavior on width {
-                                NumberAnimation {
-                                    duration: 500
-                                }
-
-                            }
-
+                            radius: 5; color: Theme.primaryColor
+                            Behavior on width { NumberAnimation { duration: 500 } }
                         }
-
                     }
-
                 }
-
             }
 
-            // Recent recordings
+            // Recording settings box
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 300
+                Layout.preferredHeight: 140
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
 
@@ -394,90 +269,137 @@ Page {
 
                     RowLayout {
                         Layout.fillWidth: true
-
                         Label {
-                            text: qsTr("Recent Recordings")
-                            font.pixelSize: Theme.fontSizeMedium
+                            text: qsTr("Recording Settings")
+                            font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
-                            color: Theme.textColor
+                            color: Theme.textSecondaryColor
                         }
-
-                        Item {
-                            Layout.fillWidth: true
-                        }
-
+                        Item { Layout.fillWidth: true }
                         TrophyButton {
-                            text: qsTr("View All")
-                            implicitHeight: 26
-                            onClicked: window.currentPage = 1
+                            text: qsTr("Edit")
+                            implicitHeight: 28
+                            implicitWidth: 70
+                            radius: 14
+                            onClicked: window.currentPage = 2
                         }
-
                     }
 
-                    RowLayout {
+                    GridLayout {
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        spacing: Theme.spacingMedium
+                        columns: 2
+                        columnSpacing: Theme.spacingMedium
+                        rowSpacing: Theme.spacingSmall
 
-                        ActiveRecordingCard {
-                            Layout.preferredWidth: 240
-                            Layout.preferredHeight: Theme.recordingCardHeight
-                            Layout.alignment: Qt.AlignTop
-                            visible: recordingManager && recordingManager.isRecording
-                        }
-
-                        ListView {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            orientation: ListView.Horizontal
-                            spacing: Theme.spacingMedium
-                            clip: true
-                            model: (recordingManager && recordingManager.isRecording) ? (recordingLibrary ? recordingLibrary.recordings.slice(0, 3) : []) : (recordingLibrary ? recordingLibrary.recordings.slice(0, 4) : [])
-
+                        // Encoder
+                        ColumnLayout {
+                            spacing: 2
+                            Label { text: qsTr("Encoder"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
                             Label {
-                                anchors.centerIn: parent
-                                visible: !recordingLibrary || (recordingLibrary.count === 0 && !(recordingManager && recordingManager.isRecording))
-                                text: qsTr("No recordings yet")
-                                color: Theme.textMutedColor
+                                text: {
+                                    if (settingsManager && settingsManager.encoder === "auto") {
+                                         var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "");
+                                         return active || (settingsManager ? settingsManager.encoderDisplayName : "");
+                                     }
+                                    return settingsManager ? settingsManager.encoderDisplayName : "";
+                                }
+                                font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; elide: Text.ElideRight
                             }
-
-                            delegate: RecordingCard {
-                                width: 240
-                                height: Theme.recordingCardHeight
-                                recording: modelData
-                                onPlay: {
-                                    if (modelData)
-                                        Qt.openUrlExternally("file://" + modelData.filePath);
-
-                                }
-                                onOpenFolder: {
-                                    if (modelData)
-                                        window.openFolder(modelData.directory);
-
-                                }
-                                onDeleteRequested: {
-                                    if (modelData)
-                                        window.confirmDelete(modelData.filePath, modelData.fileName);
-
-                                }
-                            }
-
                         }
 
+                        // Resolution
+                        ColumnLayout {
+                            spacing: 2
+                            Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                            Label {
+                                text: settingsManager.resolution === "auto" ? qsTr("Auto (%1x%2)").arg(settingsManager.autoResolutionWidth).arg(settingsManager.autoResolutionHeight) : settingsManager.resolution
+                                font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
+                            }
+                        }
+
+                        // Quality
+                        ColumnLayout {
+                            spacing: 2
+                            Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                            Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor }
+                        }
+
+                        // FPS
+                        ColumnLayout {
+                            spacing: 2
+                            Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                            Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor }
+                        }
                     }
-
                 }
-
             }
 
+            // Recent Activity
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: Theme.spacingMedium; spacing: Theme.spacingSmall
+                    Label { text: qsTr("Recent Activity"); font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Medium; color: Theme.textSecondaryColor }
+                    ScrollView {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        ColumnLayout {
+                            width: parent.width; spacing: Theme.spacingSmall
+                            Repeater {
+                                model: ListModel {
+                                    id: activityModel
+                                    Component.onCompleted: updateActivity()
+                                    function updateActivity() {
+                                        clear()
+                                        if (recordingManager && recordingManager.isRecording) {
+                                            append({ type: "recording_started", game: recordingManager.currentGameName || "Unknown Game", time: "Now", size: "", duration: "" })
+                                        }
+                                        if (recordingLibrary && recordingLibrary.count > 0) {
+                                            for (var i = 0; i < Math.min(recordingLibrary.count, 5); i++) {
+                                                var clip = recordingLibrary.get(i)
+                                                if (clip) append({ type: "recording_completed", game: clip.gameName || "Unknown Game", time: getRelativeTime(clip.date), size: formatSize(clip.size), duration: formatDuration(clip.duration) })
+                                            }
+                                        }
+                                    }
+                                    function getRelativeTime(d) {
+                                        var diffMins = Math.floor((new Date() - new Date(d)) / 60000)
+                                        if (diffMins < 1) return "Just now"
+                                        if (diffMins < 60) return diffMins + " mins ago"
+                                        return Math.floor(diffMins / 60) + " hours ago"
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true; Layout.preferredHeight: 50; radius: 6; color: Theme.surfaceColor
+                                    RowLayout {
+                                        anchors.fill: parent; anchors.margins: Theme.spacingSmall
+                                        Rectangle { width: 8; height: 8; radius: 4; color: model.type === "recording_completed" ? Theme.successColor : Theme.errorColor }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true; spacing: 1
+                                            Label { text: model.type === "recording_completed" ? qsTr("Completed: %1").arg(model.game) : qsTr("Started: %1").arg(model.game); font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; elide: Text.ElideRight }
+                                            Label { text: model.time; font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-
     }
 
-    background: Rectangle {
-        color: Theme.backgroundColor
-        bottomRightRadius: 12
-        topLeftRadius: 26
+    Timer {
+        interval: 30000 // 30 seconds
+        running: true
+        repeat: true
+        onTriggered: activityModel.updateActivity()
     }
 
+    Connections { target: recordingLibrary; function onCountChanged() { activityModel.updateActivity() } }
+    Connections { target: recordingManager; function onIsRecordingChanged() { activityModel.updateActivity() } }
+
+    background: Rectangle { color: Theme.backgroundColor; bottomRightRadius: 12; topLeftRadius: 26 }
 }

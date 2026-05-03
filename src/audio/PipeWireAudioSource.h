@@ -12,7 +12,7 @@
 #include <atomic>
 #include <memory>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief PipeWire-based audio capture source
@@ -100,4 +100,4 @@ private:
   std::atomic<float> m_volume{1.0f};
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

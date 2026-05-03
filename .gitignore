@@ -64,3 +64,5 @@ TODO.md
 .sonar-scanner/
 .sonar-scanner.properties
 sonar-project.properties
+.qmlls.ini
+patch.diff

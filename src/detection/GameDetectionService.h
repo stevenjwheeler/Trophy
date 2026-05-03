@@ -14,7 +14,7 @@
 #include <QSet>
 #include <memory>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class GameWhitelist;
 class GameWhitelist;
@@ -89,4 +89,4 @@ private:
   std::unique_ptr<GameWhitelist> m_whitelist;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

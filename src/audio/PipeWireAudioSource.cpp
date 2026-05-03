@@ -17,7 +17,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 // ---------------------------------------------------------------------------
 // Private implementation struct (keeps PipeWire types out of the header)
@@ -1069,4 +1069,4 @@ void PipeWireAudioSource::stop() {
 
 bool PipeWireAudioSource::isCapturing() const { return m_capturing; }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

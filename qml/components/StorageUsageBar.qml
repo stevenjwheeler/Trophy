@@ -54,7 +54,7 @@ Item {
             }
 
             Label {
-                text: formatSize(root.used) + " / " + formatSize(root.max)
+                text: root.max > 0 ? formatSize(root.used) + " / " + formatSize(root.max) : formatSize(root.used) + " / " + qsTr("Unlimited")
                 color: Theme.textColor
                 font.pixelSize: Theme.fontSizeSmall
             }
@@ -63,6 +63,7 @@ Item {
 
         // Progress bar
         Rectangle {
+            visible: root.max > 0
             Layout.fillWidth: true
             Layout.preferredHeight: 8
             radius: 4
@@ -107,6 +108,7 @@ Item {
 
         // Percentage label
         Label {
+            visible: root.max > 0
             Layout.alignment: Qt.AlignRight
             text: root.percent.toFixed(1) + "% " + qsTr("used")
             color: {

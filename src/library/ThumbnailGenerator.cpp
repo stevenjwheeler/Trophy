@@ -19,7 +19,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 ThumbnailGenerator::ThumbnailGenerator(QObject *parent) : QObject(parent) {}
 
@@ -194,4 +194,4 @@ cleanup:
   return success;
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

@@ -84,6 +84,13 @@ if(PIPEWIRE_FOUND)
     add_compile_definitions(HAVE_PIPEWIRE)
 endif()
 
+# Find libdrm (for DMA-BUF zero-copy capture and DRM format constants)
+pkg_check_modules(LIBDRM IMPORTED_TARGET libdrm)
+if(LIBDRM_FOUND)
+    message(STATUS "libdrm found: ${LIBDRM_VERSION}")
+    add_compile_definitions(HAVE_LIBDRM)
+endif()
+
 # Find VA-API (optional)
 if(ENABLE_VAAPI)
     pkg_check_modules(VAAPI IMPORTED_TARGET libva libva-drm)
@@ -258,9 +265,15 @@ set_source_files_properties(qml/styles/Theme.qml
         QT_QML_SINGLETON_TYPE TRUE
 )
 
+# Generates .qmlls.ini files so your IDE/Linter can find the build artifacts
+set(QT_QML_GENERATE_QMLLS_INI ON)
+
+# Optional: Forces all QML artifacts into a single folder to simplify pathing
+set(QT_QML_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml)
+
 # QML module
 qt_add_qml_module(${PROJECT_NAME}
-    URI GameRecorder
+    URI TrophyBackend
     VERSION 1.0
     QML_FILES
         qml/main.qml
@@ -288,6 +301,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/TrophyRadioButton.qml
         qml/controls/TrophySwitch.qml
         qml/controls/TrophyTextField.qml
+        qml/controls/TrophySearchBox.qml
         qml/controls/TrophyDialog.qml
         qml/controls/TrophyWindowButton.qml
     SOURCES
@@ -350,6 +364,10 @@ endif()
 
 if(VAAPI_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::VAAPI)
+endif()
+
+if(LIBDRM_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBDRM)
 endif()
 
 
@@ -419,7 +437,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "")
 message(STATUS "Features:")
 message(STATUS "  PipeWire: ${PIPEWIRE_FOUND}")
-message(STATUS "  VA-API: ${VAAPI_FOUND}")
+message(STATUS "  libdrm:   ${LIBDRM_FOUND}")
 message(STATUS "  VA-API: ${VAAPI_FOUND}")
 message(STATUS "  NVENC: ${HAVE_NVENC_IN_FFMPEG}")
 message(STATUS "")

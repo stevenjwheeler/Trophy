@@ -15,7 +15,7 @@
 #include <mutex>
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class IAudioSource;
 
@@ -101,4 +101,4 @@ private:
   TrackAudioCallback m_trackAudioCallback;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

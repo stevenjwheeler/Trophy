@@ -6,7 +6,7 @@
 #include <tuple>
 #include <vector>
 
-using namespace GameRecorder;
+using namespace TrophyBackend;
 
 // Use the fully qualified name from your logs: FFmpegEncoder::EncoderType
 using EncoderTestData = std::tuple<FFmpegEncoder::EncoderType, QString, QSize>;
@@ -34,8 +34,6 @@ protected:
       return "hevc_vaapi";
     case FFmpegEncoder::EncoderType::Software_x264:
       return "libx264";
-    case FFmpegEncoder::EncoderType::Software_x265:
-      return "libx265";
     default:
       return "";
     }
@@ -60,8 +58,7 @@ TEST_P(EncoderMatrixTest, FullPipelineTest) {
   config.useVBR = true;
 
   if (!encoder.initialize(config)) {
-    if (type != FFmpegEncoder::EncoderType::Software_x264 &&
-        type != FFmpegEncoder::EncoderType::Software_x265) {
+    if (type != FFmpegEncoder::EncoderType::Software_x264) {
       GTEST_SKIP() << "Hardware encoder " << codecName.toStdString()
                    << " not supported.";
     } else {

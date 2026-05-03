@@ -12,7 +12,7 @@
 
 #include "library/Recording.h"
 
-using namespace GameRecorder;
+using namespace TrophyBackend;
 
 class RecordingTestEnvironment : public ::testing::Environment {
 public:

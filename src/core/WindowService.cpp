@@ -2,7 +2,7 @@
 #include <QDebug>
 #include <QFile>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 WindowService::WindowService(QObject *parent) : QObject(parent) {
 }
@@ -52,4 +52,4 @@ QVariantList WindowService::getVisibleWindows() {
   return QVariantList();
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

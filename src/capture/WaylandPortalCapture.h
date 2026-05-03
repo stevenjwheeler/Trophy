@@ -14,7 +14,7 @@
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Wayland screen capture using XDG Desktop Portal
@@ -86,4 +86,4 @@ private:
   uint64_t m_negotiatedModifier = 0; // DRM modifier agreed during format negotiation
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

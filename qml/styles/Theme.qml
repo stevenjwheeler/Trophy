@@ -19,6 +19,7 @@ QtObject {
     readonly property color primaryHoverColor: "#ff6b6b"
     readonly property color secondaryColor: "#0f3460"
     readonly property color highlightedColor: '#1c62b8'
+    readonly property color recordingGridBackgroundColor: '#4b1f2940'
     readonly property color textColor: "#eaeaea"
     readonly property color textSecondaryColor: "#a0a0a0"
     readonly property color textMutedColor: "#6c6c6c"
@@ -45,6 +46,7 @@ QtObject {
     }
 
     // Typography
+    readonly property int fontSizeTiny: 10
     readonly property int fontSizeSmall: 12
     readonly property int fontSizeNormal: 14
     readonly property int fontSizeMedium: 16
@@ -70,6 +72,7 @@ QtObject {
     readonly property int animationFast: 100
     readonly property int animationNormal: 200
     readonly property int animationSlow: 300
+    readonly property int animationPulse: 800
     // Navigation rail
     readonly property int navRailWidth: 72
     readonly property int navRailExpandedWidth: 200

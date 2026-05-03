@@ -16,7 +16,7 @@ struct AVPacket;
 struct SwsContext;
 struct AVBufferRef;
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief FFmpeg-based video encoder implementation
@@ -52,6 +52,7 @@ private:
 
   int m_lastInputWidth = 0;
   int m_lastInputHeight = 0;
+  int m_swsInputFmt = 0; // AVPixelFormat of the last sws context
 
   EncoderType m_type;
   QString m_codecName;
@@ -63,7 +64,8 @@ private:
   AVFrame *m_hwFrame = nullptr; // For hardware encoding
   AVPacket *m_packet = nullptr;
   SwsContext *m_swsCtx = nullptr;
-  AVBufferRef *m_hwDeviceCtx = nullptr;
+  AVBufferRef *m_hwDeviceCtx = nullptr;  // VA-API / CUDA device
+  AVBufferRef *m_drmDeviceCtx = nullptr; // DRM device (parent of VA-API ctx)
   AVBufferRef *m_hwFramesCtx = nullptr;
 
   int64_t m_frameCount = 0;
@@ -71,4 +73,4 @@ private:
   bool m_initialized = false;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

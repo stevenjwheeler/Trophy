@@ -15,7 +15,7 @@
 
 #include "settings/SettingsManager.h"
 
-using namespace GameRecorder;
+using namespace TrophyBackend;
 
 class SettingsManagerTestEnvironment : public ::testing::Environment {
 public:

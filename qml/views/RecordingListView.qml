@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import GameRecorder
+import TrophyBackend
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -13,10 +13,18 @@ import QtQuick.Layouts
 ListView {
     id: root
 
+    property int skip: 0
+
     spacing: Theme.spacingSmall
     clip: true
     boundsBehavior: Flickable.StopAtBounds
-    model: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : []
+    model: {
+        var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
+        if (skip > 0 && full.length > skip) {
+            return full.slice(skip);
+        }
+        return full;
+    }
 
     delegate: RecordingListItem {
         recording: modelData

@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 struct EncodedPacket; // Forward declaration
 
@@ -105,4 +105,4 @@ signals:
   void muxingError(const QString &error);
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

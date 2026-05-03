@@ -11,7 +11,7 @@
 #include <QObject>
 #include <QString>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Manages recording storage and auto-cleanup
@@ -51,6 +51,7 @@ public:
   Q_INVOKABLE bool deleteRecording(const QString &filePath);
   Q_INVOKABLE QString generateFilePath(const QString &baseName,
                                        const QString &extension) const;
+  Q_INVOKABLE bool exportRecording(const QString &sourcePath, const QString &destDir) const;
 
   // Formatting helpers
   Q_INVOKABLE static QString formatSize(qint64 bytes);
@@ -77,4 +78,4 @@ private:
   QFileSystemWatcher m_watcher;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

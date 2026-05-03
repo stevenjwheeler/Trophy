@@ -21,7 +21,7 @@ public:
 static auto *env =
     testing::AddGlobalTestEnvironment(new GameDetectionTestEnvironment);
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class GameDetectionServiceTest : public ::testing::Test {
 protected:
@@ -115,4 +115,4 @@ TEST_F(GameDetectionServiceTest, WhitelistManagement) {
   EXPECT_FALSE(whitelist.contains(windowClass));
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

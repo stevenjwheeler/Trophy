@@ -14,7 +14,7 @@
 #include <QRegularExpression>
 #include <QStorageInfo>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 StorageManager::StorageManager(const QString &storagePath, QObject *parent)
     : QObject(parent), m_storagePath(storagePath) {
@@ -139,6 +139,43 @@ bool StorageManager::deleteRecording(const QString &filePath) {
   return false;
 }
 
+bool StorageManager::exportRecording(const QString &sourcePath, const QString &destDir) const {
+  QFileInfo sourceInfo(sourcePath);
+  if (!sourceInfo.exists()) {
+    qWarning() << "Export source does not exist:" << sourcePath;
+    return false;
+  }
+
+  QDir dir(destDir);
+  if (!dir.exists()) {
+    if (!dir.mkpath(".")) {
+      qWarning() << "Failed to create export directory:" << destDir;
+      return false;
+    }
+  }
+
+  QString destPath = dir.filePath(sourceInfo.fileName());
+  
+  // If file already exists, don't overwrite blindly, maybe add a suffix
+  if (QFile::exists(destPath)) {
+    QString baseName = sourceInfo.completeBaseName();
+    QString ext = sourceInfo.suffix();
+    int counter = 1;
+    while (QFile::exists(destPath)) {
+      destPath = dir.filePath(QString("%1_%2.%3").arg(baseName).arg(counter).arg(ext));
+      counter++;
+    }
+  }
+
+  if (QFile::copy(sourcePath, destPath)) {
+    qDebug() << "Exported recording to:" << destPath;
+    return true;
+  }
+
+  qWarning() << "Failed to export recording to:" << destPath;
+  return false;
+}
+
 QString StorageManager::generateFilePath(const QString &baseName,
                                          const QString &extension) const {
   QString safeName = baseName;
@@ -217,4 +254,4 @@ void StorageManager::deleteOldestRecording() {
   deleteRecording(oldest);
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

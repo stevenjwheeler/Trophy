@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 struct VideoFrame; // Forward declaration
 
@@ -23,6 +23,7 @@ struct EncodedPacket {
   std::vector<uint8_t> data;
   int64_t pts; // Presentation timestamp
   int64_t dts; // Decode timestamp
+  int64_t duration; // Frame duration
   bool isKeyframe;
   int streamIndex; // For muxer
 };
@@ -46,7 +47,7 @@ struct EncoderConfig {
 /**
  * @brief Abstract interface for video encoders
  *
- * Implementations include NVENC, VA-API, and software (x264) encoders.
+ * Implementations include NVENC, VA-API, and software (x264/AV1) encoders.
  */
 class IEncoder : public QObject {
   Q_OBJECT
@@ -55,10 +56,11 @@ public:
   enum class EncoderType {
     NVENC_H264,
     NVENC_HEVC,
+    NVENC_AV1,
     VAAPI_H264,
     VAAPI_HEVC,
-    Software_x264,
-    Software_x265
+    VAAPI_AV1,
+    Software_x264
   };
   Q_ENUM(EncoderType)
 
@@ -128,4 +130,4 @@ signals:
   void encodingError(const QString &error);
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

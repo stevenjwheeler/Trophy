@@ -12,7 +12,7 @@
 #include <memory>
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Information about an available encoder
@@ -75,4 +75,4 @@ private:
   static bool probeX264();
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

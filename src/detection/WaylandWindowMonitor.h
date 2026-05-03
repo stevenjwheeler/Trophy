@@ -11,7 +11,7 @@
 #include <QString>
 #include <QTimer>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Monitors Wayland window/application activity
@@ -46,4 +46,4 @@ private:
   bool m_monitoring = false;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

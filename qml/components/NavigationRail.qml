@@ -49,26 +49,18 @@ Rectangle {
         // Navigation buttons
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "📊"
-            text: qsTr("Dashboard")
+            iconText: "🏠"
+            text: qsTr("Home")
             checked: root.currentIndex === 0
             onClicked: root.navigate(0)
         }
 
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "🎬"
-            text: qsTr("Recordings")
-            checked: root.currentIndex === 1
-            onClicked: root.navigate(1)
-        }
-
-        NavigationButton {
-            Layout.fillWidth: true
             iconText: "🎮"
             text: qsTr("Games")
-            checked: root.currentIndex === 2
-            onClicked: root.navigate(2)
+            checked: root.currentIndex === 1
+            onClicked: root.navigate(1)
         }
 
         // Spacer
@@ -81,16 +73,16 @@ Rectangle {
             Layout.fillWidth: true
             iconText: "⚙️"
             text: qsTr("Settings")
-            checked: root.currentIndex === 3
-            onClicked: root.navigate(3)
+            checked: root.currentIndex === 2
+            onClicked: root.navigate(2)
         }
 
         NavigationButton {
             Layout.fillWidth: true
             iconText: "ℹ️"
             text: qsTr("Info")
-            checked: root.currentIndex === 4
-            onClicked: root.navigate(4)
+            checked: root.currentIndex === 3
+            onClicked: root.navigate(3)
         }
 
     }

@@ -21,7 +21,7 @@
 #include <queue>
 #include <thread>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class IVideoCaptureSource;
 class IEncoder;
@@ -120,4 +120,4 @@ private:
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

@@ -10,7 +10,7 @@
 #include <QObject>
 #include <QString>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Provides system notification capabilities
@@ -50,4 +50,4 @@ private:
   uint m_lastNotificationId = 0;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

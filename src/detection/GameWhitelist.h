@@ -11,7 +11,7 @@
 #include <QString>
 #include <QStringList>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief User-defined game whitelist and blacklist
@@ -56,4 +56,4 @@ private:
   QStringList m_blacklist;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

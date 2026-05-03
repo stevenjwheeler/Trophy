@@ -13,6 +13,7 @@ T.Button {
     // Removed 'hovered' from here so icons don't flip to white just by touching them
     readonly property bool isBright: checked || pressed
     readonly property color _text: Theme.textColor || "#ffffff"
+    property real radius: Theme.radiusSmall
 
     implicitWidth: Math.max(implicitBackgroundWidth + leftInset + rightInset, implicitContentWidth + leftPadding + rightPadding)
     implicitHeight: Math.max(implicitBackgroundHeight + topInset + bottomInset, implicitContentHeight + topPadding + bottomPadding)
@@ -81,7 +82,7 @@ T.Button {
     background: Rectangle {
         implicitWidth: 32
         implicitHeight: 32
-        radius: Theme.radiusSmall
+        radius: control.radius
         color: {
             let isSolid = control.checked || control.baseColor != Theme.withOpacity(Theme.textColor, 0.05);
             if (isSolid) {

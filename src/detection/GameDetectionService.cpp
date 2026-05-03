@@ -9,7 +9,7 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 GameDetectionService::GameDetectionService(QObject *parent)
     : QObject(parent), m_whitelist(std::make_unique<GameWhitelist>()) {
@@ -310,4 +310,4 @@ QStringList GameDetectionService::blacklist() const {
   return m_whitelist->blacklistEntries();
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

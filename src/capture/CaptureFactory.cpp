@@ -17,7 +17,7 @@
 #include "WaylandPortalCapture.h"
 #endif
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 CaptureFactory::DisplayServer CaptureFactory::detectDisplayServer() {
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -102,4 +102,4 @@ bool CaptureFactory::isPipeWireAvailable() {
 #endif
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend
