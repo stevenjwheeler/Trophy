@@ -14,7 +14,7 @@
 #include <QRegularExpression>
 #include <QStorageInfo>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 StorageManager::StorageManager(const QString &storagePath, QObject *parent)
     : QObject(parent), m_storagePath(storagePath) {
@@ -217,4 +217,4 @@ void StorageManager::deleteOldestRecording() {
   deleteRecording(oldest);
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

@@ -15,7 +15,7 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 GameWhitelist::GameWhitelist() {
   m_blacklist << "xalia" << "xalia.exe" << "steam" << "Steam" << "discord" 
@@ -36,7 +36,7 @@ void GameWhitelist::load() {
   QFile file(filePath);
 
   if (!file.exists()) {
-    qInfo() << "No whitelist file found, using empty lists";
+    qDebug() << "No whitelist file found, using empty lists";
     return;
   }
 
@@ -161,4 +161,4 @@ bool GameWhitelist::isBlacklisted(const QString &windowClass) const {
 
 QStringList GameWhitelist::blacklistEntries() const { return m_blacklist; }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

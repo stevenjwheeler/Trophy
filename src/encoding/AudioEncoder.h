@@ -16,7 +16,7 @@ struct AVCodecContext;
 struct AVFrame;
 struct AVPacket;
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 struct EncodedPacket;
 
@@ -82,4 +82,4 @@ private:
   int m_requiredFrameSize = 1024;  // AAC standard frame size
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

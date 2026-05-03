@@ -11,7 +11,7 @@
 #include <QObject>
 #include <QString>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Represents a single video recording
@@ -76,4 +76,4 @@ private:
   int m_height = 0;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

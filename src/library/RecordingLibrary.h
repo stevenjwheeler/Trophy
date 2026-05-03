@@ -14,7 +14,7 @@
 #include <memory>
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class Recording;
 class ThumbnailGenerator;
@@ -59,6 +59,7 @@ public:
   void setSortOrder(int order);
 
   Q_INVOKABLE void refresh();
+  Q_INVOKABLE Recording *get(int index) const;
   Q_INVOKABLE Recording *getRecording(const QString &filePath) const;
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
@@ -91,4 +92,4 @@ private:
   bool m_ignoreNextChange = false;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

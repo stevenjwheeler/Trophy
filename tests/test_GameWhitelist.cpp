@@ -12,7 +12,7 @@
 
 #include "detection/GameWhitelist.h"
 
-using namespace GameRecorder;
+using namespace TrophyBackend;
 
 class GameWhitelistTestEnvironment : public ::testing::Environment {
 public:

@@ -6,7 +6,8 @@
  */
 
 #include "SettingsManager.h"
-
+#include "encoding/EncoderFactory.h"
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -14,7 +15,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 SettingsManager::SettingsManager(QObject *parent) : QObject(parent) {
   // Set default recordings path
@@ -258,15 +259,10 @@ QStringList SettingsManager::availableEncoders() const {
   QStringList encoders;
   encoders << "auto";
 
-#ifdef HAVE_NVENC
-  encoders << "nvenc_h264" << "nvenc_hevc";
-#endif
-
-#ifdef HAVE_VAAPI
-  encoders << "vaapi_h264" << "vaapi_hevc";
-#endif
-
-  encoders << "x264";
+  auto detected = EncoderFactory::detectAvailableEncoders();
+  for (const auto &enc : detected) {
+    encoders << enc.name;
+  }
 
   return encoders;
 }
@@ -302,6 +298,21 @@ void SettingsManager::setEncoder(const QString &encoder) {
     save();
     emit encoderChanged();
   }
+}
+
+QString SettingsManager::encoderDisplayName() const {
+  if (m_encoder == "auto") {
+    return tr("Automatic");
+  }
+
+  auto encoders = EncoderFactory::detectAvailableEncoders();
+  for (const auto &enc : encoders) {
+    if (enc.name == m_encoder) {
+      return enc.description;
+    }
+  }
+
+  return m_encoder;
 }
 
 void SettingsManager::setContainerFormat(const QString &format) {
@@ -468,4 +479,18 @@ void SettingsManager::setSetupCompleted(bool completed) {
   }
 }
 
-} // namespace GameRecorder
+void SettingsManager::setAutoResolutionWidth(int width) {
+  if (m_autoResolutionWidth != width) {
+    m_autoResolutionWidth = width;
+    emit autoResolutionChanged();
+  }
+}
+
+void SettingsManager::setAutoResolutionHeight(int height) {
+  if (m_autoResolutionHeight != height) {
+    m_autoResolutionHeight = height;
+    emit autoResolutionChanged();
+  }
+}
+
+} // namespace TrophyBackend

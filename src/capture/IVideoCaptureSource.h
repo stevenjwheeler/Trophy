@@ -11,9 +11,10 @@
 #include <QSize>
 #include <cstdint>
 #include <functional>
+#include <unistd.h> // ::dup(), ::close()
 #include <vector>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Video frame data passed to callbacks
@@ -38,16 +39,56 @@ struct VideoFrame {
 /**
  * @brief Frame with owned data for queuing
  *
- * For DMA-BUF frames the pixel data lives in GPU memory (no CPU pointer);
- * we simply copy the metadata and leave ownedData empty.
+ * For DMA-BUF frames the pixel data lives in GPU memory (no CPU pointer).
+ * We dup() the fd on construction so PipeWire can recycle its buffer as soon
+ * as the capture callback returns.  The destructor closes the duped fd.
+ * Copying is deleted to prevent double-close; use move semantics instead.
  */
 struct QueuedFrame : public VideoFrame {
   std::vector<uint8_t> ownedData;
-  QueuedFrame(const VideoFrame &other) : VideoFrame(other) {
+
+  explicit QueuedFrame(const VideoFrame &other) : VideoFrame(other) {
     if (!other.isDmaBuf && other.data && other.stride > 0 && other.height > 0) {
-      ownedData.assign(other.data, other.data + (other.stride * other.height));
+      ownedData.assign(other.data,
+                       other.data + (size_t(other.stride) * other.height));
       data = ownedData.data();
+    } else if (other.isDmaBuf && other.dmaBufFd >= 0) {
+      // Dup so PipeWire can recycle its buffer immediately after our callback
+      dmaBufFd = ::dup(other.dmaBufFd);
+      if (dmaBufFd < 0)
+        isDmaBuf = false; // dup failed – frame is unusable, drop silently
     }
+  }
+
+  // Move constructor – transfer fd ownership
+  QueuedFrame(QueuedFrame &&other) noexcept
+      : VideoFrame(static_cast<VideoFrame &&>(other)),
+        ownedData(std::move(other.ownedData)) {
+    if (!ownedData.empty())
+      data = ownedData.data();
+    other.dmaBufFd = -1;
+  }
+
+  // Move assignment – transfer fd ownership
+  QueuedFrame &operator=(QueuedFrame &&other) noexcept {
+    if (this != &other) {
+      if (isDmaBuf && dmaBufFd >= 0)
+        ::close(dmaBufFd);
+      static_cast<VideoFrame &>(*this) = static_cast<VideoFrame &&>(other);
+      ownedData = std::move(other.ownedData);
+      if (!ownedData.empty())
+        data = ownedData.data();
+      other.dmaBufFd = -1;
+    }
+    return *this;
+  }
+
+  QueuedFrame(const QueuedFrame &) = delete;
+  QueuedFrame &operator=(const QueuedFrame &) = delete;
+
+  ~QueuedFrame() {
+    if (isDmaBuf && dmaBufFd >= 0)
+      ::close(dmaBufFd);
   }
 };
 
@@ -168,4 +209,4 @@ signals:
   void restoreTokenUpdated(const QString &token);
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

@@ -19,7 +19,7 @@ extern "C" {
 #include <pipewire/pipewire.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 RecordingSession::RecordingSession(const QString &outputPath,
                                    IVideoCaptureSource *capture,
@@ -448,4 +448,4 @@ void RecordingSession::checkForNewAudioNodes() {
   }
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import GameRecorder
+import TrophyBackend
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -182,7 +182,7 @@ Page {
                         FeatureItem {
                             icon: "🎮"
                             title: qsTr("Auto Game Detection")
-                            description: qsTr("Steam, Proton, and custom game support with heuristic detection")
+                            description: qsTr("Steam, Proton, and custom game support with automatic detection")
                         }
 
                         FeatureItem {

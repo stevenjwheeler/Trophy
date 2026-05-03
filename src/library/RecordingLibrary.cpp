@@ -13,7 +13,7 @@
 #include <QDir>
 #include <algorithm>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
     : QObject(parent), m_libraryPath(libraryPath),
@@ -69,6 +69,13 @@ void RecordingLibrary::setSortOrder(int order) {
 void RecordingLibrary::refresh() {
   scanDirectory();
   updateFilteredRecordings();
+}
+
+Recording *RecordingLibrary::get(int index) const {
+  if (index < 0 || index >= m_filteredRecordings.size()) {
+    return nullptr;
+  }
+  return m_filteredRecordings[index];
 }
 
 Recording *RecordingLibrary::getRecording(const QString &filePath) const {
@@ -259,4 +266,4 @@ void RecordingLibrary::updateFilteredRecordings() {
   emit recordingsChanged();
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

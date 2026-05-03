@@ -5,7 +5,7 @@
 #include <QString>
 #include <QVariantMap>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Service to list available windows for manual recording
@@ -47,4 +47,4 @@ private:
   unsigned long m_trophyWindowId = 0;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

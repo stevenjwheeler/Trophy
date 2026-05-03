@@ -9,265 +9,155 @@ import "../styles"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Effects
 
 Rectangle {
     id: root
 
     property var recording: null
-    readonly property bool hovered: mouseArea.containsMouse || playBtn.hovered || folderBtn.hovered || deleteBtn.hovered
+    property bool isAdaptive: true
+    readonly property bool hovered: hoverHandler.hovered
+    
+    height: 180
+    radius: Theme.radiusMedium
+    color: Theme.cardColor
+    clip: true
+    
+    // This is the magic for rounded clipping in Qt Quick
+    layer.enabled: true
 
     signal play()
     signal openFolder()
     signal deleteRequested()
 
     function formatDuration(seconds) {
-        if (!seconds)
-            return "0:00";
-
+        if (!seconds || seconds <= 0) return "0:00";
         var h = Math.floor(seconds / 3600);
         var m = Math.floor((seconds % 3600) / 60);
         var s = seconds % 60;
-        if (h > 0)
-            return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
-
+        if (h > 0) return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
         return m + ":" + s.toString().padStart(2, '0');
     }
 
-    function formatDate(date) {
-        if (!date)
-            return "";
-
-        return Qt.formatDateTime(date, "MMM d, yyyy HH:mm");
-    }
-
     function formatSize(bytes) {
-        if (!bytes)
-            return "";
-
-        var gb = bytes / (1024 * 1024 * 1024);
-        if (gb >= 1)
-            return gb.toFixed(1) + " GB";
-
-        var mb = bytes / (1024 * 1024);
-        return mb.toFixed(0) + " MB";
+        if (!bytes || bytes <= 0) return "0 B";
+        var kb = 1024;
+        var mb = kb * 1024;
+        var gb = mb * 1024;
+        if (bytes >= gb) return (bytes / gb).toFixed(1) + " GB";
+        if (bytes >= mb) return (bytes / mb).toFixed(1) + " MB";
+        if (bytes >= kb) return (bytes / kb).toFixed(0) + " KB";
+        return bytes + " B";
     }
-
-    radius: Theme.radiusMedium
-    color: root.hovered ? Theme.cardHoverColor : Theme.cardColor
 
     MouseArea {
-        id: mouseArea
-
         anchors.fill: parent
-        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton
         onClicked: root.play()
+        z: 0 // Keep it behind everything else
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+        z: 1
 
-        // --- THUMBNAIL SECTION ---
+        // Thumbnail Section
         Rectangle {
-            id: thumbContainer
-
             Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.margins: Theme.spacingSmall
-            color: Theme.surfaceColor
+            Layout.preferredHeight: 100
+            color: "black"
             
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                maskEnabled: true
-                maskSource: thumbContainer
+            // We don't need radius here because the root clips us
+            
+            Image {
+                anchors.fill: parent
+                source: root.recording && root.recording.thumbnailPath ? "file://" + root.recording.thumbnailPath : "qrc:/icons/video.svg"
+                fillMode: Image.PreserveAspectCrop
+                opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
+                
+                Behavior on scale {
+                    NumberAnimation { duration: 400; easing.type: Easing.OutCubic }
+                }
+                scale: root.hovered ? 1.05 : 1.0
             }
 
-            // This wrapper scales both the image together
-            Item {
-                id: zoomWrapper
-
+            // Hover Buttons Overlay
+            Rectangle {
                 anchors.fill: parent
-                clip: true
-                scale: root.hovered ? 1.05 : 1 // Subtle zoom
+                color: "#80000000"
+                visible: root.hovered
 
-                Image {
-                    id: thumbnailImage
+                Row {
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingMedium
 
-                    anchors.fill: parent
-                    source: recording && recording.thumbnailPath ? "file://" + recording.thumbnailPath : ""
-                    fillMode: Image.PreserveAspectCrop
-                }
-
-                Behavior on scale {
-                    NumberAnimation {
-                        duration: 400
-                        easing.type: Easing.OutCubic
+                    RoundButton {
+                        width: 40; height: 40
+                        icon.source: "qrc:/icons/play.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        onClicked: root.play()
+                        background: Rectangle { radius: 20; color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor }
                     }
 
+                    RoundButton {
+                        width: 40; height: 40
+                        icon.source: "qrc:/icons/folder.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        onClicked: root.openFolder()
+                        background: Rectangle { radius: 20; color: parent.hovered ? "#CCFFFFFF" : "#80FFFFFF" }
+                    }
+
+                    RoundButton {
+                        width: 40; height: 40
+                        icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        onClicked: root.deleteRequested()
+                        background: Rectangle { radius: 20; color: parent.hovered ? Theme.errorColor : "#80FFFFFF" }
+                    }
                 }
-
-            }
-
-            // Placeholder when no thumbnail is available
-            Label {
-                anchors.centerIn: parent
-                text: recording ? recording.gameName.charAt(0).toUpperCase() : "?"
-                font.pixelSize: 48
-                color: Theme.textMutedColor
-                visible: !recording || !recording.thumbnailPath
             }
 
             // Duration badge
             Rectangle {
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: Theme.spacingSmall
-                width: durationLabel.width + Theme.spacingTiny * 2
-                height: durationLabel.height + Theme.spacingTiny * 2
-                radius: Theme.radiusSmall
-                color: "#CC000000"
-
+                anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: Theme.spacingSmall
+                visible: !root.hovered && root.recording
+                width: durationLabel.width + 12; height: durationLabel.height + 4
+                radius: 4; color: "#CC000000"
                 Label {
-                    id: durationLabel
-
-                    anchors.centerIn: parent
-                    text: recording ? formatDuration(recording.duration) : "0:00"
-                    color: "white"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.family: "monospace"
+                    id: durationLabel; anchors.centerIn: parent
+                    text: root.recording ? formatDuration(root.recording.duration) : ""
+                    color: "white"; font.pixelSize: Theme.fontSizeTiny
                 }
-
             }
-
-            // Action Overlay (appears on hover)
-            Rectangle {
-                id: hoverOverlay
-
-                anchors.fill: parent
-                color: "#80000000"
-                opacity: root.hovered ? 1 : 0
-                radius: Theme.radiusSmall
-
-                Row {
-                    anchors.centerIn: parent
-                    spacing: Theme.spacingSmall
-
-                    RoundButton {
-                        id: playBtn
-
-                        width: 48
-                        height: 48
-                        icon.source: "qrc:/icons/play.svg"
-                        icon.color: "white"
-                        icon.width: 32
-                        icon.height: 32
-                        onClicked: root.play()
-
-                        background: Rectangle {
-                            radius: 24
-                            color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor
-                        }
-
-                    }
-
-                    RoundButton {
-                        id: folderBtn
-
-                        width: 36
-                        height: 36
-                        icon.source: "qrc:/icons/folder.svg"
-                        icon.color: "white"
-                        icon.width: 28
-                        icon.height: 28
-                        onClicked: root.openFolder()
-
-                        background: Rectangle {
-                            radius: 18
-                            color: parent.hovered ? "#60FFFFFF" : "#40FFFFFF"
-                        }
-
-                    }
-
-                    RoundButton {
-                        id: deleteBtn
-
-                        width: 36
-                        height: 36
-                        icon.source: "qrc:/icons/trash.svg"
-                        icon.color: "white"
-                        icon.width: 28
-                        icon.height: 28
-                        onClicked: root.deleteRequested()
-
-                        background: Rectangle {
-                            radius: 18
-                            color: parent.hovered ? Theme.errorColor : "#40FFFFFF"
-                        }
-
-                    }
-
-                }
-
-                Behavior on opacity {
-                    NumberAnimation {
-                        duration: Theme.animationFast
-                    }
-
-                }
-
-            }
-
         }
 
-        // --- METADATA SECTION ---
+        // Info Section
         ColumnLayout {
-            Layout.fillWidth: true
-            Layout.margins: Theme.spacingSmall
-            Layout.topMargin: 0
-            spacing: 2
-
+            Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: Theme.spacingSmall; spacing: 2
             Label {
-                Layout.fillWidth: true
-                text: recording ? recording.gameName : qsTr("Unknown Game")
-                color: Theme.textColor
-                font.pixelSize: Theme.fontSizeNormal
-                font.weight: Font.Medium
-                elide: Text.ElideRight
+                text: root.recording ? root.recording.gameName || "Unknown Game" : ""
+                font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
             }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                Label {
-                    text: recording ? formatDate(recording.date) : ""
-                    color: Theme.textSecondaryColor
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-
-                Item {
-                    Layout.fillWidth: true
-                }
-
-                Label {
-                    text: recording ? formatSize(recording.size) : ""
-                    color: Theme.textMutedColor
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-
+            Label {
+                text: root.recording ? formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
             }
-
+            Item { Layout.fillHeight: true }
+            Label {
+                text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
+                font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor; Layout.alignment: Qt.AlignBottom
+            }
         }
-
     }
 
-    // Smooth transition for card background
-    Behavior on color {
-        ColorAnimation {
-            duration: Theme.animationFast
-        }
-
+    // Border overlay (Highest Z to ensure it's on top of the image)
+    Rectangle {
+        anchors.fill: parent
+        radius: root.radius
+        color: "transparent"
+        border.color: root.hovered ? Theme.primaryColor : Theme.borderColor
+        border.width: root.hovered ? 2 : 1
+        z: 10
     }
 
+    HoverHandler { id: hoverHandler }
+
+    Behavior on color { ColorAnimation { duration: Theme.animationFast } }
 }

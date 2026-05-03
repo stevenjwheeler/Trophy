@@ -13,7 +13,7 @@
 #include <QTimer>
 #include <memory>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 class SettingsManager;
 class StorageManager;
@@ -132,4 +132,4 @@ private:
   QTimer *m_progressTimer = nullptr;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

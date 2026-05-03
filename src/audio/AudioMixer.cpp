@@ -13,7 +13,7 @@
 #include <cmath>
 #include <qlogging.h>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 AudioMixer::AudioMixer(int sampleRate, int channels, QObject *parent)
     : QObject(parent), m_sampleRate(sampleRate), m_channels(channels) {
@@ -234,4 +234,4 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   }
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

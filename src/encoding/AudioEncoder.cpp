@@ -18,7 +18,7 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 AudioEncoder::AudioEncoder(QObject *parent) : QObject(parent) {}
 
@@ -52,7 +52,7 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   m_codecCtx->sample_rate = config.sampleRate;
   m_codecCtx->bit_rate = config.bitrate * 1000;
   m_codecCtx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-  m_codecCtx->time_base = {1, 1000000}; // microseconds, matches muxer rescaling
+  m_codecCtx->time_base = {1, 1000};
 
   // Set channel layout
   av_channel_layout_default(&m_codecCtx->ch_layout, config.channels);
@@ -95,10 +95,12 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   }
 
   m_sampleCount = 0;
+  m_requiredFrameSize = m_codecCtx->frame_size > 0 ? m_codecCtx->frame_size : 1024;
   m_initialized = true;
 
   qDebug() << "Audio encoder initialized:" << config.codec << config.sampleRate
-           << "Hz," << config.channels << "ch," << config.bitrate << "kbps";
+           << "Hz," << config.channels << "ch," << config.bitrate << "kbps"
+           << "Frame size:" << m_requiredFrameSize;
 
   return true;
 }
@@ -135,7 +137,7 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
 
     // Set frame properties
     m_frame->nb_samples = m_requiredFrameSize;
-    m_frame->pts = (m_sampleCount * 1000000LL) / m_codecCtx->sample_rate;
+    m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
     m_sampleCount += m_requiredFrameSize;
 
     // Send frame to encoder
@@ -200,7 +202,7 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
         }
 
         m_frame->nb_samples = m_requiredFrameSize;
-        m_frame->pts = (m_sampleCount * 1000000LL) / m_codecCtx->sample_rate;
+        m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
         m_sampleCount += m_requiredFrameSize;
 
         avcodec_send_frame(m_codecCtx, m_frame);
@@ -237,6 +239,7 @@ bool AudioEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {
   memcpy(output.data.data(), packet->data, packet->size);
   output.pts = packet->pts;
   output.dts = packet->dts;
+  output.duration = packet->duration;
   output.isKeyframe = true; // Audio frames are always keyframes
   output.streamIndex = 1;   // Audio stream
 
@@ -270,4 +273,4 @@ void AudioEncoder::cleanup() {
   m_initialized = false;
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

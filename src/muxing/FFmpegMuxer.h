@@ -14,7 +14,7 @@
 struct AVFormatContext;
 struct AVStream;
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief FFmpeg-based container muxer
@@ -47,6 +47,7 @@ private:
   std::mutex m_writeMutex;
   int64_t m_bytesWritten = 0;
   bool m_headerWritten = false;
+  int64_t m_globalOffset = -1;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

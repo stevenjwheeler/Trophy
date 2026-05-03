@@ -32,7 +32,7 @@ extern "C" {
 #include <QRegularExpression>
 #include <QTimer>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 RecordingManager::RecordingManager(QObject *parent) : QObject(parent) {
   // Progress update timer
@@ -197,7 +197,7 @@ void RecordingManager::finishPipelineAndStart() {
         qDebug() << "RecordingManager: Using GameDetectionService name fallback:"
                 << label;
       } else {
-        qWarning()
+        qDebug()
             << "RecordingManager: Wayland captured generic node, but no "
                "game is currently detected. Falling back to generic system "
                "audio routing.";
@@ -342,6 +342,12 @@ bool RecordingManager::buildPipeline() {
     encConfig.width = nativeRes.width();
     encConfig.height = nativeRes.height();
 
+    // Update auto resolution in settings for UI display
+    if (m_settings) {
+      m_settings->setAutoResolutionWidth(encConfig.width);
+      m_settings->setAutoResolutionHeight(encConfig.height);
+    }
+
     // CRITICAL: Ensure dimensions are even. FFmpeg/YUV420p hates odd numbers.
     if (encConfig.width % 2 != 0)
       encConfig.width--;
@@ -452,7 +458,7 @@ bool RecordingManager::buildPipeline() {
         } else {
           // Fallback to default monitor (whole system audio) if no specific
           // game found
-          qWarning() << "Game audio: no specific node found, falling back to "
+          qDebug() << "Game audio: no specific node found, falling back to "
                         "default monitor for track"
                      << gameTrack;
           m_audioMixer->addSource(
@@ -477,7 +483,7 @@ bool RecordingManager::buildPipeline() {
           activeSources++;
           vcSourceAdded = true;
         } else {
-          qWarning() << "No PipeWire node for voice chat app:" << vcApp;
+          qDebug() << "No PipeWire node for voice chat app:" << vcApp;
         }
       }
 
@@ -642,4 +648,4 @@ void RecordingManager::onEncodingError(const QString &error) {
   }
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

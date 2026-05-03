@@ -14,6 +14,9 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    function scrollToSection(sectionTitle) {
+        settingsList.openSectionTitle = sectionTitle;
+    }
 
     ScrollView {
         anchors.fill: parent
@@ -91,17 +94,17 @@ Page {
 
                     SettingItem {
                         label: qsTr("Video Encoder")
-                        helpText: qsTr("Choose 'Auto' to let Trophy pick the best hardware encoder for your system (NVIDIA NVENC or AMD/Intel VA-API). Use 'x264' only as a fallback.")
+                        helpText: qsTr("Choose 'Auto' to let Trophy pick the best hardware encoder for your system (NVIDIA NVENC, AMD/Intel VA-API, or AV1). AV1 offers the best quality but requires modern hardware.")
 
                         TrophyComboBox {
                             id: encoderBox
 
-                            property var values: ["auto", "nvenc_h264", "nvenc_hevc", "vaapi_h264", "vaapi_hevc", "x264"]
+                            property var values: ["auto", "nvenc_h264", "nvenc_hevc", "nvenc_av1", "vaapi_h264", "vaapi_hevc", "vaapi_av1", "x264"]
 
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             Layout.fillWidth: true
-                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "VA-API H.264", "VA-API HEVC", "x264 Software"]
+                            model: ["Auto (Recommended)", "NVENC H.264", "NVENC HEVC", "NVENC AV1", "VA-API H.264", "VA-API HEVC", "VA-API AV1", "x264 Software"]
 
                             Binding {
                                 target: encoderBox

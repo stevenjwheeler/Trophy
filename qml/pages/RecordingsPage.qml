@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import GameRecorder
+import TrophyBackend
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts

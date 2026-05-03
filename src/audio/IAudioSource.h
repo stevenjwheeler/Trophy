@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <functional>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Audio frame data passed to callbacks
@@ -122,4 +122,4 @@ signals:
   void levelChanged(float level);
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

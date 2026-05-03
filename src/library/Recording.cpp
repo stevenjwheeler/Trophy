@@ -17,7 +17,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 Recording::Recording(const QString &filePath, QObject *parent)
     : QObject(parent), m_filePath(filePath) {
@@ -105,18 +105,7 @@ void Recording::probeVideoFile() {
     return;
   }
 
-  ret = avformat_find_stream_info(formatCtx, nullptr);
-  if (ret < 0) {
-    avformat_close_input(&formatCtx);
-    return;
-  }
-
-  // Get duration
-  if (formatCtx->duration != AV_NOPTS_VALUE) {
-    m_duration = formatCtx->duration / AV_TIME_BASE;
-  }
-
-  // Find video stream for resolution
+  // Extract resolution even if stream info hasn't been called (often in header)
   for (unsigned int i = 0; i < formatCtx->nb_streams; i++) {
     AVStream *stream = formatCtx->streams[i];
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -126,7 +115,20 @@ void Recording::probeVideoFile() {
     }
   }
 
+  // Only call find_stream_info if we need duration and it's missing from header
+  if (formatCtx->duration == AV_NOPTS_VALUE) {
+    // We increase probesize to avoid the warning, and also set max_analyze_duration
+    formatCtx->probesize = 5 * 1024 * 1024; // 5MB
+    formatCtx->max_analyze_duration = 5 * AV_TIME_BASE; // 5 seconds
+    avformat_find_stream_info(formatCtx, nullptr);
+  }
+
+  // Get duration
+  if (formatCtx->duration != AV_NOPTS_VALUE) {
+    m_duration = formatCtx->duration / AV_TIME_BASE;
+  }
+
   avformat_close_input(&formatCtx);
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

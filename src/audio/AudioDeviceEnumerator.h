@@ -12,7 +12,7 @@
 #include <QString>
 #include <QVariantList>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Audio device information
@@ -73,6 +73,6 @@ private:
   QVariantList m_audioApps;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend
 
-Q_DECLARE_METATYPE(GameRecorder::AudioDeviceInfo)
+Q_DECLARE_METATYPE(TrophyBackend::AudioDeviceInfo)

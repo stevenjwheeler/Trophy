@@ -11,7 +11,7 @@
 #include <QObject>
 #include <QString>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Manages recording storage and auto-cleanup
@@ -77,4 +77,4 @@ private:
   QFileSystemWatcher m_watcher;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

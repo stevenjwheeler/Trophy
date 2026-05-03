@@ -11,7 +11,7 @@
 #include <QString>
 #include <QVariantMap>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 /**
  * @brief Manages application settings with JSON persistence
@@ -30,6 +30,7 @@ class SettingsManager : public QObject {
   Q_PROPERTY(int fps READ fps WRITE setFps NOTIFY fpsChanged)
   Q_PROPERTY(
       QString encoder READ encoder WRITE setEncoder NOTIFY encoderChanged)
+  Q_PROPERTY(QString encoderDisplayName READ encoderDisplayName NOTIFY encoderChanged)
   Q_PROPERTY(QString containerFormat READ containerFormat WRITE
                  setContainerFormat NOTIFY containerFormatChanged)
   Q_PROPERTY(QString encoderPreset READ encoderPreset WRITE setEncoderPreset
@@ -39,6 +40,9 @@ class SettingsManager : public QObject {
   Q_PROPERTY(bool useVBR READ useVBR WRITE setUseVBR NOTIFY useVBRChanged)
   Q_PROPERTY(bool useDmaBuf READ useDmaBuf WRITE setUseDmaBuf NOTIFY
                  useDmaBufChanged)
+  Q_PROPERTY(QString resolution READ resolution NOTIFY videoResolutionChanged)
+  Q_PROPERTY(int autoResolutionWidth READ autoResolutionWidth NOTIFY autoResolutionChanged)
+  Q_PROPERTY(int autoResolutionHeight READ autoResolutionHeight NOTIFY autoResolutionChanged)
 
   // Audio settings
   Q_PROPERTY(QString audioMode READ audioMode WRITE setAudioMode NOTIFY
@@ -100,8 +104,14 @@ public:
   int fps() const { return m_fps; }
   void setFps(int fps);
 
+  int autoResolutionWidth() const { return m_autoResolutionWidth; }
+  void setAutoResolutionWidth(int width);
+  int autoResolutionHeight() const { return m_autoResolutionHeight; }
+  void setAutoResolutionHeight(int height);
+
   QString encoder() const { return m_encoder; }
   void setEncoder(const QString &encoder);
+  QString encoderDisplayName() const;
 
   QString containerFormat() const { return m_containerFormat; }
   void setContainerFormat(const QString &format);
@@ -172,6 +182,7 @@ signals:
   void maxVideoBitrateChanged();
   void useVBRChanged();
   void useDmaBufChanged();
+  void autoResolutionChanged();
 
   // Audio
   void audioModeChanged();
@@ -213,6 +224,8 @@ private:
   int m_maxVideoBitrate = 20000;
   bool m_useVBR = true;
   bool m_useDmaBuf = true;
+  int m_autoResolutionWidth = 0;
+  int m_autoResolutionHeight = 0;
 
   // Audio settings
   QString m_audioMode = "game";
@@ -236,4 +249,4 @@ private:
   QVariantMap m_waylandRestoreTokens;
 };
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

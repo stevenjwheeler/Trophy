@@ -14,7 +14,7 @@
 #include <spa/param/audio/format-utils.h>
 #endif
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 AudioDeviceEnumerator::AudioDeviceEnumerator(QObject *parent)
     : QObject(parent) {
@@ -282,7 +282,7 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
   pw_context_destroy(ctx);
   pw_main_loop_destroy(data.loop);
 
-  qInfo() << "PipeWire enumeration: found" << m_inputDevices.size() - 1
+  qDebug() << "PipeWire enumeration: found" << m_inputDevices.size() - 1
           << "input devices and" << m_outputDevices.size() - 1
           << "output devices";
 #else
@@ -291,4 +291,4 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
 }
 
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

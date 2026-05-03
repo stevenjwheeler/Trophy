@@ -9,7 +9,7 @@
 #include <QDebug>
 #include <QProcessEnvironment>
 
-namespace GameRecorder {
+namespace TrophyBackend {
 
 WaylandWindowMonitor::WaylandWindowMonitor(QObject *parent) : QObject(parent) {
   m_pollTimer = new QTimer(this);
@@ -107,4 +107,4 @@ QString WaylandWindowMonitor::detectCompositor() const {
   return "unknown";
 }
 
-} // namespace GameRecorder
+} // namespace TrophyBackend

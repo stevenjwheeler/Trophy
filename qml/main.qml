@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import GameRecorder
+import TrophyBackend
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -14,45 +14,47 @@ import QtQuick.Window
 ApplicationWindow {
     id: window
 
+    // --- REQUIRED PROPERTIES (Injected from C++) ---
+    required property var app
+    required property var recordingManager
+    required property var storageManager
+    required property var recordingLibrary
+    required property var gameDetector
+    required property var settingsManager
+
+    // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
 
-    function openWindowPicker(forceX11) {
-        console.log("openWindowPicker called. forceX11:", forceX11, "app.isWayland:", app.isWayland);
-        if (app.isWayland && forceX11 !== true) {
+    function openWindowPicker() {
+        console.log("openWindowPicker called. app.isWayland:", window.app.isWayland);
+        if (window.app.isWayland) {
             // On Wayland, the system portal handles window/screen selection.
-            // Calling startRecording() without a windowId will trigger the Portal popup.
-            recordingManager.startRecording();
+            window.recordingManager.startRecording();
         } else {
-            console.log("Opening windowPicker dialog. forceX11Capture will be set to:", forceX11);
-            // For X11, or if forceX11 is activated on Wayland, show our custom window picker
-            windowPicker.forceX11Capture = (forceX11 === true);
+            console.log("Opening windowPicker dialog.");
             windowPicker.open();
         }
     }
 
     function openFolder(path) {
-        if (!path)
-            return ;
+        if (!path) return;
 
         var url = path;
         if (!url.startsWith("file://")) {
             if (!url.startsWith("/"))
                 url = "/" + url;
-
-            url = "file://" + url;
+            url = `file://${url}`;
         }
         Qt.openUrlExternally(url);
     }
 
     function confirmDelete(filePath, fileName) {
-        // Use the window's local property (it resets on app close)
         if (window.skipDeleteConfirmation) {
-            if (typeof storageManager !== "undefined" && storageManager) {
-                storageManager.deleteRecording(filePath);
-                if (typeof recordingLibrary !== "undefined")
-                    recordingLibrary.refresh();
-
+            if (window.storageManager) {
+                window.storageManager.deleteRecording(filePath);
+                if (window.recordingLibrary)
+                    window.recordingLibrary.refresh();
             }
         } else {
             deleteDialog.filePath = filePath;
@@ -61,19 +63,149 @@ ApplicationWindow {
         }
     }
 
-    // Removes system borders/titlebar
+    function updateGlobalSearchResults(query) {
+        globalSearchBox.searchResults.clear();
+
+        if (query.length === 0) {
+            globalSearchBox.dropdown.visible = false;
+            return;
+        }
+
+        var lowerQuery = query.toLowerCase();
+
+        // Helper for date matching
+        var now = new Date();
+        var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        var yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+
+        function matchesDate(clipDate, query) {
+            var d = new Date(clipDate);
+            var dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+            var monthNames = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+
+            if (query === "today" && d >= today) return true;
+            if (query === "yesterday" && d >= yesterday && d < today) return true;
+            if (dayNames[d.getDay()] === query) return true;
+            if (monthNames[d.getMonth()].includes(query)) return true;
+            
+            // Format: 2024-05-03 or 03/05/2024 etc.
+            var dateStr = d.toLocaleDateString().toLowerCase();
+            var timeStr = d.toLocaleTimeString().toLowerCase();
+            var isoStr = d.toISOString().toLowerCase(); // e.g. 2026-05-03T14:10...
+
+            if (dateStr.includes(query) || timeStr.includes(query) || isoStr.includes(query)) return true;
+
+            return false;
+        }
+
+        // Search clips
+        if (recordingLibrary) {
+            for (var i = 0; i < recordingLibrary.count; i++) {
+                var clip = recordingLibrary.get(i);
+                if (!clip) continue;
+
+                var gameName = (clip.gameName || "").toLowerCase();
+                var fileName = (clip.fileName || "").toLowerCase();
+                
+                var match = gameName.includes(lowerQuery) ||
+                            fileName.includes(lowerQuery) ||
+                            matchesDate(clip.date, lowerQuery);
+
+                if (match) {
+                    globalSearchBox.searchResults.append({
+                        "type": "clip",
+                        "title": clip.gameName || "Unknown Game",
+                        "subtitle": formatSize(clip.size) + " • " + clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm"),
+                        "index": i
+                    });
+                }
+            }
+        }
+
+        // Search settings
+        var settings = [
+            { name: "Video Recording", section: "Video Recording", keywords: ["encoder", "av1", "nvenc", "vaapi", "h264", "hevc", "quality", "bitrate", "fps", "resolution", "mkv", "mp4"] },
+            { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "tracks", "desktop", "game"] },
+            { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "limit", "cleanup", "size", "delete"] },
+            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "auto", "record", "launch", "game"] }
+        ];
+
+        for (var j = 0; j < settings.length; j++) {
+            var setting = settings[j];
+            var settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
+                               (setting.keywords || []).some(k => (k || "").toLowerCase().includes(lowerQuery));
+
+            if (settingMatch) {
+                globalSearchBox.searchResults.append({
+                    "type": "setting",
+                    "title": setting.name,
+                    "subtitle": "Settings",
+                    "section": setting.section,
+                    "index": j
+                });
+            }
+        }
+
+        globalSearchBox.dropdown.visible = globalSearchBox.searchResults.count > 0;
+    }
+
+    function handleSearchResult() {
+        if (globalSearchBox.searchResults.count > 0) {
+            var firstResult = globalSearchBox.searchResults.get(0);
+            navigateToResult(firstResult);
+        }
+        globalSearchBox.text = "";
+    }
+
+    function navigateToResult(result) {
+        if (!result) return;
+        if (result.type === "clip") {
+            window.currentPage = 0; // Dashboard
+            dashboardPage.scrollToRecording(result.index);
+        } else if (result.type === "setting") {
+            window.currentPage = 2; // Settings
+            settingsPage.scrollToSection(result.section);
+        }
+        globalSearchBox.dropdown.visible = false;
+        globalSearchBox.text = "";
+    }
+
+    function formatSize(bytes) {
+        if (!bytes)
+            return "0 B";
+
+        var kb = 1024;
+        var mb = kb * 1024;
+        var gb = mb * 1024;
+        if (bytes >= gb)
+            return (bytes / gb).toFixed(1) + " GB";
+
+        if (bytes >= mb)
+            return (bytes / mb).toFixed(0) + " MB";
+
+        if (bytes >= kb)
+            return (bytes / kb).toFixed(0) + " KB";
+
+        return bytes + " B";
+    }
+
+    readonly property int defaultWindowWidth: 1200
+    readonly property int defaultWindowHeight: 800
+    readonly property int minimumWindowWidth: 900
+    readonly property int minimumWindowHeight: 650
+
     flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint
-    width: 1200
-    height: 800
-    minimumWidth: 1200
-    minimumHeight: 800
-    maximumWidth: 1200
-    maximumHeight: 800
+    width: defaultWindowWidth
+    height: defaultWindowHeight
+    minimumWidth: minimumWindowWidth
+    minimumHeight: minimumWindowHeight
     visible: true
     title: qsTr("Trophy - Game recording and clipping for Linux")
-    color: "transparent"
+    palette.window: "transparent"
+
     onClosing: function(close) {
-        if (recordingManager && recordingManager.isRecording) {
+        if (window.recordingManager && window.recordingManager.isRecording) {
             closeConfirmDialog.open();
             close.accepted = false;
         }
@@ -81,28 +213,23 @@ ApplicationWindow {
 
     Rectangle {
         id: windowBody
-
         anchors.fill: parent
         radius: 12
         color: Theme.surfaceColor
         border.width: 1
         border.color: Theme.borderColor
-        clip: true
 
         ColumnLayout {
             anchors.fill: parent
             anchors.margins: 1
             spacing: 0
 
-            // --- CUSTOM TITLE BAR ---
             Rectangle {
                 id: titleBar
-
                 Layout.fillWidth: true
-                Layout.preferredHeight: 32
+                Layout.preferredHeight: 60
                 color: Theme.surfaceColor
-                topLeftRadius: 12
-                topRightRadius: 12
+                radius: 12
 
                 MouseArea {
                     anchors.fill: parent
@@ -110,72 +237,80 @@ ApplicationWindow {
                 }
 
                 RowLayout {
-                    anchors.fill: parent
+                    anchors.left: parent.left
                     anchors.leftMargin: Theme.spacingMedium
-                    spacing: Theme.spacingSmall
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Theme.spacingMedium
 
-                    Image {
-                        source: "qrc:/icons/trophy.svg"
-                        Layout.preferredWidth: 18
-                        Layout.preferredHeight: 18
-                        sourceSize: Qt.size(18, 18)
-                    }
+                    ColumnLayout {
+                        spacing: 2
+                        Layout.alignment: Qt.AlignVCenter
 
-                    Label {
-                        text: window.title
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
-                        color: Theme.textSecondaryColor
-                    }
+                        Image {
+                            source: "qrc:/icons/trophy.svg"
+                            Layout.preferredWidth: 24
+                            Layout.preferredHeight: 24
+                            sourceSize: Qt.size(24, 24)
+                            Layout.alignment: Qt.AlignHCenter
+                        }
 
-                    Item {
-                        Layout.fillWidth: true
+                        Label {
+                            text: "Trophy"
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                            color: Theme.textColor
+                            Layout.alignment: Qt.AlignHCenter
+                        }
                     }
+                }
+
+                TrophySearchBox {
+                    id: globalSearchBox
+                    width: 350
+                    anchors.centerIn: parent
+                    placeholderText: qsTr("Search clips, settings...")
+                    onSearchTextChanged: function(query) { updateGlobalSearchResults(query); }
+                    onSearchAccepted: handleSearchResult()
+                    onResultSelected: function(result) { navigateToResult(result); }
+                }
+
+                // Right section: Recording Pill and Window Controls
+                RowLayout {
+                    anchors.right: parent.right
+                    anchors.rightMargin: windowButtons.width + Theme.spacingMedium
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Theme.spacingMedium
 
                     Rectangle {
                         id: recordingPill
-
                         Layout.preferredHeight: 22
                         Layout.preferredWidth: pillRow.implicitWidth + 20
                         radius: 11
-                        color: "#E6CF3131"
-                        visible: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.isRecording : false
-                        border.color: "#FF5F5F"
+                        color: Theme.recordingColor
+                        visible: window.recordingManager && window.recordingManager.isRecording
+                        border.color: Theme.errorColor
                         border.width: 1
 
                         RowLayout {
                             id: pillRow
-
                             anchors.centerIn: parent
                             spacing: 10
 
                             Rectangle {
-                                width: 8
-                                height: 8
+                                Layout.preferredWidth: 8
+                                Layout.preferredHeight: 8
                                 radius: 4
-                                color: "#FFF"
+                                color: Theme.textColor
 
                                 SequentialAnimation on opacity {
                                     loops: Animation.Infinite
-
-                                    NumberAnimation {
-                                        from: 1
-                                        to: 0.3
-                                        duration: 800
-                                    }
-
-                                    NumberAnimation {
-                                        from: 0.3
-                                        to: 1
-                                        duration: 800
-                                    }
-
+                                    NumberAnimation { from: 1; to: 0.3; duration: Theme.animationPulse }
+                                    NumberAnimation { from: 0.3; to: 1; duration: Theme.animationPulse }
                                 }
-
                             }
 
                             Label {
-                                text: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName : ""
+                                text: window.recordingManager ? window.recordingManager.currentGameName : ""
                                 color: "white"
                                 font.pixelSize: 11
                                 font.weight: Font.Bold
@@ -183,20 +318,20 @@ ApplicationWindow {
                             }
 
                             Rectangle {
-                                width: 1
-                                height: 12
+                                Layout.preferredWidth: 1
+                                Layout.preferredHeight: 12
                                 color: "white"
                                 opacity: 0.3
-                                visible: (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.currentGameName !== "" : false
+                                visible: window.recordingManager && window.recordingManager.currentGameName !== ""
                             }
 
                             Label {
                                 text: {
-                                    var durMs = (typeof recordingManager !== "undefined" && recordingManager) ? recordingManager.recordingDuration : 0;
+                                    var durMs = window.recordingManager ? window.recordingManager.recordingDuration : 0;
                                     var dur = Math.floor(durMs / 1000);
                                     var m = Math.floor(dur / 60);
                                     var s = dur % 60;
-                                    return m + ":" + s.toString().padStart(2, '0');
+                                    return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
                                 }
                                 color: "white"
                                 font.pixelSize: 11
@@ -204,55 +339,50 @@ ApplicationWindow {
                             }
 
                             Button {
+                                id: stopButton
                                 Layout.preferredWidth: 18
                                 Layout.preferredHeight: 18
                                 flat: true
-                                padding: 0
                                 icon.source: "qrc:/icons/stop.svg"
                                 icon.width: 12
                                 icon.height: 12
                                 icon.color: "white"
-                                palette.button: "transparent"
-                                onClicked: {
-                                    if (recordingManager)
-                                        recordingManager.stopRecording();
-
-                                }
-
-                                background: Rectangle {
-                                    radius: 9
-                                    color: parent.hovered ? "#40FFFFFF" : "transparent"
-                                }
-
+                                onClicked: window.recordingManager.stopRecording()
                             }
-
                         }
-
                     }
-
-                    Row {
-                        Layout.fillHeight: true
-
-                        // --- Minimize Button ---
-                        TrophyWindowButton {
-                            symbol: "—"
-                            hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
-                            onClicked: window.showMinimized()
-                        }
-
-                        // --- Close Button ---
-                        TrophyWindowButton {
-                            symbol: "✕"
-                            hoverColor: Theme.errorColor
-                            hoverIconColor: "white"
-                            isCloseButton: true
-                            onClicked: window.close()
-                        }
-
-                    }
-
                 }
 
+                Row {
+                    id: windowButtons
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+
+                    TrophyWindowButton {
+                        symbol: "—"
+                        hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
+                        onClicked: window.showMinimized()
+                    }
+
+                    TrophyWindowButton {
+                        symbol: window.visibility === Window.Maximized ? "❐" : "▢"
+                        hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
+                        onClicked: {
+                            if (window.visibility === Window.Maximized)
+                                window.showNormal();
+                            else
+                                window.showMaximized();
+                        }
+                    }
+
+                    TrophyWindowButton {
+                        symbol: "✕"
+                        hoverColor: Theme.errorColor
+                        hoverIconColor: "white"
+                        isCloseButton: true
+                        onClicked: window.close()
+                    }
+                }
             }
 
             RowLayout {
@@ -262,12 +392,9 @@ ApplicationWindow {
 
                 NavigationRail {
                     id: navRail
-
                     Layout.fillHeight: true
                     currentIndex: window.currentPage
-                    onNavigate: function(index) {
-                        window.currentPage = index;
-                    }
+                    onNavigate: function(index) { window.currentPage = index; }
                 }
 
                 Item {
@@ -276,38 +403,17 @@ ApplicationWindow {
 
                     StackLayout {
                         id: pageStack
-
                         anchors.fill: parent
                         currentIndex: window.currentPage
 
-                        DashboardPage {
-                            id: dashboardPage
-                        }
-
-                        RecordingsPage {
-                            id: recordingsPage
-                        }
-
-                        GameListPage {
-                            id: gameListPage
-                        }
-
-                        SettingsPage {
-                            id: settingsPage
-                        }
-
-                        InfoPage {
-                            id: infoPage
-                        }
-
+                        DashboardPage { id: dashboardPage }
+                        GameListPage { id: gameListPage }
+                        SettingsPage { id: settingsPage }
+                        InfoPage { id: infoPage }
                     }
-
                 }
-
             }
-
         }
-
     }
 
     MouseArea {
@@ -327,41 +433,37 @@ ApplicationWindow {
     Shortcut {
         sequence: "F9"
         onActivated: {
-            if (recordingManager) {
-                if (recordingManager.isRecording)
-                    recordingManager.stopRecording();
-                else if (gameDetector && gameDetector.currentGameName !== "")
-                    recordingManager.startRecording(gameDetector.currentGameName);
+            if (window.recordingManager) {
+                if (window.recordingManager.isRecording)
+                    window.recordingManager.stopRecording();
+                else if (window.gameDetector && window.gameDetector.currentGameName !== "")
+                    window.recordingManager.startRecording(window.gameDetector.currentGameName);
             }
         }
     }
 
     TrophyDialog {
         id: closeConfirmDialog
-
         title: qsTr("Recording in Progress")
         message: qsTr("A recording is currently in progress. Would you like to stop recording and exit Trophy?")
         confirmText: qsTr("Stop and Exit")
         confirmColor: Theme.errorColor
-        showDontAsk: false
         onAccepted: {
-            recordingManager.stopRecording();
+            window.recordingManager.stopRecording();
             Qt.quit();
         }
     }
 
     Connections {
+        target: window.recordingManager
         function onRecordingError(error) {
             errorDialog.message = error;
             errorDialog.open();
         }
-
-        target: recordingManager
     }
 
     TrophyDialog {
         id: errorDialog
-
         title: qsTr("Recording Error")
         confirmText: qsTr("OK")
         cancelText: ""
@@ -369,42 +471,33 @@ ApplicationWindow {
 
     WindowPickerDialog {
         id: windowPicker
-
-        property bool forceX11Capture: false
-
         onWindowSelected: function(windowId, title) {
-            console.log("Window selected id:", windowId, "title:", title, "forceX11Capture:", forceX11Capture);
-            recordingManager.startRecording(title, windowId, forceX11Capture);
+            window.recordingManager.startRecording(title, windowId);
         }
     }
 
     TrophyDialog {
         id: deleteDialog
-
         property string filePath: ""
         property string fileName: ""
-
         title: qsTr("Delete Recording")
         message: qsTr("Are you sure you want to delete '%1'? This cannot be undone.").arg(fileName)
         confirmText: qsTr("Delete")
         confirmColor: Theme.errorColor
         showDontAsk: true
         onAccepted: {
-            if (typeof storageManager !== "undefined" && storageManager) {
-                storageManager.deleteRecording(filePath);
-                if (typeof recordingLibrary !== "undefined")
-                    recordingLibrary.refresh();
-
+            if (window.storageManager) {
+                window.storageManager.deleteRecording(filePath);
+                if (window.recordingLibrary)
+                    window.recordingLibrary.refresh();
             }
             if (deleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
-
         }
     }
 
     SetupWizard {
         id: setupWizard
-        visible: settingsManager ? !settingsManager.setupCompleted : false
+        visible: window.settingsManager ? !window.settingsManager.setupCompleted : false
     }
-
 }

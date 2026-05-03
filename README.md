@@ -4,7 +4,7 @@
   <p><strong>Game recorder and clipping for Linux</strong></p>
 </div>
 
-Trophy is a modern, performant game session recording and clipping application for Linux, built exclusively for Wayland. It features hardware-accelerated encoding, multi-track audio capture, and intelligent, heuristic-driven game detection.
+Trophy is a modern, performant game session recording and clipping application for Linux, built exclusively for Wayland. It features hardware-accelerated encoding, multi-track audio capture, and intelligent game detection.
 
 > [!WARNING]
 > **Native X11 sessions are not supported.** Trophy is designed specifically for Wayland. While XWayland applications can be recorded perfectly fine, the application must be run within a Wayland compositor (like KWin/KDE, GNOME Shell, or Hyprland).

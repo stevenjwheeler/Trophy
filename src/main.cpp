@@ -29,7 +29,6 @@ int main(int argc, char *argv[]) {
   std::signal(SIGTERM, signalHandler);
 
   // Set application metadata BEFORE creating the application object
-  // (Some backend initializations rely on these being set early)
   QCoreApplication::setOrganizationName("Trophy");
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
@@ -37,7 +36,7 @@ int main(int argc, char *argv[]) {
   QGuiApplication::setDesktopFileName("trophy");
 
   // Create application
-  GameRecorder::Application app(argc, argv);
+  TrophyBackend::Application app(argc, argv);
 
   // Set application icon
   app.setWindowIcon(QIcon(":/icons/trophy.svg"));
