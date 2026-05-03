@@ -93,6 +93,7 @@ Item {
         anchors.rightMargin: 10
         anchors.verticalCenter: parent.verticalCenter
         source: "qrc:/icons/search.svg"
+        
         width: 16
         height: 16
         opacity: 0.6

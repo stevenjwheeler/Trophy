@@ -17,12 +17,13 @@ GridView {
 
     property int minCellWidth: 280
     cellWidth: {
-        var cols = Math.floor(width / minCellWidth);
+        var availableWidth = width - leftMargin - rightMargin;
+        var cols = Math.floor(availableWidth / minCellWidth);
         if (cols <= 0) cols = 1;
-        return width / cols;
+        return availableWidth / cols;
     }
     cellHeight: Theme.recordingCardHeight + Theme.spacingMedium
-    clip: true
+    clip: false
     boundsBehavior: Flickable.DragAndOvershootBounds
     boundsMovement: Flickable.FollowBoundsBehavior
     model: {

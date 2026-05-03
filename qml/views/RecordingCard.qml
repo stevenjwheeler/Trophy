@@ -16,6 +16,8 @@ Rectangle {
     property var recording: null
     property bool isAdaptive: true
     readonly property bool hovered: hoverHandler.hovered
+    property bool isSelected: window.selectedRecordings && recording && window.selectedRecordings.indexOf(recording.filePath) !== -1
+    property bool isSelectionModeActive: window.selectedRecordings && window.selectedRecordings.length > 0
     
     height: 180
     radius: Theme.radiusMedium
@@ -52,7 +54,15 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
-        onClicked: root.play()
+        onClicked: {
+            if (root.isSelectionModeActive) {
+                if (root.recording) {
+                    window.toggleSelection(root.recording.filePath);
+                }
+            } else {
+                root.play();
+            }
+        }
         z: 0 // Keep it behind everything else
     }
 
@@ -66,8 +76,6 @@ Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 100
             color: "black"
-            
-            // We don't need radius here because the root clips us
             
             Image {
                 anchors.fill: parent
@@ -85,7 +93,7 @@ Rectangle {
             Rectangle {
                 anchors.fill: parent
                 color: "#80000000"
-                visible: root.hovered
+                visible: root.hovered && !root.isSelectionModeActive
 
                 Row {
                     anchors.centerIn: parent
@@ -147,15 +155,68 @@ Rectangle {
         }
     }
 
+    // Selection Circle Overlay
+    Rectangle {
+        id: selectionCircle
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Theme.spacingSmall
+        width: 24
+        height: 24
+        radius: 12
+        color: root.isSelected ? Theme.primaryColor : "#80000000"
+        border.color: root.isSelected ? Theme.primaryColor : "white"
+        border.width: 1.5
+        visible: root.hovered || root.isSelectionModeActive
+        z: 20
+
+        Item {
+            anchors.centerIn: parent
+            width: 8
+            height: 8
+            visible: root.isSelected
+            rotation: 45
+            anchors.verticalCenterOffset: -2
+            
+            Rectangle {
+                width: 2
+                height: 8
+                color: "white"
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+            }
+            Rectangle {
+                width: 4
+                height: 2
+                color: "white"
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {
+                if (root.recording) {
+                    window.toggleSelection(root.recording.filePath);
+                }
+            }
+            cursorShape: Qt.PointingHandCursor
+        }
+    }
+
     // Border overlay (Highest Z to ensure it's on top of the image)
     Rectangle {
         anchors.fill: parent
         radius: root.radius
-        color: "transparent"
-        border.color: root.hovered ? Theme.primaryColor : Theme.borderColor
-        border.width: root.hovered ? 2 : 1
+        color: root.isSelected ? "#20FFFFFF" : "transparent"
+        border.color: root.isSelected ? Theme.primaryColor : (root.hovered ? Theme.primaryColor : Theme.borderColor)
+        border.width: root.isSelected ? 2 : (root.hovered ? 2 : 1)
         z: 10
     }
+    
+    scale: root.isSelected ? 1.02 : 1.0
+    Behavior on scale { NumberAnimation { duration: Theme.animationFast } }
 
     HoverHandler { id: hoverHandler }
 

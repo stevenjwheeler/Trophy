@@ -10,6 +10,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import QtQuick.Dialogs
 
 ApplicationWindow {
     id: window
@@ -25,6 +26,48 @@ ApplicationWindow {
     // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
+    property var selectedRecordings: []
+
+    function toggleSelection(filePath) {
+        var idx = selectedRecordings.indexOf(filePath);
+        var temp = selectedRecordings.slice();
+        if (idx === -1) {
+            temp.push(filePath);
+        } else {
+            temp.splice(idx, 1);
+        }
+        selectedRecordings = temp;
+    }
+
+    function clearSelection() {
+        selectedRecordings = [];
+    }
+
+    function exportSelected() {
+        if (selectedRecordings.length > 0) {
+            exportDialog.open();
+        }
+    }
+
+    function deleteSelected() {
+        if (selectedRecordings.length > 0) {
+            if (window.skipDeleteConfirmation) {
+                performDeleteSelected();
+            } else {
+                bulkDeleteDialog.open();
+            }
+        }
+    }
+
+    function performDeleteSelected() {
+        if (window.storageManager && window.recordingLibrary) {
+            for (var i = 0; i < selectedRecordings.length; i++) {
+                window.storageManager.deleteRecording(selectedRecordings[i]);
+            }
+            window.recordingLibrary.refresh();
+        }
+        clearSelection();
+    }
 
     function openWindowPicker() {
         console.log("openWindowPicker called. app.isWayland:", window.app.isWayland);
@@ -245,6 +288,8 @@ ApplicationWindow {
                     ColumnLayout {
                         spacing: 2
                         Layout.alignment: Qt.AlignVCenter
+                        Layout.leftMargin: 2
+                        Layout.topMargin: 4
 
                         Image {
                             source: "qrc:/icons/trophy.svg"
@@ -493,6 +538,38 @@ ApplicationWindow {
             }
             if (deleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
+        }
+    }
+
+    TrophyDialog {
+        id: bulkDeleteDialog
+        title: qsTr("Delete Selected Recordings")
+        message: qsTr("Are you sure you want to delete %1 recordings? This cannot be undone.").arg(window.selectedRecordings.length)
+        confirmText: qsTr("Delete All")
+        confirmColor: Theme.errorColor
+        showDontAsk: true
+        onAccepted: {
+            performDeleteSelected();
+            if (bulkDeleteDialog.dontAskChecked)
+                window.skipDeleteConfirmation = true;
+        }
+    }
+
+    FolderDialog {
+        id: exportDialog
+        title: qsTr("Choose Export Directory")
+        onAccepted: {
+            var destDir = exportDialog.selectedFolder.toString();
+            if (destDir.startsWith("file://")) {
+                destDir = destDir.substring(7); // remove file://
+            }
+            if (window.storageManager) {
+                for (var i = 0; i < window.selectedRecordings.length; i++) {
+                    window.storageManager.exportRecording(window.selectedRecordings[i], destDir);
+                }
+            }
+            window.clearSelection();
+            window.openFolder(destDir);
         }
     }
 

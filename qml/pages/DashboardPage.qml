@@ -97,6 +97,32 @@ Page {
                             }
 
                             Item { Layout.fillWidth: true }
+
+                            RowLayout {
+                                spacing: Theme.spacingSmall
+                                visible: window.selectedRecordings && window.selectedRecordings.length > 0
+
+                                TrophyButton {
+                                    text: qsTr("Export Selected (%1)").arg(window.selectedRecordings.length)
+                                    icon.source: "qrc:/icons/folder.svg"
+                                    implicitHeight: 28
+                                    onClicked: window.exportSelected()
+                                }
+
+                                TrophyButton {
+                                    text: qsTr("Delete Selected")
+                                    icon.source: "qrc:/icons/trash.svg"
+                                    implicitHeight: 28
+                                    baseColor: Theme.errorColor
+                                    onClicked: window.deleteSelected()
+                                }
+                                
+                                TrophyButton {
+                                    text: qsTr("Cancel")
+                                    implicitHeight: 28
+                                    onClicked: window.clearSelection()
+                                }
+                            }
                         }
 
                         ScrollView {
@@ -106,14 +132,8 @@ Page {
 
 
                             ScrollBar.vertical: ScrollBar {
-                                policy: ScrollBar.AsNeeded
-                                width: 8
-                                background: Rectangle { color: "transparent" }
-                                contentItem: Rectangle {
-                                    radius: 4
-                                    color: Theme.textSecondaryColor
-                                    opacity: 0.3
-                                }
+                                policy: ScrollBar.AlwaysOff
+                                width: 0
                             }
 
                             RecordingGridView {
@@ -121,6 +141,10 @@ Page {
                                 width: parent.width
                                 height: parent.height
                                 skip: 0
+                                leftMargin: Theme.spacingSmall
+                                rightMargin: Theme.spacingSmall
+                                topMargin: Theme.spacingSmall
+                                bottomMargin: Theme.spacingSmall
                             }
                         }
                     }
