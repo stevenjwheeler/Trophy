@@ -32,6 +32,8 @@
 #include <QStandardPaths>
 #include <cstdio>
 
+Q_LOGGING_CATEGORY(appLog, "trophy.app")
+
 namespace TrophyBackend {
 
 Application::Application(int &argc, char **argv)
@@ -40,55 +42,69 @@ Application::Application(int &argc, char **argv)
 Application::~Application() = default;
 
 bool Application::initialize() {
+  // 1. Force Qt to enable debug logging for our categories
+  // This ensures messages actually reach our handler
+  QLoggingCategory::setFilterRules("*.debug=true\n"
+                                   "qt.*.debug=false\n"
+                                   "qml.debug=false");
+
   QString configDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/trophy";
   QDir().mkpath(configDir);
   QString logPath = configDir + "/trophy.log";
 
-  static FILE* logFile = std::fopen(logPath.toUtf8().constData(), "w");
+  // Open log file in append mode
+  static FILE* logFile = std::fopen(logPath.toUtf8().constData(), "a");
 
-  qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &context,
-                             const QString &msg) {
+  qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &context, const QString &msg) {
     const char *level = "UNKNOWN";
-    bool shouldLogToConsole = true;
+    bool isImportant = (type != QtDebugMsg);
 
     switch (type) {
-    case QtDebugMsg: level = "DEBUG"; shouldLogToConsole = false; break;
-    case QtInfoMsg: level = "INFO"; break;
-    case QtWarningMsg: level = "WARNING"; break;
-    case QtCriticalMsg: level = "CRITICAL"; break;
-    case QtFatalMsg: level = "FATAL"; break;
+        case QtDebugMsg:    level = "DEBUG";    break;
+        case QtInfoMsg:     level = "INFO";     break;
+        case QtWarningMsg:  level = "WARNING";  break;
+        case QtCriticalMsg: level = "CRITICAL"; break;
+        case QtFatalMsg:    level = "FATAL";    break;
     }
 
+    // --- FILTERS ---
     QString category = QString::fromLatin1(context.category);
     QString filePath = QString::fromLatin1(context.file ? context.file : "");
     
-    bool isTrophySource = filePath.contains("/src/") || filePath.contains("src/");
+    // Identify if the message comes from YOUR code.
+    // If it's in the src directory, or uses the "default" category, we treat it as Trophy.
+    bool isTrophySource = filePath.contains("/src/") || 
+                          filePath.contains("src/") || 
+                          (category == "default");
+    
+    // Identify "Noise" (Qt internals, QML engine babble)
     bool isTechnicalNoise = category.startsWith("qt.") || 
                            category.startsWith("qml") || 
-                           category.startsWith("dbus.") ||
-                           (category == "default" && !isTrophySource);
+                           category.startsWith("dbus.");
 
-    if (logFile && (!isTechnicalNoise || type != QtDebugMsg)) {
-      QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz");
-      std::fprintf(logFile, "[%s] [%s] [%s] %s\n", 
-                   timestamp.toUtf8().constData(), 
-                   level,
-                   context.category,
-                   msg.toUtf8().constData());
-      std::fflush(logFile);
+    // --- 1. LOG FILE LOGIC ---
+    if (logFile && (isTrophySource || isImportant)) {
+        QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz");
+        std::fprintf(logFile, "[%s] [%s] [%s] %s\n", 
+                     timestamp.toUtf8().constData(), 
+                     level,
+                     context.category,
+                     msg.toUtf8().constData());
+        std::fflush(logFile);
     }
 
-    static bool forceDebug = qEnvironmentVariableIsSet("TROPHY_DEBUG") || 
-                             qgetenv("QT_LOGGING_RULES").contains("debug=true");
+    // --- 2. CONSOLE LOGIC ---
+    // Usage: TROPHY_DEBUG=1 trophy
+    static bool forceDebug = qEnvironmentVariableIsSet("TROPHY_DEBUG");
     
-    if (shouldLogToConsole || forceDebug) {
-      std::fprintf(stderr, "[Qt %s] %s\n", level, msg.toUtf8().constData());
-      std::fflush(stderr);
+    if (isImportant || forceDebug) {
+        // Keep console clean: only show noise if it's actually an error
+        if (!isTechnicalNoise || isImportant) {
+            std::fprintf(stderr, "[%s] %s\n", level, msg.toUtf8().constData());
+            std::fflush(stderr);
+        }
     }
   });
-
-  QLoggingCategory::setFilterRules("qt.*.debug=false\n"
-                                   "*.debug=true");
 
 #ifdef APP_VERSION
   QString versionStr = QString::fromUtf8(TOSTRING(APP_VERSION));
@@ -98,7 +114,7 @@ bool Application::initialize() {
 #endif
 
   setApplicationVersion(versionStr);
-  qInfo() << "Initializing Trophy - Game recording and clipping" << versionStr;
+  qCInfo(appLog) << "Initializing Trophy - Game recording and clipping" << versionStr;
 
   initializeServices();
   ensureVulkanLayerRegistered();
@@ -120,12 +136,11 @@ bool Application::initialize() {
   initialProperties.insert("gameDetector", QVariant::fromValue(m_gameDetector.get()));
 
   m_engine->setInitialProperties(initialProperties);
-  // ---------------------------------------------------
 
   QUrl url;
   if (!m_mainQmlPath.isEmpty()) {
       url = QUrl::fromLocalFile(m_mainQmlPath);
-      qInfo() << "Live Reload active: Loading QML from filesystem:" << url;
+      qCInfo(appLog) << "Live Reload active: Loading QML from filesystem:" << url;
   } else {
       url = QUrl(QStringLiteral("qrc:/qt/qml/TrophyBackend/qml/main.qml"));
   }
@@ -133,7 +148,7 @@ bool Application::initialize() {
   QObject::connect(
       m_engine.get(), &QQmlApplicationEngine::objectCreationFailed, this,
       [this, url]() {
-        qCritical() << "Failed to load QML:" << url;
+        qCCritical(appLog) << "Failed to load QML:" << url;
         emit fatalError("Failed to load user interface");
         QCoreApplication::exit(1);
       },
@@ -142,26 +157,26 @@ bool Application::initialize() {
   m_engine->load(url);
 
   if (m_engine->rootObjects().isEmpty()) {
-    qCritical() << "No root objects created from QML";
+    qCCritical(appLog) << "No root objects created from QML";
     return false;
   }
 
   if (CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::X11) {
-    qCritical() << "Trophy does not support native X11 sessions.";
+    qCCritical(appLog) << "Trophy does not support native X11 sessions.";
     emit fatalError("Trophy does not support native X11 sessions. Please switch to a Wayland session.");
     return false;
   }
 
   if (CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::Wayland) {
     if (!CaptureFactory::isPipeWireAvailable()) {
-      qCritical() << "PipeWire or ScreenCast portal not found!";
+      qCCritical(appLog) << "PipeWire or ScreenCast portal not found!";
       emit fatalError("PipeWire or ScreenCast portal not found. Screen capture is unavailable.");
       return false;
     }
   }
 
   m_gameDetector->start();
-  qInfo() << "Application initialized successfully";
+  qCInfo(appLog) << "Application initialized successfully";
   return true;
 }
 
@@ -219,7 +234,7 @@ void Application::connectSignals() {
             m_recordingLibrary->refresh();
           });
   connect(m_gameDetector.get(), &GameDetectionService::gameDetected, this, [this](const QString &gameName, qint64 pid) {
-            qInfo() << "Game detected:" << gameName;
+            qCInfo(appLog) << "Game detected:" << gameName;
             emit currentGameChanged();
             if (m_settingsManager->autoRecordEnabled()) {
               QString token = m_settingsManager->getRestoreToken(gameName);
