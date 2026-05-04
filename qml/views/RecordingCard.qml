@@ -75,7 +75,7 @@ Rectangle {
         Item {
             id: thumbnailContainer
             Layout.fillWidth: true
-            Layout.preferredHeight: 100
+            Layout.preferredHeight: 125
             
             // This keeps the bottom edge razor sharp where it meets the info section
             clip: true
@@ -137,21 +137,42 @@ Rectangle {
                         width: 40; height: 40
                         icon.source: "qrc:/icons/play.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
                         onClicked: root.play()
-                        background: Rectangle { radius: 20; color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor }
+                        background: Rectangle {
+                            radius: 20
+                            color: parent.hovered ? '#cc303030' : "#00000000"
+                            border.color: "#ffffffff"
+                            border.width: 2
+                            scale: parent.hovered ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                        }
                     }
 
                     RoundButton {
                         width: 40; height: 40
                         icon.source: "qrc:/icons/folder.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
                         onClicked: root.openFolder()
-                        background: Rectangle { radius: 20; color: parent.hovered ? "#CCFFFFFF" : "#80FFFFFF" }
+                        background: Rectangle {
+                            radius: 20
+                            color: parent.hovered ? '#cc303030' : "#00000000"
+                            border.color: "#ffffffff"
+                            border.width: 2
+                            scale: parent.hovered ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                        }
                     }
 
                     RoundButton {
                         width: 40; height: 40
-                        icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 28; icon.height: 28
                         onClicked: root.deleteRequested()
-                        background: Rectangle { radius: 20; color: parent.hovered ? Theme.errorColor : "#80FFFFFF" }
+                        background: Rectangle {
+                            radius: 20
+                            color: parent.hovered ? '#cc303030' : "#00000000"
+                            border.color: "#ffffffff"
+                            border.width: 2
+                            scale: parent.hovered ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                        }
                     }
                 }
             }
@@ -250,7 +271,7 @@ Rectangle {
         z: 10
     }
     
-    scale: root.isSelected ? 1.02 : 1.0
+    scale: root.isSelected ? 1.03 : (root.hovered ? 1.02 : 1.0)
     Behavior on scale { NumberAnimation { duration: Theme.animationFast } }
 
     HoverHandler { id: hoverHandler }
