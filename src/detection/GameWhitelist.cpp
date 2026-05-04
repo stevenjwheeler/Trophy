@@ -74,7 +74,7 @@ void GameWhitelist::load() {
     }
   }
 
-  qInfo() << "Loaded" << m_whitelist.size() << "whitelisted and"
+  qDebug() << "Loaded" << m_whitelist.size() << "whitelisted and"
           << m_blacklist.size() << "blacklisted entries";
 }
 
