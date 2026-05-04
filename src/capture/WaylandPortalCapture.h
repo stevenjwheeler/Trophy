@@ -84,6 +84,7 @@ private:
   bool m_useDmaBuf = true;        // Set from CaptureConfig
   bool m_dmaBufNegotiated = false; // Whether compositor accepted DMA-BUF
   uint64_t m_negotiatedModifier = 0; // DRM modifier agreed during format negotiation
+  uint32_t m_negotiatedFormat = 0;   // DRM format agreed during format negotiation
 };
 
 } // namespace TrophyBackend

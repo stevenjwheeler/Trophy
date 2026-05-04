@@ -20,13 +20,13 @@ extern "C" {
 namespace TrophyBackend {
 
 FFmpegMuxer::FFmpegMuxer(QObject *parent) 
-    : IMuxer(parent), m_globalOffset(-1) {}
-
-FFmpegMuxer::~FFmpegMuxer() { 
-    cleanup(); 
-}
+    : IMuxer(parent), 
+      m_formatCtx(nullptr), 
+      m_headerWritten(false),
+      m_globalOffset(-1) {}
 
 bool FFmpegMuxer::initialize(const QString &outputPath) {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
     m_outputPath = outputPath;
 
     QString ext = QFileInfo(outputPath).suffix().toLower();
@@ -43,6 +43,7 @@ bool FFmpegMuxer::initialize(const QString &outputPath) {
 }
 
 int FFmpegMuxer::addStream(const StreamInfo &info) {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
     if (!m_formatCtx) return -1;
 
     AVStream *stream = avformat_new_stream(m_formatCtx, nullptr);
@@ -56,7 +57,6 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
         codecpar->codec_id = static_cast<AVCodecID>(info.codecId);
         codecpar->width = info.width;
         codecpar->height = info.height;
-        // Use millisecond timebase
         stream->time_base = {1, 1000};
         stream->avg_frame_rate = {info.fps, 1};
         stream->r_frame_rate = {info.fps, 1};
@@ -72,7 +72,7 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
         codecpar->extradata_size = static_cast<int>(info.extraData.size());
         codecpar->extradata = static_cast<uint8_t *>(
             av_mallocz(codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
-        memcpy(codecpar->extradata, info.extraData.data(), codecpar->extradata_size);
+        memcpy(codecpar->extradata, info.extraData.data(), info.extraData.size());
     }
 
     m_streams.push_back(stream);
@@ -80,6 +80,7 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
 }
 
 bool FFmpegMuxer::writeHeader() {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
     if (!m_formatCtx) return false;
 
     if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE)) {
@@ -103,16 +104,20 @@ bool FFmpegMuxer::writeHeader() {
 
 bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
     if (!m_formatCtx || !m_headerWritten) return false;
+    
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
+    
     if (packet.streamIndex >= static_cast<int>(m_streams.size())) return false;
 
     AVPacket *avPacket = av_packet_alloc();
     if (!avPacket) return false;
 
-    avPacket->data = (uint8_t *)av_malloc(packet.data.size());
+    if (av_new_packet(avPacket, packet.data.size()) < 0) {
+        av_packet_free(&avPacket);
+        return false;
+    }
     memcpy(avPacket->data, packet.data.data(), packet.data.size());
-    avPacket->size = packet.data.size();
     
-    // Normalize timestamps to start at 0 based on the first arriving packet.
     if (m_globalOffset == -1) {
         m_globalOffset = packet.pts;
     }
@@ -127,8 +132,6 @@ bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
     }
 
     AVStream *stream = m_streams[packet.streamIndex];
-    
-    // Rescale from 1ms internal timebase to stream timebase
     av_packet_rescale_ts(avPacket, {1, 1000}, stream->time_base);
     
     int ret = av_interleaved_write_frame(m_formatCtx, avPacket);
@@ -138,25 +141,46 @@ bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
 }
 
 bool FFmpegMuxer::finalize() {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
     if (!m_formatCtx) return false;
     
     bool success = true;
     if (m_headerWritten) {
+        // Write the trailer (this updates the file size on disk)
         success = (av_write_trailer(m_formatCtx) >= 0);
+        
+        // Force a flush to the IO context so avio_tell is accurate
+        if (m_formatCtx->pb) {
+            avio_flush(m_formatCtx->pb);
+        }
     }
     
-    cleanup();
     return success;
 }
 
+// Ensure the destructor still cleans up
+FFmpegMuxer::~FFmpegMuxer() { 
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
+    cleanup_internal(); 
+}
+
+int64_t FFmpegMuxer::bytesWritten() const {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
+    if (m_formatCtx && m_formatCtx->pb) {
+        return avio_tell(m_formatCtx->pb);
+    }
+    return 0;
+}
+
 QString FFmpegMuxer::formatName() const {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
     if (m_formatCtx && m_formatCtx->oformat) {
         return QString::fromUtf8(m_formatCtx->oformat->name);
     }
     return QStringLiteral("unknown");
 }
 
-void FFmpegMuxer::cleanup() {
+void FFmpegMuxer::cleanup_internal() {
     if (m_formatCtx) {
         if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE) && m_formatCtx->pb) {
             avio_closep(&m_formatCtx->pb);
@@ -167,6 +191,11 @@ void FFmpegMuxer::cleanup() {
     m_streams.clear();
     m_headerWritten = false;
     m_globalOffset = -1;
+}
+
+void FFmpegMuxer::cleanup() {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
+    cleanup_internal();
 }
 
 } // namespace TrophyBackend

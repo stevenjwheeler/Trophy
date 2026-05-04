@@ -650,9 +650,32 @@ void WaylandPortalCapture::on_stream_param_changed(
                                      ? info.modifier
                                      : DRM_FORMAT_MOD_LINEAR;
 
+    // Convert SPA video format to DRM format for DMA-BUF descriptor
+    switch (info.format) {
+    case SPA_VIDEO_FORMAT_BGRx:
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      break;
+    case SPA_VIDEO_FORMAT_RGBx:
+      self->m_negotiatedFormat = DRM_FORMAT_XBGR8888;
+      break;
+    case SPA_VIDEO_FORMAT_xRGB:
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      break;
+    case SPA_VIDEO_FORMAT_xBGR:
+      self->m_negotiatedFormat = DRM_FORMAT_XBGR8888;
+      break;
+    default:
+      // Fallback to XRGB8888 for unknown formats
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      qWarning() << "Unknown SPA video format:" << info.format 
+                 << "falling back to DRM_FORMAT_XRGB8888";
+      break;
+    }
+
     self->m_resolution = QSize(info.size.width, info.size.height);
     qDebug() << "Wayland Portal: Negotiated resolution:" << self->m_resolution
-             << "DMA-BUF active:" << self->m_dmaBufNegotiated;
+             << "DMA-BUF active:" << self->m_dmaBufNegotiated
+             << "Format:" << QString::number(self->m_negotiatedFormat, 16);
 
     // ---- Stage 2: Buffer-type negotiation ----
     // Now that we know the compositor CAN export DMA-BUF, explicitly request
@@ -699,7 +722,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   frame.height    = self->m_resolution.height();
   frame.timestamp = ts;
 
-  if (self->m_dmaBufNegotiated && d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
+  if (d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
     // ---- Zero-copy DMA-BUF path ----
     frame.isDmaBuf    = true;
     frame.dmaBufFd    = static_cast<int>(d.fd);
@@ -707,12 +730,24 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     frame.dmaBufOffset  = static_cast<int>(d.chunk->offset);
     // The modifier was captured during format negotiation and stored as
     // m_resolution is to the geometry. We expose it via the DRM format
-    // constant for XRGB8888 (the format we requested).
-    frame.drmFormat   = DRM_FORMAT_XRGB8888;
+    // constant for the negotiated format.
+    frame.drmFormat   = self->m_negotiatedFormat;
     frame.drmModifier = self->m_negotiatedModifier;
-    frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
-    frame.data        = nullptr;
+    frame.data        = d.data ? static_cast<const uint8_t *>(d.data) : nullptr; // CPU fallback if available
     frame.stride      = frame.dmaBufStride;
+    
+    // Set pixel format based on available data
+    if (frame.data) {
+      frame.pixelFormat = AV_PIX_FMT_BGRA; // CPU data is in BGRA format
+    } else {
+      frame.pixelFormat = AV_PIX_FMT_DRM_PRIME; // GPU-only DMA-BUF
+    }
+
+    // Validate that we only have single-plane DMA-BUF (common for screen capture)
+    if (buf->n_datas > 1) {
+      qWarning() << "Multi-plane DMA-BUF not supported, has" << buf->n_datas << "planes";
+      // Still try to use it, but it may fail
+    }
 
     if (self->m_callback)
       self->m_callback(frame);

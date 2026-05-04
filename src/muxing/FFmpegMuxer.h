@@ -16,11 +16,6 @@ struct AVStream;
 
 namespace TrophyBackend {
 
-/**
- * @brief FFmpeg-based container muxer
- *
- * Supports MKV and MP4 output formats.
- */
 class FFmpegMuxer : public IMuxer {
   Q_OBJECT
 
@@ -35,19 +30,21 @@ public:
   bool finalize() override;
 
   QString outputPath() const override { return m_outputPath; }
-  int64_t bytesWritten() const override { return m_bytesWritten; }
+  int64_t bytesWritten() const override;
   QString formatName() const override;
 
 private:
   void cleanup();
+  void cleanup_internal(); // Added this declaration
 
   QString m_outputPath;
   AVFormatContext *m_formatCtx = nullptr;
   std::vector<AVStream *> m_streams;
-  std::mutex m_writeMutex;
-  int64_t m_bytesWritten = 0;
+  
   bool m_headerWritten = false;
   int64_t m_globalOffset = -1;
+  
+  mutable std::mutex m_muxerMutex; 
 };
 
 } // namespace TrophyBackend

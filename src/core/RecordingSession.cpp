@@ -44,7 +44,14 @@ bool RecordingSession::start() {
 
   qDebug() << "Starting recording session to:" << m_outputPath;
 
+  // Initialize state BEFORE starting any threads or callbacks
+  m_frameCount = 0;
+  m_bytesWritten = 0;
+  m_running = true;
+  m_paused = false;
+
   if (!m_muxer->initialize(m_outputPath)) {
+    m_running = false;
     emit errorOccurred("Failed to initialize muxer");
     return false;
   }
@@ -61,6 +68,7 @@ bool RecordingSession::start() {
   videoStream.extraData = m_encoder->extraData();
 
   if (m_muxer->addStream(videoStream) < 0) {
+    m_running = false;
     emit errorOccurred("Failed to add video stream to muxer");
     return false;
   }
@@ -74,8 +82,6 @@ bool RecordingSession::start() {
     audioConfig.codec = "aac";
 
     if (m_separateAudioTracks) {
-      // One encoder + one muxer stream per track (even if empty initially, for
-      // consistent MKV layout)
       const QStringList trackNames = {"Game Audio", "Voice Chat", "Microphone"};
       qDebug() << "Separate tracks mode: initializing" << kAudioTrackCount
               << "audio tracks";
@@ -110,30 +116,8 @@ bool RecordingSession::start() {
               return;
             if (trackIndex < 0 || trackIndex >= kAudioTrackCount)
               return;
-            if (!m_audioEncoders[trackIndex]) {
-              qDebug() << "Track" << trackIndex << "has no encoder, skipping"
-                       << frameCount << "frames";
+            if (!m_audioEncoders[trackIndex])
               return;
-            }
-            if (!samples) {
-              qWarning() << "Track" << trackIndex << "has null samples!";
-              return;
-            }
-
-            // Debug: log first few samples to check for data
-            float peakSample = 0.0f;
-            for (int i = 0; i < frameCount * channels && i < 1000; ++i) {
-              if (std::abs(samples[i]) > peakSample)
-                peakSample = std::abs(samples[i]);
-            }
-
-            /* static int callCount[3] = {0, 0, 0};
-            if (callCount[trackIndex]++ % 60 == 0) {  // Log every 60th call (~1
-            sec at 60fps) qDebug() << "Track" << trackIndex << ": frames=" <<
-            frameCount
-                       << "sr=" << sampleRate << "ch=" << channels
-                       << "peak=" << peakSample;
-            } */
 
             EncodedPacket packet;
             std::lock_guard<std::mutex> lock(m_audioEncoderMutexes[trackIndex]);
@@ -142,14 +126,14 @@ bool RecordingSession::start() {
               int streamIdx = m_trackToStreamMap[trackIndex];
               if (streamIdx >= 0) {
                 packet.streamIndex = streamIdx;
-                m_muxer->writePacket(packet);
-                m_bytesWritten = m_muxer->bytesWritten();
+                if (m_muxer->writePacket(packet)) {
+                    m_bytesWritten = m_muxer->bytesWritten();
+                }
               }
             }
           });
 
     } else {
-      // Single merged stream — software mix all active tracks
       m_mergedEncoder = std::make_unique<AudioEncoder>();
       if (!m_mergedEncoder->initialize(audioConfig)) {
         qWarning() << "Failed to init merged audio encoder";
@@ -170,33 +154,17 @@ bool RecordingSession::start() {
       m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
-            if (!m_running || m_paused)
-              return;
-            if (!m_mergedEncoder)
+            if (!m_running || m_paused || !m_mergedEncoder)
               return;
             if (trackIndex < 0 || trackIndex >= m_activeTrackCount)
               return;
 
-            float peakSample = 0.0f;
-            for (int i = 0; i < frameCount * channels && i < 1000; ++i)
-              if (std::abs(samples[i]) > peakSample)
-                peakSample = std::abs(samples[i]);
-
-            /* static int callCount[3] = {0, 0, 0};
-            if (callCount[trackIndex]++ % 60 == 0)
-              qDebug() << "Track" << trackIndex << ": frames=" << frameCount
-                       << "sr=" << sampleRate << "ch=" << channels
-                       << "peak=" << peakSample; */
-
             std::lock_guard<std::mutex> lock(m_mergeMutex);
 
-            // Append to this track's own accumulator
             const int incoming = frameCount * channels;
             auto &buf = m_trackAccumulators[trackIndex];
             buf.insert(buf.end(), samples, samples + incoming);
 
-            // Mix and encode as long as ALL active tracks have a full AAC frame
-            // ready
             const int needed = 1024 * channels;
             while (true) {
               bool allReady = true;
@@ -223,24 +191,21 @@ bool RecordingSession::start() {
               EncodedPacket packet;
               if (m_mergedEncoder->encodeAudio(mixed.data(), 1024, packet)) {
                 packet.streamIndex = 1;
-                m_muxer->writePacket(packet);
-                m_bytesWritten = m_muxer->bytesWritten();
+                if (m_muxer->writePacket(packet)) {
+                    m_bytesWritten = m_muxer->bytesWritten();
+                }
               }
             }
           });
     }
   }
 
-  // --- Write container header (must be after all streams are added) ---
+  // Write container header
   if (!m_muxer->writeHeader()) {
+    m_running = false;
     emit errorOccurred("Failed to write muxer header");
     return false;
   }
-
-  m_running = true;
-  m_paused = false;
-  m_frameCount = 0;
-  m_bytesWritten = 0;
 
   // Set video capture callback
   m_capture->setFrameCallback([this](const VideoFrame &frame) {
@@ -257,26 +222,24 @@ bool RecordingSession::start() {
   });
 
   if (!m_capture->startCapture()) {
+    m_running = false;
     emit errorOccurred("Failed to start video capture");
     return false;
   }
 
-  // Start audio capture (driven by PipeWire callbacks, no dedicated thread)
   if (m_audioMixer) {
     m_audioMixer->startAll();
   }
 
-  // Set up periodic checking for newly-appeared audio nodes
   if (!m_gameProcess.isEmpty() || !m_voiceChatApp.isEmpty()) {
     m_audioNodeCheckTimer = new QTimer(this);
-    m_audioNodeCheckTimer->setInterval(3000); // Check every 3 seconds
+    m_audioNodeCheckTimer->setInterval(3000);
     connect(m_audioNodeCheckTimer, &QTimer::timeout, this,
             &RecordingSession::checkForNewAudioNodes);
     m_audioNodeCheckTimer->start();
-    checkForNewAudioNodes(); // Immediate first check
+    checkForNewAudioNodes(); 
   }
 
-  // Start video encoding thread
   m_encodingThread = std::thread([this]() { encodingLoop(); });
 
   return true;
@@ -289,7 +252,6 @@ void RecordingSession::stop() {
 
   qDebug() << "Stopping recording session...";
 
-  // Stop audio node checking
   if (m_audioNodeCheckTimer) {
     m_audioNodeCheckTimer->stop();
     m_audioNodeCheckTimer->deleteLater();
@@ -301,7 +263,6 @@ void RecordingSession::stop() {
     m_capture->setFrameCallback(nullptr);
   }
 
-  // Stop audio capture before flushing
   if (m_audioMixer) {
     m_audioMixer->stopAll();
     m_audioMixer->setTrackAudioCallback(nullptr);
@@ -314,7 +275,6 @@ void RecordingSession::stop() {
     m_encodingThread.join();
   }
 
-  // Flush all audio encoders
   for (int i = 0; i < kAudioTrackCount; ++i) {
     if (!m_audioEncoders[i])
       continue;
@@ -329,7 +289,6 @@ void RecordingSession::stop() {
     }
   }
 
-  // Flush merged encoder if used
   if (m_mergedEncoder) {
     std::vector<EncodedPacket> flushed;
     m_mergedEncoder->flush(flushed);
@@ -341,6 +300,7 @@ void RecordingSession::stop() {
 
   if (m_muxer) {
     m_muxer->finalize();
+    
     m_bytesWritten = m_muxer->bytesWritten();
   }
 
@@ -383,7 +343,6 @@ void RecordingSession::encodingLoop() {
     }
   }
 
-  // Flush video encoder
   std::vector<EncodedPacket> flushedPackets;
   if (m_encoder && m_encoder->flush(flushedPackets) > 0) {
     for (auto &pkt : flushedPackets) {
@@ -402,17 +361,13 @@ void RecordingSession::checkForNewAudioNodes() {
 
   bool allConnected = true;
 
-  // Check for game audio (track 0)
   if (!m_sourceConnected[0] && !m_gameProcess.isEmpty()) {
     allConnected = false;
     uint32_t nodeId = PW_ID_ANY;
     QString nodeName, nodeSerial;
 
-    // Try process name
-    if (!m_gameProcess.isEmpty()) {
-      nodeId = PipeWireAudioSource::findNodeByProcessName(
-          m_gameProcess, &nodeName, &nodeSerial);
-    }
+    nodeId = PipeWireAudioSource::findNodeByProcessName(
+        m_gameProcess, &nodeName, &nodeSerial);
 
     if (nodeId != PW_ID_ANY) {
       qDebug() << "Game audio node appeared, connecting:"
@@ -424,7 +379,6 @@ void RecordingSession::checkForNewAudioNodes() {
     }
   }
 
-  // Check for voice chat audio (track 1)
   if (!m_sourceConnected[1] && !m_voiceChatApp.isEmpty()) {
     allConnected = false;
     QString nodeName, nodeSerial;
@@ -441,7 +395,6 @@ void RecordingSession::checkForNewAudioNodes() {
     }
   }
 
-  // Stop checking once all expected sources are connected
   if (allConnected && m_audioNodeCheckTimer) {
     m_audioNodeCheckTimer->stop();
     qDebug() << "All expected audio nodes connected, stopping node checks";
