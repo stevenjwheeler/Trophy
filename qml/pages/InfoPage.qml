@@ -243,6 +243,12 @@ Page {
                         }
 
                         Label {
+                            text: qsTr("• The Wayland and KWin teams for modern Linux compositing")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
                             text: qsTr("• The PipeWire team for modern Linux audio")
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
