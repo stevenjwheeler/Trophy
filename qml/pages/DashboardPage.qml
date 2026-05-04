@@ -125,26 +125,42 @@ Page {
                             }
                         }
 
-                        ScrollView {
+                        RecordingGridView {
+                            id: recordingsGrid
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
+                            
+                            skip: 0
+                            leftMargin: Theme.spacingSmall
+                            topMargin: Theme.spacingSmall
+                            bottomMargin: Theme.spacingSmall
+                            
+                            // Add margin on the right so your grid content doesn't get covered by the scrollbar
+                            rightMargin: Theme.spacingSmall
 
-
+                            // Attach the custom scrollbar directly to the GridView
                             ScrollBar.vertical: ScrollBar {
-                                policy: ScrollBar.AlwaysOff
-                                width: 0
-                            }
+                                id: customVBar
+                                active: hovered || pressed
+                                width: 8
+                                
+                                // The handle
+                                contentItem: Rectangle {
+                                    implicitWidth: 4
+                                    implicitHeight: 40 // Minimum height of the thumb
+                                    radius: 16
+                                    color: customVBar.pressed ? Theme.highlightedColor : (customVBar.hovered ? Theme.highlightedColor : Theme.secondaryColor)
 
-                            RecordingGridView {
-                                id: recordingsGrid
-                                width: parent.width
-                                height: parent.height
-                                skip: 0
-                                leftMargin: Theme.spacingSmall
-                                rightMargin: Theme.spacingSmall
-                                topMargin: Theme.spacingSmall
-                                bottomMargin: Theme.spacingSmall
+                                    // Optional: fade out when not interacting
+                                    opacity: customVBar.active ? 1.0 : 0.2
+                                    Behavior on opacity { NumberAnimation { duration: 200 } }
+                                
+                                }
+
+                                background: Rectangle {
+                                    color: "transparent"
+                                }
                             }
                         }
                     }
