@@ -288,20 +288,6 @@ Page {
                         rowSpacing: Theme.spacingSmall
 
                         Label {
-                            text: "F9"
-                            font.family: "monospace"
-                            font.pixelSize: Theme.fontSizeNormal
-                            color: Theme.primaryColor
-                            Layout.preferredWidth: 100
-                        }
-
-                        Label {
-                            text: qsTr("Start/Stop Recording")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                        Label {
                             text: "Ctrl+Q"
                             font.family: "monospace"
                             font.pixelSize: Theme.fontSizeNormal
