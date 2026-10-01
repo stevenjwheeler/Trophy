@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QThreadPool>
 
@@ -51,11 +52,18 @@ void Recording::setThumbnailPath(const QString &path) {
 void Recording::loadMetadata() {
   parseFileNameForGameName();
 
-  // Run probing in a background thread to prevent UI freezing
-  QThreadPool::globalInstance()->start([this]() {
-    probeVideoFile();
+  // Run probing in a background thread to prevent UI freezing.
+  // Guarded by QPointer: the Recording may be destroyed (e.g. library
+  // refresh during shutdown) before the probe finishes.
+  QPointer<Recording> self(this);
+  QThreadPool::globalInstance()->start([self]() {
+    if (self.isNull())
+      return;
+    self->probeVideoFile();
+    if (self.isNull())
+      return;
     // Notify on the main thread
-    QMetaObject::invokeMethod(this, &Recording::metadataChanged,
+    QMetaObject::invokeMethod(self.data(), &Recording::metadataChanged,
                               Qt::QueuedConnection);
   });
 }
@@ -103,6 +111,40 @@ void Recording::probeVideoFile() {
       qWarning() << "Failed to open video file for probing:" << m_filePath;
     }
     return;
+  }
+
+  // Read container metadata tags first. These are more reliable than
+  // filename parsing for game title and recording date — unless the user
+  // renamed the file, in which case the embedded title is stale and the
+  // filename is authoritative (creation_time stays valid regardless).
+  if (formatCtx->metadata) {
+    if (!m_preferFileNameTitle) {
+      AVDictionaryEntry *titleTag =
+          av_dict_get(formatCtx->metadata, "title", nullptr, 0);
+      QString containerTitle;
+      if (titleTag && titleTag->value)
+        containerTitle = QString::fromUtf8(titleTag->value).trimmed();
+
+      if (containerTitle.isEmpty()) {
+        titleTag = av_dict_get(formatCtx->metadata, "comment", nullptr, 0);
+        if (titleTag && titleTag->value)
+          containerTitle = QString::fromUtf8(titleTag->value).trimmed();
+      }
+
+      if (!containerTitle.isEmpty()) {
+        m_gameName = containerTitle;
+      }
+    }
+
+    AVDictionaryEntry *tag =
+        av_dict_get(formatCtx->metadata, "creation_time", nullptr, 0);
+    if (tag && tag->value) {
+      QDateTime creationTime = QDateTime::fromString(
+          QString::fromUtf8(tag->value).trimmed(), Qt::ISODate);
+      if (creationTime.isValid()) {
+        m_date = creationTime;
+      }
+    }
   }
 
   // Extract resolution even if stream info hasn't been called (often in header)

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <QMap>
 #include <QObject>
 #include <QString>
 #include <cstdint>
@@ -25,6 +26,7 @@ struct StreamInfo {
   Type type;
   int codecId;                    // FFmpeg codec ID
   std::vector<uint8_t> extraData; // Codec extradata (SPS/PPS, etc.)
+  int pixelFormat = 0;            // Encoded video pixel format for container metadata
 
   // Settings metadata
   int bitrate = 0;
@@ -74,11 +76,32 @@ public:
   virtual bool writeHeader() = 0;
 
   /**
+   * @brief Set container metadata tags before writing the header
+   * @param metadata Map of metadata tags to values
+   * @return true on success
+   */
+  virtual bool setMetadata(const QMap<QString, QString> &metadata) {
+    Q_UNUSED(metadata);
+    return true;
+  }
+
+  /**
    * @brief Write an encoded packet
    * @param packet Encoded packet to write
    * @return true on success
    */
   virtual bool writePacket(const EncodedPacket &packet) = 0;
+
+  /**
+   * @brief Update codec extradata for an existing stream before header
+   * is written. Implementations should copy the provided data into the
+   * stream codecpar->extradata.
+   */
+  virtual bool updateStreamExtraData(int streamIndex, const std::vector<uint8_t> &data) {
+    Q_UNUSED(streamIndex);
+    Q_UNUSED(data);
+    return false;
+  }
 
   /**
    * @brief Finalize and close the container

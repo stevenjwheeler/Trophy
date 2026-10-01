@@ -11,9 +11,20 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 #include <algorithm>
 
 namespace TrophyBackend {
+
+namespace {
+constexpr char kCustomTitlesFile[] = ".trophy-titles.json";
+constexpr char kCustomTitlesKey[] = "preferFileNameTitle";
+} // namespace
 
 RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
     : QObject(parent), m_libraryPath(libraryPath),
@@ -25,6 +36,8 @@ RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
   // Watch for changes
   connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this,
           &RecordingLibrary::onDirectoryChanged);
+
+  loadCustomTitles();
 
   // Initial scan
   refresh();
@@ -48,6 +61,7 @@ void RecordingLibrary::setLibraryPath(const QString &path) {
 
     m_libraryPath = path;
     emit libraryPathChanged();
+    loadCustomTitles();
     refresh();
   }
 }
@@ -102,6 +116,17 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
 void RecordingLibrary::setActiveRecordingPath(const QString &path) {
   m_activeRecordingPath = path;
   updateFilteredRecordings();
+}
+
+void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
+                                           const QString &newPath) {
+  // Every in-app rename makes the new filename authoritative: the file
+  // still carries the pre-rename container title tag.
+  m_fileNameTitlePreferred.remove(QFileInfo(oldPath).fileName());
+  if (!newPath.isEmpty()) {
+    m_fileNameTitlePreferred.insert(QFileInfo(newPath).fileName());
+  }
+  saveCustomTitles();
 }
 
 void RecordingLibrary::onDirectoryChanged(const QString &path) {
@@ -182,6 +207,8 @@ void RecordingLibrary::addRecording(const QString &filePath) {
   }
 
   auto recording = std::make_unique<Recording>(filePath, this);
+  recording->setPreferFileNameTitle(
+      m_fileNameTitlePreferred.contains(QFileInfo(filePath).fileName()));
   recording->loadMetadata();
 
   // Request thumbnail generation
@@ -195,6 +222,11 @@ void RecordingLibrary::addRecording(const QString &filePath) {
 }
 
 void RecordingLibrary::removeRecording(const QString &filePath) {
+  // Drop any rename preference for the deleted file.
+  if (m_fileNameTitlePreferred.remove(QFileInfo(filePath).fileName())) {
+    saveCustomTitles();
+  }
+
   // Delete thumbnail
   QFileInfo videoInfo(filePath);
   QString thumbDir = videoInfo.absolutePath() + "/.thumbnails";
@@ -264,6 +296,63 @@ void RecordingLibrary::updateFilteredRecordings() {
   }
 
   emit recordingsChanged();
+}
+
+QString RecordingLibrary::customTitlesPath() const {
+  return QDir(m_libraryPath).absoluteFilePath(kCustomTitlesFile);
+}
+
+void RecordingLibrary::loadCustomTitles() {
+  m_fileNameTitlePreferred.clear();
+
+  QFile file(customTitlesPath());
+  if (!file.exists()) {
+    return;
+  }
+  if (!file.open(QIODevice::ReadOnly)) {
+    qWarning() << "Failed to read custom titles:" << file.fileName();
+    return;
+  }
+  const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  if (!doc.isObject()) {
+    qWarning() << "Ignoring malformed custom titles:" << file.fileName();
+    return;
+  }
+  const QJsonArray names =
+      doc.object().value(kCustomTitlesKey).toArray();
+  for (const QJsonValue &v : names) {
+    if (v.isString() && !v.toString().isEmpty()) {
+      m_fileNameTitlePreferred.insert(v.toString());
+    }
+  }
+}
+
+void RecordingLibrary::saveCustomTitles() const {
+  if (m_libraryPath.isEmpty()) {
+    return;
+  }
+  QDir dir(m_libraryPath);
+  if (!dir.exists() && !dir.mkpath(".")) {
+    qWarning() << "Failed to create library path for custom titles:"
+               << m_libraryPath;
+    return;
+  }
+  QJsonArray names;
+  for (const QString &name : m_fileNameTitlePreferred) {
+    names.append(name);
+  }
+  QJsonObject root;
+  root.insert(kCustomTitlesKey, names);
+
+  QSaveFile file(customTitlesPath());
+  if (!file.open(QIODevice::WriteOnly)) {
+    qWarning() << "Failed to write custom titles:" << file.fileName();
+    return;
+  }
+  file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+  if (!file.commit()) {
+    qWarning() << "Failed to commit custom titles:" << file.fileName();
+  }
 }
 
 } // namespace TrophyBackend

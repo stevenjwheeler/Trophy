@@ -80,6 +80,7 @@ void SettingsManager::load() {
   m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
   m_useVBR = video["useVBR"].toBool(true);
   m_useDmaBuf = video["useDmaBuf"].toBool(true);
+  m_clipBufferSeconds = video["clipBufferSeconds"].toInt(30);
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
@@ -103,10 +104,21 @@ void SettingsManager::load() {
   QJsonObject detection = root["detection"].toObject();
   m_autoDetectGames = detection["autoDetect"].toBool(true);
   m_autoRecordEnabled = detection["autoRecord"].toBool(false);
+  m_windowTrackingEnabled = detection["windowTracking"].toBool(false);
+  m_vulkanLayerEnabled = detection["vulkanLayer"].toBool(false);
   m_setupCompleted = detection["setupCompleted"].toBool(false);
+
+  // Load general settings
+  QJsonObject general = root["general"].toObject();
+  m_minimizeToTray = general["minimizeToTray"].toBool(true);
+  m_startMinimized = general["startMinimized"].toBool(false);
+  m_startOnLogin = general["startOnLogin"].toBool(false);
+  m_instantReplayEnabled = general["instantReplay"].toBool(true);
+  m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
+  m_replayCachePath = general["replayCachePath"].toString();
   
-  // Load Wayland restore tokens
-  m_waylandRestoreToken = root["waylandRestoreToken"].toString();
+  // Load Wayland restore tokens (per-game map; a legacy singular
+  // "waylandRestoreToken" key is ignored — it was never mapped to a game).
   if (root.contains("waylandRestoreTokens")) {
     m_waylandRestoreTokens = root["waylandRestoreTokens"].toObject().toVariantMap();
   }
@@ -138,6 +150,7 @@ void SettingsManager::save() {
   video["maxBitrate"] = m_maxVideoBitrate;
   video["useVBR"] = m_useVBR;
   video["useDmaBuf"] = m_useDmaBuf;
+  video["clipBufferSeconds"] = m_clipBufferSeconds;
   root["video"] = video;
 
   // Audio settings
@@ -161,10 +174,21 @@ void SettingsManager::save() {
   QJsonObject detection;
   detection["autoDetect"] = m_autoDetectGames;
   detection["autoRecord"] = m_autoRecordEnabled;
+  detection["windowTracking"] = m_windowTrackingEnabled;
+  detection["vulkanLayer"] = m_vulkanLayerEnabled;
   detection["setupCompleted"] = m_setupCompleted;
   root["detection"] = detection;
 
-  root["waylandRestoreToken"] = m_waylandRestoreToken;
+  // General settings
+  QJsonObject general;
+  general["minimizeToTray"] = m_minimizeToTray;
+  general["startMinimized"] = m_startMinimized;
+  general["startOnLogin"] = m_startOnLogin;
+  general["instantReplay"] = m_instantReplayEnabled;
+  general["globalShortcuts"] = m_globalShortcutsEnabled;
+  general["replayCachePath"] = m_replayCachePath;
+  root["general"] = general;
+
   root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
 
   // Write atomically using QSaveFile
@@ -200,6 +224,7 @@ void SettingsManager::resetToDefaults() {
   emit encoderPresetChanged();
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
+  emit clipBufferSecondsChanged();
 
   emit audioModeChanged();
   emit gameAudioDeviceChanged();
@@ -213,7 +238,15 @@ void SettingsManager::resetToDefaults() {
 
   emit autoDetectGamesChanged();
   emit autoRecordEnabledChanged();
+  emit windowTrackingEnabledChanged();
+  emit vulkanLayerEnabledChanged();
   emit setupCompletedChanged();
+  emit minimizeToTrayChanged();
+  emit startMinimizedChanged();
+  emit startOnLoginChanged();
+  emit instantReplayEnabledChanged();
+  emit globalShortcutsEnabledChanged();
+  emit replayCachePathChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -227,6 +260,7 @@ void SettingsManager::loadDefaults() {
   m_maxVideoBitrate = 20000;
   m_useVBR = true;
   m_useDmaBuf = true;
+  m_clipBufferSeconds = 30;
 
   // Audio
   m_audioMode = "game";
@@ -245,6 +279,15 @@ void SettingsManager::loadDefaults() {
   // Detection
   m_autoDetectGames = true;
   m_autoRecordEnabled = false;
+  m_windowTrackingEnabled = false;
+  m_vulkanLayerEnabled = false;
+
+  // System tray
+  m_minimizeToTray = true;
+  m_startMinimized = false;
+  m_startOnLogin = false;
+  m_instantReplayEnabled = true;
+  m_globalShortcutsEnabled = true;
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -411,6 +454,70 @@ void SettingsManager::setAutoRecordEnabled(bool enabled) {
   }
 }
 
+void SettingsManager::setWindowTrackingEnabled(bool enabled) {
+  if (m_windowTrackingEnabled != enabled) {
+    m_windowTrackingEnabled = enabled;
+    save();
+    emit windowTrackingEnabledChanged();
+  }
+}
+
+void SettingsManager::setVulkanLayerEnabled(bool enabled) {
+  if (m_vulkanLayerEnabled != enabled) {
+    m_vulkanLayerEnabled = enabled;
+    save();
+    emit vulkanLayerEnabledChanged();
+  }
+}
+
+void SettingsManager::setMinimizeToTray(bool enabled) {
+  if (m_minimizeToTray != enabled) {
+    m_minimizeToTray = enabled;
+    save();
+    emit minimizeToTrayChanged();
+  }
+}
+
+void SettingsManager::setStartMinimized(bool enabled) {
+  if (m_startMinimized != enabled) {
+    m_startMinimized = enabled;
+    save();
+    emit startMinimizedChanged();
+  }
+}
+
+void SettingsManager::setStartOnLogin(bool enabled) {
+  if (m_startOnLogin != enabled) {
+    m_startOnLogin = enabled;
+    save();
+    emit startOnLoginChanged();
+  }
+}
+
+void SettingsManager::setInstantReplayEnabled(bool enabled) {
+  if (m_instantReplayEnabled != enabled) {
+    m_instantReplayEnabled = enabled;
+    save();
+    emit instantReplayEnabledChanged();
+  }
+}
+
+void SettingsManager::setGlobalShortcutsEnabled(bool enabled) {
+  if (m_globalShortcutsEnabled != enabled) {
+    m_globalShortcutsEnabled = enabled;
+    save();
+    emit globalShortcutsEnabledChanged();
+  }
+}
+
+void SettingsManager::setReplayCachePath(const QString &path) {
+  if (m_replayCachePath != path) {
+    m_replayCachePath = path;
+    save();
+    emit replayCachePathChanged();
+  }
+}
+
 void SettingsManager::setMaxVideoBitrate(int bitrate) {
   if (m_maxVideoBitrate != bitrate) {
     m_maxVideoBitrate = bitrate;
@@ -435,19 +542,17 @@ void SettingsManager::setUseDmaBuf(bool enabled) {
   }
 }
 
-void SettingsManager::setWaylandRestoreToken(const QString &token) {
-  if (m_waylandRestoreToken != token) {
-    m_waylandRestoreToken = token;
+void SettingsManager::setClipBufferSeconds(int seconds) {
+  if (m_clipBufferSeconds != seconds) {
+    m_clipBufferSeconds = seconds;
     save();
-    emit waylandRestoreTokenChanged();
+    emit clipBufferSecondsChanged();
   }
 }
 
 void SettingsManager::clearWaylandToken() {
-  m_waylandRestoreToken = "";
   m_waylandRestoreTokens.clear();
   save();
-  emit waylandRestoreTokenChanged();
   emit waylandRestoreTokensChanged();
 }
 

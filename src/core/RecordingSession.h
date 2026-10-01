@@ -10,6 +10,7 @@
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
 #include <QElapsedTimer>
+#include <QMap>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -20,6 +21,8 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include "FrameDispatcher.h"
+
 
 namespace TrophyBackend {
 
@@ -41,16 +44,16 @@ public:
                    IEncoder *encoder, IMuxer *muxer, AudioMixer *audioMixer,
                    bool separateAudioTracks, int audioBitrate,
                    int activeAudioTrackCount,
+                   const QMap<QString, QString> &metadata = {},
                    QObject *parent = nullptr);
   ~RecordingSession() override;
 
   bool start();
-  void stop();
-  void pause();
-  void resume();
+  // keepCaptureSource skips stopping the capture + callbacks, so a new
+  // session can attach to the still-running stream (DVR rotation).
+  void stop(bool keepCaptureSource = false);
 
   bool isRunning() const { return m_running; }
-  bool isPaused() const { return m_paused; }
 
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
@@ -60,6 +63,9 @@ public:
     m_gameProcess = processName;
   }
   void setVoiceChatApp(const QString &appName) { m_voiceChatApp = appName; }
+
+  void setFrameDispatcher(std::shared_ptr<TrophyBackend::FrameDispatcher> d) { m_frameDispatcher = d; }
+  bool pushQueuedFrame(QueuedFrame &&frame);
 
   // Mark a track as already having a source so the node-check timer won't re-add it
   void markSourceConnected(int trackIndex) {
@@ -73,7 +79,6 @@ signals:
 
 private:
   void encodingLoop();
-  void audioLoop();
   void checkForNewAudioNodes();
 
   // Track index to muxer stream index: audio stream N = track N + 1
@@ -94,17 +99,18 @@ private:
   int m_audioBitrate = 192;
   int m_activeTrackCount = 0;
   std::unique_ptr<AudioEncoder> m_mergedEncoder;
+  QMap<QString, QString> m_metadata;
   // Per-track accumulation buffers (merged mode) — different PipeWire sources
   // deliver different frame sizes, so each track accumulates independently.
   std::array<std::vector<float>, kAudioTrackCount> m_trackAccumulators;
   std::mutex m_mergeMutex;
 
   std::atomic<bool> m_running{false};
-  std::atomic<bool> m_paused{false};
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};
 
   std::thread m_encodingThread;
+  std::shared_ptr<TrophyBackend::FrameDispatcher> m_frameDispatcher;
 
   // Video frame queue for producer/consumer
   std::queue<QueuedFrame> m_videoQueue;

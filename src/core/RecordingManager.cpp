@@ -7,9 +7,12 @@
 
 #include "RecordingManager.h"
 #include "RecordingSession.h"
+#include "CallbackSink.h"
+#include "CircularFrameBuffer.h"
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#include <QMap>
 #include <qlogging.h>
 #ifdef HAVE_PIPEWIRE
 #include "audio/PipeWireAudioSource.h"
@@ -31,6 +34,7 @@ extern "C" {
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QTimer>
+#include <atomic>
 
 namespace TrophyBackend {
 
@@ -43,8 +47,7 @@ RecordingManager::RecordingManager(QObject *parent) : QObject(parent) {
 }
 
 RecordingManager::~RecordingManager() {
-  if (m_state == RecordingState::Recording ||
-      m_state == RecordingState::Paused) {
+  if (m_state == RecordingState::Recording) {
     stopRecording();
   }
 }
@@ -100,11 +103,18 @@ void RecordingManager::startRecording(const QString &gameName,
 
   setState(RecordingState::Initializing);
 
-  // Check storage space
-  m_storage->enforceStorageLimit();
+  // Check storage space and prevent starting if the limit cannot be satisfied.
+  if (!m_storage->enforceStorageLimit()) {
+    qWarning() << "Storage limit cannot be satisfied, aborting recording start";
+    setState(RecordingState::Idle);
+    return;
+  }
 
   // Generate output path
   m_currentFilePath = generateOutputPath();
+  if (m_storage) {
+    m_storage->setExcludedRecordingPath(m_currentFilePath);
+  }
 
   // Ensure output directory exists
   QDir dir = QFileInfo(m_currentFilePath).dir();
@@ -134,28 +144,43 @@ void RecordingManager::startRecording(const QString &gameName,
   connect(m_captureSource.get(), &IVideoCaptureSource::captureError, this,
           &RecordingManager::onEncodingError, Qt::QueuedConnection);
 
-  // Connect restore token update to save it for this game
+  // Connect restore token update to save it for this game.
+  // Tokens are held indefinitely and only overwritten with fresher ones —
+  // never pruned for missing recordings.
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenUpdated,
           this, [this](const QString &token) {
             if (m_settings && !m_currentGameName.isEmpty() &&
                 m_currentGameName != "Recording") {
               qDebug() << "Saving Wayland restore token for game:"
-                       << m_currentGameName;
+                       << m_currentGameName
+                       << "(fp:" << token.left(4) << ")";
               m_settings->setRestoreToken(m_currentGameName, token);
             }
+          });
+  connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenStale, this,
+          [this](const QString &oldToken) {
+            Q_UNUSED(oldToken)
+            qWarning() << "Saved restore token rejected for"
+                       << m_currentGameName << "- re-authorizing";
+            teardownPipeline();
+            emit restoreAuthNeeded(m_currentGameName);
           });
 
   CaptureConfig capConfig;
   capConfig.targetFps = m_settings->fps();
   capConfig.windowId = m_manualWindowId;
   capConfig.useDmaBuf = m_settings->useDmaBuf();
+  // Game-targeted (non-manual) recordings get a windows-only picker;
+  // manual recordings keep the full monitor + window choice.
+  capConfig.windowOnly = !isManual;
 
   // Use restore token only for automatic recordings, always prompt for manual
   if (!isManual) {
     capConfig.waylandRestoreToken =
         m_settings->getRestoreToken(m_currentGameName);
     if (!capConfig.waylandRestoreToken.isEmpty()) {
-      qDebug() << "Using saved Wayland restore token for:" << m_currentGameName;
+      qDebug() << "Using saved Wayland restore token for:" << m_currentGameName
+               << "(fp:" << capConfig.waylandRestoreToken.left(4) << ")";
     }
   }
 
@@ -244,8 +269,7 @@ void RecordingManager::finishPipelineAndStart() {
 }
 
 void RecordingManager::stopRecording() {
-  if (m_state != RecordingState::Recording &&
-      m_state != RecordingState::Paused) {
+  if (m_state != RecordingState::Recording) {
     qWarning() << "Cannot stop recording: not recording";
     return;
   }
@@ -255,6 +279,10 @@ void RecordingManager::stopRecording() {
 
   // Finalize and teardown pipeline
   teardownPipeline();
+
+  if (m_storage) {
+    m_storage->clearExcludedRecordingPath();
+  }
 
   QString filePath = m_currentFilePath;
   m_currentFilePath.clear();
@@ -266,32 +294,15 @@ void RecordingManager::stopRecording() {
     m_storage->refresh();
   }
 
-  emit recordingStopped(filePath);
+  // Duration + size for the "Recording Saved" notice (file is finalized by
+  // now, so read the size off disk).
+  const qint64 durationMs =
+      m_recordingTimer.isValid() ? m_recordingTimer.elapsed() : 0;
+  const qint64 sizeBytes = QFileInfo(filePath).size();
+  emit recordingStopped(filePath, durationMs, sizeBytes);
   emit currentGameNameChanged();
 
   qInfo() << "Recording stopped:" << filePath;
-}
-
-void RecordingManager::pauseRecording() {
-  if (m_state != RecordingState::Recording) {
-    qWarning() << "Cannot pause: not recording";
-    return;
-  }
-
-  // TODO: Implement pause logic in capture/encoding
-  setState(RecordingState::Paused);
-  qInfo() << "Recording paused";
-}
-
-void RecordingManager::resumeRecording() {
-  if (m_state != RecordingState::Paused) {
-    qWarning() << "Cannot resume: not paused";
-    return;
-  }
-
-  // TODO: Implement resume logic in capture/encoding
-  setState(RecordingState::Recording);
-  qInfo() << "Recording resumed";
 }
 
 void RecordingManager::setState(RecordingState newState) {
@@ -508,12 +519,59 @@ bool RecordingManager::buildPipeline() {
   int activeAudioTrackCount = 0;
 #endif
 
+  // Augment encoded file with metadata tags for later playback and indexing.
+  QMap<QString, QString> outputMetadata;
+  outputMetadata[QStringLiteral("title")] = m_currentGameName;
+  outputMetadata[QStringLiteral("creation_time")] =
+      QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+
   // Create recording session to coordinate everything
-  m_session = std::make_unique<RecordingSession>(
+    m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
       m_muxer.get(), m_audioMixer, m_settings->separateAudioTracks(),
       192, // Audio bitrate: hard-coded to 192 kbps (CD quality)
-      activeAudioTrackCount);
+      activeAudioTrackCount, outputMetadata);
+
+  // Create a FrameDispatcher and provide a CircularFrameBuffer sink for clips
+  auto dispatcher = std::make_shared<TrophyBackend::FrameDispatcher>();
+  auto bufferSeconds = std::max(1, m_settings->clipBufferSeconds());
+  auto circular = std::make_shared<TrophyBackend::CircularFrameBuffer>(static_cast<size_t>(m_settings->fps() * bufferSeconds));
+  circular->start();
+  dispatcher->registerSink(circular);
+  // Register encoder sink that forwards frames to the recording session queue
+  auto encoderSink = std::make_shared<TrophyBackend::CallbackSink>(
+      [this](TrophyBackend::FrameDescriptor &&frame) -> bool {
+          // Convert FrameDescriptor to VideoFrame and then to QueuedFrame
+          TrophyBackend::VideoFrame vf{};
+          vf.data = nullptr;
+          vf.width = static_cast<int>(frame.width);
+          vf.height = static_cast<int>(frame.height);
+          vf.stride = 0;
+          vf.timestamp = static_cast<int64_t>(frame.pts);
+          // Prefer explicit encoded pixel format if provided; otherwise use
+          // the DRM/format field as a best-effort fallback.
+          vf.pixelFormat = frame.pixelFormat != 0 ? static_cast<int>(frame.pixelFormat) : static_cast<int>(frame.format);
+          vf.isDmaBuf = true;
+          vf.dmaBufFd = frame.fd;
+          vf.drmFormat = frame.format;
+          vf.drmModifier = frame.drmModifier;
+          vf.dmaBufStride = frame.dmaBufStride;
+          vf.dmaBufOffset = frame.dmaBufOffset;
+          TrophyBackend::QueuedFrame qf(vf);
+          bool pushed = m_session->pushQueuedFrame(std::move(qf));
+          // Per-frame success logs flood at 60fps; always log drops, and
+          // throttle successes unless TROPHY_VIDEO_DEBUG is set.
+          static std::atomic<uint64_t> s_sinkFrames{0};
+          const uint64_t n = ++s_sinkFrames;
+          if (!pushed || qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG") ||
+              n == 1 || n % 600 == 0) {
+            qDebug() << "Encoder sink: pushed frame to session?" << pushed << "pts:" << vf.timestamp << "fd:" << vf.dmaBufFd << "pixfmt:" << vf.pixelFormat;
+          }
+          return pushed;
+      });
+  dispatcher->registerSink(encoderSink);
+  // Provide dispatcher to session
+  m_session->setFrameDispatcher(dispatcher);
 
   // Set app names for periodic node checking during recording
   m_session->setGameApps(gameProcess);
@@ -593,14 +651,23 @@ QString RecordingManager::generateOutputPath() const {
 }
 
 qint64 RecordingManager::recordingDuration() const {
-  if (m_state == RecordingState::Recording ||
-      m_state == RecordingState::Paused) {
+  if (m_state == RecordingState::Recording) {
     return m_recordingTimer.elapsed();
   }
   return 0;
 }
 
 qint64 RecordingManager::recordingSize() const {
+  // While recording, prefer the muxer's byte counter (AVIO position,
+  // updated per packet) over the on-disk size: encoder queues,
+  // interleave buffering and AVIO buffering all delay bytes reaching
+  // disk, so stat() can lag the true size by megabytes.
+  if (m_session && m_state == RecordingState::Recording) {
+    const qint64 live = m_session->bytesWritten();
+    if (live > 0) {
+      return live;
+    }
+  }
   if (m_currentFilePath.isEmpty()) {
     return 0;
   }

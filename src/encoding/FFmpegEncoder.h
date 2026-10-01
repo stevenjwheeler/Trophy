@@ -9,6 +9,8 @@
 
 #include "IEncoder.h"
 #include <QString>
+#include <cstdint>
+#include <memory>
 
 struct AVCodecContext;
 struct AVFrame;
@@ -17,6 +19,10 @@ struct SwsContext;
 struct AVBufferRef;
 
 namespace TrophyBackend {
+
+// Stage B import state (defined in FFmpegEncoder.cpp; needs no CUDA
+// toolkit headers here).
+struct CudaImportState;
 
 /**
  * @brief FFmpeg-based video encoder implementation
@@ -43,12 +49,21 @@ public:
   bool isHardwareEncoder() const override;
   std::vector<uint8_t> extraData() const override;
   int codecId() const override;
+  int encodedPixelFormat() const override;
+
+  // Zero-copy telemetry: input frames encoded via the DMA-BUF hwmap path
+  // vs. the CPU fallback, and inputs that produced no frame at all.
+  int64_t zeroCopyFrames() const { return m_zeroCopyFrames; }
+  int64_t eglImportFrames() const { return m_eglImportFrames; }
+  int64_t fallbackFrames() const { return m_fallbackFrames; }
+  int64_t droppedFrames() const { return m_droppedFrames; }
 
 private:
   bool initializeCodec(const EncoderConfig &config);
   bool initializeHardwareContext();
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
+  void logSummary();
 
   int m_lastInputWidth = 0;
   int m_lastInputHeight = 0;
@@ -61,16 +76,24 @@ private:
 
   AVCodecContext *m_codecCtx = nullptr;
   AVFrame *m_frame = nullptr;
-  AVFrame *m_hwFrame = nullptr; // For hardware encoding
   AVPacket *m_packet = nullptr;
   SwsContext *m_swsCtx = nullptr;
   AVBufferRef *m_hwDeviceCtx = nullptr;  // VA-API / CUDA device
-  AVBufferRef *m_drmDeviceCtx = nullptr; // DRM device (parent of VA-API ctx)
   AVBufferRef *m_hwFramesCtx = nullptr;
 
   int64_t m_frameCount = 0;
   int64_t m_firstTimestamp = -1;
   bool m_initialized = false;
+
+  // Step-1 observability: zero-copy vs. fallback accounting.
+  int64_t m_zeroCopyFrames = 0;
+  int64_t m_eglImportFrames = 0;
+  int64_t m_fallbackFrames = 0;
+  int64_t m_droppedFrames = 0;
+  bool m_lastMapSucceeded = true; // suppress transition spam; first failure logs
+  bool m_lastImportSucceeded = true;
+  bool m_summaryLogged = false;
+  std::unique_ptr<CudaImportState> m_cudaImport;
 };
 
 } // namespace TrophyBackend

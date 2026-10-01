@@ -103,6 +103,9 @@ struct CaptureConfig {
   bool captureMouseCursor = true;
   bool useDmaBuf = true;
   QString waylandRestoreToken;
+  // Game-targeted recordings (auto-detect) offer windows only in the
+  // portal picker; manual recordings offer monitors + windows.
+  bool windowOnly = false;
 };
 
 /**
@@ -207,6 +210,13 @@ signals:
    * @param token The new restore token.
    */
   void restoreTokenUpdated(const QString &token);
+
+  /**
+   * @brief Emitted when a saved restore token was rejected and capture
+   * falls back to a fresh picker. The saved token is kept; a successful
+   * Start overwrites it via restoreTokenUpdated.
+   */
+  void restoreTokenStale(const QString &oldToken);
 };
 
 } // namespace TrophyBackend

@@ -52,6 +52,18 @@ public:
   void setThumbnailPath(const QString &path);
 
   /**
+   * @brief Prefer the filename-derived title over container metadata.
+   *
+   * Set for user-renamed files: the container still carries the title
+   * baked in at record time, so without this the background probe would
+   * overwrite the new filename-derived game name with the stale tag.
+   * Must be called before loadMetadata().
+   */
+  void setPreferFileNameTitle(bool prefer) {
+    m_preferFileNameTitle = prefer;
+  }
+
+  /**
    * @brief Load metadata from the video file
    */
   void loadMetadata();
@@ -74,6 +86,7 @@ private:
   QString m_thumbnailPath;
   int m_width = 0;
   int m_height = 0;
+  bool m_preferFileNameTitle = false;
 };
 
 } // namespace TrophyBackend

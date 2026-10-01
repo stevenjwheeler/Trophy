@@ -26,11 +26,13 @@ RecordingSession::RecordingSession(const QString &outputPath,
                                    IEncoder *encoder, IMuxer *muxer,
                                    AudioMixer *audioMixer,
                                    bool separateAudioTracks, int audioBitrate,
-                                   int activeAudioTrackCount, QObject *parent)
+                                   int activeAudioTrackCount,
+                                   const QMap<QString, QString> &metadata,
+                                   QObject *parent)
     : QObject(parent), m_outputPath(outputPath), m_capture(capture),
       m_encoder(encoder), m_muxer(muxer), m_audioMixer(audioMixer),
       m_separateAudioTracks(separateAudioTracks), m_audioBitrate(audioBitrate),
-      m_activeTrackCount(activeAudioTrackCount) {
+      m_activeTrackCount(activeAudioTrackCount), m_metadata(metadata) {
   m_trackToStreamMap.fill(-1);
 }
 
@@ -48,11 +50,16 @@ bool RecordingSession::start() {
   m_frameCount = 0;
   m_bytesWritten = 0;
   m_running = true;
-  m_paused = false;
 
   if (!m_muxer->initialize(m_outputPath)) {
     m_running = false;
     emit errorOccurred("Failed to initialize muxer");
+    return false;
+  }
+
+  if (!m_muxer->setMetadata(m_metadata)) {
+    m_running = false;
+    emit errorOccurred("Failed to set muxer metadata");
     return false;
   }
 
@@ -65,7 +72,12 @@ bool RecordingSession::start() {
   videoStream.fps = m_encoder->fps();
   videoStream.bitrate = m_encoder->bitrate();
   videoStream.preset = m_encoder->preset();
+  videoStream.pixelFormat = m_encoder->encodedPixelFormat();
   videoStream.extraData = m_encoder->extraData();
+
+  if (videoStream.extraData.empty()) {
+    qWarning() << "RecordingSession: encoder provided no extradata (SPS/PPS) for video stream";
+  }
 
   if (m_muxer->addStream(videoStream) < 0) {
     m_running = false;
@@ -112,7 +124,7 @@ bool RecordingSession::start() {
       m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
-            if (!m_running || m_paused)
+            if (!m_running)
               return;
             if (trackIndex < 0 || trackIndex >= kAudioTrackCount)
               return;
@@ -154,7 +166,7 @@ bool RecordingSession::start() {
       m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
-            if (!m_running || m_paused || !m_mergedEncoder)
+            if (!m_running || !m_mergedEncoder)
               return;
             if (trackIndex < 0 || trackIndex >= m_activeTrackCount)
               return;
@@ -208,18 +220,53 @@ bool RecordingSession::start() {
   }
 
   // Set video capture callback
-  m_capture->setFrameCallback([this](const VideoFrame &frame) {
-    if (!m_running || m_paused)
-      return;
+  // Replace direct queuing with FrameDispatcher-based routing if available
+  if (!m_frameDispatcher) {
+    // fallback to original behavior
+    m_capture->setFrameCallback([this](const VideoFrame &frame) {
+      if (!m_running)
+        return;
 
-    std::lock_guard<std::mutex> lock(m_queueMutex);
-    if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
-      m_videoQueue.emplace(frame);
-      m_queueCv.notify_one();
-    } else {
-      qWarning() << "Video queue full, dropping frame";
-    }
-  });
+      std::lock_guard<std::mutex> lock(m_queueMutex);
+      if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+        m_videoQueue.emplace(frame);
+        m_queueCv.notify_one();
+      } else {
+        qWarning() << "Video queue full, dropping frame";
+      }
+    });
+  } else {
+    m_capture->setFrameCallback([this](const VideoFrame &frame) {
+      if (!m_running)
+        return;
+
+      // Build a FrameDescriptor and dispatch (non-blocking)
+      FrameDescriptor fd;
+      if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
+        fd.fd = ::dup(frame.dmaBufFd);
+        if (fd.fd == -1) {
+          return; // cannot dup, drop
+        }
+        fd.width = frame.width;
+        fd.height = frame.height;
+        fd.format = frame.drmFormat;
+        fd.pixelFormat = frame.pixelFormat;
+        fd.drmModifier = frame.drmModifier;
+        fd.dmaBufStride = frame.dmaBufStride;
+        fd.dmaBufOffset = frame.dmaBufOffset;
+        fd.pts = frame.timestamp;
+        m_frameDispatcher->dispatch(fd);
+      } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
+        // Software frame path: build a QueuedFrame and enqueue directly
+        QueuedFrame qf(frame);
+        if (qf.data) {
+          pushQueuedFrame(std::move(qf));
+        }
+      } else {
+        return;
+      }
+    });
+  }
 
   if (!m_capture->startCapture()) {
     m_running = false;
@@ -245,7 +292,29 @@ bool RecordingSession::start() {
   return true;
 }
 
-void RecordingSession::stop() {
+bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
+  if (!m_running) {
+    qDebug() << "pushQueuedFrame: rejected (not running)";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(m_queueMutex);
+  if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+    m_videoQueue.push(std::move(frame));
+    // Success logs at 60fps; throttle unless TROPHY_VIDEO_DEBUG is set.
+    static std::atomic<uint64_t> s_pushed{0};
+    const uint64_t n = ++s_pushed;
+    if (qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG") || n == 1 ||
+        n % 600 == 0) {
+      qDebug() << "pushQueuedFrame: enqueued. queue size:" << m_videoQueue.size();
+    }
+    m_queueCv.notify_one();
+    return true;
+  }
+  qDebug() << "pushQueuedFrame: queue full, dropping frame";
+  return false;
+}
+
+void RecordingSession::stop(bool keepCaptureSource) {
   if (!m_running) {
     return;
   }
@@ -259,7 +328,14 @@ void RecordingSession::stop() {
   }
 
   if (m_capture) {
-    m_capture->stopCapture();
+    if (!keepCaptureSource)
+      m_capture->stopCapture();
+    // Always detach, even when the capture keeps running: finalizeSegment
+    // stops with keepCaptureSource=true and then destroys this session
+    // while the stream is still live. A dangling [this] callback firing on
+    // the next PipeWire frame locks a destroyed mutex (std::system_error
+    // -> terminate -> SIGABRT on the stream thread). Seen live on every
+    // clip-key press.
     m_capture->setFrameCallback(nullptr);
   }
 
@@ -307,10 +383,6 @@ void RecordingSession::stop() {
   qDebug() << "Recording session stopped. Frames:" << m_frameCount
           << "Size:" << m_bytesWritten << "bytes";
 }
-
-void RecordingSession::pause() { m_paused = true; }
-
-void RecordingSession::resume() { m_paused = false; }
 
 void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread started";

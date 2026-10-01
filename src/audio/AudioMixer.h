@@ -88,7 +88,6 @@ private:
     // on the PipeWire callback thread (onAudioReceived).
     std::atomic<float> atomicVolume{1.0f};
     std::atomic<bool>  atomicMuted{false};
-    std::vector<float> buffer;
   };
 
   void onAudioReceived(int trackIndex, const float *samples, int frameCount);

@@ -55,7 +55,6 @@ public:
     Idle,
     Initializing,
     Recording,
-    Paused,
     Stopping,
     Error
   };
@@ -85,15 +84,19 @@ public:
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
                                   unsigned long windowId = 0);
   Q_INVOKABLE void stopRecording();
-  Q_INVOKABLE void pauseRecording();
-  Q_INVOKABLE void resumeRecording();
 
 signals:
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);
-  void recordingStopped(const QString &filePath);
+  void recordingStopped(const QString &filePath, qint64 durationMs,
+                        qint64 sizeBytes);
   void recordingError(const QString &error);
+  /**
+   * The portal rejected our saved restore token. The app deletes it and
+   * re-authorizes through the New Game prompt — never a bare picker.
+   */
+  void restoreAuthNeeded(const QString &gameName);
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
 

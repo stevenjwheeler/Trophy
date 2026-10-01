@@ -188,10 +188,8 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
 
   if (isInput) {
     data->inputs->append(device);
-    qDebug() << "Found input device:" << device.name << "(" << device.id << ")";
   } else {
     data->outputs->append(device);
-    qDebug() << "Found output device:" << device.name << "(" << device.id << ")";
   }
 }
 
@@ -282,9 +280,19 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
   pw_context_destroy(ctx);
   pw_main_loop_destroy(data.loop);
 
-  qDebug() << "PipeWire enumeration: found" << m_inputDevices.size() - 1
-          << "input devices and" << m_outputDevices.size() - 1
-          << "output devices";
+  qDebug() << "Detected" << m_outputDevices.size() - 1
+           << "output devices:";
+  for (const auto &device : m_outputDevices) {
+    if (device.id == "default")
+      continue;
+    qDebug() << "  -" << device.name << "(" << device.id << ")";
+  }
+  qDebug() << "Detected" << m_inputDevices.size() - 1 << "input devices:";
+  for (const auto &device : m_inputDevices) {
+    if (device.id == "default")
+      continue;
+    qDebug() << "  -" << device.name << "(" << device.id << ")";
+  }
 #else
   qDebug() << "PipeWire not available, no devices enumerated";
 #endif

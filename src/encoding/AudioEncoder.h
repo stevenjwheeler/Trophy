@@ -12,6 +12,10 @@
 #include <cstdint>
 #include <vector>
 
+extern "C" {
+#include <libavutil/samplefmt.h>
+}
+
 struct AVCodecContext;
 struct AVFrame;
 struct AVPacket;
@@ -69,10 +73,14 @@ signals:
 private:
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
+  // Convert one frame from the interleaved-float accumulator into m_frame,
+  // sanitizing non-finite PipeWire samples to silence.
+  void writeFrameSamples();
 
   AVCodecContext *m_codecCtx = nullptr;
   AVFrame *m_frame = nullptr;
   AVPacket *m_packet = nullptr;
+  AVSampleFormat m_sampleFmt = AV_SAMPLE_FMT_FLTP;
 
   int64_t m_sampleCount = 0;
   bool m_initialized = false;

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "IMuxer.h"
+#include <QMap>
 #include <mutex>
 #include <vector>
 
@@ -26,8 +27,11 @@ public:
   bool initialize(const QString &outputPath) override;
   int addStream(const StreamInfo &info) override;
   bool writeHeader() override;
+  bool setMetadata(const QMap<QString, QString> &metadata) override;
   bool writePacket(const EncodedPacket &packet) override;
   bool finalize() override;
+
+  bool updateStreamExtraData(int streamIndex, const std::vector<uint8_t> &data) override;
 
   QString outputPath() const override { return m_outputPath; }
   int64_t bytesWritten() const override;
