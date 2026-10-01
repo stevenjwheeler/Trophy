@@ -1,0 +1,19 @@
+{
+    "KPlugin": {
+        "Name": "Trophy Monitor",
+        "Description": "Reports window list, focus and fullscreen state to the Trophy game recorder over D-Bus. Read-only: never moves, resizes or closes windows.",
+        "Icon": "preferences-system-windows",
+        "Authors": [
+            {
+                "Name": "Trophy"
+            }
+        ],
+        "Id": "trophy-monitor",
+        "Version": "1",
+        "License": "GPL-3.0-or-later",
+        "Website": "https://github.com/stevenjwheeler/trophy"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js",
+    "KPackageStructure": "KWin/Script"
+}

@@ -17,7 +17,8 @@
 namespace TrophyBackend {
 
 class GameWhitelist;
-class GameWhitelist;
+class WaylandWindowMonitor;
+struct WindowInfo;
 class GameDetectionServiceTest; // Forward declaration for unit testing
 
 class GameDetectionService : public QObject {
@@ -46,6 +47,16 @@ public:
   qint64 currentGamePid() const { return m_currentGamePid; }
   QStringList recentGames() const { return m_recentGames; }
 
+  /**
+   * @brief Whether the compositor currently shows a window for the game.
+   *
+   * Portal restore data references concrete windows (KDE matches by appId +
+   * title), so firing a capture request before any game window exists
+   * guarantees a picker even with a valid token. Application waits for
+   * this before starting a token-armed capture.
+   */
+  bool hasVisibleWindow() const;
+
   // Whitelist/Blacklist Management
   void addToWhitelist(const QString &windowClass, const QString &displayName);
   void addToBlacklist(const QString &windowClass);
@@ -53,6 +64,20 @@ public:
   void removeFromBlacklist(const QString &windowClass);
   QStringList whitelist() const;
   QStringList blacklist() const;
+
+  /**
+   * @brief Attach the compositor window monitor for confidence fusion.
+   * Without one, only whitelisted / Steam-identified shim events detect.
+   */
+  void setWindowMonitor(WaylandWindowMonitor *monitor);
+
+  // SteamAppId/SteamGameId from a process environment (what the Vulkan
+  // layer reads via getenv, but usable for any PID after the fact).
+  static uint steamAppIdForPid(qint64 pid);
+
+  // "steam_app_1422450" -> 1422450, anything else -> 0. Window classes
+  // from Steam games carry the id; resolving it gives display names.
+  static uint steamAppIdFromAppId(const QString &appId);
 
 signals:
   void gameDetected(const QString &gameName, qint64 pid);
@@ -64,15 +89,42 @@ private slots:
   void onNewConnection();
   void onSocketReadyRead();
   void onSocketDisconnected();
+  void onMonitorWindowsChanged();
 
 private:
   // Grant the test class access to private members (fixes your build errors)
   friend class GameDetectionServiceTest;
 
   // Internal identification helpers
-  uint getSteamAppId(qint64 pid);
   QString getSteamAppName(uint appId);
-  QString formatDisplayName(const QString &rawName);
+
+  /**
+   * @brief Decide whether a shim event is confident enough to report.
+   * Blacklist is checked by the caller. Instant detect on: whitelist
+   * hit, SteamAppId present, or the exe living under a steamapps library.
+   * Otherwise the focused + fullscreen window for the PID decides.
+   */
+  bool isConfidentGame(qint64 pid, const QString &gameName, uint steamAppId);
+  static bool processLooksLikeSteamGame(qint64 pid);
+
+  void trackGame(qint64 pid, const QString &gameName);
+  void recheckCandidates();
+
+  /**
+   * @brief Detect games that were already running when Trophy started.
+   * Shims only report at graphics init, so a pre-existing game never
+   * sends START. Runs automatically on the first window snapshot after
+   * start(), and is public for explicit calls. Only focused/fullscreen
+   * windows with whitelist or Steam evidence are reported — same bar as
+   * live detection, never a guess.
+   */
+  void reconcileRunningGames();
+
+  /**
+   * @brief Borderless-windowed heuristic: a focused window covering most
+   * of its output counts like fullscreen (many games never set the flag).
+   */
+  static bool coversOutput(const WindowInfo &w);
 
   void updateCurrentGame(const QString &gameName, qint64 pid);
   void addToRecentGames(const QString &gameName);
@@ -85,7 +137,12 @@ private:
   QLocalServer *m_server;
   QMap<QLocalSocket *, qint64> m_activeConnections;
   QMap<qint64, QString> m_pidToGameName;
+  // Shim reporters that did not (yet) pass the confidence gate. Pruned
+  // on STOP/disconnect; re-checked whenever window state changes so a
+  // game that starts windowed still detects when it goes fullscreen.
+  QMap<qint64, QString> m_pendingCandidates;
 
+  WaylandWindowMonitor *m_monitor = nullptr;
   std::unique_ptr<GameWhitelist> m_whitelist;
 };
 

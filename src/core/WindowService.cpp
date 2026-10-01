@@ -1,30 +1,42 @@
 #include "WindowService.h"
+#include "detection/WaylandWindowMonitor.h"
+#include "detection/WindowInfo.h"
+
 #include <QDebug>
 #include <QFile>
+#include <QVariantMap>
 
 namespace TrophyBackend {
 
-WindowService::WindowService(QObject *parent) : QObject(parent) {
+WindowService::WindowService(QObject *parent) : QObject(parent) {}
+
+void WindowService::setWindowMonitor(WaylandWindowMonitor *monitor) {
+  m_monitor = monitor;
 }
 
-void WindowService::setTrophyWindowId(unsigned long windowId) {
-  m_trophyWindowId = windowId;
-}
-
-WindowService::~WindowService() {
-}
+WindowService::~WindowService() {}
 
 QString WindowService::getWindowTitle(unsigned long windowId) {
   return fetchWindowTitle(windowId);
 }
 
 QString WindowService::fetchWindowTitle(unsigned long windowId) {
-  Q_UNUSED(windowId)
+  if (!m_monitor)
+    return QString();
+  for (const WindowInfo &w : m_monitor->windows()) {
+    if (w.id == windowId)
+      return w.title;
+  }
   return QString();
 }
 
 unsigned long WindowService::getPidForWindow(unsigned long windowId) {
-  Q_UNUSED(windowId)
+  if (!m_monitor)
+    return 0;
+  for (const WindowInfo &w : m_monitor->windows()) {
+    if (w.id == windowId && w.pid > 0)
+      return (unsigned long)w.pid;
+  }
   return 0;
 }
 
@@ -44,12 +56,28 @@ QString WindowService::getProcessNameForWindow(unsigned long windowId) {
 }
 
 QString WindowService::getWindowClassForWindow(unsigned long windowId) {
-  Q_UNUSED(windowId)
+  if (!m_monitor)
+    return QString();
+  for (const WindowInfo &w : m_monitor->windows()) {
+    if (w.id == windowId)
+      return w.appId;
+  }
   return QString();
 }
 
 QVariantList WindowService::getVisibleWindows() {
-  return QVariantList();
+  QVariantList out;
+  if (!m_monitor)
+    return out;
+  for (const WindowInfo &w : m_monitor->windows()) {
+    QVariantMap m;
+    m["id"] = QVariant::fromValue<quint64>(w.id);
+    m["title"] = w.title;
+    m["class"] = w.appId;
+    m["pid"] = QVariant::fromValue<qint64>(w.pid);
+    out.append(m);
+  }
+  return out;
 }
 
 } // namespace TrophyBackend
