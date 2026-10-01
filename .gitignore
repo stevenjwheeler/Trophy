@@ -67,3 +67,6 @@ CHANGELOG.md
 sonar-project.properties
 .qmlls.ini
 patch.diff
+
+# --- Agent working notes (local only, never commit) ---
+AGENTS.md

@@ -57,12 +57,36 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - **System Notifications** - Desktop notifications for recording start/stop
 
 ### Planned Features
-- Global keybinds for recording control
-- Instant replay / clip last N seconds
 - Stream integration (Twitch, YouTube)
 - Post-recording editing (trim, cut)
 - Integrated video player
 - Detection for OpenGL and other games
+
+### Keyboard Shortcuts
+
+F9 toggles recording and F10 saves a clip. On KDE and Hyprland these
+work globally (even in-game) via the system shortcuts portal — accept
+the approval dialog on first launch, and remap them anytime in
+Settings → Keyboard Shortcuts.
+
+Where the portal can't reach (GNOME, Sway), bind Trophy's commands
+with your compositor's native key system instead:
+
+```ini
+# Sway (~/.config/sway/config)
+bindsym $mod+F9 exec trophy --toggle-record
+bindsym $mod+F10 exec trophy --save-clip
+
+# Hyprland (~/.config/hypr/hyprland.conf)
+bind = $mainMod, F9, exec, trophy --toggle-record
+bind = $mainMod, F10, exec, trophy --save-clip
+```
+
+GNOME: Settings → Keyboard → View and Customize Shortcuts →
+Custom Shortcuts, pointing at the same two commands. The commands
+talk to the already-running Trophy over a user-private socket
+(`$XDG_RUNTIME_DIR/trophy-control.sock`); if Trophy isn't running,
+they just launch it.
 
 ## Screenshots
 *Coming soon*

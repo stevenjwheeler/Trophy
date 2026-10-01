@@ -109,8 +109,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
-      #- name: Run Unit Tests
-      #  run: cd build && ctest --output-on-failure
+      - name: Run Unit Tests
+        run: cd build && ctest --output-on-failure
 
       - name: Generate AppImage
         shell: bash
