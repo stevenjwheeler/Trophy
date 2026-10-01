@@ -110,7 +110,13 @@ they just launch it.
 
 ## Building from source
 
-### Arch Linux
+### Arch Linux (AUR)
+
+```bash
+yay -S trophy-git
+```
+
+Or build manually:
 
 ```bash
 # Install dependencies

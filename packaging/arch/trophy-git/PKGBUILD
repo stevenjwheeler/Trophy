@@ -1,0 +1,73 @@
+# Maintainer: Steven Wheeler <swheeler2013@outlook.com>
+# Trophy is Wayland-only: the Qt Wayland platform plugin is a hard
+# dependency, and screen capture goes through xdg-desktop-portal at
+# runtime (KDE/GNOME/Hyprland/Sway backends live behind it).
+pkgname=trophy-git
+pkgver=0.0.0.r0.g0000000
+pkgrel=1
+pkgdesc='Wayland-only Linux game recorder (portal capture, NVENC/VA-API, DVR clips)'
+arch=('x86_64')
+url='https://github.com/stevenjwheeler/trophy'
+license=('GPL-3.0-or-later')
+depends=(
+  'ffmpeg'
+  'gcc-libs'
+  'glibc'
+  'hicolor-icon-theme'
+  'libdrm'
+  'libglvnd'
+  'libva'
+  'mesa'
+  'pipewire'
+  'qt6-base'
+  'qt6-declarative'
+  'qt6-multimedia'
+  'qt6-svg'
+  'qt6-wayland'
+  'vulkan-icd-loader'
+)
+makedepends=(
+  'cmake'
+  'git'
+  'gtest'
+  'ninja'
+  'pkgconf'
+  'vulkan-headers'
+)
+optdepends=(
+  'wireplumber: PipeWire session manager (audio routing)'
+  'xdg-desktop-portal: screen-capture portal (required)'
+  'xdg-desktop-portal-kde: portal backend for KDE'
+  'xdg-desktop-portal-gtk: portal backend for GNOME and others'
+)
+provides=('trophy')
+conflicts=('trophy')
+source=("${pkgname}::git+https://github.com/stevenjwheeler/trophy.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${pkgname}"
+  git describe --long --tags --always | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  cd "${pkgname}"
+  cmake -B build -S . -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=ON
+  cmake --build build
+}
+
+check() {
+  cd "${pkgname}"
+  # Hardware-dependent tests skip gracefully when encoders are absent;
+  # offscreen platform keeps the Qt tests headless.
+  QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
+}
+
+package() {
+  cd "${pkgname}"
+  DESTDIR="${pkgdir}" cmake --install build
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
