@@ -13,10 +13,12 @@
 #include <QMap>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -58,11 +60,25 @@ public:
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
 
-  // Set app name to watch for (called by RecordingManager during setup)
+  // Audio identities to watch for (called by RecordingManager/ReplayManager
+  // during setup). Game takes a PID plus a list of name hints (window
+  // process, portal app-id, detector display name — Proton nodes expose
+  // only the exe basename, e.g. "deadlock.exe", with no PID/binary).
   void setGameApps(const QString &processName) {
-    m_gameProcess = processName;
+    m_gamePid = 0;
+    m_gameHints = processName.isEmpty() ? QStringList() : QStringList(processName);
+  }
+  void setGameAudioHints(uint32_t pid, const QStringList &hints) {
+    m_gamePid = pid;
+    m_gameHints = hints;
   }
   void setVoiceChatApp(const QString &appName) { m_voiceChatApp = appName; }
+  // Mixer track reserved for voice (-1 when merged mode left it unslotted;
+  // the retry then skips voice instead of clobbering the mic's slot).
+  void setVoiceTrack(int track) { m_voiceTrack = track; }
+  // Track 0 is on monitor fallback (full mix), not the real app node — the
+  // retry keeps hunting instead of treating it as connected.
+  void setGameIsFallback(bool fallback) { m_gameIsFallback = fallback; }
 
   void setFrameDispatcher(std::shared_ptr<TrophyBackend::FrameDispatcher> d) { m_frameDispatcher = d; }
   bool pushQueuedFrame(QueuedFrame &&frame);
@@ -72,6 +88,14 @@ public:
     if (trackIndex >= 0 && trackIndex < kAudioTrackCount)
       m_sourceConnected[trackIndex] = true;
   }
+  // Forget a track's bind (used when the user retargets mid-session: the
+  // old source is removed and the retry hunts the new identity).
+  void forgetTrack(int trackIndex) {
+    if (trackIndex >= 0 && trackIndex < kAudioTrackCount) {
+      m_sourceConnected[trackIndex] = false;
+      m_boundSerial[trackIndex].clear();
+    }
+  }
 
 signals:
   void errorOccurred(const QString &error);
@@ -80,6 +104,12 @@ signals:
 private:
   void encodingLoop();
   void checkForNewAudioNodes();
+  // Reconcile one app-capture track against the live registry: bind on
+  // appearance, hot-swap when the stream generation changes, forget when
+  // the node vanishes. isFallback (game track only) tracks monitor-fallback
+  // state; it never counts as bound.
+  void reconcileAppTrack(int track, uint32_t pid, const QStringList &hints,
+                         bool *isFallback);
 
   // Track index to muxer stream index: audio stream N = track N + 1
   static constexpr int kAudioTrackCount = 3;
@@ -120,9 +150,16 @@ private:
 
   // Audio node reconnection tracking
   QTimer *m_audioNodeCheckTimer = nullptr;
-  QString m_gameProcess;      // Game process name to watch for
-  QString m_voiceChatApp;     // Voice chat app name to watch for
-  std::array<bool, kAudioTrackCount> m_sourceConnected{};  // Track which sources are connected
+  uint32_t m_gamePid = 0;       // Game audio PID to watch for (0 = unknown)
+  QStringList m_gameHints;      // Game name hints (exe, app-id, display name)
+  QString m_voiceChatApp;       // Voice chat app name to watch for
+  int m_voiceTrack = 1;         // Mixer slot reserved for voice (-1 = none)
+  // Per-track bind state: bound serial of the node we're capturing (empty
+  // when unbound). Track 0 additionally remembers monitor-fallback, which
+  // never counts as bound — the retry keeps hunting the real app node.
+  std::array<QString, kAudioTrackCount> m_boundSerial{};
+  std::array<bool, kAudioTrackCount> m_sourceConnected{};
+  bool m_gameIsFallback = false;
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };
 

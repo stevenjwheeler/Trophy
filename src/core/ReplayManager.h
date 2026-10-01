@@ -10,7 +10,9 @@
 #include <QElapsedTimer>
 #include <QList>
 #include <QObject>
+#include <QStringList>
 #include <QTimer>
+#include <cstdint>
 #include <memory>
 
 #include "muxing/ReplayClipper.h"
@@ -104,12 +106,32 @@ private:
   static QString legacyCacheDir();
   QString clipOutputPath() const;
   double elapsedSec() const;
-  void setupAudioSources(int &trackCount);
+  void setupAudioSources(int &trackCount, QStringList &gameHints,
+                           uint32_t &gamePid, bool &gameFound, int &voiceTrack,
+                           bool &voiceFound, int &micTrack);
 
   State m_state = State::Idle;
   QString m_gameName;
   bool m_paused = false;
   bool m_saving = false;
+
+ public:
+  // Live audio retargeting, mirroring RecordingManager (acts on the open
+  // segment's session; no-ops when the DVR is idle — the next segment
+  // picks the new setting up).
+  void applyMicrophoneDevice();
+  void applyGameAudioDevice();
+  void applyVoiceChatApp();
+
+  // Mixer passthroughs for the Application-level mute proxy.
+  void setTrackMuted(int trackIndex, bool muted);
+  bool isTrackMuted(int trackIndex) const;
+  float trackLevel(int trackIndex) const;
+
+ private:
+  // Mixer slots assigned per segment (needed to retarget mid-segment).
+  int m_micTrack = -1;
+  int m_voiceTrack = -1;
 
   // Test seam (same pattern as GameDetectionServiceTest).
   friend class ReplayManagerTest;

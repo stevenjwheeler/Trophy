@@ -93,6 +93,19 @@ class SettingsManager : public QObject {
                  setInstantReplayEnabled NOTIFY instantReplayEnabledChanged)
   Q_PROPERTY(bool globalShortcutsEnabled READ globalShortcutsEnabled WRITE
                  setGlobalShortcutsEnabled NOTIFY globalShortcutsEnabledChanged)
+
+  // Notification options (which ambient notices may appear; errors, the
+  // DVR authorize prompt and direct keypress feedback always show).
+  Q_PROPERTY(bool notifyRecordings READ notifyRecordings WRITE
+                 setNotifyRecordings NOTIFY notifyRecordingsChanged)
+  Q_PROPERTY(bool notifyClips READ notifyClips WRITE setNotifyClips NOTIFY
+                 notifyClipsChanged)
+  Q_PROPERTY(bool notifyStorage READ notifyStorage WRITE setNotifyStorage
+                 NOTIFY notifyStorageChanged)
+  // Short chime when a clip finishes saving (played via pw-play, which
+  // ships with PipeWire itself — no extra backend needed).
+  Q_PROPERTY(bool clipPingEnabled READ clipPingEnabled WRITE setClipPingEnabled
+                 NOTIFY clipPingEnabledChanged)
   
   // Wayland Restore Tokens
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
@@ -202,6 +215,19 @@ public:
   bool globalShortcutsEnabled() const { return m_globalShortcutsEnabled; }
   void setGlobalShortcutsEnabled(bool enabled);
 
+  // Ambient-notice toggles (errors/authorize/keypress feedback always show).
+  bool notifyRecordings() const { return m_notifyRecordings; }
+  void setNotifyRecordings(bool enabled);
+
+  bool notifyClips() const { return m_notifyClips; }
+  void setNotifyClips(bool enabled);
+
+  bool notifyStorage() const { return m_notifyStorage; }
+  void setNotifyStorage(bool enabled);
+
+  bool clipPingEnabled() const { return m_clipPingEnabled; }
+  void setClipPingEnabled(bool enabled);
+
   // Replay cache dir for DVR segments; empty = /tmp/trophy/replay (RAM-backed).
   // Point it at /tmp (tmpfs) to hold the rolling buffer in RAM.
   QString replayCachePath() const { return m_replayCachePath; }
@@ -254,6 +280,10 @@ signals:
   void startOnLoginChanged();
   void instantReplayEnabledChanged();
   void globalShortcutsEnabledChanged();
+  void notifyRecordingsChanged();
+  void notifyClipsChanged();
+  void notifyStorageChanged();
+  void clipPingEnabledChanged();
   void replayCachePathChanged();
   void waylandRestoreTokensChanged();
 
@@ -314,6 +344,12 @@ private:
   // Portal global shortcuts (F9/F10); bound on user consent, never silently.
   bool m_globalShortcutsEnabled = true;
   QString m_replayCachePath;
+  // Ambient-notice toggles (all default on; errors, the DVR authorize
+  // prompt and direct keypress feedback always show regardless).
+  bool m_notifyRecordings = true;
+  bool m_notifyClips = true;
+  bool m_notifyStorage = true;
+  bool m_clipPingEnabled = true;
   
   // Wayland Restore Tokens
   QVariantMap m_waylandRestoreTokens;

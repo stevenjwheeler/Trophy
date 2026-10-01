@@ -10,6 +10,7 @@
 #include "IVideoCaptureSource.h"
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
 #include <spa/param/buffers.h>
@@ -85,6 +86,13 @@ private:
   spa_hook m_pw_stream_listener;
 
   FrameCallback m_callback;
+  // Guards m_callback: setFrameCallback (GUI thread, incl. session
+  // teardown) blocks until an in-flight on_stream_process delivery
+  // finishes, so clearing it in stop() can never strand a running
+  // invocation over a session that is about to be destroyed (SIGSEGV in
+  // pthread_cond_signal on the freed queue condvar, seen live on DVR
+  // rotation). Invoke holds the lock; callbacks only enqueue downstream.
+  std::mutex m_callbackMutex;
   CaptureConfig m_config;
   std::atomic<bool> m_capturing{false};
   QSize m_resolution;

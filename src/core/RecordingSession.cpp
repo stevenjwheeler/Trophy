@@ -278,13 +278,13 @@ bool RecordingSession::start() {
     m_audioMixer->startAll();
   }
 
-  if (!m_gameProcess.isEmpty() || !m_voiceChatApp.isEmpty()) {
+  if (!m_gameHints.isEmpty() || m_gamePid != 0 || !m_voiceChatApp.isEmpty()) {
     m_audioNodeCheckTimer = new QTimer(this);
     m_audioNodeCheckTimer->setInterval(3000);
     connect(m_audioNodeCheckTimer, &QTimer::timeout, this,
             &RecordingSession::checkForNewAudioNodes);
     m_audioNodeCheckTimer->start();
-    checkForNewAudioNodes(); 
+    checkForNewAudioNodes();
   }
 
   m_encodingThread = std::thread([this]() { encodingLoop(); });
@@ -426,51 +426,111 @@ void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread stopped";
 }
 
+void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
+                                          const QStringList &hints,
+                                          bool *isFallback) {
+  if (track < 0 || track >= kAudioTrackCount || !m_audioMixer)
+    return;
+
+  // Fresh lookup: PID first (exact), then name hints in order.
+  uint32_t nodeId = PW_ID_ANY;
+  QString nodeName, nodeSerial;
+#ifdef HAVE_PIPEWIRE
+  if (pid != 0) {
+    nodeId = PipeWireAudioSource::findNodeByPid(pid, &nodeName, &nodeSerial);
+  }
+  if (nodeId == PW_ID_ANY) {
+    for (const QString &hint : hints) {
+      if (hint.isEmpty())
+        continue;
+      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                          &nodeSerial);
+      if (nodeId != PW_ID_ANY)
+        break;
+    }
+  }
+#else
+  Q_UNUSED(pid);
+  Q_UNUSED(hints);
+#endif
+
+  if (nodeId == PW_ID_ANY) {
+    // No live node. A previous bind died with its stream (Electron /
+    // Proton streams are recreated constantly) — forget it so the next
+    // appearance re-binds instead of being skipped as "connected".
+    if (m_sourceConnected[track]) {
+      qDebug() << "Audio node vanished for track" << track
+               << "- will re-bind on return";
+      m_sourceConnected[track] = false;
+      m_boundSerial[track].clear();
+    }
+    return;
+  }
+
+  if (m_sourceConnected[track]) {
+    if (m_boundSerial[track].isEmpty()) {
+      if (nodeSerial.isEmpty())
+        return; // serial-less node we can't churn-check; leave it alone
+      // Manager bound this node at build without knowing the serial —
+      // adopt it so later generations read as new, not same.
+      m_boundSerial[track] = nodeSerial;
+      if (isFallback)
+        *isFallback = false;
+      return;
+    }
+    if (nodeSerial.isEmpty() || nodeSerial == m_boundSerial[track])
+      return; // same generation (or uncheckable) — nothing to do
+    qDebug() << "Audio node recreated for track" << track << "- re-binding";
+  }
+
+  // (Re)bind — replaces monitor fallback or a dead stream generation.
+  m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
+                              nodeId, nodeName, nodeSerial),
+                          track);
+  m_sourceConnected[track] = true;
+  m_boundSerial[track] = nodeSerial;
+  if (isFallback)
+    *isFallback = false;
+  qDebug() << "Audio node bound for track" << track << ":"
+           << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
+}
+
 void RecordingSession::checkForNewAudioNodes() {
   if (!m_running || !m_audioMixer) {
     return;
   }
 
-  bool allConnected = true;
+  // Game track: PID + hints; monitor fallback never counts as bound.
+  if (m_gamePid != 0 || !m_gameHints.isEmpty())
+    reconcileAppTrack(0, m_gamePid, m_gameHints, &m_gameIsFallback);
 
-  if (!m_sourceConnected[0] && !m_gameProcess.isEmpty()) {
-    allConnected = false;
-    uint32_t nodeId = PW_ID_ANY;
-    QString nodeName, nodeSerial;
-
-    nodeId = PipeWireAudioSource::findNodeByProcessName(
-        m_gameProcess, &nodeName, &nodeSerial);
-
-    if (nodeId != PW_ID_ANY) {
-      qDebug() << "Game audio node appeared, connecting:"
-              << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  nodeId, nodeName, nodeSerial),
-                              0);
-      m_sourceConnected[0] = true;
+  if (!m_voiceChatApp.isEmpty()) {
+    if (m_voiceTrack >= 0 && m_voiceTrack < kAudioTrackCount) {
+      // Reserved slot (separate mode always reserves it at build).
+      reconcileAppTrack(m_voiceTrack, 0, {m_voiceChatApp}, nullptr);
+    } else if (!m_separateAudioTracks &&
+               m_activeTrackCount < kAudioTrackCount) {
+      // Merged mode can't reserve a voice slot at build (an empty slot
+      // would stall the mix gate forever), so adopt the next free slot if
+      // the stream exists now. Never clobbers mic: the slot is always fresh.
+      const int probe = m_activeTrackCount;
+      reconcileAppTrack(probe, 0, {m_voiceChatApp}, nullptr);
+      if (m_sourceConnected[probe]) {
+        m_voiceTrack = probe;
+        {
+          std::lock_guard<std::mutex> lock(m_mergeMutex);
+          if (m_activeTrackCount <= probe)
+            m_activeTrackCount = probe + 1;
+        }
+        qDebug() << "Voice adopted merged slot" << probe;
+      }
     }
+    // (merged + unslotted + absent: skip — binding there would evict mic)
   }
 
-  if (!m_sourceConnected[1] && !m_voiceChatApp.isEmpty()) {
-    allConnected = false;
-    QString nodeName, nodeSerial;
-    uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(
-        m_voiceChatApp, &nodeName, &nodeSerial);
-
-    if (nodeId != PW_ID_ANY) {
-      qDebug() << "Voice chat app node appeared, connecting:"
-              << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  nodeId, nodeName, nodeSerial),
-                              1);
-      m_sourceConnected[1] = true;
-    }
-  }
-
-  if (allConnected && m_audioNodeCheckTimer) {
-    m_audioNodeCheckTimer->stop();
-    qDebug() << "All expected audio nodes connected, stopping node checks";
-  }
+  // The timer intentionally runs for the whole session: app streams churn
+  // (voice join/leave, Proton audio restart) and a pin to a dead serial
+  // delivers silence forever otherwise.
 }
 
 } // namespace TrophyBackend

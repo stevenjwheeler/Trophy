@@ -8,8 +8,10 @@
 #include "PipeWireAudioSource.h"
 
 #include <QDebug>
+#include <QList>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
@@ -184,12 +186,19 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
     if (isNumeric && numericId == id) {
       qDebug() << "Found PipeWire node by ID:" << id;
       data->nodeId = id;
+      // Record the real name too: pinning must use the name (or serial),
+      // never the bare numeric ID — WirePlumber reads target.object as a
+      // serial and IDs collide with serials (easyeffects id/serial skew
+      // captured the wrong node live).
+      if (pwNodeName)
+        data->foundNodeName = QString::fromUtf8(pwNodeName);
       return;
     }
     // Otherwise check by string name
     if (pwNodeName && QString(pwNodeName) == data->nodeName) {
       qDebug() << "Found PipeWire node:" << data->nodeName << "-> ID:" << id;
       data->nodeId = id;
+      data->foundNodeName = QString::fromUtf8(pwNodeName);
       return;
     }
     // If we're searching by nodeName and didn't find it, don't fall through to
@@ -480,66 +489,248 @@ static std::pair<QString, QString> queryDefaultDevices() {
 
 } // namespace
 
-uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
-                                                    QString *outNodeName,
-                                                    QString *outSerial) {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Info-based node matching.
+//
+// Registry-global properties are a snapshot at announce time: client-set
+// identity props (notably application.process.binary) often arrive later
+// via node info updates. Proven live 2026-10-01: Discord's playback stream
+// carries binary "Discord" in its current info, but announce-time globals
+// lack it, so global-only matching missed a present node on every tick
+// while the full node name matched fine. Matching therefore binds
+// candidates and reads CURRENT info props.
+// ---------------------------------------------------------------------------
+
+struct InfoMatchRequest {
+  QString hintLower; // product-name hint, lowercased (empty if unused)
+  uint32_t pid = 0;  // PID hint (0 if unused)
+  bool gatherAll = false; // collect every candidate instead of first match
+  QVariantList apps;      // gatherAll results: {name, binary, nodeId}
+  uint32_t foundId = PW_ID_ANY;
+  QString foundName;
+  QString foundSerial;
+  bool done = false;
+};
+
+struct InfoMatchData;
+
+struct InfoBindEntry {
+  uint32_t id = PW_ID_ANY;
+  struct pw_node *proxy = nullptr;
+  struct spa_hook hook = {};
+  bool gotInfo = false;
+  InfoMatchData *owner = nullptr;
+};
+
+struct InfoMatchData {
+  InfoMatchRequest *req = nullptr;
+  QList<uint32_t> candidates; // Stream/Output/Audio node ids (phase 1)
+  std::vector<InfoBindEntry> binds; // phase 2 (reserved upfront: stable)
+  int pendingSync = 0;
+  struct pw_main_loop *loop = nullptr;
+  struct spa_hook registryListener = {};
+  struct spa_hook coreListener = {};
+};
+
+static bool infoPropsMatch(const struct spa_dict *props,
+                           const InfoMatchRequest *req) {
+  if (!props || !req)
+    return false;
+  if (req->pid != 0) {
+    const char *pidStr = spa_dict_lookup(props, PW_KEY_APP_PROCESS_ID);
+    return pidStr && QString(pidStr).toUInt() == req->pid;
+  }
+  if (req->hintLower.isEmpty())
+    return false;
+  auto matches = [&](const char *key) {
+    const char *s = spa_dict_lookup(props, key);
+    return s && QString(s).toLower().contains(req->hintLower);
+  };
+  return matches(PW_KEY_APP_PROCESS_BINARY) || matches(PW_KEY_APP_NAME) ||
+         matches(PW_KEY_NODE_NAME) || matches(PW_KEY_APP_ID);
+}
+
+static void infoMatchGather(const struct spa_dict *props, uint32_t id,
+                            InfoMatchRequest *req) {
+  const char *binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY);
+  const char *appName = spa_dict_lookup(props, PW_KEY_APP_NAME);
+  const char *nodeName = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+  // Display prefers the binary: it is the stable, recognizable product
+  // name ("Discord") while node names are engine-internal
+  // ("WEBRTC VoiceEngine"). The voice setting stores the binary, so the
+  // dropdown value and the matcher speak the same language.
+  QString display;
+  if (binary && strlen(binary) > 0)
+    display = QString::fromUtf8(binary);
+  else if (appName && strlen(appName) > 0)
+    display = QString::fromUtf8(appName);
+  else if (nodeName)
+    display = QString::fromUtf8(nodeName);
+  if (display.isEmpty())
+    return;
+  QVariantMap app;
+  app["name"] = display;
+  app["binary"] = binary ? QString::fromUtf8(binary) : "";
+  app["nodeId"] = id;
+  req->apps.append(app);
+}
+
+static void infoMatchNodeInfo(void *userdata,
+                              const struct pw_node_info *info) {
+  auto *entry = static_cast<InfoBindEntry *>(userdata);
+  InfoMatchData *data = entry->owner;
+  if (!data || !data->req || data->req->done || entry->gotInfo)
+    return; // one evaluation per node
+  entry->gotInfo = true;
+  if (!info || !info->props)
+    return;
+  InfoMatchRequest *req = data->req;
+  if (req->gatherAll) {
+    infoMatchGather(info->props, entry->id, req);
+    return;
+  }
+  if (infoPropsMatch(info->props, req)) {
+    const char *name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
+    const char *serial = spa_dict_lookup(info->props, "object.serial");
+    req->foundId = entry->id;
+    if (name)
+      req->foundName = QString::fromUtf8(name);
+    if (serial)
+      req->foundSerial = QString::fromUtf8(serial);
+    req->done = true;
+    qDebug() << "Found PipeWire node via info props:" << req->foundName
+             << "-> ID:" << entry->id;
+    pw_main_loop_quit(data->loop);
+  }
+}
+
+static void infoMatchRegistryGlobal(void *userdata, uint32_t id,
+                                    uint32_t /*permissions*/, const char *type,
+                                    uint32_t /*version*/,
+                                    const struct spa_dict *props) {
+  auto *data = static_cast<InfoMatchData *>(userdata);
+  if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !props)
+    return;
+  // Phase-1 prefilter on announce-time class (core SPA property, always
+  // present at announce); identity matching happens on current info.
+  const char *mediaClass = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+  if (!mediaClass || strcmp(mediaClass, "Stream/Output/Audio") != 0)
+    return;
+  data->candidates.append(id);
+}
+
+static void infoMatchCoreDone(void *userdata, uint32_t id, int seq) {
+  auto *data = static_cast<InfoMatchData *>(userdata);
+  if (id == PW_ID_CORE && seq == data->pendingSync)
+    pw_main_loop_quit(data->loop);
+}
+
+static void runInfoMatch(InfoMatchRequest &req) {
+  req.foundId = PW_ID_ANY;
+  req.done = false;
   pw_init(nullptr, nullptr);
 
-  NodeEnumData data;
-  data.processName = processName;
+  InfoMatchData data;
+  data.req = &req;
   data.loop = pw_main_loop_new(nullptr);
   if (!data.loop)
-    return PW_ID_ANY;
-
+    return;
   struct pw_context *ctx =
       pw_context_new(pw_main_loop_get_loop(data.loop), nullptr, 0);
   if (!ctx) {
     pw_main_loop_destroy(data.loop);
-    return PW_ID_ANY;
+    data.loop = nullptr;
+    return;
   }
-
   struct pw_core *core = pw_context_connect(ctx, nullptr, 0);
   if (!core) {
     pw_context_destroy(ctx);
     pw_main_loop_destroy(data.loop);
-    return PW_ID_ANY;
+    data.loop = nullptr;
+    return;
   }
 
   static const struct pw_core_events core_events = [] {
     struct pw_core_events e = {};
     e.version = PW_VERSION_CORE_EVENTS;
-    e.done = enumCoreDone;
+    e.done = infoMatchCoreDone;
     return e;
   }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
 
   struct pw_registry *registry =
       pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-
   static const struct pw_registry_events registry_events = [] {
     struct pw_registry_events e = {};
     e.version = PW_VERSION_REGISTRY_EVENTS;
-    e.global = enumRegistryGlobal;
+    e.global = infoMatchRegistryGlobal;
     return e;
   }();
   pw_registry_add_listener(registry, &data.registryListener, &registry_events,
                            &data);
 
+  // Phase 1: collect candidate output-stream ids.
   data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
   pw_main_loop_run(data.loop);
 
-  uint32_t result = data.nodeId;
-  if (outNodeName)
-    *outNodeName = data.foundNodeName;
-  if (outSerial)
-    *outSerial = data.foundSerial;
+  // Phase 2: bind every candidate and match/gather on current info props.
+  // The server answers binds (info) before the sync reply on the same
+  // connection, so one round trip collects everything; done ends the loop
+  // even if some node never infos (no hang).
+  static const struct pw_node_events node_events = [] {
+    struct pw_node_events e = {};
+    e.version = PW_VERSION_NODE_EVENTS;
+    e.info = infoMatchNodeInfo;
+    return e;
+  }();
+  data.binds.reserve(data.candidates.size());
+  for (uint32_t id : data.candidates) {
+    struct pw_node *proxy = static_cast<struct pw_node *>(
+        pw_registry_bind(registry, id, PW_TYPE_INTERFACE_Node,
+                         PW_VERSION_NODE, 0));
+    if (!proxy)
+      continue;
+    InfoBindEntry entry;
+    entry.id = id;
+    entry.proxy = proxy;
+    entry.owner = &data;
+    data.binds.push_back(entry);
+    pw_node_add_listener(data.binds.back().proxy, &data.binds.back().hook,
+                         &node_events, &data.binds.back());
+  }
+  if (!data.binds.empty()) {
+    data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
+    pw_main_loop_run(data.loop);
+  }
 
+  for (auto &entry : data.binds) {
+    if (entry.proxy)
+      pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(entry.proxy));
+  }
   pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
   pw_core_disconnect(core);
   pw_context_destroy(ctx);
   pw_main_loop_destroy(data.loop);
+  data.loop = nullptr;
+}
 
-  return result;
+} // namespace
+
+uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
+                                                    QString *outNodeName,
+                                                    QString *outSerial) {
+  // Identity props (notably application.process.binary) arrive after
+  // announce — match on current node info, never on global snapshots.
+  InfoMatchRequest req;
+  req.hintLower = processName.toLower();
+  runInfoMatch(req);
+  if (outNodeName)
+    *outNodeName = req.foundName;
+  if (outSerial)
+    *outSerial = req.foundSerial;
+  return req.foundId;
 }
 
 uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
@@ -547,179 +738,50 @@ uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
   if (pid == 0)
     return PW_ID_ANY;
 
-  pw_init(nullptr, nullptr);
-
-  NodeEnumData data;
-  data.targetPid = pid;
-  data.loop = pw_main_loop_new(nullptr);
-  if (!data.loop)
-    return PW_ID_ANY;
-
-  struct pw_context *ctx =
-      pw_context_new(pw_main_loop_get_loop(data.loop), nullptr, 0);
-  if (!ctx) {
-    pw_main_loop_destroy(data.loop);
-    return PW_ID_ANY;
-  }
-
-  struct pw_core *core = pw_context_connect(ctx, nullptr, 0);
-  if (!core) {
-    pw_context_destroy(ctx);
-    pw_main_loop_destroy(data.loop);
-    return PW_ID_ANY;
-  }
-
-  static const struct pw_core_events core_events = [] {
-    struct pw_core_events e = {};
-    e.version = PW_VERSION_CORE_EVENTS;
-    e.done = enumCoreDone;
-    return e;
-  }();
-  pw_core_add_listener(core, &data.coreListener, &core_events, &data);
-
-  struct pw_registry *registry =
-      pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-
-  static const struct pw_registry_events registry_events = [] {
-    struct pw_registry_events e = {};
-    e.version = PW_VERSION_REGISTRY_EVENTS;
-    e.global = enumRegistryGlobal;
-    return e;
-  }();
-  pw_registry_add_listener(registry, &data.registryListener, &registry_events,
-                           &data);
-
-  data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(data.loop);
-
-  uint32_t result = data.nodeId;
+  // Same info-based matching as names: PID props can also arrive after
+  // announce (and Proton streams carry no PID at all — then this misses,
+  // and the exe-name hint is the fallback).
+  InfoMatchRequest req;
+  req.pid = pid;
+  runInfoMatch(req);
   if (outNodeName)
-    *outNodeName = data.foundNodeName;
+    *outNodeName = req.foundName;
   if (outSerial)
-    *outSerial = data.foundSerial;
-
-  pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
-  pw_core_disconnect(core);
-  pw_context_destroy(ctx);
-  pw_main_loop_destroy(data.loop);
-
-  return result;
+    *outSerial = req.foundSerial;
+  return req.foundId;
 }
 
 // ---------------------------------------------------------------------------
 // Audio app enumeration
 // ---------------------------------------------------------------------------
 
-namespace {
-
-struct AudioAppEnumData {
-  QVariantList apps;
-  struct pw_main_loop *loop = nullptr;
-  struct spa_hook registryListener = {};
-  struct spa_hook coreListener = {};
-  int pendingSync = 0;
-};
-
-static void enumAppsRegistryGlobal(void *userdata, uint32_t id,
-                                   uint32_t /*permissions*/, const char *type,
-                                   uint32_t /*version*/,
-                                   const struct spa_dict *props) {
-  auto *data = static_cast<AudioAppEnumData *>(userdata);
-  if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
-    return;
-  if (!props)
-    return;
-
-  // Only enumerate application playback streams
-  const char *mediaClass = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
-  if (!mediaClass || strcmp(mediaClass, "Stream/Output/Audio") != 0)
-    return;
-
-  const char *binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY);
-  const char *appName = spa_dict_lookup(props, PW_KEY_APP_NAME);
-  const char *pwNodeName = spa_dict_lookup(props, PW_KEY_NODE_NAME);
-
-  // Build display name: prefer app name, fall back to binary or node name
-  QString displayName;
-  if (appName && strlen(appName) > 0) {
-    displayName = QString::fromUtf8(appName);
-  } else if (binary && strlen(binary) > 0) {
-    displayName = QString::fromUtf8(binary);
-  } else if (pwNodeName) {
-    displayName = QString::fromUtf8(pwNodeName);
-  }
-
-  if (!displayName.isEmpty()) {
-    QVariantMap app;
-    app["name"] = displayName;
-    app["binary"] = binary ? QString::fromUtf8(binary) : "";
-    app["nodeId"] = id;
-    data->apps.append(app);
-    qDebug() << "Audio app found:" << displayName << "-> ID:" << id;
-  }
-}
-
-static void enumAppsCoreDone(void *userdata, uint32_t id, int seq) {
-  auto *data = static_cast<AudioAppEnumData *>(userdata);
-  if (id == PW_ID_CORE && seq == data->pendingSync)
-    pw_main_loop_quit(data->loop);
-}
-
-} // namespace
+// (App enumeration gathers via the info-match core above, so no
+// separate globals-only enumerator is kept — it could not see
+// post-announce identity props.)
 
 QVariantList PipeWireAudioSource::enumerateAudioApps() {
-  pw_init(nullptr, nullptr);
-
-  AudioAppEnumData data;
-  data.loop = pw_main_loop_new(nullptr);
-  if (!data.loop)
-    return {};
-
-  struct pw_context *ctx =
-      pw_context_new(pw_main_loop_get_loop(data.loop), nullptr, 0);
-  if (!ctx) {
-    pw_main_loop_destroy(data.loop);
-    return {};
+  // Gather from current node info, not announce-time globals (identity
+  // props like the binary arrive after announce — globals would list
+  // engine-internal names with empty binaries).
+  InfoMatchRequest req;
+  req.gatherAll = true;
+  runInfoMatch(req);
+  for (const QVariant &app : req.apps) {
+    const QVariantMap m = app.toMap();
+    qDebug() << "Audio app found:" << m.value("name").toString()
+             << "-> ID:" << m.value("nodeId").toUInt();
   }
+  return req.apps;
+}
 
-  struct pw_core *core = pw_context_connect(ctx, nullptr, 0);
-  if (!core) {
-    pw_context_destroy(ctx);
-    pw_main_loop_destroy(data.loop);
-    return {};
-  }
-
-  static const struct pw_core_events core_events = [] {
-    struct pw_core_events e = {};
-    e.version = PW_VERSION_CORE_EVENTS;
-    e.done = enumAppsCoreDone;
-    return e;
-  }();
-  pw_core_add_listener(core, &data.coreListener, &core_events, &data);
-
-  struct pw_registry *registry =
-      pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-
-  static const struct pw_registry_events registry_events = [] {
-    struct pw_registry_events e = {};
-    e.version = PW_VERSION_REGISTRY_EVENTS;
-    e.global = enumAppsRegistryGlobal;
-    return e;
-  }();
-  pw_registry_add_listener(registry, &data.registryListener, &registry_events,
-                           &data);
-
-  data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(data.loop);
-
-  QVariantList result = data.apps;
-
-  pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
-  pw_core_disconnect(core);
-  pw_context_destroy(ctx);
-  pw_main_loop_destroy(data.loop);
-
-  return result;
+QString PipeWireAudioSource::preferredTarget(const QString &serial,
+                                                  const QString &nodeName,
+                                                  uint32_t nodeId) {
+  if (!serial.isEmpty())
+    return serial;
+  if (!nodeName.isEmpty())
+    return nodeName;
+  return QString::number(nodeId);
 }
 
 // ---------------------------------------------------------------------------
@@ -905,17 +967,19 @@ bool PipeWireAudioSource::start() {
     // ApplicationAudio captures the OUTPUT side of the target app's stream
     pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
 
-    // Prefer serial (WirePlumber 0.5), then name, then numeric ID as fallback
-    const QString &bestTarget = !m_targetSerial.isEmpty() ? m_targetSerial
-                                : !m_targetNodeName.isEmpty()
-                                    ? m_targetNodeName
-                                    : QString::number(m_targetNodeId);
+    // Serial first (unambiguous), then name — never a bare numeric ID:
+    // WirePlumber reads target.object as a serial and IDs collide with
+    // serials (easyeffects id/serial skew captured the wrong node live).
+    const QString bestTarget =
+        preferredTarget(m_targetSerial, m_targetNodeName, m_targetNodeId);
     const QByteArray ba = bestTarget.toUtf8();
     pw_properties_set(props, "target.object", ba.constData());
 
-    const QString &legacyTarget = !m_targetNodeName.isEmpty()
-                                      ? m_targetNodeName
-                                      : QString::number(m_targetNodeId);
+    const QString legacyTarget =
+        !m_targetNodeName.isEmpty()
+            ? m_targetNodeName
+            : preferredTarget(m_targetSerial, m_targetNodeName,
+                              m_targetNodeId);
     const QByteArray lba = legacyTarget.toUtf8();
     pw_properties_set(props, "node.target", lba.constData());
 
@@ -925,22 +989,23 @@ bool PipeWireAudioSource::start() {
   } else if (m_type == SourceType::Microphone && m_targetNodeId != PW_ID_ANY) {
     // Microphone with an explicit device: pin WirePlumber to that node so it
     // cannot reroute to the default input (e.g., EasyEffects source).
-    const QString &bestTarget = !m_targetSerial.isEmpty() ? m_targetSerial
-                                : !m_targetNodeName.isEmpty()
-                                    ? m_targetNodeName
-                                    : QString::number(m_targetNodeId);
+    const QString bestTarget =
+        preferredTarget(m_targetSerial, m_targetNodeName, m_targetNodeId);
     const QByteArray ba = bestTarget.toUtf8();
     pw_properties_set(props, "target.object", ba.constData());
 
-    const QString &legacyTarget = !m_targetNodeName.isEmpty()
-                                      ? m_targetNodeName
-                                      : QString::number(m_targetNodeId);
+    const QString legacyTarget =
+        !m_targetNodeName.isEmpty()
+            ? m_targetNodeName
+            : preferredTarget(m_targetSerial, m_targetNodeName,
+                              m_targetNodeId);
     pw_properties_set(props, "node.target", legacyTarget.toUtf8().constData());
 
     qDebug() << "Microphone target pinned — target.object:" << bestTarget;
   }
 
-  d->stream = pw_stream_new(d->core, "trophy-capture", props);
+  const QByteArray streamNameBa = m_streamName.toUtf8();
+  d->stream = pw_stream_new(d->core, streamNameBa.constData(), props);
   if (!d->stream) {
     pw_core_disconnect(d->core);
     d->core = nullptr;

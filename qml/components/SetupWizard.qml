@@ -30,6 +30,8 @@ Rectangle {
             wizardCard.opacity = 0
             wizardCard.scale = 0.96
             wizardCardAnimation.start()
+            // Its voice picker has no Refresh button — populate on open.
+            if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
         }
     }
 
@@ -295,14 +297,14 @@ Rectangle {
                                     Label { text: qsTr("Audio Capture Mode"); font.weight: Font.Bold; color: Theme.textColor }
                                     RowLayout {
                                         spacing: Theme.spacingLarge
-                                        TrophyRadioButton { text: qsTr("Game + Voice"); checked: settingsManager ? settingsManager.audioMode === "game" : true; onClicked: if (settingsManager) settingsManager.audioMode = "game" }
-                                        TrophyRadioButton { text: qsTr("Entire Desktop"); checked: settingsManager ? settingsManager.audioMode === "desktop" : false; onClicked: if (settingsManager) settingsManager.audioMode = "desktop" }
+                                        TrophyRadioButton { text: qsTr("Game + Voice"); checked: settingsManager ? settingsManager.audioMode === "game" : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "game" }
+                                        TrophyRadioButton { text: qsTr("Entire Desktop"); checked: settingsManager ? settingsManager.audioMode === "desktop" : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "desktop" }
                                     }
                                     Label { text: qsTr("Recording Tracks"); font.weight: Font.Bold; color: Theme.textColor }
                                     RowLayout {
                                         spacing: Theme.spacingLarge
-                                        TrophyRadioButton { text: qsTr("Single (Mixed)"); checked: settingsManager ? !settingsManager.separateAudioTracks : true; onClicked: if (settingsManager) settingsManager.separateAudioTracks = false }
-                                        TrophyRadioButton { text: qsTr("Separate (Multi)"); checked: settingsManager ? settingsManager.separateAudioTracks : false; onClicked: if (settingsManager) settingsManager.separateAudioTracks = true }
+                                        TrophyRadioButton { text: qsTr("Single (Mixed)"); checked: settingsManager ? !settingsManager.separateAudioTracks : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = false }
+                                        TrophyRadioButton { text: qsTr("Separate (Multi)"); checked: settingsManager ? settingsManager.separateAudioTracks : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = true }
                                     }
                                     ColumnLayout {
                                         Layout.fillWidth: true
@@ -312,8 +314,42 @@ Rectangle {
                                         TrophyComboBox {
                                             id: voiceAppBox; Layout.fillWidth: true
                                             property var apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
-                                            model: { let names = ["None"]; for (let a of apps) { names.push(a.name); } return names; }
-                                            onActivated: if (settingsManager) settingsManager.voiceChatApp = (currentIndex > 0) ? apps[currentIndex - 1].binary : ""
+                                            model: {
+                                                let names = ["None"];
+                                                for (let a of apps) { names.push(a.name); }
+                                                let saved = settingsManager ? settingsManager.voiceChatApp : "";
+                                                if (saved && saved !== "") {
+                                                    let found = false;
+                                                    for (let a of apps) {
+                                                        if (a.binary && a.binary.toLowerCase() === saved.toLowerCase()) { found = true; break; }
+                                                    }
+                                                    if (!found) names.push(saved);
+                                                }
+                                                return names;
+                                            }
+                                            Binding {
+                                                target: voiceAppBox
+                                                property: "currentIndex"
+                                                value: (function() {
+                                                    if (!settingsManager || !audioDeviceEnumerator) return 0;
+                                                    let apps = audioDeviceEnumerator.audioApps;
+                                                    let saved = settingsManager.voiceChatApp;
+                                                    if (!saved || saved === "") return 0;
+                                                    for (let i = 0; i < apps.length; i++) {
+                                                        if (apps[i].binary && apps[i].binary.toLowerCase() === saved.toLowerCase()) return i + 1;
+                                                    }
+                                                    return apps.length + 1;
+                                                })()
+                                            }
+                                            onActivated: {
+                                                if (settingsManager && audioDeviceEnumerator) {
+                                                    if (currentIndex === 0) {
+                                                        settingsManager.voiceChatApp = "";
+                                                    } else if (currentIndex > 0 && currentIndex <= apps.length) {
+                                                        settingsManager.voiceChatApp = apps[currentIndex - 1].binary;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -609,17 +645,18 @@ Rectangle {
                                         columns: 2
                                         columnSpacing: Theme.spacingMedium
                                         rowSpacing: Theme.spacingSmall
-                                        TrophyRadioButton { text: qsTr("Automatic (recommended)"); checked: stepHwScroll.currentCodec() === "auto"; onClicked: stepHwScroll.setCodec("auto") }
-                                        TrophyRadioButton { text: qsTr("H.264 — widest support"); checked: stepHwScroll.currentCodec() === "h264"; onClicked: stepHwScroll.setCodec("h264") }
-                                        TrophyRadioButton { text: qsTr("HEVC — smaller files"); checked: stepHwScroll.currentCodec() === "hevc"; enabled: stepHwScroll.codecAvailable("hevc"); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("hevc") }
-                                        TrophyRadioButton { text: qsTr("AV1 — best quality"); checked: stepHwScroll.currentCodec() === "av1"; enabled: stepHwScroll.codecAvailable("av1"); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("av1") }
+                                        TrophyRadioButton { text: qsTr("Automatic (recommended)"); checked: stepHwScroll.currentCodec() === "auto"; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("auto") }
+                                        TrophyRadioButton { text: qsTr("H.264 — widest support"); checked: stepHwScroll.currentCodec() === "h264"; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("h264") }
+                                        TrophyRadioButton { text: qsTr("HEVC — smaller files"); checked: stepHwScroll.currentCodec() === "hevc"; enabled: stepHwScroll.codecAvailable("hevc") && !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("hevc") }
+                                        TrophyRadioButton { text: qsTr("AV1 — best quality"); checked: stepHwScroll.currentCodec() === "av1"; enabled: stepHwScroll.codecAvailable("av1") && !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("av1") }
                                     }
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
                                         TrophySwitch {
                                             checked: settingsManager ? settingsManager.useDmaBuf : true
-                                            enabled: hardwareInfo ? hardwareInfo.dmaBufAvailable : false
+                                            enabled: (hardwareInfo ? hardwareInfo.dmaBufAvailable : false) && !(recordingManager && recordingManager.isRecording)
+                                            opacity: enabled ? 1.0 : 0.5
                                             onToggled: if (settingsManager) settingsManager.useDmaBuf = checked
                                         }
                                         ColumnLayout {

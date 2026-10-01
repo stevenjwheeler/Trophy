@@ -17,5 +17,6 @@
     <file>icons/gpu-nvidia.svg</file>
     <file>icons/gpu-amd.svg</file>
     <file>icons/gpu-intel.svg</file>
+    <file>sounds/clip-saved.wav</file>
   </qresource>
 </RCC>

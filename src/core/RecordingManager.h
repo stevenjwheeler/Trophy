@@ -133,6 +133,20 @@ private:
   // Progress tracking
   QElapsedTimer m_recordingTimer;
   QTimer *m_progressTimer = nullptr;
+
+ public:
+  // Live audio retargeting: swap one track's source on the running
+  // pipeline (mixer hot-swaps; no-ops without an active session, in which
+  // case the next build picks the new setting up). Invoked from
+  // Application's settings-change wiring.
+  void applyMicrophoneDevice();
+  void applyGameAudioDevice();
+  void applyVoiceChatApp();
+
+ private:
+  // Mixer slots assigned at build (needed to retarget mid-session).
+  int m_micTrack = -1;
+  int m_voiceTrack = -1;
 };
 
 } // namespace TrophyBackend

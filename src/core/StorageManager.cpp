@@ -90,6 +90,12 @@ qint64 StorageManager::availableSpace() const {
   return storage.bytesAvailable();
 }
 
+qint64 StorageManager::driveCapacityBytes() const {
+  QStorageInfo storage(m_storagePath);
+  const qint64 total = storage.bytesTotal();
+  return total > 0 ? total : 0;
+}
+
 void StorageManager::refresh() {
   qint64 newSize = calculateDirectorySize();
   if (m_usedSize != newSize) {

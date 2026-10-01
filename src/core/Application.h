@@ -104,6 +104,18 @@ public:
   Q_INVOKABLE void showMainWindow();
   // Instant replay: routes tray/F10/hotkey requests with user feedback.
   Q_INVOKABLE void requestReplay();
+  // Track mute that follows the active pipeline (the dashboard meters).
+  // The recording and the DVR own different mixers; muting only one
+  // would silently do nothing half the time, so both are always set and
+  // the readback prefers whichever pipeline is running.
+  Q_INVOKABLE void setTrackMuted(int trackIndex, bool muted);
+  Q_INVOKABLE bool isTrackMuted(int trackIndex) const;
+  // Live level from whichever pipeline is running (same routing).
+  Q_INVOKABLE float trackLevel(int trackIndex) const;
+  // Clip completion chime (pw-play ships with PipeWire; the wav is
+  // extracted from resources to cache on first use). Also wired to a
+  // Test button in Settings (preview bypasses the toggle).
+  Q_INVOKABLE void playClipPing(bool preview);
   // Global-shortcut record toggle (mirrors F9, with feedback).
   Q_INVOKABLE void requestToggleRecording();
   // --minimized CLI flag: behave like startMinimized for this launch.

@@ -19,6 +19,10 @@ namespace TrophyBackend {
 AudioDeviceEnumerator::AudioDeviceEnumerator(QObject *parent)
     : QObject(parent) {
   refresh();
+  // Populate the app list too (voice-chat picker): it has no other
+  // automatic trigger — previously it stayed empty until the user hit
+  // Refresh, so a saved app always read as "(not running)".
+  refreshAudioApps();
 }
 
 AudioDeviceEnumerator::~AudioDeviceEnumerator() = default;

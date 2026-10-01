@@ -230,6 +230,7 @@ ApplicationWindow {
             { name: "Video Recording", section: "Video Recording", keywords: ["encoder", "av1", "nvenc", "vaapi", "h264", "hevc", "quality", "bitrate", "fps", "resolution", "mkv", "mp4"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "tracks", "desktop", "game"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "limit", "cleanup", "size", "delete"] },
+            { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify"] },
             { name: "Game Detection", section: "Game Detection", keywords: ["detection", "auto", "record", "launch", "game"] }
         ];
 

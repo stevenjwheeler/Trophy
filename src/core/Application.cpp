@@ -37,7 +37,9 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileInfo>
 #include <QLoggingCategory>
+#include <QProcess>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickWindow>
@@ -132,6 +134,17 @@ bool Application::initialize() {
   qCInfo(appLog) << "Initializing Trophy - Game recording and clipping" << versionStr;
 
   initializeServices();
+
+  // Claim the control socket early (before QML/tray/detection): remote
+  // --toggle-record/--save-clip/--show-window commands sent during startup
+  // would otherwise find nobody listening and be dropped. Normally main()'s
+  // instance lock guarantees no rival; a false return here means we lost a
+  // concurrent-startup race, so forward a raise and refuse to run doubled.
+  if (m_controlServer && !m_controlServer->listen()) {
+    ControlServer::sendCommand(QStringLiteral("show-window")); // best effort
+    qCCritical(appLog) << "Another Trophy instance is running; exiting.";
+    return false;
+  }
   // The Vulkan layer is optional: only (re)register when enabled. A user
   // who opted out keeps no layer JSON behind.
   if (m_settingsManager->vulkanLayerEnabled()) {
@@ -198,11 +211,6 @@ bool Application::initialize() {
   }
 
   syncAutostartFile();
-
-  // Control socket for native compositor keybinds (best effort).
-  if (m_controlServer && !m_controlServer->listen()) {
-    qCWarning(appLog) << "Control socket unavailable; native keybinds disabled";
-  }
 
   // Global shortcuts register once the event loop spins (portal D-Bus) —
   // but only after first-run setup: the wizard's Shortcuts step asks
@@ -329,6 +337,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("windowMonitor", m_windowMonitor.get());
   context->setContextProperty("audioDeviceEnumerator", m_audioDeviceEnumerator.get());
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());
+  context->setContextProperty("replayManager", m_replayManager.get());
 }
 
 void Application::connectSignals() {
@@ -464,12 +473,59 @@ void Application::connectSignals() {
             m_storageManager->setAutoDeleteOldest(
                 m_settingsManager->autoDeleteOldest());
           });
+  // Live audio retargeting: device/app picks apply to whichever pipeline
+  // is running (full recording wins over DVR). Without a session the
+  // setters no-op and the next build picks the new values up.
+  connect(m_settingsManager.get(), &SettingsManager::microphoneDeviceChanged,
+          this, [this]() {
+            if (m_recordingManager && m_recordingManager->isRecording())
+              m_recordingManager->applyMicrophoneDevice();
+            else if (m_replayManager && m_replayManager->isActive())
+              m_replayManager->applyMicrophoneDevice();
+          });
+  connect(m_settingsManager.get(), &SettingsManager::gameAudioDeviceChanged,
+          this, [this]() {
+            if (m_recordingManager && m_recordingManager->isRecording())
+              m_recordingManager->applyGameAudioDevice();
+            else if (m_replayManager && m_replayManager->isActive())
+              m_replayManager->applyGameAudioDevice();
+          });
+  connect(m_settingsManager.get(), &SettingsManager::voiceChatAppChanged, this,
+          [this]() {
+            if (m_recordingManager && m_recordingManager->isRecording())
+              m_recordingManager->applyVoiceChatApp();
+            else if (m_replayManager && m_replayManager->isActive())
+              m_replayManager->applyVoiceChatApp();
+          });
+  // Layout changes (mode/tracks) can't hot-swap: the DVR rebuilds at the
+  // next segment rotation, recordings at the next start. Say so when the
+  // change lands mid-DVR, or the new layout seemingly "does nothing" for
+  // up to a rotation. (During recording the UI locks these outright.)
+  // The copy states the rotation bound concretely, from the constant.
+  const QString segmentBound = QStringLiteral("Takes effect within %1 seconds.")
+                                   .arg(ReplayManager::kSegmentSeconds);
+  connect(m_settingsManager.get(), &SettingsManager::audioModeChanged, this,
+          [this, segmentBound]() {
+            if (m_replayManager && m_replayManager->isActive())
+              // Critical like the other transient notices: the user is
+              // fullscreen gaming, where normal urgency never surfaces.
+              m_notificationService->showNotification(
+                  "Audio Mode Changed", segmentBound, "trophy", 3000, 2);
+          });
+  connect(m_settingsManager.get(), &SettingsManager::separateAudioTracksChanged,
+          this, [this, segmentBound]() {
+            if (m_replayManager && m_replayManager->isActive())
+              m_notificationService->showNotification(
+                  "Track Layout Changed", segmentBound, "trophy", 3000, 2);
+          });
   connect(m_storageManager.get(), &StorageManager::storageLimitReached, this,
           [this]() {
             if (m_suppressNextStorageNotification) {
               m_suppressNextStorageNotification = false;
               return;
             }
+            if (!m_settingsManager->notifyStorage())
+              return;
             if (m_settingsManager->autoDeleteOldest()) {
               m_notificationService->showNotification(
                   "Storage Full",
@@ -531,11 +587,14 @@ void Application::connectSignals() {
   // at all (critical urgency alone can't show a notification nobody sends).
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this,
           [this](const QString &) {
-            m_notificationService->showRecordingStarted(
-                m_recordingManager->currentGameName());
+            if (m_settingsManager->notifyRecordings())
+              m_notificationService->showRecordingStarted(
+                  m_recordingManager->currentGameName());
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
           [this](const QString &, qint64 durationMs, qint64 sizeBytes) {
+            if (!m_settingsManager->notifyRecordings())
+              return;
             const QString summary = QStringLiteral("%1 · %2").arg(
                 NotificationService::formatDuration(durationMs),
                 StorageManager::formatSize(sizeBytes));
@@ -579,17 +638,21 @@ void Application::connectSignals() {
   // --- Clips ---
   connect(m_replayManager.get(), &ReplayManager::replaySaved, this,
           [this](const QString &filePath, double seconds) {
-            const QString game = m_replayManager->currentGame();
-            const qint64 secs = std::max<qint64>(1, llround(seconds));
-            const QString span = (secs == 1) ? QStringLiteral("Last 1 second")
-                                             : QStringLiteral("Last %1 seconds").arg(secs);
-            const QString size =
-                StorageManager::formatSize(QFileInfo(filePath).size());
-            m_notificationService->showNotification(
-                game.isEmpty() ? QStringLiteral("Clip saved")
-                               : QStringLiteral("%1 clip saved").arg(game),
-                QStringLiteral("%1 · %2").arg(span, size),
-                "trophy", 3000, 2); // critical: visible over screenshare
+            playClipPing(false);
+            if (m_settingsManager->notifyClips()) {
+              const QString game = m_replayManager->currentGame();
+              const qint64 secs = std::max<qint64>(1, llround(seconds));
+              const QString span =
+                  (secs == 1) ? QStringLiteral("Last 1 second")
+                              : QStringLiteral("Last %1 seconds").arg(secs);
+              const QString size =
+                  StorageManager::formatSize(QFileInfo(filePath).size());
+              m_notificationService->showNotification(
+                  game.isEmpty() ? QStringLiteral("Clip saved")
+                                 : QStringLiteral("%1 clip saved").arg(game),
+                  QStringLiteral("%1 · %2").arg(span, size),
+                  "trophy", 3000, 2); // critical: visible over screenshare
+            }
             m_recordingLibrary->refresh();
           });
   connect(m_replayManager.get(), &ReplayManager::replayFailed, this,
@@ -720,6 +783,27 @@ void Application::requestQuit() {
   QCoreApplication::quit();
 }
 
+void Application::playClipPing(bool preview) {
+  if (!preview && (!m_settingsManager || !m_settingsManager->clipPingEnabled()))
+    return;
+  // pw-play needs a real file: extract the bundled chime to cache once.
+  const QString dest =
+      QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+      QStringLiteral("/trophy/sounds/clip-saved.wav");
+  if (!QFile::exists(dest)) {
+    QDir().mkpath(QFileInfo(dest).path());
+    if (!QFile::copy(QStringLiteral(":/sounds/clip-saved.wav"), dest)) {
+      qCWarning(appLog) << "Could not extract clip chime to" << dest;
+      return;
+    }
+  }
+  // Fire-and-forget: a missing/slow player must never hang the UI thread.
+  if (!QProcess::startDetached(QStringLiteral("pw-play"),
+                               QStringList(dest))) {
+    qCWarning(appLog) << "Could not start pw-play for clip chime";
+  }
+}
+
 void Application::requestReplay() {
   if (!m_replayManager || !m_settingsManager) {
     return;
@@ -752,8 +836,36 @@ void Application::requestReplay() {
   m_replayManager->saveReplay();
 }
 
-void Application::requestToggleRecording() {
-  if (!m_recordingManager) {
+void Application::setTrackMuted(int trackIndex, bool muted) {
+  // Mute is a user preference, not pipeline state: set it on both mixers
+  // so it holds whichever pipeline runs next. Rare UI action — logging it
+  // traces dashboard mute clicks end to end.
+  qCInfo(appLog) << "Track" << trackIndex << (muted ? "muted" : "unmuted");
+  if (m_audioMixer)
+    m_audioMixer->setTrackMuted(trackIndex, muted);
+  if (m_replayManager)
+    m_replayManager->setTrackMuted(trackIndex, muted);
+}
+
+bool Application::isTrackMuted(int trackIndex) const {
+  if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
+    return m_audioMixer->isTrackMuted(trackIndex);
+  if (m_replayManager && m_replayManager->isActive())
+    return m_replayManager->isTrackMuted(trackIndex);
+  if (m_audioMixer)
+    return m_audioMixer->isTrackMuted(trackIndex);
+  return false;
+}
+
+float Application::trackLevel(int trackIndex) const {
+  if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
+    return m_audioMixer->getTrackLevel(trackIndex);
+  if (m_replayManager && m_replayManager->isActive())
+    return m_replayManager->trackLevel(trackIndex);
+  return 0.0f;
+}
+
+void Application::requestToggleRecording() {  if (!m_recordingManager) {
     return;
   }
   if (m_recordingManager->isRecording()) {

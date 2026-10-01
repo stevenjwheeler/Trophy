@@ -145,6 +145,7 @@ bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
 }
 
 void WaylandPortalCapture::setFrameCallback(FrameCallback callback) {
+  std::lock_guard<std::mutex> lock(m_callbackMutex);
   m_callback = std::move(callback);
 }
 
@@ -897,8 +898,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
 
   if (d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
     // ---- Zero-copy DMA-BUF path ----
-    frame.isDmaBuf    = true;
-    frame.dmaBufFd    = static_cast<int>(d.fd);
+    frame.isDmaBuf    = true;    frame.dmaBufFd    = static_cast<int>(d.fd);
     frame.dmaBufStride  = d.chunk->stride;
     frame.dmaBufOffset  = static_cast<int>(d.chunk->offset);
     // The modifier was captured during format negotiation and stored as
@@ -927,10 +927,16 @@ void WaylandPortalCapture::on_stream_process(void *data) {
       qWarning() << "WaylandPortalCapture: GPU-only DMA-BUF frame (no CPU mapping); encoders without a working hwmap import will drop it (further occurrences suppressed)";
     }
 
-    if (self->m_callback) {
-      self->m_dmaBufFrames++;
-      noteBufferType(1, self->m_dmaBufFrames, "dmaBuf");
-      self->m_callback(frame);
+    // Invoke under the callback lock: setFrameCallback (session teardown)
+    // blocks until this delivery finishes, so the session can't be
+    // destroyed mid-invoke.
+    {
+      std::lock_guard<std::mutex> lock(self->m_callbackMutex);
+      if (self->m_callback) {
+        self->m_dmaBufFrames++;
+        noteBufferType(1, self->m_dmaBufFrames, "dmaBuf");
+        self->m_callback(frame);
+      }
     }
   } else if (d.data) {
     // ---- Shared-memory (MemFd / mmap) path ----
@@ -939,10 +945,13 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     frame.stride      = d.chunk->stride;
     frame.pixelFormat = AV_PIX_FMT_BGRA;
 
-    if (self->m_callback) {
-      self->m_shmFrames++;
-      noteBufferType(0, self->m_shmFrames, "shm");
-      self->m_callback(frame);
+    {
+      std::lock_guard<std::mutex> lock(self->m_callbackMutex);
+      if (self->m_callback) {
+        self->m_shmFrames++;
+        noteBufferType(0, self->m_shmFrames, "shm");
+        self->m_callback(frame);
+      }
     }
   } else {
     // No valid data pointer and no FD — skip silently.

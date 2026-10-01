@@ -28,6 +28,11 @@ class StorageManager : public QObject {
   Q_PROPERTY(qint64 maxSize READ maxSize WRITE setMaxSize NOTIFY maxSizeChanged)
   Q_PROPERTY(double usagePercent READ usagePercent NOTIFY usedSizeChanged)
   Q_PROPERTY(qint64 availableSpace READ availableSpace NOTIFY usedSizeChanged)
+
+  // Total capacity of the drive holding the recordings (upper bound for
+  // the limit slider). Re-read when the path changes.
+  Q_PROPERTY(qint64 driveCapacityBytes READ driveCapacityBytes NOTIFY
+                 storagePathChanged)
   Q_PROPERTY(bool autoDeleteOldest READ autoDeleteOldest WRITE setAutoDeleteOldest NOTIFY autoDeleteOldestChanged)
 
 public:
@@ -49,6 +54,7 @@ public:
   void clearExcludedRecordingPath();
   double usagePercent() const;
   qint64 availableSpace() const;
+  qint64 driveCapacityBytes() const;
 
   // Operations
   Q_INVOKABLE void refresh();

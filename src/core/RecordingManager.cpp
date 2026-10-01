@@ -33,6 +33,7 @@ extern "C" {
 #include <QDir>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QTimer>
 #include <atomic>
 
@@ -386,7 +387,11 @@ bool RecordingManager::buildPipeline() {
   QString gameProcess;
   QString vcApp;
   bool gameSourceAdded = false;
+  bool gameIsFallback = false;
   bool vcSourceAdded = false;
+  int voiceTrack = -1;
+  uint32_t gameTargetPid = 0;
+  QStringList gameHints;
 
   if (m_audioMixer) {
     QString mode = m_settings->audioMode();
@@ -395,19 +400,21 @@ bool RecordingManager::buildPipeline() {
       // Track 0: all system audio (sink monitor)
       QString gameDeviceId = m_settings->gameAudioDevice();
       qDebug() << "Desktop mode: using game audio device:" << gameDeviceId;
-      m_audioMixer->addSource(
-          PipeWireAudioSource::createMonitorSource(
-              gameDeviceId == "default" ? QString() : gameDeviceId),
-          0);
+      auto desktopSrc = PipeWireAudioSource::createMonitorSource(
+          gameDeviceId == "default" ? QString() : gameDeviceId);
+      desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
+      m_audioMixer->addSource(std::move(desktopSrc), 0);
       activeAudioTrackCount++;
       // Track 1: microphone
       QString micDeviceId = m_settings->microphoneDevice();
       qDebug() << "Desktop mode: using microphone device:" << micDeviceId;
-      m_audioMixer->addSource(
-          PipeWireAudioSource::createInputSource(
-              micDeviceId == "default" ? QString() : micDeviceId),
-          1);
+      auto desktopMicSrc = PipeWireAudioSource::createInputSource(
+          micDeviceId == "default" ? QString() : micDeviceId);
+      desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
+      m_audioMixer->addSource(std::move(desktopMicSrc), 1);
       activeAudioTrackCount++;
+      m_micTrack = 1;
+      m_voiceTrack = -1; // desktop mode has no voice track
 
     } else { // "game" mode
       // Separate mode uses fixed positions so the MKV always has 3 named audio
@@ -418,12 +425,30 @@ bool RecordingManager::buildPipeline() {
       int activeSources = 0;
 
       // === Game audio (always at track 0) ===
-      uint32_t targetPid = 0;
+      // Proton/Wine playback nodes expose no PID, no binary and no app-id
+      // (verified live: deadlock.exe has only app/node name) — so the
+      // detector's display name ("Deadlock") is a first-class hint: the
+      // contains-match catches the exe basename.
+      gameTargetPid = 0;
+      gameHints.clear();
       if (m_manualWindowId != 0 && m_windowService) {
         gameProcess =
             m_windowService->getProcessNameForWindow(m_manualWindowId);
+        if (!gameProcess.isEmpty())
+          gameHints << gameProcess;
       } else if (m_captureSource) {
-        targetPid = m_captureSource->sourcePid();
+        gameTargetPid = m_captureSource->sourcePid();
+      }
+      if (m_captureSource) {
+        const QString hint = m_captureSource->sourceProcessName();
+        if (!hint.isEmpty() && !gameHints.contains(hint))
+          gameHints << hint;
+      }
+      if (m_gameDetector && m_gameDetector->isGameRunning()) {
+        const QString detected = m_gameDetector->currentGameName();
+        if (!detected.isEmpty() &&
+            !gameHints.contains(detected, Qt::CaseInsensitive))
+          gameHints << detected;
       }
 
       {
@@ -433,48 +458,41 @@ bool RecordingManager::buildPipeline() {
         QString nodeName, nodeSerial;
 
         // Try PID search first if we have one (more accurate on Wayland)
-        if (targetPid != 0) {
-          nodeId = PipeWireAudioSource::findNodeByPid(targetPid, &nodeName,
+        if (gameTargetPid != 0) {
+          nodeId = PipeWireAudioSource::findNodeByPid(gameTargetPid, &nodeName,
                                                       &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
-            qDebug() << "Game audio: found node via PID" << targetPid;
+            qDebug() << "Game audio: found node via PID" << gameTargetPid;
         }
 
-        // Try process name / app id from capture source
-        if (nodeId == 0xFFFFFFFFu && m_captureSource) {
-          QString hint = m_captureSource->sourceProcessName();
-          if (!hint.isEmpty()) {
-            nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
-                                                                &nodeSerial);
-            if (nodeId != 0xFFFFFFFFu)
-              qDebug() << "Game audio: found node via capture source hint"
-                      << hint;
-          }
-        }
-
-        // Try derived process name (standard behavior)
-        if (nodeId == 0xFFFFFFFFu && !gameProcess.isEmpty()) {
-          nodeId = PipeWireAudioSource::findNodeByProcessName(
-              gameProcess, &nodeName, &nodeSerial);
+        // Then each name hint in order (window process, portal app-id,
+        // detector display name / exe basename).
+        for (const QString &hint : gameHints) {
+          if (nodeId != 0xFFFFFFFFu || hint.isEmpty())
+            break;
+          nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                              &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
-            qDebug() << "Game audio: found node via process name" << gameProcess;
+            qDebug() << "Game audio: found node via hint" << hint;
         }
 
         if (nodeId != 0xFFFFFFFFu) {
-          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                      nodeId, nodeName, nodeSerial),
-                                  gameTrack);
+          auto gameSrc = PipeWireAudioSource::createApplicationSource(
+              nodeId, nodeName, nodeSerial);
+          gameSrc->setStreamName(QStringLiteral("trophy-game"));
+          m_audioMixer->addSource(std::move(gameSrc), gameTrack);
           activeSources++;
           gameSourceAdded = true;
         } else {
           // Fallback to default monitor (whole system audio) if no specific
-          // game found
+          // game found. This is NOT marked connected: the session retry
+          // keeps hunting the real app node and hot-swaps when it appears.
           qDebug() << "Game audio: no specific node found, falling back to "
                         "default monitor for track"
                      << gameTrack;
           m_audioMixer->addSource(
               PipeWireAudioSource::createMonitorSource(QString()), gameTrack);
-          gameSourceAdded = true;
+          gameIsFallback = true;
           activeSources++;
         }
       }
@@ -482,32 +500,43 @@ bool RecordingManager::buildPipeline() {
       // === Voice chat (track 1 in separate; next contiguous slot in merged)
       // ===
       vcApp = m_settings->voiceChatApp().trimmed();
+      voiceTrack = -1;
       if (!vcApp.isEmpty()) {
         QString vcNodeName, vcSerial;
         uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(
             vcApp, &vcNodeName, &vcSerial);
         if (nodeId != 0xFFFFFFFF) {
-          const int voiceTrack = isSeparate ? 1 : nextContiguous++;
-          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                      nodeId, vcNodeName, vcSerial),
-                                  voiceTrack);
+          voiceTrack = isSeparate ? 1 : nextContiguous++;
+          auto voiceSrc = PipeWireAudioSource::createApplicationSource(
+              nodeId, vcNodeName, vcSerial);
+          voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
+          m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
           activeSources++;
           vcSourceAdded = true;
         } else {
-          qDebug() << "No PipeWire node for voice chat app:" << vcApp;
+          qDebug() << "No PipeWire node for voice chat app:" << vcApp
+                   << "- retry will bind it when the stream appears";
+          // Separate mode reserves the slot so the retry has somewhere to
+          // bind. Merged mode can't reserve (an empty slot would stall the
+          // mix gate), so the retry skips voice instead of clobbering mic.
+          if (isSeparate)
+            voiceTrack = 1;
         }
       }
+      m_voiceTrack = voiceTrack;
 
       // === Microphone (track 2 in separate; next contiguous slot in merged)
       // ===
       {
         const int micTrack = isSeparate ? 2 : nextContiguous++;
-        m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
-                                    m_settings->microphoneDevice() == "default"
-                                        ? QString()
-                                        : m_settings->microphoneDevice()),
-                                micTrack);
+        auto micSrc = PipeWireAudioSource::createInputSource(
+            m_settings->microphoneDevice() == "default"
+                ? QString()
+                : m_settings->microphoneDevice());
+        micSrc->setStreamName(QStringLiteral("trophy-mic"));
+        m_audioMixer->addSource(std::move(micSrc), micTrack);
         activeSources++;
+        m_micTrack = micTrack;
       }
 
       // Separate: always 3 streams so the file layout is consistent.
@@ -573,18 +602,24 @@ bool RecordingManager::buildPipeline() {
   // Provide dispatcher to session
   m_session->setFrameDispatcher(dispatcher);
 
-  // Set app names for periodic node checking during recording
-  m_session->setGameApps(gameProcess);
+  // Set app names for periodic node checking during recording. The timer
+  // reconciles for the whole session: game upgrades past monitor fallback,
+  // voice binds on appearance and re-binds when Electron recreates streams.
+  // NOTE: gameProcess is only the manual-window name — the detector display
+  // name (exe-basename match for Proton) rides along in gameHints.
+  m_session->setGameAudioHints(gameTargetPid, gameHints);
   m_session->setVoiceChatApp(vcApp);
+  m_session->setVoiceTrack(voiceTrack);
+  m_session->setGameIsFallback(gameIsFallback);
 
 #ifdef HAVE_PIPEWIRE
-  // If sources were already found and added during buildPipeline, mark them as
-  // connected so the node-check timer doesn't replace the already-running
-  // sources.
+  // True app binds adopt their serial on the first retry tick (so later
+  // stream generations read as new). Fallback monitor is never marked —
+  // the retry replaces it with the real node on appearance.
   if (gameSourceAdded)
     m_session->markSourceConnected(0);
-  if (vcSourceAdded)
-    m_session->markSourceConnected(1);
+  if (vcSourceAdded && voiceTrack >= 0)
+    m_session->markSourceConnected(voiceTrack);
 #endif
 
   // Connect error signals
@@ -620,6 +655,65 @@ void RecordingManager::teardownPipeline() {
   m_muxer.reset();
   m_videoEncoder.reset();
   m_captureSource.reset();
+  m_micTrack = -1;
+  m_voiceTrack = -1;
+}
+
+void RecordingManager::applyMicrophoneDevice() {
+  if (!m_session || !m_audioMixer || !m_settings || m_micTrack < 0)
+    return;
+  const QString dev = m_settings->microphoneDevice();
+  auto src = PipeWireAudioSource::createInputSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-mic"));
+  // Mixer hot-swap: replaces the running source, initializes + starts it
+  // immediately (AudioMixer late-add path).
+  m_audioMixer->addSource(std::move(src), m_micTrack);
+  qDebug() << "Live-applied microphone device:" << dev << "to track"
+           << m_micTrack;
+}
+
+void RecordingManager::applyGameAudioDevice() {
+  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  // Only desktop mode captures a named device; game mode hunts the app node.
+  if (m_settings->audioMode() != "desktop")
+    return;
+  const QString dev = m_settings->gameAudioDevice();
+  auto src = PipeWireAudioSource::createMonitorSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-desktop"));
+  m_audioMixer->addSource(std::move(src), 0);
+  qDebug() << "Live-applied system audio device:" << dev;
+}
+
+void RecordingManager::applyVoiceChatApp() {
+  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  const QString app = m_settings->voiceChatApp().trimmed();
+  m_session->setVoiceChatApp(app);
+  const bool isSeparate = m_settings->separateAudioTracks();
+  if (app.isEmpty()) {
+    // Voice disabled mid-session: drop the source. Slot stays reserved in
+    // separate mode so re-enabling rebinds without a rebuild.
+    if (m_voiceTrack >= 0) {
+      m_audioMixer->removeSource(m_voiceTrack);
+      m_session->forgetTrack(m_voiceTrack);
+    }
+    qDebug() << "Voice chat disabled mid-session";
+    return;
+  }
+  if (m_voiceTrack < 0 && isSeparate) {
+    m_voiceTrack = 1;
+    m_session->setVoiceTrack(1);
+  }
+  if (m_voiceTrack >= 0) {
+    m_audioMixer->removeSource(m_voiceTrack);
+    m_session->forgetTrack(m_voiceTrack);
+  }
+  // The session retry binds the new app on appearance (or adopts a fresh
+  // merged slot when unslotted).
+  qDebug() << "Live-applied voice chat app:" << app;
 }
 
 QString RecordingManager::generateOutputPath() const {

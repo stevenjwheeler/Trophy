@@ -121,6 +121,65 @@ TEST_F(SettingsManagerTest, SetSeparateAudioTracksEmitsSignal) {
   EXPECT_FALSE(mgr->separateAudioTracks());
 }
 
+// Live-apply wiring depends on these three signals (Application routes
+// them to the running pipeline's hot-swap).
+TEST_F(SettingsManagerTest, SetMicrophoneDeviceEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::microphoneDeviceChanged);
+  mgr->setMicrophoneDevice("easyeffects_source");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->microphoneDevice(), "easyeffects_source");
+}
+
+TEST_F(SettingsManagerTest, SetGameAudioDeviceEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::gameAudioDeviceChanged);
+  mgr->setGameAudioDevice("easyeffects_sink");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->gameAudioDevice(), "easyeffects_sink");
+}
+
+TEST_F(SettingsManagerTest, SetVoiceChatAppEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::voiceChatAppChanged);
+  mgr->setVoiceChatApp("teamspeak");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->voiceChatApp(), "teamspeak");
+}
+
+// Notification options (all default on; round-trip through the setters).
+TEST_F(SettingsManagerTest, NotificationTogglesDefaultOn) {
+  EXPECT_TRUE(mgr->notifyRecordings());
+  EXPECT_TRUE(mgr->notifyClips());
+  EXPECT_TRUE(mgr->notifyStorage());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyRecordingsEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyRecordingsChanged);
+  mgr->setNotifyRecordings(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyRecordings());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyClipsEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyClipsChanged);
+  mgr->setNotifyClips(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyClips());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyStorageEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyStorageChanged);
+  mgr->setNotifyStorage(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyStorage());
+}
+
+TEST_F(SettingsManagerTest, ClipPingDefaultsOnAndEmitsSignal) {
+  EXPECT_TRUE(mgr->clipPingEnabled());
+  QSignalSpy spy(mgr.get(), &SettingsManager::clipPingEnabledChanged);
+  mgr->setClipPingEnabled(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->clipPingEnabled());
+}
+
 TEST_F(SettingsManagerTest, SetAutoDetectGamesEmitsSignal) {
   QSignalSpy spy(mgr.get(), &SettingsManager::autoDetectGamesChanged);
   mgr->setAutoDetectGames(false);

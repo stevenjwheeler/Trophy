@@ -88,7 +88,10 @@ void SettingsManager::load() {
   m_gameAudioDevice = audio["gameAudioDevice"].toString("default");
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
-  m_separateAudioTracks = audio["separateTracks"].toBool(false);
+  // Separate tracks is the default: per-track isolation means one dead
+  // stream (voice churn, missing node) can't stall the whole mix, and the
+  // file layout is always game/voice/mic. Matches the header initializer.
+  m_separateAudioTracks = audio["separateTracks"].toBool(true);
 
   // Load storage settings
   QJsonObject storage = root["storage"].toObject();
@@ -116,6 +119,13 @@ void SettingsManager::load() {
   m_instantReplayEnabled = general["instantReplay"].toBool(true);
   m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
+
+  // Load notification options (all default on)
+  QJsonObject notifications = root["notifications"].toObject();
+  m_notifyRecordings = notifications["recordings"].toBool(true);
+  m_notifyClips = notifications["clips"].toBool(true);
+  m_notifyStorage = notifications["storage"].toBool(true);
+  m_clipPingEnabled = notifications["clipPing"].toBool(true);
   
   // Load Wayland restore tokens (per-game map; a legacy singular
   // "waylandRestoreToken" key is ignored — it was never mapped to a game).
@@ -189,6 +199,14 @@ void SettingsManager::save() {
   general["replayCachePath"] = m_replayCachePath;
   root["general"] = general;
 
+  // Notification options
+  QJsonObject notifications;
+  notifications["recordings"] = m_notifyRecordings;
+  notifications["clips"] = m_notifyClips;
+  notifications["storage"] = m_notifyStorage;
+  notifications["clipPing"] = m_clipPingEnabled;
+  root["notifications"] = notifications;
+
   root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
 
   // Write atomically using QSaveFile
@@ -247,6 +265,10 @@ void SettingsManager::resetToDefaults() {
   emit instantReplayEnabledChanged();
   emit globalShortcutsEnabledChanged();
   emit replayCachePathChanged();
+  emit notifyRecordingsChanged();
+  emit notifyClipsChanged();
+  emit notifyStorageChanged();
+  emit clipPingEnabledChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -267,7 +289,7 @@ void SettingsManager::loadDefaults() {
   m_gameAudioDevice = "default";
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
-  m_separateAudioTracks = false;
+  m_separateAudioTracks = true;
 
   // Storage
   m_recordingsPath =
@@ -288,6 +310,12 @@ void SettingsManager::loadDefaults() {
   m_startOnLogin = false;
   m_instantReplayEnabled = true;
   m_globalShortcutsEnabled = true;
+
+  // Notifications (all on)
+  m_notifyRecordings = true;
+  m_notifyClips = true;
+  m_notifyStorage = true;
+  m_clipPingEnabled = true;
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -507,6 +535,38 @@ void SettingsManager::setGlobalShortcutsEnabled(bool enabled) {
     m_globalShortcutsEnabled = enabled;
     save();
     emit globalShortcutsEnabledChanged();
+  }
+}
+
+void SettingsManager::setNotifyRecordings(bool enabled) {
+  if (m_notifyRecordings != enabled) {
+    m_notifyRecordings = enabled;
+    save();
+    emit notifyRecordingsChanged();
+  }
+}
+
+void SettingsManager::setNotifyClips(bool enabled) {
+  if (m_notifyClips != enabled) {
+    m_notifyClips = enabled;
+    save();
+    emit notifyClipsChanged();
+  }
+}
+
+void SettingsManager::setNotifyStorage(bool enabled) {
+  if (m_notifyStorage != enabled) {
+    m_notifyStorage = enabled;
+    save();
+    emit notifyStorageChanged();
+  }
+}
+
+void SettingsManager::setClipPingEnabled(bool enabled) {
+  if (m_clipPingEnabled != enabled) {
+    m_clipPingEnabled = enabled;
+    save();
+    emit clipPingEnabledChanged();
   }
 }
 

@@ -9,6 +9,7 @@
 
 #include "audio/AudioMixer.h"
 #include "audio/IAudioSource.h"
+#include "audio/PipeWireAudioSource.h"
 
 using namespace TrophyBackend;
 
@@ -161,6 +162,49 @@ TEST_F(AudioMixerTest, RemoveSourceStopsCallbacks) {
   // No source left to drive; callback count must stay put.
   EXPECT_EQ(count, 0);
   mixer2.stopAll();
+}
+
+// Pinning must prefer serial, then name, and only use the numeric ID as a
+// last resort: WirePlumber reads target.object as a *serial*, and IDs
+// collide with serials (live: easyeffects_source id 73 / serial 74 vs
+// easyeffects_sink serial 73 — pinning bare "73" captured the sink).
+TEST(AudioPinTargetTest, PrefersSerialThenNameOverNumericId) {
+  using P = PipeWireAudioSource;
+  EXPECT_EQ(P::preferredTarget("74", "easyeffects_source", 73), "74");
+  EXPECT_EQ(P::preferredTarget("", "easyeffects_source", 73),
+            "easyeffects_source");
+  EXPECT_EQ(P::preferredTarget("", "", 73), "73");
+  // Name wins over a *different* numeric ID: the name resolves
+  // unambiguously while the ID may alias another node's serial.
+  EXPECT_EQ(P::preferredTarget("", "easyeffects_source", 999),
+            "easyeffects_source");
+}
+
+TEST_F(AudioMixerTest, HotSwapReplacesRunningSource) {
+  // Live retarget (what applyMicrophoneDevice does): replace a track's
+  // source mid-run — the late-added one initializes and starts
+  // immediately, and it (not the old one) drives the track callback.
+  AudioMixer mixer{48000, 2};
+  auto *rawA = new FakeAudioSource(IAudioSource::SourceType::DesktopAudio,
+                                   "a");
+  mixer.addSource(std::unique_ptr<IAudioSource>(rawA), 0);
+  ASSERT_TRUE(mixer.startAll());
+  EXPECT_TRUE(rawA->isCapturing());
+
+  auto *rawB = new FakeAudioSource(IAudioSource::SourceType::Microphone,
+                                   "b");
+  // NOTE: replacing destroys rawA — do not touch it after this line.
+  mixer.addSource(std::unique_ptr<IAudioSource>(rawB), 0);
+  EXPECT_TRUE(rawB->isCapturing());
+
+  int count = 0;
+  mixer.setTrackAudioCallback(
+      [&](int, const float *, int, int, int) { ++count; });
+  const float samples[4] = {0.1f, 0.1f, 0.1f, 0.1f};
+  rawB->emitAudio(samples, 2);
+  EXPECT_EQ(count, 1);
+  mixer.stopAll();
+  EXPECT_FALSE(rawB->isCapturing());
 }
 
 #include "test_AudioMixer.moc"

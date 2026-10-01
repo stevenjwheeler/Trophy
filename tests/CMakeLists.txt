@@ -194,10 +194,11 @@ gtest_discover_tests(test_FramePipeline)
 add_executable(test_AudioMixer test_AudioMixer.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/AudioMixer.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/AudioMixer.h
+    ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
 )
 target_include_directories(test_AudioMixer PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_AudioMixer PRIVATE ${TEST_LINK_LIBS})
+target_link_libraries(test_AudioMixer PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 gtest_discover_tests(test_AudioMixer)
 
 # --- AudioEncoder (needs FFmpeg audio encoders at runtime, skips otherwise) ---

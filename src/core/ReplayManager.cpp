@@ -290,21 +290,48 @@ bool ReplayManager::beginSegment() {
   meta["comment"] = "trophy-replay-segment";
 
   int audioTracks = 0;
-  setupAudioSources(audioTracks);
+  QStringList gameHints;
+  uint32_t gamePid = 0;
+  bool gameFound = false;
+  int voiceTrack = -1;
+  bool voiceFound = false;
+  setupAudioSources(audioTracks, gameHints, gamePid, gameFound, voiceTrack,
+                    voiceFound, m_micTrack);
+  m_voiceTrack = voiceTrack;
 
   m_session = std::make_unique<RecordingSession>(
       path, m_capture.get(), m_encoder.get(), m_muxer.get(), m_audioMixer.get(),
       m_settings->separateAudioTracks(), 192, audioTracks, meta);
   connect(m_session.get(), &RecordingSession::errorOccurred, this,
           &ReplayManager::onCaptureError);
+  // Wire the session's node retry (the DVR previously never re-checked:
+  // voice joining mid-game and stream churn never healed until rotation).
+  m_session->setGameAudioHints(gamePid, gameHints);
+  m_session->setVoiceChatApp(m_settings->voiceChatApp().trimmed());
+  m_session->setVoiceTrack(voiceTrack);
+  m_session->setGameIsFallback(!gameFound);
+  if (gameFound)
+    m_session->markSourceConnected(0);
+  if (voiceFound && voiceTrack >= 0)
+    m_session->markSourceConnected(voiceTrack);
   // No dispatcher: segments ARE the buffer.
   if (!m_session->start())
     return false;
   return true;
 }
 
-void ReplayManager::setupAudioSources(int &trackCount) {
+void ReplayManager::setupAudioSources(int &trackCount,
+                                       QStringList &gameHints,
+                                       uint32_t &gamePid, bool &gameFound,
+                                       int &voiceTrack, bool &voiceFound,
+                                       int &micTrack) {
   trackCount = 0;
+  gameHints.clear();
+  gamePid = 0;
+  gameFound = false;
+  voiceTrack = -1;
+  voiceFound = false;
+  micTrack = -1;
   if (!m_audioMixer || !m_settings)
     return;
 #ifdef HAVE_PIPEWIRE
@@ -312,35 +339,56 @@ void ReplayManager::setupAudioSources(int &trackCount) {
   const QString mode = m_settings->audioMode();
   if (mode == "desktop") {
     const QString dev = m_settings->gameAudioDevice();
-    m_audioMixer->addSource(PipeWireAudioSource::createMonitorSource(
-                                dev == "default" ? QString() : dev),
-                            0);
-    m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
-                                m_settings->microphoneDevice() == "default"
-                                    ? QString()
-                                    : m_settings->microphoneDevice()),
-                            1);
+    auto desktopSrc = PipeWireAudioSource::createMonitorSource(
+        dev == "default" ? QString() : dev);
+    desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
+    m_audioMixer->addSource(std::move(desktopSrc), 0);
+    const QString micDev = m_settings->microphoneDevice();
+    auto desktopMicSrc = PipeWireAudioSource::createInputSource(
+        micDev == "default" ? QString() : micDev);
+    desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
+    m_audioMixer->addSource(std::move(desktopMicSrc), 1);
     trackCount = 2;
+    micTrack = 1;
     return;
   }
-  // Game mode: game node (PID first, monitor fallback), voice, mic.
-  uint32_t targetPid = m_capture ? m_capture->sourcePid() : 0;
+  // Game mode: game node (PID first, name hints, monitor fallback), voice,
+  // mic. Proton nodes expose only the exe basename, so the DVR game name
+  // (detector display name) is a first-class hint.
+  gamePid = m_capture ? m_capture->sourcePid() : 0;
+  if (m_capture) {
+    const QString hint = m_capture->sourceProcessName();
+    if (!hint.isEmpty())
+      gameHints << hint;
+  }
+  if (!m_gameName.isEmpty() &&
+      !gameHints.contains(m_gameName, Qt::CaseInsensitive))
+    gameHints << m_gameName;
   int nextContiguous = 0;
   {
     const int gameTrack = isSeparate ? 0 : nextContiguous++;
     uint32_t nodeId = 0xFFFFFFFFu;
     QString nodeName, nodeSerial;
-    if (targetPid != 0) {
+    if (gamePid != 0) {
       nodeId =
-          PipeWireAudioSource::findNodeByPid(targetPid, &nodeName, &nodeSerial);
+          PipeWireAudioSource::findNodeByPid(gamePid, &nodeName, &nodeSerial);
+    }
+    for (const QString &hint : gameHints) {
+      if (nodeId != 0xFFFFFFFFu || hint.isEmpty())
+        break;
+      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                          &nodeSerial);
     }
     if (nodeId == 0xFFFFFFFFu) {
-      m_audioMixer->addSource(
-          PipeWireAudioSource::createMonitorSource(QString()), gameTrack);
+      auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString());
+      fallbackSrc->setStreamName(QStringLiteral("trophy-game"));
+      m_audioMixer->addSource(std::move(fallbackSrc), gameTrack);
     } else {
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  nodeId, nodeName, nodeSerial),
-                              gameTrack);
+      auto gameSrc = PipeWireAudioSource::createApplicationSource(
+          nodeId, nodeName, nodeSerial);
+      gameSrc->setStreamName(QStringLiteral("trophy-game"));
+      m_audioMixer->addSource(std::move(gameSrc), gameTrack);
+      gameFound = true;
     }
     trackCount++;
   }
@@ -350,22 +398,97 @@ void ReplayManager::setupAudioSources(int &trackCount) {
     const uint32_t vcNode = PipeWireAudioSource::findNodeByProcessName(
         vcApp, &vcName, &vcSerial);
     if (vcNode != 0xFFFFFFFFu) {
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  vcNode, vcName, vcSerial),
-                              isSeparate ? 1 : nextContiguous++);
+      voiceTrack = isSeparate ? 1 : nextContiguous++;
+      auto voiceSrc = PipeWireAudioSource::createApplicationSource(
+          vcNode, vcName, vcSerial);
+      voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
+      m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
       trackCount++;
+      voiceFound = true;
+    } else if (isSeparate) {
+      // Reserve the slot so the session retry has somewhere to bind when
+      // the stream appears. Merged mode can't reserve (empty slot stalls
+      // the mix gate).
+      voiceTrack = 1;
     }
   }
-  m_audioMixer->addSource(
-      PipeWireAudioSource::createInputSource(
-          m_settings->microphoneDevice() == "default"
-              ? QString()
-              : m_settings->microphoneDevice()),
-      isSeparate ? 2 : nextContiguous++);
+  auto micSrc = PipeWireAudioSource::createInputSource(
+      m_settings->microphoneDevice() == "default"
+          ? QString()
+          : m_settings->microphoneDevice());
+  micSrc->setStreamName(QStringLiteral("trophy-mic"));
+  const int micSlot = isSeparate ? 2 : nextContiguous++;
+  m_audioMixer->addSource(std::move(micSrc), micSlot);
+  micTrack = micSlot;
   trackCount++;
 #else
   Q_UNUSED(trackCount);
 #endif
+}
+
+void ReplayManager::applyMicrophoneDevice() {
+  if (!m_session || !m_audioMixer || !m_settings || m_micTrack < 0)
+    return;
+  const QString dev = m_settings->microphoneDevice();
+  auto src = PipeWireAudioSource::createInputSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-mic"));
+  m_audioMixer->addSource(std::move(src), m_micTrack);
+  qDebug() << "DVR live-applied microphone device:" << dev;
+}
+
+void ReplayManager::applyGameAudioDevice() {
+  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  if (m_settings->audioMode() != "desktop")
+    return;
+  const QString dev = m_settings->gameAudioDevice();
+  auto src = PipeWireAudioSource::createMonitorSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-desktop"));
+  m_audioMixer->addSource(std::move(src), 0);
+  qDebug() << "DVR live-applied system audio device:" << dev;
+}
+
+void ReplayManager::setTrackMuted(int trackIndex, bool muted) {
+  if (m_audioMixer)
+    m_audioMixer->setTrackMuted(trackIndex, muted);
+}
+
+bool ReplayManager::isTrackMuted(int trackIndex) const {
+  if (m_audioMixer)
+    return m_audioMixer->isTrackMuted(trackIndex);
+  return false;
+}
+
+float ReplayManager::trackLevel(int trackIndex) const {
+  if (m_audioMixer)
+    return m_audioMixer->getTrackLevel(trackIndex);
+  return 0.0f;
+}
+
+void ReplayManager::applyVoiceChatApp() {  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  const QString app = m_settings->voiceChatApp().trimmed();
+  m_session->setVoiceChatApp(app);
+  const bool isSeparate = m_settings->separateAudioTracks();
+  if (app.isEmpty()) {
+    if (m_voiceTrack >= 0) {
+      m_audioMixer->removeSource(m_voiceTrack);
+      m_session->forgetTrack(m_voiceTrack);
+    }
+    qDebug() << "DVR voice chat disabled mid-segment";
+    return;
+  }
+  if (m_voiceTrack < 0 && isSeparate) {
+    m_voiceTrack = 1;
+    m_session->setVoiceTrack(1);
+  }
+  if (m_voiceTrack >= 0) {
+    m_audioMixer->removeSource(m_voiceTrack);
+    m_session->forgetTrack(m_voiceTrack);
+  }
+  qDebug() << "DVR live-applied voice chat app:" << app;
 }
 
 void ReplayManager::finalizeSegment() {

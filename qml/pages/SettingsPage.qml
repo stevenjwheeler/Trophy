@@ -15,6 +15,13 @@ import QtQuick.Layouts
 Page {
     id: root
 
+    // The app list goes stale (apps publish streams on demand), so refresh
+    // it every time Settings opens — otherwise a saved voice app reads as
+    // "(not running)" until the user hits Refresh by hand.
+    onVisibleChanged: {
+        if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+    }
+
     // Section navigation (titles must match main.qml global search mapping)
     property string activeSection: qsTr("Video Recording")
     property bool scrollingProgrammatically: false
@@ -22,6 +29,7 @@ Page {
         { title: qsTr("Video Recording"), icon: "🎥" },
         { title: qsTr("Audio Recording"), icon: "🔊" },
         { title: qsTr("Storage Management"), icon: "💾" },
+        { title: qsTr("Notifications"), icon: "🔔" },
         { title: qsTr("Game Detection"), icon: "🎮" },
         { title: qsTr("System Tray"), icon: "📌" },
         { title: qsTr("Keyboard Shortcuts"), icon: "⌨️" }
@@ -35,6 +43,8 @@ Page {
             card = audioCard;
         else if (sectionTitle === "Storage Management")
             card = storageCard;
+        else if (sectionTitle === "Notifications")
+            card = notificationsCard;
         else if (sectionTitle === "Game Detection")
             card = detectionCard;
         else if (sectionTitle === "System Tray")
@@ -659,12 +669,14 @@ Page {
 
                             TrophyButton {
                                 text: qsTr("Browse")
+                                enabled: !(replayManager && replayManager.active)
                                 onClicked: replayFolderDialog.open()
                             }
 
                             TrophyButton {
                                 text: qsTr("Default")
                                 visible: replayCachePathField.text !== ""
+                                enabled: !(replayManager && replayManager.active)
                                 onClicked: {
                                     if (settingsManager)
                                         settingsManager.replayCachePath = "";
@@ -712,7 +724,7 @@ Page {
                     description: qsTr("What gets heard in your recordings, and how tracks are stored.")
 
                     WarnBanner {
-                        message: qsTr("Recording in progress. To change these settings, stop recording.")
+                        message: qsTr("Recording in progress. Mode and track layout are locked; devices and the voice app apply live.")
                         visible: recordingManager && recordingManager.isRecording
                     }
 
@@ -785,7 +797,7 @@ Page {
                         TrophyComboBox {
                             id: microphoneBox
                             Layout.preferredWidth: 300
-                            enabled: !(recordingManager && recordingManager.isRecording)
+                            // Live-applied to the running pipeline; no lock needed.
                             property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.inputDevices : []
 
                             model: {
@@ -822,7 +834,7 @@ Page {
                         TrophyComboBox {
                             id: gameAudioBox
                             Layout.preferredWidth: 300
-                            enabled: !(recordingManager && recordingManager.isRecording)
+                            // Live-applied to the running pipeline (desktop mode); no lock needed.
                             property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.outputDevices : []
 
                             model: {
@@ -851,25 +863,35 @@ Page {
                         }
                     }
 
-                    SettingStack {
+                    SettingRow {
                         label: qsTr("Voice Chat App")
                         help: qsTr("Select from running audio applications.")
                         visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         RowLayout {
-                            Layout.fillWidth: true
                             spacing: Theme.spacingSmall
 
                             TrophyComboBox {
                                 id: voiceChatAppBox
-                                Layout.fillWidth: true
-                                enabled: !(recordingManager && recordingManager.isRecording)
+                                Layout.preferredWidth: 300
+                                // Live-applied to the running pipeline; no lock needed.
                                 property var apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
 
                                 model: {
                                     let names = ["None"];
                                     for (let a of apps) {
                                         names.push(a.name);
+                                    }
+                                    // Show the saved app even while it has no
+                                    // live entry (the list only refreshes on
+                                    // open/Refresh; streams come and go).
+                                    let saved = settingsManager ? settingsManager.voiceChatApp : "";
+                                    if (saved && saved !== "") {
+                                        let found = false;
+                                        for (let a of apps) {
+                                            if (a.binary && a.binary.toLowerCase() === saved.toLowerCase()) { found = true; break; }
+                                        }
+                                        if (!found) names.push(saved);
                                     }
                                     names;
                                 }
@@ -883,9 +905,9 @@ Page {
                                         let saved = settingsManager.voiceChatApp;
                                         if (!saved || saved === "") return 0;
                                         for (let i = 0; i < apps.length; i++) {
-                                            if (apps[i].binary === saved) return i + 1;
+                                            if (apps[i].binary && apps[i].binary.toLowerCase() === saved.toLowerCase()) return i + 1;
                                         }
-                                        return 0;
+                                        return apps.length + 1; // saved but unmatched entry
                                     })()
                                 }
 
@@ -896,6 +918,7 @@ Page {
                                         } else if (currentIndex > 0 && currentIndex <= apps.length) {
                                             settingsManager.voiceChatApp = apps[currentIndex - 1].binary;
                                         }
+                                        // Saved-but-unmatched entry: keep the saved value.
                                     }
                                 }
 
@@ -909,7 +932,7 @@ Page {
 
                             TrophyButton {
                                 text: qsTr("Refresh")
-                                enabled: audioDeviceEnumerator && !(recordingManager && recordingManager.isRecording)
+                                enabled: audioDeviceEnumerator
                                 onClicked: if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
                             }
                         }
@@ -1018,7 +1041,9 @@ Page {
 
                                 Layout.fillWidth: true
                                 from: 0
-                                to: 500
+                                // Upper bound is the drive holding the
+                                // recordings (0 = unknown → legacy 500 GB cap).
+                                to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500
                                 stepSize: 0.1
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
                                 onPressedChanged: {
@@ -1028,7 +1053,7 @@ Page {
                             }
 
                             ValuePill {
-                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : storageSlider.value < 1 ? storageSlider.value.toFixed(1) + " GB" : Math.round(storageSlider.value) + " GB"
+                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : storageSlider.value >= 1024 ? (storageSlider.value / 1024).toFixed(1) + " TB" : storageSlider.value < 1 ? storageSlider.value.toFixed(1) + " GB" : Math.round(storageSlider.value) + " GB"
                             }
                         }
                     }
@@ -1052,6 +1077,79 @@ Page {
                                 }
 
                                 setAutoCleanupEnabled(checked);
+                            }
+                        }
+                    }
+                }
+
+                // ================= NOTIFICATIONS =================
+                SectionCard {
+                    id: notificationsCard
+                    sectionTitle: qsTr("Notifications")
+                    iconText: "🔔"
+                    description: qsTr("Which popups Trophy may show. Errors, the capture-authorize prompt and direct keypress feedback always show.")
+
+                    SettingRow {
+                        label: qsTr("Recording Notices")
+                        help: qsTr("Recording started and recording saved.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.notifyRecordings : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.notifyRecordings = checked;
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Clip Notices")
+                        help: qsTr("Clip saved after pressing the clip key.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.notifyClips : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.notifyClips = checked;
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Storage Notices")
+                        help: qsTr("Storage-full warnings.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.notifyStorage : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.notifyStorage = checked;
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Clip Completion Sound")
+                        help: qsTr("Play a short chime when a clip finishes saving.")
+
+                        RowLayout {
+                            spacing: Theme.spacingSmall
+
+                            TrophyButton {
+                                text: qsTr("Test")
+                                onClicked: if (app) app.playClipPing(true)
+                            }
+
+                            TrophySwitch {
+                                Layout.alignment: Qt.AlignVCenter
+                                checked: settingsManager ? settingsManager.clipPingEnabled : true
+                                onToggled: {
+                                    if (settingsManager)
+                                        settingsManager.clipPingEnabled = checked;
+                                }
                             }
                         }
                     }

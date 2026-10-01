@@ -273,14 +273,17 @@ Page {
                 }
             }
 
-            // Recording settings box
+            // Recording settings box (height follows content; a fixed
+            // height either clips the meters or leaves dead slack, and a
+            // plain Rectangle takes no height from anchored children)
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 140
+                Layout.preferredHeight: settingsContent.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
 
                 ColumnLayout {
+                    id: settingsContent
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
@@ -305,7 +308,7 @@ Page {
 
                     GridLayout {
                         Layout.fillWidth: true
-                        columns: 2
+                        columns: 3
                         columnSpacing: Theme.spacingMedium
                         rowSpacing: Theme.spacingSmall
 
@@ -335,6 +338,27 @@ Page {
                             }
                         }
 
+                        // Audio levels (spans both rows; one icon+bar row
+                        // per track)
+                        ColumnLayout {
+                            Layout.rowSpan: 2
+                            Layout.fillHeight: true
+                            spacing: 2
+                            Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                            Repeater {
+                                id: dashMeters
+                                model: 3
+
+                                AudioLevelMeter {
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 24
+                                    label: audioMixer ? audioMixer.trackName(index) : ""
+                                    onMutedChanged: if (app) app.setTrackMuted(index, muted)
+                                }
+                            }
+                        }
+
                         // Quality
                         ColumnLayout {
                             spacing: 2
@@ -347,6 +371,23 @@ Page {
                             spacing: 2
                             Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
                             Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor }
+                        }
+                    }
+
+                    Timer {
+                        interval: 100
+                        running: root.visible
+                        repeat: true
+                        onTriggered: {
+                            if (!app) return;
+                            const live = (recordingManager && recordingManager.isRecording) || (replayManager && replayManager.active);
+                            for (let i = 0; i < 3; i++) {
+                                const m = dashMeters.itemAt(i);
+                                if (m) {
+                                    m.level = live ? app.trackLevel(i) : 0;
+                                    m.muted = app.isTrackMuted(i);
+                                }
+                            }
                         }
                     }
                 }
