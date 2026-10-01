@@ -42,9 +42,19 @@ bool ControlServer::isListening() const {
 bool ControlServer::listen() {
   if (isListening())
     return true;
-  // Drop a stale socket file from a crashed run, then listen. A live
-  // instance would have answered sendCommand first, so removing here
-  // cannot steal another instance's socket.
+  // Probe before removing: if a live instance owns this path, back off
+  // rather than stealing its socket. (main()'s instance lock normally
+  // prevents this; the probe covers the concurrent-startup race.)
+  {
+    QLocalSocket probe;
+    probe.connectToServer(m_socketPath);
+    if (probe.waitForConnected(300)) {
+      qWarning() << "Control socket owned by a running instance; not stealing"
+                 << m_socketPath;
+      return false;
+    }
+  }
+  // No live owner: drop a stale file from a crashed run, then listen.
   QLocalServer::removeServer(m_socketPath);
   if (!m_server->listen(m_socketPath)) {
     qWarning() << "Control socket failed to listen:" << m_server->errorString();

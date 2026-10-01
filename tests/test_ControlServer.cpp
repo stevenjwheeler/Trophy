@@ -6,6 +6,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QLocalSocket>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -98,6 +99,36 @@ TEST_F(ControlServerTest, UnknownCommandsIgnored) {
   EXPECT_EQ(showSpy.count(), 0);
 }
 
+TEST_F(ControlServerTest, SecondListenDoesNotStealLiveSocket) {
+  ControlServer first(sockPath);
+  ASSERT_TRUE(first.listen());
+
+  // A rival listener on a live path must back off, not remove the socket.
+  ControlServer rival(sockPath);
+  EXPECT_FALSE(rival.listen());
+  EXPECT_TRUE(first.isListening());
+
+  // The original owner still serves commands afterwards.
+  QSignalSpy showSpy(&first, &ControlServer::showWindowRequested);
+  EXPECT_TRUE(ControlServer::sendCommandTo(sockPath, "show-window", 2000));
+  EXPECT_TRUE(waitFor([&] { return showSpy.count() == 1; }));
+}
+
+TEST_F(ControlServerTest, ListenRecoversStaleSocketFile) {
+  // A crashed run leaves a socket file with nobody behind it: listen()
+  // must clear it and serve. Simulate with a server that is destroyed
+  // without close() cleanup... QLocalServer removes on close, so instead
+  // plant a plain file at the path.
+  const QString stalePath = tempDir.path() + "/stale.sock";
+  QFile plant(stalePath);
+  ASSERT_TRUE(plant.open(QIODevice::WriteOnly));
+  plant.write("dead");
+  plant.close();
+
+  ControlServer server(stalePath);
+  EXPECT_TRUE(server.listen());
+  EXPECT_TRUE(server.isListening());
+}
 TEST_F(ControlServerTest, SendCommandFailsWithoutServer) {
   // Nothing listens on the isolated path (never the default: a running
   // Trophy instance would answer there and break isolation).

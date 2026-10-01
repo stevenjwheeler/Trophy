@@ -13,8 +13,10 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QIcon>
+#include <QLockFile>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QStandardPaths>
 #include <csignal>
 
 namespace {
@@ -68,6 +70,19 @@ int main(int argc, char *argv[]) {
       }
       break;
     }
+  }
+
+  // Single-instance guard: a second plain launch raises the running
+  // instance instead of starting a second GUI (which double-recorded).
+  // Held for the process lifetime; a crash leaves a stale lock that
+  // QLockFile clears via PID detection.
+  QLockFile instanceLock(QStandardPaths::writableLocation(
+                             QStandardPaths::RuntimeLocation) +
+                         QStringLiteral("/trophy.lock"));
+  if (!instanceLock.tryLock()) {
+    TrophyBackend::ControlServer::sendCommand(QStringLiteral("show-window")); // best effort
+    qInfo() << "Trophy is already running; showing the existing window.";
+    return 0;
   }
 
   // Set application icon
