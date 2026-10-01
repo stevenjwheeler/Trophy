@@ -105,8 +105,16 @@ ApplicationWindow {
     function openWindowPicker() {
         console.log("openWindowPicker called. app.isWayland:", window.app.isWayland);
         if (window.app.isWayland) {
-            // On Wayland, the system portal handles window/screen selection.
-            window.recordingManager.startRecording();
+            // A detected game records directly (same as the hotkey/tray
+            // paths); the picker is only for idle manual capture. The
+            // portal reports every KWin source as generic "kwin_wayland",
+            // so a picker choice made while a game runs could never be
+            // named correctly anyway.
+            if (window.gameDetector && window.gameDetector.currentGameName !== "")
+                window.recordingManager.startRecording(window.gameDetector.currentGameName);
+            else
+                // On Wayland, the system portal handles window/screen selection.
+                window.recordingManager.startRecording();
         } else {
             console.log("Opening windowPicker dialog.");
             windowPicker.open();

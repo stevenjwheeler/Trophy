@@ -98,3 +98,30 @@ TEST_F(RecordingManagerTest,
             static_cast<int>(RecordingManager::RecordingState::Idle));
   EXPECT_GT(storage.usedSize(), storage.maxSize());
 }
+
+// --- Captured-source naming (manual recording while a game is detected
+// must not inherit the detected game when the portal captured
+// something else) ---
+
+TEST_F(RecordingManagerTest, GenericSourceLabelsCarryNoIdentity) {
+  EXPECT_TRUE(RecordingManager::isGenericSourceLabel(""));
+  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("Unknown Game"));
+  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("KWin Wayland"));
+  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("steam_app_1422450"));
+  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Deadlock"));
+  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("deadlock.exe"));
+  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Firefox"));
+}
+
+TEST_F(RecordingManagerTest, SourceLabelsAgreeAcrossTitleAndExeForms) {
+  // Portal exe basenames agree with detector display names.
+  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("Deadlock", "deadlock.exe"));
+  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("deadlock.exe", "Deadlock"));
+  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("Firefox", "firefox"));
+  // A different captured window disagrees with the detected game.
+  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Firefox", "Deadlock"));
+  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Deadlock", "Discord"));
+  // Empty labels never agree (callers guard empties separately).
+  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("", "Deadlock"));
+  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Deadlock", ""));
+}

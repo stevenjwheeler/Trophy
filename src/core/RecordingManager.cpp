@@ -31,6 +31,7 @@ extern "C" {
 
 #include <QDateTime>
 #include <QDir>
+#include <QRegularExpression>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QStringList>
@@ -71,6 +72,28 @@ void RecordingManager::setWindowService(WindowService *ws) {
 
 void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
   m_gameDetector = detector;
+}
+
+bool RecordingManager::isGenericSourceLabel(const QString &label) {
+  const QString lower = label.trimmed().toLower();
+  if (lower.isEmpty() || lower == "unknown game" || lower.contains("kwin") ||
+      lower.contains("wayland")) {
+    return true;
+  }
+  // Bare portal app-id with no title behind it (e.g. steam_app_1422450):
+  // evidence-free, so the detector guess stays preferable.
+  static const QRegularExpression appIdRe("^steam_app_\\d+$");
+  return appIdRe.match(lower).hasMatch();
+}
+
+bool RecordingManager::sourceLabelsAgree(const QString &a,
+                                         const QString &b) {
+  const QString al = a.trimmed().toLower();
+  const QString bl = b.trimmed().toLower();
+  if (al.isEmpty() || bl.isEmpty()) {
+    return false;
+  }
+  return al.contains(bl) || bl.contains(al);
 }
 
 void RecordingManager::startRecording(const QString &gameName,
@@ -235,6 +258,8 @@ void RecordingManager::finishPipelineAndStart() {
         m_currentGameName = label;
         emit currentGameNameChanged();
         m_currentFilePath = generateOutputPath();
+        if (m_storage)
+          m_storage->setExcludedRecordingPath(m_currentFilePath);
       } else if (m_manualWindowId != 0 && m_windowService) {
         // Fallback for manual capture where capture source provides empty
         // label
@@ -242,13 +267,32 @@ void RecordingManager::finishPipelineAndStart() {
         if (!m_currentGameName.isEmpty()) {
           emit currentGameNameChanged();
           m_currentFilePath = generateOutputPath();
+          if (m_storage)
+            m_storage->setExcludedRecordingPath(m_currentFilePath);
         }
       }
     } else {
-      qDebug() << "RecordingManager: Automatic recording, keeping detected game "
-                 "name:"
-              << m_currentGameName;
-      // Do nothing, preserving the game name passed into startRecording
+      // Automatic recording: the capture should be the detected game
+      // (silent restore / windows-only picker), but the user may still
+      // have picked another window. Trust a truthful portal label over
+      // the detector guess so captures of other windows aren't misnamed
+      // after a merely-detected game.
+      if (!label.isEmpty() && !isGenericSourceLabel(label) &&
+          !sourceLabelsAgree(label, m_currentGameName)) {
+        qDebug() << "RecordingManager: captured source" << label
+                 << "disagrees with detected game" << m_currentGameName
+                 << "- naming the recording after the captured source";
+        m_currentGameName = label;
+        emit currentGameNameChanged();
+        m_currentFilePath = generateOutputPath();
+        if (m_storage)
+          m_storage->setExcludedRecordingPath(m_currentFilePath);
+      } else {
+        qDebug() << "RecordingManager: Automatic recording, keeping detected "
+                    "game name:"
+                 << m_currentGameName;
+        // Do nothing, preserving the game name passed into startRecording
+      }
     }
   }
 

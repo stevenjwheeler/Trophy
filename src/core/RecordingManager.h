@@ -85,6 +85,23 @@ public:
                                   unsigned long windowId = 0);
   Q_INVOKABLE void stopRecording();
 
+  /**
+   * @brief Whether a portal source label carries no real identity.
+   *
+   * Empty, compositor-generic (kwin/wayland/Unknown Game) and bare
+   * portal app-ids (steam_app_<id> with no title behind them) say
+   * nothing about what is actually captured.
+   */
+  static bool isGenericSourceLabel(const QString &label);
+  /**
+   * @brief Whether two source names plausibly denote the same target.
+   *
+   * Case-insensitive containment either way ("Deadlock" vs
+   * "deadlock.exe"). Used to decide if the portal's captured source
+   * agrees with the detected game before adopting it as the file name.
+   */
+  static bool sourceLabelsAgree(const QString &a, const QString &b);
+
 signals:
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
