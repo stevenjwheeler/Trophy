@@ -27,6 +27,7 @@ ApplicationWindow {
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
     property var selectedRecordings: []
+    property int lastSelectedIndex: -1
 
     function toggleSelection(filePath) {
         var idx = selectedRecordings.indexOf(filePath);
@@ -39,8 +40,40 @@ ApplicationWindow {
         selectedRecordings = temp;
     }
 
+    function shiftSelectRange(currentIndex) {
+        if (lastSelectedIndex === -1 || !recordingLibrary) {
+            // First selection in this sequence - just toggle normally
+            if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
+                var recording = recordingLibrary.get(currentIndex);
+                if (recording) {
+                    toggleSelection(recording.filePath);
+                    lastSelectedIndex = currentIndex;
+                }
+            }
+            return;
+        }
+
+        var startIdx = Math.min(lastSelectedIndex, currentIndex);
+        var endIdx = Math.max(lastSelectedIndex, currentIndex);
+        var temp = selectedRecordings.slice();
+
+        // Select all items in the range
+        for (var i = startIdx; i <= endIdx; i++) {
+            if (recordingLibrary && i >= 0 && i < recordingLibrary.count) {
+                var rec = recordingLibrary.get(i);
+                if (rec && temp.indexOf(rec.filePath) === -1) {
+                    temp.push(rec.filePath);
+                }
+            }
+        }
+
+        selectedRecordings = temp;
+        lastSelectedIndex = currentIndex;
+    }
+
     function clearSelection() {
         selectedRecordings = [];
+        lastSelectedIndex = -1;
     }
 
     function exportSelected() {
@@ -104,6 +137,32 @@ ApplicationWindow {
             deleteDialog.fileName = fileName;
             deleteDialog.open();
         }
+    }
+
+    function requestRename(filePath, currentName) {
+        renameDialog.filePath = filePath;
+        renameDialog.renameField.text = currentName || "";
+        renameDialog.errorMessage = "";
+        renameDialog.open();
+        renameDialog.renameField.forceActiveFocus();
+        renameDialog.renameField.selectAll();
+    }
+
+    function performRename() {
+        var newPath = window.storageManager.renameRecording(renameDialog.filePath, renameDialog.renameField.text);
+        if (!newPath) {
+            renameDialog.errorMessage = qsTr("Rename failed. Try a different name using letters, numbers, - or _.");
+            return;
+        }
+        var idx = selectedRecordings.indexOf(renameDialog.filePath);
+        if (idx !== -1) {
+            var temp = selectedRecordings.slice();
+            temp[idx] = newPath;
+            selectedRecordings = temp;
+        }
+        if (window.recordingLibrary)
+            window.recordingLibrary.refresh();
+        renameDialog.close();
     }
 
     function updateGlobalSearchResults(query) {
@@ -248,9 +307,22 @@ ApplicationWindow {
     palette.window: "transparent"
 
     onClosing: function(close) {
-        if (window.recordingManager && window.recordingManager.isRecording) {
+        // Close-to-tray keeps Trophy (and any recording) running in the
+        // background; otherwise confirm when recording, else just quit.
+        if (window.app && window.app.minimizeToTray()) {
+            close.accepted = false;
+        } else if (window.recordingManager && window.recordingManager.isRecording) {
             closeConfirmDialog.open();
             close.accepted = false;
+        }
+    }
+
+    // Called from C++ (tray "Quit"): confirm when recording, else quit.
+    function requestQuit() {
+        if (window.recordingManager && window.recordingManager.isRecording) {
+            closeConfirmDialog.open();
+        } else {
+            Qt.quit();
         }
     }
 
@@ -487,6 +559,14 @@ ApplicationWindow {
         }
     }
 
+    Shortcut {
+        sequence: "F10"
+        onActivated: {
+            if (window.app)
+                window.app.requestReplay();
+        }
+    }
+
     TrophyDialog {
         id: closeConfirmDialog
         title: qsTr("Recording in Progress")
@@ -552,6 +632,84 @@ ApplicationWindow {
             performDeleteSelected();
             if (bulkDeleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
+        }
+    }
+
+    Dialog {
+        id: renameDialog
+        property string filePath: ""
+        property string errorMessage: ""
+        property alias renameField: renameField
+        title: qsTr("Rename Recording")
+        modal: true
+        anchors.centerIn: parent
+        width: 400
+        standardButtons: Dialog.NoButton
+
+        background: Rectangle {
+            color: Theme.cardColor || "#212121"
+            radius: Theme.radiusLarge
+            border.color: Theme.withOpacity(Theme.textColor, 0.1)
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingMedium
+
+            Label {
+                text: renameDialog.title
+                font.pixelSize: Theme.fontSizeLarge
+                font.weight: Font.Bold
+                color: Theme.textColor
+                Layout.fillWidth: true
+            }
+
+            TrophyTextField {
+                id: renameField
+                Layout.fillWidth: true
+                placeholderText: qsTr("Recording name")
+                maximumLength: 80
+                onAccepted: {
+                    if (text.trim().length > 0)
+                        window.performRename();
+                }
+                onTextChanged: {
+                    if (renameDialog.errorMessage !== "")
+                        renameDialog.errorMessage = "";
+                }
+            }
+
+            Label {
+                text: qsTr("The recording date is kept automatically.")
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.textMutedColor
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: renameDialog.errorMessage
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.errorColor
+                wrapMode: Text.WordWrap
+                visible: renameDialog.errorMessage !== ""
+                Layout.fillWidth: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                TrophyButton {
+                    text: qsTr("Cancel")
+                    onClicked: renameDialog.reject()
+                }
+                TrophyButton {
+                    text: qsTr("Rename")
+                    baseColor: Theme.accentColor || "#3498db"
+                    enabled: renameField.text.trim().length > 0
+                    onClicked: window.performRename()
+                }
+            }
         }
     }
 

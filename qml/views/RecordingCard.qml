@@ -16,6 +16,7 @@ Rectangle {
 
     property var recording: null
     property bool isAdaptive: true
+    property int cardIndex: -1
     readonly property bool hovered: hoverHandler.hovered
     property bool isSelected: window.selectedRecordings && recording && window.selectedRecordings.indexOf(recording.filePath) !== -1
     property bool isSelectionModeActive: window.selectedRecordings && window.selectedRecordings.length > 0
@@ -29,6 +30,7 @@ Rectangle {
 
     signal play()
     signal openFolder()
+    signal renameRequested()
     signal deleteRequested()
 
     function formatDuration(seconds) {
@@ -54,10 +56,17 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
-        onClicked: {
+        onClicked: (mouse) => {
             if (root.isSelectionModeActive) {
                 if (root.recording) {
-                    window.toggleSelection(root.recording.filePath);
+                    if (mouse.modifiers & Qt.ShiftModifier) {
+                        // Shift+click: range select
+                        window.shiftSelectRange(root.cardIndex);
+                    } else {
+                        // Regular click in selection mode: toggle this item
+                        window.toggleSelection(root.recording.filePath);
+                        window.lastSelectedIndex = root.cardIndex;
+                    }
                 }
             } else {
                 root.play();
@@ -163,6 +172,20 @@ Rectangle {
 
                     RoundButton {
                         width: 40; height: 40
+                        icon.source: "qrc:/icons/edit.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        onClicked: root.renameRequested()
+                        background: Rectangle {
+                            radius: 20
+                            color: parent.hovered ? '#cc303030' : "#00000000"
+                            border.color: "#ffffffff"
+                            border.width: 2
+                            scale: parent.hovered ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                        }
+                    }
+
+                    RoundButton {
+                        width: 40; height: 40
                         icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 28; icon.height: 28
                         onClicked: root.deleteRequested()
                         background: Rectangle {
@@ -252,9 +275,16 @@ Rectangle {
 
         MouseArea {
             anchors.fill: parent
-            onClicked: {
+            onClicked: (mouse) => {
                 if (root.recording) {
-                    window.toggleSelection(root.recording.filePath);
+                    if (mouse.modifiers & Qt.ShiftModifier) {
+                        // Shift+click: range select
+                        window.shiftSelectRange(root.cardIndex);
+                    } else {
+                        // Regular click: toggle this item
+                        window.toggleSelection(root.recording.filePath);
+                        window.lastSelectedIndex = root.cardIndex;
+                    }
                 }
             }
             cursorShape: Qt.PointingHandCursor

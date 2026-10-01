@@ -29,7 +29,12 @@ GridView {
     model: {
         var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
         if (skip > 0 && full.length > skip) {
-            return full.slice(skip);
+            full = full.slice(skip);
+        }
+        // Prepend a sentinel for the in-progress recording so the live
+        // card renders as the first grid cell while recording.
+        if (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) {
+            return [{ __live: true }].concat(full);
         }
         return full;
     }
@@ -44,23 +49,50 @@ GridView {
         font.pixelSize: Theme.fontSizeMedium
     }
 
-    delegate: RecordingCard {
+    delegate: Loader {
+        id: cellLoader
         width: root.cellWidth - Theme.spacingMedium
         height: Theme.recordingCardHeight
-        recording: modelData
-        onPlay: {
-            if (modelData) {
-                Qt.openUrlExternally("file://" + modelData.filePath);
-            }
+        // NOTE: modelData/index live on the delegate's context and do NOT
+        // resolve inside the Components below — forward them explicitly.
+        property var recData: modelData
+        property int recIdx: index
+        property bool isLive: modelData && modelData.__live === true
+        sourceComponent: isLive ? liveCardComponent : recordingCardComponent
+    }
+
+    Component {
+        id: liveCardComponent
+        ActiveRecordingCard {
+            anchors.fill: parent
         }
-        onOpenFolder: {
-            if (modelData) {
-                window.openFolder(modelData.directory);
+    }
+
+    Component {
+        id: recordingCardComponent
+        RecordingCard {
+            anchors.fill: parent
+            recording: parent.recData
+            cardIndex: parent.recIdx
+            onPlay: {
+                if (recording) {
+                    Qt.openUrlExternally("file://" + recording.filePath);
+                }
             }
-        }
-        onDeleteRequested: {
-            if (modelData) {
-                window.confirmDelete(modelData.filePath, modelData.fileName);
+            onOpenFolder: {
+                if (recording) {
+                    window.openFolder(recording.directory);
+                }
+            }
+            onDeleteRequested: {
+                if (recording) {
+                    window.confirmDelete(recording.filePath, recording.fileName);
+                }
+            }
+            onRenameRequested: {
+                if (recording) {
+                    window.requestRename(recording.filePath, recording.gameName);
+                }
             }
         }
     }

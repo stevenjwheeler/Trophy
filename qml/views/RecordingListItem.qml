@@ -133,6 +133,22 @@ ItemDelegate {
             RoundButton {
                 width: 32
                 height: 32
+                icon.source: "qrc:/icons/edit.svg"
+                icon.color: "white"
+                icon.width: 28
+                icon.height: 28
+                onClicked: window.requestRename(root.recording.filePath, root.recording.gameName)
+
+                background: Rectangle {
+                    radius: 16
+                    color: parent.hovered ? "#60FFFFFF" : "#40FFFFFF"
+                }
+
+            }
+
+            RoundButton {
+                width: 32
+                height: 32
                 icon.source: "qrc:/icons/trash.svg"
                 icon.color: "white"
                 icon.width: 28

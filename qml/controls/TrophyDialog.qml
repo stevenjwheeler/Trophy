@@ -22,11 +22,54 @@ T.Dialog {
     width: 400
     implicitHeight: mainLayout.implicitHeight
 
+    // Dimmed backdrop overlay
+    Overlay.modal: Rectangle {
+        color: Theme.withOpacity("#000000", 0.5)
+        Behavior on opacity {
+            NumberAnimation { duration: Theme.animationFast }
+        }
+    }
+
     background: Rectangle {
         color: Theme.cardColor || "#212121"
         radius: Theme.radiusLarge
         border.color: Theme.withOpacity(_text, 0.1)
         border.width: 1
+    }
+
+    // Open/close animation
+    enter: Transition {
+        NumberAnimation {
+            property: "opacity"
+            from: 0
+            to: 1
+            duration: Theme.animationNormal
+            easing.type: Easing.OutCubic
+        }
+        NumberAnimation {
+            property: "scale"
+            from: 0.92
+            to: 1
+            duration: Theme.animationNormal
+            easing.type: Easing.OutCubic
+        }
+    }
+
+    exit: Transition {
+        NumberAnimation {
+            property: "opacity"
+            from: 1
+            to: 0
+            duration: Theme.animationFast
+            easing.type: Easing.InCubic
+        }
+        NumberAnimation {
+            property: "scale"
+            from: 1
+            to: 0.95
+            duration: Theme.animationFast
+            easing.type: Easing.InCubic
+        }
     }
 
     contentItem: ColumnLayout {
@@ -95,7 +138,6 @@ T.Dialog {
                         ColorAnimation {
                             duration: 100
                         }
-
                     }
 
                 }

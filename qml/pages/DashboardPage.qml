@@ -36,7 +36,9 @@ Page {
     }
 
     function scrollToRecording(index) {
-        recordingsGrid.positionViewAtIndex(index, GridView.Beginning);
+        // Index is into the library; offset past the live card when recording.
+        var offset = (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0;
+        recordingsGrid.positionViewAtIndex(index + offset, GridView.Beginning);
     }
 
     RowLayout {
