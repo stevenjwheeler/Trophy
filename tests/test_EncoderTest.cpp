@@ -28,15 +28,18 @@ protected:
       return "h264_nvenc";
     case FFmpegEncoder::EncoderType::NVENC_HEVC:
       return "hevc_nvenc";
+    case FFmpegEncoder::EncoderType::NVENC_AV1:
+      return "av1_nvenc";
     case FFmpegEncoder::EncoderType::VAAPI_H264:
       return "h264_vaapi";
     case FFmpegEncoder::EncoderType::VAAPI_HEVC:
       return "hevc_vaapi";
+    case FFmpegEncoder::EncoderType::VAAPI_AV1:
+      return "av1_vaapi";
     case FFmpegEncoder::EncoderType::Software_x264:
       return "libx264";
-    default:
-      return "";
     }
+    return "";
   }
 };
 
@@ -103,8 +106,10 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::Values(FFmpegEncoder::EncoderType::NVENC_H264,
                           FFmpegEncoder::EncoderType::NVENC_HEVC,
+                          FFmpegEncoder::EncoderType::NVENC_AV1,
                           FFmpegEncoder::EncoderType::VAAPI_H264,
                           FFmpegEncoder::EncoderType::VAAPI_HEVC,
+                          FFmpegEncoder::EncoderType::VAAPI_AV1,
                           FFmpegEncoder::EncoderType::Software_x264),
         ::testing::Values("ultrafast", "medium"),
         ::testing::Values(QSize(1280, 720), QSize(1080, 1296))));

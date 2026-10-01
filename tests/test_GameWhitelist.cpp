@@ -34,27 +34,44 @@ static auto *env =
 
 class GameWhitelistTest : public ::testing::Test {
 protected:
-  void SetUp() override { wl = std::make_unique<GameWhitelist>(); }
+  // NOTE: declared before wl so it outlives it.
+  QTemporaryDir configHome;
+  QByteArray oldXdgConfigHome;
+  std::unique_ptr<GameWhitelist> wl;
+
+  void SetUp() override {
+    ASSERT_TRUE(configHome.isValid());
+    // Isolate from the user's real ~/.config/trophy config: GameWhitelist
+    // resolves its path via XDG_CONFIG_HOME on Linux.
+    oldXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
+    wl = std::make_unique<GameWhitelist>();
+  }
 
   void TearDown() override {
     wl.reset();
-    // Clean up any saved config files
-    QString configPath =
-        QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
-    QDir configDir(configPath + "/trophy");
-    if (configDir.exists()) {
-      configDir.removeRecursively();
-    }
+    if (oldXdgConfigHome.isNull())
+      qunsetenv("XDG_CONFIG_HOME");
+    else
+      qputenv("XDG_CONFIG_HOME", oldXdgConfigHome);
   }
-
-  std::unique_ptr<GameWhitelist> wl;
 };
 
-// --- Empty Default State ---
+// --- Built-in default state ---
 
-TEST_F(GameWhitelistTest, EmptyByDefault) {
+TEST_F(GameWhitelistTest, WhitelistEmptyByDefault) {
   EXPECT_TRUE(wl->whitelistEntries().isEmpty());
-  EXPECT_TRUE(wl->blacklistEntries().isEmpty());
+}
+
+TEST_F(GameWhitelistTest, BlacklistHasBuiltInDefaults) {
+  // Constructor pre-populates well-known non-games so the detector
+  // ignores launchers, chat apps, and test tools out of the box.
+  QStringList entries = wl->blacklistEntries();
+  EXPECT_FALSE(entries.isEmpty());
+  EXPECT_TRUE(wl->isBlacklisted("steam"));
+  EXPECT_TRUE(wl->isBlacklisted("discord"));
+  EXPECT_TRUE(wl->isBlacklisted("obs"));
+  EXPECT_TRUE(wl->isBlacklisted("vkcube"));
 }
 
 // --- Whitelist CRUD ---
@@ -120,11 +137,12 @@ TEST_F(GameWhitelistTest, RemoveFromBlacklist) {
 }
 
 TEST_F(GameWhitelistTest, BlacklistEntriesListing) {
+  const int initialSize = wl->blacklistEntries().size();
   wl->addToBlacklist("app1");
   wl->addToBlacklist("app2");
 
   QStringList entries = wl->blacklistEntries();
-  EXPECT_EQ(entries.size(), 2);
+  EXPECT_EQ(entries.size(), initialSize + 2);
   EXPECT_TRUE(entries.contains("app1"));
   EXPECT_TRUE(entries.contains("app2"));
 }
@@ -155,10 +173,10 @@ TEST_F(GameWhitelistTest, SaveLoadRoundTrip) {
 }
 
 TEST_F(GameWhitelistTest, LoadNonExistentFile) {
-  // Should not crash, just result in empty lists
+  // Should not crash; whitelist stays empty, built-in blacklist stays intact.
   wl->load();
   EXPECT_TRUE(wl->whitelistEntries().isEmpty());
-  EXPECT_TRUE(wl->blacklistEntries().isEmpty());
+  EXPECT_TRUE(wl->isBlacklisted("steam"));
 }
 
 // --- Mixed operations ---
