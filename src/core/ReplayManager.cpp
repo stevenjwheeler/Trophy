@@ -268,6 +268,12 @@ bool ReplayManager::beginSegment() {
     return false;
   enc.fps = m_settings->fps();
   enc.bitrate = m_settings->videoBitrate();
+  // DVR-only 1s GOP: clip cuts land on keyframes, so a shorter interval
+  // keeps saved clips within ~1s of the buffer setting (30.0–31.0s reads
+  // as 0:30). Full recordings keep the 2s default — smaller files, and
+  // nothing trims them mid-stream. Slightly larger segment files is the
+  // price; they live in cache and rotate away.
+  enc.keyframeInterval = 1;
   enc.maxBitrate = m_settings->maxVideoBitrate();
   enc.useVBR = m_settings->useVBR();
   enc.preset = m_settings->encoderPreset();
@@ -566,11 +572,12 @@ void ReplayManager::saveReplay() {
 
   const double window = std::max(1, m_settings->clipBufferSeconds());
   QList<ReplaySegment> segs = selectForWindow(m_segments, now, window);
-  // Actual span, not the setting: within the first `window` seconds of
-  // buffering there is less than a full window to save.
-  double actualSec = window;
-  if (!segs.isEmpty())
-    actualSec = std::min(window, std::max(0.0, now - segs.front().startOffsetSec));
+  // Fallback span when the remux can't report one: within the first
+  // `window` seconds of buffering there is less than a full window.
+  const double fallbackSec =
+      segs.isEmpty()
+          ? window
+          : std::min(window, std::max(0.0, now - segs.front().startOffsetSec));
   const QString out = clipOutputPath();
 
   // Remux off the UI thread; completion hops back via queued invoke.
@@ -580,9 +587,13 @@ void ReplayManager::saveReplay() {
   QPointer<ReplayManager> self(this);
   const QString tmpOut = out + ".part";
   QFile::remove(tmpOut);
-  std::thread([self, segs, window, actualSec, out, tmpOut]() {
+  std::thread([self, segs, window, fallbackSec, out, tmpOut]() {
     QString err;
-    bool ok = ReplayClipper::saveTail(segs, window, tmpOut, &err);
+    double keptSec = 0.0;
+    bool ok = ReplayClipper::saveTail(segs, window, tmpOut, &err, &keptSec);
+    // Report what the file actually holds (keyframe overshoot runs up
+    // to a GOP over the setting), not the aspirational setting.
+    const double actualSec = keptSec > 0 ? keptSec : fallbackSec;
     if (ok && QFile::exists(out))
       QFile::remove(out);
     if (ok)

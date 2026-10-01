@@ -56,18 +56,22 @@ protected:
     return path;
   }
 
-  // Render a real 1s clip with an embedded container title using the
+  // Render a real 1s clip with embedded container tags using the
   // system ffmpeg. Empty string when ffmpeg is unavailable (callers
   // should SKIP).
-  QString makeTitledClip(const QString &name, const QString &title) {
+  QString makeTitledClip(const QString &name, const QString &title,
+                         const QString &kind = QString()) {
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
       return QString();
     const QString path = tempDir.path() + "/" + name;
+    QStringList args{"-y",          "-v",     "error", "-f", "lavfi", "-i",
+                     "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt",
+                     "yuv420p",     "-metadata", QString("title=%1").arg(title)};
+    if (!kind.isEmpty())
+      args << "-metadata" << QString("trophy-kind=%1").arg(kind);
+    args << path;
     QProcess proc;
-    proc.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
-                          "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt",
-                          "yuv420p", "-metadata",
-                          QString("title=%1").arg(title), path});
+    proc.start("ffmpeg", args);
     if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
         !QFile::exists(path))
       return QString();
@@ -161,6 +165,38 @@ TEST_F(RecordingTest, ParseMP4Extension) {
   Recording rec(path);
   rec.loadMetadata();
   EXPECT_EQ(rec.gameName(), "Factorio");
+}
+
+TEST_F(RecordingTest, ParseClipFilename) {
+  QString path = createFile("Deadlock_2026-10-01_19-31-31_Replay.mkv");
+  Recording rec(path);
+  rec.loadMetadata();
+  EXPECT_EQ(rec.gameName(), "Deadlock");
+}
+
+// --- trophy-kind container tag (survives renames, unlike the suffix) ---
+
+TEST_F(RecordingTest, KindTagMarksClipWithoutSuffix) {
+  QString path = makeTitledClip("Custom_Name.mkv", "Deadlock", "clip");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  EXPECT_FALSE(rec.isClip());
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_TRUE(rec.isClip());
+}
+
+TEST_F(RecordingTest, NoKindTagLeavesRecording) {
+  QString path =
+      makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_FALSE(rec.isClip());
+  EXPECT_EQ(rec.gameName(), "Deadlock");
 }
 
 // --- Thumbnail path ---

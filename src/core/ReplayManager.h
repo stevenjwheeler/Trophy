@@ -42,6 +42,7 @@ class ReplayManager : public QObject {
   Q_OBJECT
 
   Q_PROPERTY(bool active READ isActive NOTIFY replayStateChanged)
+  Q_PROPERTY(QString currentGame READ currentGame NOTIFY replayStateChanged)
 
 public:
   static constexpr int kSegmentSeconds = 60;

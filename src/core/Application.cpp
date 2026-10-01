@@ -30,6 +30,7 @@
 #include "detection/VulkanLayer.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "encoding/EncoderFactory.h"
+#include "library/ActivityFeed.h"
 #include "library/RecordingLibrary.h"
 #include "settings/SettingsManager.h"
 
@@ -262,6 +263,7 @@ void Application::initializeServices() {
   m_notificationService = std::make_unique<NotificationService>(this);
   m_hardwareInfo = std::make_unique<HardwareInfo>(this);
   m_recordingLibrary = std::make_unique<RecordingLibrary>(m_settingsManager->recordingsPath(), this);
+  m_activityFeed = std::make_unique<ActivityFeed>(this);
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
@@ -329,6 +331,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("settingsManager", m_settingsManager.get());
   context->setContextProperty("storageManager", m_storageManager.get());
   context->setContextProperty("recordingLibrary", m_recordingLibrary.get());
+  context->setContextProperty("activityFeed", m_activityFeed.get());
   context->setContextProperty("gameDetector", m_gameDetector.get());
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());

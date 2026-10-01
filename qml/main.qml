@@ -219,25 +219,27 @@ ApplicationWindow {
                         "type": "clip",
                         "title": clip.gameName || "Unknown Game",
                         "subtitle": formatSize(clip.size) + " • " + clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm"),
-                        "index": i
+                        "targetIndex": i
                     });
                 }
             }
         }
 
-        // Search settings
+        // Search settings (names must match SettingsPage sections)
         var settings = [
-            { name: "Video Recording", section: "Video Recording", keywords: ["encoder", "av1", "nvenc", "vaapi", "h264", "hevc", "quality", "bitrate", "fps", "resolution", "mkv", "mp4"] },
-            { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "tracks", "desktop", "game"] },
-            { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "limit", "cleanup", "size", "delete"] },
-            { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify"] },
-            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "auto", "record", "launch", "game"] }
+            { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "background clips", "clip buffer", "clip cache", "zero-copy", "dma-buf", "wayland", "permissions", "screen capture"] },
+            { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
+            { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
+            { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test"] },
+            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "window tracking", "vulkan", "opengl", "shim", "auto", "record", "launch", "game"] },
+            { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
+            { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
 
         for (var j = 0; j < settings.length; j++) {
             var setting = settings[j];
             var settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
-                               (setting.keywords || []).some(k => (k || "").toLowerCase().includes(lowerQuery));
+                               (setting.keywords || []).some(k => { const kw = (k || "").toLowerCase(); return kw.includes(lowerQuery) || lowerQuery.includes(kw); });
 
             if (settingMatch) {
                 globalSearchBox.searchResults.append({
@@ -245,7 +247,7 @@ ApplicationWindow {
                     "title": setting.name,
                     "subtitle": "Settings",
                     "section": setting.section,
-                    "index": j
+                    "targetIndex": j
                 });
             }
         }
@@ -265,7 +267,7 @@ ApplicationWindow {
         if (!result) return;
         if (result.type === "clip") {
             window.currentPage = 0; // Dashboard
-            dashboardPage.scrollToRecording(result.index);
+            dashboardPage.scrollToRecording(result.targetIndex);
         } else if (result.type === "setting") {
             window.currentPage = 2; // Settings
             settingsPage.scrollToSection(result.section);

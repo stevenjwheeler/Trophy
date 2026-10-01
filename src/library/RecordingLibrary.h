@@ -104,6 +104,11 @@ private:
   QFileSystemWatcher m_watcher;
   std::unique_ptr<ThumbnailGenerator> m_thumbnailGenerator;
   bool m_ignoreNextChange = false;
+  // Source path of an in-flight user rename (set by onRecordingRenamed,
+  // consumed by the refresh that follows). The old file is genuinely
+  // gone from disk, but observers must not hear recordingRemoved for
+  // it — otherwise renames show up as deletions in the activity feed.
+  QString m_renameSource;
   // File names (not paths) whose filename-derived title wins over the
   // container title tag. Populated by user renames, persisted next to the
   // library so it survives restarts and library moves.

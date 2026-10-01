@@ -125,6 +125,9 @@ void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
   m_fileNameTitlePreferred.remove(QFileInfo(oldPath).fileName());
   if (!newPath.isEmpty()) {
     m_fileNameTitlePreferred.insert(QFileInfo(newPath).fileName());
+    // Mark the source so the refresh below doesn't report its
+    // disappearance as a deletion (see removeRecording).
+    m_renameSource = oldPath;
   }
   saveCustomTitles();
 }
@@ -218,6 +221,10 @@ void RecordingLibrary::addRecording(const QString &filePath) {
 
   m_recordings.push_back(std::move(recording));
 
+  // Settle the filtered list before notifying: observers calling get()
+  // inside the slot (the dashboard activity feed does) must never see a
+  // stale list.
+  updateFilteredRecordings();
   emit recordingAdded(m_recordings.back().get());
 }
 
@@ -247,8 +254,21 @@ void RecordingLibrary::removeRecording(const QString &filePath) {
 
   if (it != m_recordings.end()) {
     m_recordings.erase(it, m_recordings.end());
-    emit recordingRemoved(filePath);
+    // Settle the filtered list BEFORE emitting: it still holds the raw
+    // pointer that erase() just freed, and any observer calling get()
+    // inside the slot would wrap a dangling QObject (live SIGSEGV,
+    // 2026-10-01: deleting a library item crashed in QV4::fromData via
+    // the new activity-feed onRecordingRemoved handler).
     updateFilteredRecordings();
+    // A rename's source path vanishes from disk too, but that is not a
+    // deletion — the renamed file arrives in the same refresh. Swallow
+    // the signal (marked by onRecordingRenamed) so renames don't show
+    // up as deletions in the activity feed.
+    if (filePath == m_renameSource) {
+      m_renameSource.clear();
+    } else {
+      emit recordingRemoved(filePath);
+    }
   }
 }
 

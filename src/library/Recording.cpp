@@ -75,6 +75,14 @@ void Recording::parseFileNameForGameName() {
   QFileInfo fileInfo(m_filePath);
   QString baseName = fileInfo.completeBaseName();
 
+  // Clip files append _Replay after the timestamp
+  // (<Game>_<ts>_Replay.mkv). The suffix is also the legacy clip
+  // marker (see the trophy-kind container tag, which wins and
+  // survives renames).
+  m_isClip = baseName.endsWith(QStringLiteral("_Replay"));
+  if (m_isClip)
+    baseName.chop(QString("_Replay").size());
+
   // Try to extract game name (everything before the timestamp)
   QRegularExpression timestampRe("_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$");
   int timestampIndex = baseName.indexOf(timestampRe);
@@ -144,6 +152,15 @@ void Recording::probeVideoFile() {
       if (creationTime.isValid()) {
         m_date = creationTime;
       }
+    }
+
+    // Media kind tag wins over the filename fallback and survives
+    // renames (the suffix does not). Absence keeps whatever the
+    // filename said.
+    tag = av_dict_get(formatCtx->metadata, "trophy-kind", nullptr, 0);
+    if (tag && tag->value) {
+      m_isClip = QString::fromUtf8(tag->value).trimmed().compare(
+                     QStringLiteral("clip"), Qt::CaseInsensitive) == 0;
     }
   }
 

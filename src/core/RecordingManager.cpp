@@ -553,6 +553,9 @@ bool RecordingManager::buildPipeline() {
   outputMetadata[QStringLiteral("title")] = m_currentGameName;
   outputMetadata[QStringLiteral("creation_time")] =
       QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+  // Media kind survives renames (unlike the _Replay filename suffix),
+  // so cards and the activity feed can always tell clips apart.
+  outputMetadata[QStringLiteral("trophy-kind")] = QStringLiteral("recording");
 
   // Create recording session to coordinate everything
     m_session = std::make_unique<RecordingSession>(

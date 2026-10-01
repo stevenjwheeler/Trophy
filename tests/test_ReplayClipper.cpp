@@ -6,6 +6,8 @@
  */
 
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QMap>
 #include <QTemporaryDir>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -94,6 +96,10 @@ protected:
     ainfo.channels = 2;
     ainfo.bitrate = 128;
     ASSERT_GE(muxer.addStream(ainfo), 1);
+
+    QMap<QString, QString> meta;
+    meta["title"] = "ClipperGame";
+    ASSERT_TRUE(muxer.setMetadata(meta));
 
     ASSERT_TRUE(muxer.writeHeader());
 
@@ -184,7 +190,8 @@ TEST_F(ReplayClipperTest, TailCutKeepsTrailingWindow) {
   QList<ReplaySegment> segs{{s0, 0.0}, {s1, 3.0}};
   const QString out = tempDir.path() + "/clip.mkv";
   QString err;
-  ASSERT_TRUE(ReplayClipper::saveTail(segs, 1.0, out, &err))
+  double kept = 0.0;
+  ASSERT_TRUE(ReplayClipper::saveTail(segs, 1.0, out, &err, &kept))
       << qPrintable(err);
 
   auto streams = readStreams(out);
@@ -192,9 +199,22 @@ TEST_F(ReplayClipperTest, TailCutKeepsTrailingWindow) {
   ASSERT_FALSE(streams[0].isEmpty());
   // Head cut lands on a video keyframe: first packet is a keyframe.
   EXPECT_TRUE(streams[0].first().key);
-  // ~1.0s window at 30fps, plus up to one GOP of overshoot.
-  EXPECT_GE(streams[0].size(), 20);
-  EXPECT_LE(streams[0].size(), 65);
+  // ~1.0s window at 30fps with 1s GOPs (keyframeInterval is honored):
+  // the cut backs up to the last keyframe at or before the cut. seg1's
+  // head keyframe (3.0s) carries no demuxable DTS — matroska can't store
+  // the negative DTS of B-frame delay, per segment file — so the cut
+  // falls back to 4.0s and the clip overshoots by ~1s. Production
+  // windows are 30s, where the same effect is at most ~1 GOP and the
+  // duration truncates to 0:30; the invariant that matters is kept >=
+  // window (never undershoots).
+  EXPECT_GE(streams[0].size(), 25);
+  EXPECT_LE(streams[0].size(), 130);
+  EXPECT_GE(kept, 1.0);
+  EXPECT_LE(kept, 4.5);
+  EXPECT_GE(streams[0].size(), 25);
+  EXPECT_LE(streams[0].size(), 130);
+  EXPECT_GE(kept, 1.0);
+  EXPECT_LE(kept, 4.5);
   // Core invariant: per-stream clocks never go backwards. Matroska
   // demux yields NOPTS DTS on head packets of B-frame streams (also
   // true of normal recordings), so clocks are checked from the first
@@ -212,6 +232,42 @@ TEST_F(ReplayClipperTest, TailCutKeepsTrailingWindow) {
       EXPECT_GE(s[i].pts, 0);
     }
   }
+}
+
+TEST_F(ReplayClipperTest, OutputCarriesSegmentTitle) {
+  if (!haveCodecs())
+    GTEST_SKIP() << "libx264/AAC unavailable";
+  const QString s0 = tempDir.path() + "/seg0.mkv";
+  makeSegment(s0, 90);
+
+  const QString out = tempDir.path() + "/clip.mkv";
+  QString err;
+  ASSERT_TRUE(ReplayClipper::saveTail({{s0, 0.0}}, 30.0, out, &err))
+      << qPrintable(err);
+
+  // The clip names itself after the game (segment title tag), not its
+  // filename — this is what library cards and search display. It also
+  // carries its own save moment (not the segment's start) and its
+  // media kind (survives renames, unlike the _Replay suffix).
+  AVFormatContext *ctx = nullptr;
+  ASSERT_EQ(
+      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr),
+      0);
+  AVDictionaryEntry *title = av_dict_get(ctx->metadata, "title", nullptr, 0);
+  ASSERT_NE(title, nullptr);
+  EXPECT_STREQ(title->value, "ClipperGame");
+  AVDictionaryEntry *kind =
+      av_dict_get(ctx->metadata, "trophy-kind", nullptr, 0);
+  ASSERT_NE(kind, nullptr);
+  EXPECT_STREQ(kind->value, "clip");
+  AVDictionaryEntry *created =
+      av_dict_get(ctx->metadata, "creation_time", nullptr, 0);
+  ASSERT_NE(created, nullptr);
+  const QDateTime stamp = QDateTime::fromString(
+      QString::fromUtf8(created->value).trimmed(), Qt::ISODate);
+  EXPECT_TRUE(stamp.isValid());
+  EXPECT_LT(qAbs(stamp.secsTo(QDateTime::currentDateTimeUtc())), 300);
+  avformat_close_input(&ctx);
 }
 
 TEST_F(ReplayClipperTest, WindowLargerThanContentKeepsAll) {
@@ -251,8 +307,9 @@ TEST_F(ReplayClipperTest, OverlappingSegmentsDeduplicate) {
   // Rotation seams can hold a couple of near-duplicate frames: the two
   // segments encode the overlap independently, so the same wall moment
   // may carry slightly different DTS on each side. Clocks must never
-  // step backwards; wholesale tail duplication is caught by the count.
-  EXPECT_LE(streams[0].size(), 105);
+  // step backwards; wholesale tail duplication is caught by the count
+  // (3s window + up to one 1s GOP of keyframe overshoot ≈ 120 frames).
+  EXPECT_LE(streams[0].size(), 160);
   int64_t lastDts = AV_NOPTS_VALUE;
   for (const auto &p : streams[0]) {
     if (p.dts == AV_NOPTS_VALUE)

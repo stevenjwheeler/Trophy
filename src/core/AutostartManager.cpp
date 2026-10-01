@@ -64,7 +64,7 @@ bool AutostartManager::setEnabled(bool enabled, const QString &execPath) {
       << "Type=Application\n"
       << "Version=1.0\n"
       << "Name=Trophy\n"
-      << "Comment=Trophy game recording and clipping\n"
+      << "Comment=Game recording and clipping\n"
       << "Exec=" << execPath << " --minimized\n"
       << "Icon=trophy\n"
       << "Terminal=false\n"

@@ -7,6 +7,7 @@
 
 #include "ReplayClipper.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QFileInfo>
 
@@ -52,7 +53,7 @@ inline double pktPtsSec(const AVPacket *pkt, const AVRational &tb) {
 
 bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
                              double windowSeconds, const QString &outputPath,
-                             QString *error) {
+                             QString *error, double *keptSeconds) {
   auto fail = [&](const QString &msg) {
     qWarning() << "ReplayClipper:" << msg;
     if (error)
@@ -119,9 +120,12 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
     }
   }
 
-  // Find the global end (max video pts across segments, in seconds).
-  // Each pass opens its own handles (see above).
+  // Find the global end (max video pts across segments, in seconds)
+  // plus every video keyframe time (valid DTS only — file-head packets
+  // often lack one and a DTS-less start breaks the mux clock). Each pass
+  // opens its own handles (see above).
   double globalEnd = -1.0;
+  QVector<double> keyTimes;
   for (const Input &in : inputs) {
     QString msg;
     AVFormatContext *ctx = openInput(in, &msg);
@@ -134,6 +138,9 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
         const double t = in.offset + pktPtsSec(pkt, ctx->streams[0]->time_base);
         if (t > globalEnd)
           globalEnd = t;
+        if (t >= 0 && (pkt->flags & AV_PKT_FLAG_KEY) &&
+            pkt->dts != AV_NOPTS_VALUE)
+          keyTimes.push_back(t);
       }
       av_packet_unref(pkt);
     }
@@ -143,6 +150,22 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
     return fail("segments contain no video packets");
 
   const double cutSec = globalEnd - windowSeconds;
+  // Stream copy must start on a keyframe. Cutting at the first keyframe
+  // *after* the cut undershoots the window by up to a GOP (a 30s clip
+  // saved as 28s with 2s GOPs); cutting at the last keyframe *at or
+  // before* it overshoots by at most a GOP instead, keeping everything
+  // the user asked for. Falls back forward when the buffer is shorter
+  // than the window (cut before the first keyframe).
+  double lastBefore = -1.0, firstAfter = -1.0;
+  for (const double kt : keyTimes) {
+    if (kt <= cutSec && kt > lastBefore)
+      lastBefore = kt;
+    if (kt >= cutSec && (firstAfter < 0 || kt < firstAfter))
+      firstAfter = kt;
+  }
+  const double cutKey = (lastBefore >= 0) ? lastBefore : firstAfter;
+  if (cutKey < 0)
+    return fail("segments contain no usable keyframe");
 
   // Create the output with copied stream layouts.
   AVFormatContext *outCtx = nullptr;
@@ -158,6 +181,15 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
     if (!firstCtx)
       return fail(msg);
     InputContext firstHolder = wrapInput(firstCtx);
+    // Carry the segment's container tags (notably title=<game>) so the
+    // clip names itself after the game instead of its filename. Must
+    // precede the header write. Then stamp the clip's own identity: its
+    // save moment (not the segment's start) and its kind — the kind tag
+    // survives renames, unlike the _Replay filename suffix.
+    av_dict_copy(&outCtx->metadata, firstCtx->metadata, 0);
+    av_dict_set(&outCtx->metadata, "trophy-kind", "clip", 0);
+    av_dict_set(&outCtx->metadata, "creation_time",
+                QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toUtf8().constData(), 0);
     for (unsigned s = 0; s < nbStreams; ++s) {
       AVStream *inStream = firstCtx->streams[s];
       AVStream *outStream = avformat_new_stream(outCtx, nullptr);
@@ -179,8 +211,9 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   if (avformat_write_header(outCtx, nullptr) < 0)
     return fail("cannot write header");
 
-  // Copy pass, in file (decode) order. The cut is the first video
-  // keyframe with PTS >= cutSec; every video packet after it is kept
+  // Copy pass, in file (decode) order. The cut is the last video
+  // keyframe at or before cutSec (first one after it when the buffer is
+  // shorter than the window); every video packet from it on is kept
   // (closed GOPs keep PTS order within the kept range). All timestamps
   // are rebased in the microsecond domain against ONE anchor per stream
   // (the first kept packet's global DTS): a single anchor preserves the
@@ -188,6 +221,7 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   // Output DTS must never step backwards — older packets are overlap
   // duplicates from rotation.
   bool cutFound = false;
+  double firstVideoT = -1.0, lastVideoT = -1.0;
   QVector<int64_t> maxDtsOut(nbStreams, -1);
   QVector<int64_t> anchorUs(nbStreams, AV_NOPTS_VALUE);
   QVector<int> keptPerStream(nbStreams, 0);
@@ -214,21 +248,18 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
       const int64_t dtsUs = av_rescale_q(pkt->dts, inTb, AV_TIME_BASE_Q);
       const double t = (ptsUs + offsetUs) / double(AV_TIME_BASE);
       if (si == 0) {
-        // The cut keyframe needs a valid DTS too: file-head packets
-        // often lack one (matroska can't store the negative DTS of
-        // B-frame delay), and a DTS-less start breaks the mux clock.
-        // Skipping to the next keyframed packet loses at most one GOP,
-        // and only when the cut lands in the file's first GOP.
+        // cutKey was collected with the identical timestamp math, so the
+        // cut keyframe matches exactly (no epsilon needed).
         if (!cutFound) {
           if ((pkt->flags & AV_PKT_FLAG_KEY) &&
-              pkt->dts != AV_NOPTS_VALUE && t >= cutSec)
+              pkt->dts != AV_NOPTS_VALUE && t >= cutKey)
             cutFound = true;
           else {
             av_packet_unref(pkt);
             continue;
           }
         }
-      } else if (!cutFound || t < cutSec) {
+      } else if (!cutFound || t < cutKey) {
         av_packet_unref(pkt);
         continue;
       }
@@ -260,6 +291,11 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
         maxDtsOut[si] = outDts;
         ++keptPackets;
         ++keptPerStream[si];
+        if (si == 0) {
+          if (firstVideoT < 0)
+            firstVideoT = t;
+          lastVideoT = t;
+        }
       }
       av_packet_unref(pkt);
     }
@@ -269,8 +305,15 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   if (keptPackets == 0)
     return fail("window matched no packets");
 
-  fprintf(stderr, "CLIPDBG kept=%d (v=%d a=%d) cut=%.3f\n", keptPackets,
-          keptPerStream.value(0), keptPerStream.value(1), cutSec);
+  if (keptSeconds)
+    *keptSeconds =
+        (firstVideoT >= 0 && lastVideoT >= firstVideoT)
+            ? lastVideoT - firstVideoT
+            : 0.0;
+
+  fprintf(stderr, "CLIPDBG kept=%d (v=%d a=%d) cut=%.3f cutKey=%.3f\n",
+          keptPackets, keptPerStream.value(0), keptPerStream.value(1),
+          cutSec, cutKey);
 
   if (av_write_trailer(outCtx) < 0)
     return fail("cannot write trailer");

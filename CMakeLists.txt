@@ -239,6 +239,7 @@ set(LIBRARY_SOURCES
     src/library/RecordingLibrary.cpp
     src/library/Recording.cpp
     src/library/ThumbnailGenerator.cpp
+    src/library/ActivityFeed.cpp
 )
 
 set(SETTINGS_SOURCES
@@ -303,6 +304,7 @@ set(LIBRARY_HEADERS
     src/library/RecordingLibrary.h
     src/library/Recording.h
     src/library/ThumbnailGenerator.h
+    src/library/ActivityFeed.h
 )
 
 set(SETTINGS_HEADERS

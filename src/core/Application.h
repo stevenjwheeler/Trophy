@@ -18,6 +18,7 @@ class RecordingManager;
 class SettingsManager;
 class StorageManager;
 class RecordingLibrary;
+class ActivityFeed;
 class GameDetectionService;
 class NotificationService;
 class AudioMixer;
@@ -71,6 +72,7 @@ public:
   SettingsManager *settingsManager() const { return m_settingsManager.get(); }
   StorageManager *storageManager() const { return m_storageManager.get(); }
   RecordingLibrary *recordingLibrary() const { return m_recordingLibrary.get(); }
+  ActivityFeed *activityFeed() const { return m_activityFeed.get(); }
   GameDetectionService *gameDetector() const { return m_gameDetector.get(); }
   NotificationService *notificationService() const { return m_notificationService.get(); }
   HardwareInfo *hardwareInfo() const { return m_hardwareInfo.get(); }
@@ -144,6 +146,7 @@ private:
   std::unique_ptr<SettingsManager> m_settingsManager;
   std::unique_ptr<StorageManager> m_storageManager;
   std::unique_ptr<RecordingLibrary> m_recordingLibrary;
+  std::unique_ptr<ActivityFeed> m_activityFeed;
   std::unique_ptr<GameDetectionService> m_gameDetector;
   std::unique_ptr<NotificationService> m_notificationService;
   std::unique_ptr<HardwareInfo> m_hardwareInfo;

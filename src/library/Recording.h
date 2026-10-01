@@ -33,6 +33,9 @@ class Recording : public QObject {
       QString thumbnailPath READ thumbnailPath NOTIFY thumbnailPathChanged)
   Q_PROPERTY(int width READ width NOTIFY metadataChanged)
   Q_PROPERTY(int height READ height NOTIFY metadataChanged)
+  // Media kind: container tag (trophy-kind) wins, _Replay filename
+  // suffix is the fallback for older files. Survives renames.
+  Q_PROPERTY(bool isClip READ isClip NOTIFY metadataChanged)
 
 public:
   explicit Recording(const QString &filePath, QObject *parent = nullptr);
@@ -48,6 +51,7 @@ public:
   QString thumbnailPath() const { return m_thumbnailPath; }
   int width() const { return m_width; }
   int height() const { return m_height; }
+  bool isClip() const { return m_isClip; }
 
   void setThumbnailPath(const QString &path);
 
@@ -87,6 +91,7 @@ private:
   int m_width = 0;
   int m_height = 0;
   bool m_preferFileNameTitle = false;
+  bool m_isClip = false;
 };
 
 } // namespace TrophyBackend

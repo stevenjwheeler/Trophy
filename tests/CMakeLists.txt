@@ -34,6 +34,15 @@ target_include_directories(test_SystemTray PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_SystemTray PRIVATE ${TEST_LINK_LIBS} Qt6::Widgets)
 gtest_discover_tests(test_SystemTray)
 
+# --- ActivityFeed (dashboard timeline persistence; hermetic file path) ---
+add_executable(test_ActivityFeed test_ActivityFeed.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ActivityFeed.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ActivityFeed.h
+)
+target_include_directories(test_ActivityFeed PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ActivityFeed PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_ActivityFeed)
+
 # --- AutostartManager (isolated config home; no session changes) ---
 add_executable(test_Autostart test_Autostart.cpp ${CMAKE_SOURCE_DIR}/src/core/AutostartManager.cpp)
 target_include_directories(test_Autostart PRIVATE ${TEST_INCLUDE_DIRS})

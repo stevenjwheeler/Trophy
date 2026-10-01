@@ -13,6 +13,7 @@
 #include <QString>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <type_traits>
 #include <unistd.h>
 
@@ -404,7 +405,9 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   m_codecCtx->height = config.height;
   m_codecCtx->time_base = {1, 1000};
   m_codecCtx->framerate = {config.fps, 1};
-  m_codecCtx->gop_size = config.fps * 2;
+  // Honor the per-pipeline keyframe interval (DVR segments use 1s for
+  // tight clip cuts; recordings keep the 2s default). Was hardcoded.
+  m_codecCtx->gop_size = config.fps * std::max(1, config.keyframeInterval);
 
   if (isHardwareEncoder()) {
     m_codecCtx->pix_fmt = m_codecName.contains("nvenc") ? AV_PIX_FMT_CUDA : AV_PIX_FMT_VAAPI;
