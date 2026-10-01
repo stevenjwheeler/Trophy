@@ -57,6 +57,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     DBus
     Concurrent
     Network
+    Widgets
 )
 
 # Find Vulkan (for the detection layer)
@@ -89,6 +90,20 @@ pkg_check_modules(LIBDRM IMPORTED_TARGET libdrm)
 if(LIBDRM_FOUND)
     message(STATUS "libdrm found: ${LIBDRM_VERSION}")
     add_compile_definitions(HAVE_LIBDRM)
+endif()
+
+# Find EGL (for DMA-BUF modifier queries offered to the compositor)
+pkg_check_modules(EGL IMPORTED_TARGET egl)
+if(EGL_FOUND)
+    message(STATUS "EGL found: ${EGL_VERSION}")
+    add_compile_definitions(HAVE_EGL)
+endif()
+
+# Find GBM (for DMA-BUF test buffers; optional, tests only)
+pkg_check_modules(GBM IMPORTED_TARGET gbm)
+if(GBM_FOUND)
+    message(STATUS "GBM found: ${GBM_VERSION}")
+    add_compile_definitions(HAVE_GBM)
 endif()
 
 # Find VA-API (optional)
@@ -126,14 +141,64 @@ if(ENABLE_NVENC)
     endif()
 endif()
 
+# KWin monitor script: copy its contents to the build tree for dev runs
+# (KWinBackend looks in <appDir>/kwin-scripts/trophy-monitor); install
+# the same tree for packages.
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
+     DESTINATION "${CMAKE_BINARY_DIR}/kwin-scripts")
+
+# Detection shims (Vulkan layer + OpenGL LD_PRELOAD shim).
+# Both report to /tmp/trophy-detection.sock with the same START/STOP protocol.
+# NOTE: IEncoder has Q_OBJECT, so IEncoder.h (not a .cpp) is listed in test
+# target sources wherever FFmpegEncoder.cpp is compiled — AUTOMOC generates
+# the metaobject from the header. Same for the main Trophy target via
+# ENCODING_HEADERS.
+add_library(trophy_layer SHARED src/vulkan_layer/trophy_layer.cpp)
+target_link_libraries(trophy_layer PRIVATE Vulkan::Vulkan)
+set_target_properties(trophy_layer PROPERTIES
+    OUTPUT_NAME "trophy_layer"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/vulkan_layer"
+)
+
+add_library(trophy_gl_shim SHARED src/gl_shim/trophy_gl_shim.c)
+target_link_libraries(trophy_gl_shim PRIVATE dl)
+set_target_properties(trophy_gl_shim PROPERTIES
+    OUTPUT_NAME "trophy_gl_shim"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gl_shim"
+    C_STANDARD 11
+)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(trophy_gl_shim PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
+
+# Generate the implicit-layer JSON next to the built Vulkan layer so
+# Application::ensureVulkanLayerRegistered() finds it in dev builds.
+# NOTE: generator expressions don't expand in configure_file, so use the
+# predictable output path (LIBRARY_OUTPUT_DIRECTORY + OUTPUT_NAME above).
+set(LIBRARY_PATH "${CMAKE_BINARY_DIR}/vulkan_layer/libtrophy_layer.so")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_layer/trophy_layer.json.in"
+    "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
+    @ONLY
+)
+
 # Source files
 set(CORE_SOURCES
     src/core/Application.cpp
+    src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
     src/core/RecordingSession.cpp
     src/core/StorageManager.cpp
     src/core/NotificationService.cpp
+    src/core/SystemTrayManager.cpp
+    src/core/AutostartManager.cpp
+    src/core/ControlServer.cpp
+    src/core/GlobalShortcutManager.cpp
+    src/core/ReplayManager.cpp
     src/core/WindowService.cpp
+    src/core/FrameDispatcher.cpp
+    src/core/CircularFrameBuffer.cpp
+    src/core/FrameTypes.cpp
 )
 
 set(CAPTURE_SOURCES
@@ -159,6 +224,7 @@ set(ENCODING_SOURCES
 
 set(MUXING_SOURCES
     src/muxing/FFmpegMuxer.cpp
+    src/muxing/ReplayClipper.cpp
 )
 
 set(DETECTION_SOURCES
@@ -167,7 +233,7 @@ set(DETECTION_SOURCES
 )
 
 
-list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp)
+list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GlShimEnrollment.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
 
 set(LIBRARY_SOURCES
     src/library/RecordingLibrary.cpp
@@ -182,16 +248,23 @@ set(SETTINGS_SOURCES
 # Header files (for MOC)
 set(CORE_HEADERS
     src/core/Application.h
+    src/core/HardwareInfo.h
     src/core/RecordingManager.h
     src/core/RecordingSession.h
     src/core/StorageManager.h
     src/core/NotificationService.h
+    src/core/SystemTrayManager.h
+    src/core/AutostartManager.h
+    src/core/ControlServer.h
+    src/core/GlobalShortcutManager.h
+    src/core/ReplayManager.h
     src/core/WindowService.h
 )
 
 set(CAPTURE_HEADERS
     src/capture/IVideoCaptureSource.h
     src/capture/CaptureFactory.h
+    src/capture/EglDmaBuf.h
 )
 
 
@@ -224,7 +297,7 @@ set(DETECTION_HEADERS
 )
 
 
-list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h)
+list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h src/detection/KWinBackend.h src/detection/WindowInfo.h src/detection/GlShimEnrollment.h src/detection/GnomeBackend.h src/detection/HyprlandBackend.h src/detection/SwayBackend.h src/detection/VulkanLayer.h)
 
 set(LIBRARY_HEADERS
     src/library/RecordingLibrary.h
@@ -278,14 +351,11 @@ qt_add_qml_module(${PROJECT_NAME}
     QML_FILES
         qml/main.qml
         qml/styles/Theme.qml
-        qml/components/RecordingIndicator.qml
         qml/components/AudioLevelMeter.qml
-        qml/components/StorageUsageBar.qml
         qml/components/NavigationRail.qml
         qml/components/WindowPickerDialog.qml
         qml/components/SetupWizard.qml
         qml/pages/DashboardPage.qml
-        qml/pages/RecordingsPage.qml
         qml/pages/InfoPage.qml
         qml/pages/SettingsPage.qml
         qml/pages/GameListPage.qml
@@ -323,6 +393,7 @@ target_link_libraries(${PROJECT_NAME}App PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
 )
 
 # Set executable output name
@@ -347,6 +418,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
     Qt6::Multimedia
     Qt6::DBus
     Qt6::Concurrent
@@ -368,6 +440,10 @@ endif()
 
 if(LIBDRM_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBDRM)
+endif()
+
+if(EGL_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::EGL)
 endif()
 
 
@@ -404,12 +480,34 @@ install(TARGETS ${PROJECT_NAME}App
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# The QML module library holds every C++ class and the whole QML resource
+# bundle (qrc:/qt/qml/TrophyBackend/...), and the app links against it. Not
+# installing it produced an installed binary that could not start at all:
+# "error while loading shared libraries: libTrophy.so". It lands in
+# <prefix>/lib, which the app's install-time RUNPATH ($ORIGIN/../lib)
+# already covers.
+install(TARGETS ${PROJECT_NAME}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
 install(FILES packaging/trophy.desktop
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
 )
 
 install(FILES resources/icons/trophy.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+)
+
+install(TARGETS trophy_layer trophy_gl_shim
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
+)
+install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/vulkan_layer
+)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
 )
 
 # CPack configuration
@@ -438,6 +536,7 @@ message(STATUS "")
 message(STATUS "Features:")
 message(STATUS "  PipeWire: ${PIPEWIRE_FOUND}")
 message(STATUS "  libdrm:   ${LIBDRM_FOUND}")
+message(STATUS "  EGL:      ${EGL_FOUND}")
 message(STATUS "  VA-API: ${VAAPI_FOUND}")
 message(STATUS "  NVENC: ${HAVE_NVENC_IN_FFMPEG}")
 message(STATUS "")
