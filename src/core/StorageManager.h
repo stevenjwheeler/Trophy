@@ -28,6 +28,7 @@ class StorageManager : public QObject {
   Q_PROPERTY(qint64 maxSize READ maxSize WRITE setMaxSize NOTIFY maxSizeChanged)
   Q_PROPERTY(double usagePercent READ usagePercent NOTIFY usedSizeChanged)
   Q_PROPERTY(qint64 availableSpace READ availableSpace NOTIFY usedSizeChanged)
+  Q_PROPERTY(bool autoDeleteOldest READ autoDeleteOldest WRITE setAutoDeleteOldest NOTIFY autoDeleteOldestChanged)
 
 public:
   explicit StorageManager(const QString &storagePath,
@@ -42,15 +43,21 @@ public:
   qint64 usedSize() const { return m_usedSize; }
   qint64 maxSize() const { return m_maxSize; }
   void setMaxSize(qint64 bytes);
+  bool autoDeleteOldest() const { return m_autoDeleteOldest; }
+  void setAutoDeleteOldest(bool enabled);
+  void setExcludedRecordingPath(const QString &filePath);
+  void clearExcludedRecordingPath();
   double usagePercent() const;
   qint64 availableSpace() const;
 
   // Operations
   Q_INVOKABLE void refresh();
-  Q_INVOKABLE void enforceStorageLimit();
+  Q_INVOKABLE bool enforceStorageLimit(bool allowDelete = false);
+  Q_INVOKABLE bool requestCleanup(bool force = false);
+  Q_INVOKABLE bool isOverLimit() const;
   Q_INVOKABLE bool deleteRecording(const QString &filePath);
-  Q_INVOKABLE QString generateFilePath(const QString &baseName,
-                                       const QString &extension) const;
+  Q_INVOKABLE QString renameRecording(const QString &filePath,
+                                      const QString &newTitle);
   Q_INVOKABLE bool exportRecording(const QString &sourcePath, const QString &destDir) const;
 
   // Formatting helpers
@@ -60,8 +67,11 @@ signals:
   void storagePathChanged();
   void usedSizeChanged();
   void maxSizeChanged();
+  void autoDeleteOldestChanged();
   void recordingDeleted(const QString &filePath);
+  void recordingRenamed(const QString &oldPath, const QString &newPath);
   void storageLimitReached();
+  void storageLimitCannotCleanup();
 
 private slots:
   void onDirectoryChanged(const QString &path);
@@ -69,11 +79,13 @@ private slots:
 private:
   qint64 calculateDirectorySize() const;
   QStringList getRecordingsSortedByDate() const;
-  void deleteOldestRecording();
+  bool deleteOldestRecording();
 
   QString m_storagePath;
   qint64 m_usedSize = 0;
   qint64 m_maxSize = 50LL * 1024 * 1024 * 1024; // 50 GB default
+  bool m_autoDeleteOldest = false;
+  QString m_excludedRecordingPath;
 
   QFileSystemWatcher m_watcher;
 };
