@@ -14,6 +14,9 @@
 #include <cstring>
 #include <unistd.h>
 
+#include <cerrno>
+#include <csignal>
+
 #include <algorithm>
 
 namespace TrophyBackend {
@@ -23,6 +26,16 @@ GameDetectionService::GameDetectionService(QObject *parent)
   m_server = new QLocalServer(this);
   connect(m_server, &QLocalServer::newConnection, this,
           &GameDetectionService::onNewConnection);
+
+  // Watchdog: games rarely tear down cleanly (no vkDestroyInstance on
+  // quit), so STOP/disconnect never arrives and the session outlives
+  // the game. A single kill(pid, 0) probe every few seconds closes the
+  // gap — targeted, not a scan. Armed while a game is tracked.
+  m_livenessTimer = new QTimer(this);
+  m_livenessTimer->setInterval(5000);
+  m_livenessTimer->setSingleShot(false);
+  connect(m_livenessTimer, &QTimer::timeout, this,
+          &GameDetectionService::onLivenessTimeout);
 
   m_whitelist->load();
 }
@@ -49,6 +62,7 @@ void GameDetectionService::stop() {
   if (!m_running)
     return;
   qInfo() << "Stopping game detection service";
+  m_livenessTimer->stop();
   m_server->close();
   m_running = false;
   
@@ -388,6 +402,28 @@ void GameDetectionService::onSocketDisconnected() {
   socket->deleteLater();
 }
 
+bool GameDetectionService::processExists(qint64 pid) {
+  if (pid <= 0)
+    return false;
+  if (::kill(static_cast<pid_t>(pid), 0) == 0)
+    return true;
+  // EPERM: process exists but is not signalable. Anything else
+  // (ESRCH) means it is gone.
+  return errno == EPERM;
+}
+
+void GameDetectionService::onLivenessTimeout() {
+  if (m_currentGamePid <= 0 || m_currentGameName.isEmpty())
+    return;
+  if (processExists(m_currentGamePid))
+    return;
+  qInfo() << "Tracked game process" << m_currentGamePid << "is gone ("
+          << m_currentGameName << ")- closing";
+  m_pidToGameName.remove(m_currentGamePid);
+  m_pendingCandidates.remove(m_currentGamePid);
+  updateCurrentGame("", 0);
+}
+
 QString GameDetectionService::getSteamAppName(uint appId) {
   if (appId == 0)
     return QString();
@@ -467,6 +503,14 @@ void GameDetectionService::updateCurrentGame(const QString &gameName,
   QString oldGame = m_currentGameName;
   m_currentGameName = gameName;
   m_currentGamePid = pid;
+
+  // Arm the liveness watchdog while a game is tracked; disarm on clear.
+  if (!gameName.isEmpty() && pid > 0) {
+    if (!m_livenessTimer->isActive())
+      m_livenessTimer->start();
+  } else {
+    m_livenessTimer->stop();
+  }
 
   emit currentGameChanged();
 

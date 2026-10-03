@@ -12,6 +12,7 @@
 #include <QMap>
 #include <QObject>
 #include <QSet>
+#include <QTimer>
 #include <memory>
 
 namespace TrophyBackend {
@@ -79,6 +80,14 @@ public:
   // from Steam games carry the id; resolving it gives display names.
   static uint steamAppIdFromAppId(const QString &appId);
 
+  /**
+   * @brief Whether a process currently exists (signal 0 probe).
+   *
+   * EPERM counts as alive (process exists but is not signalable).
+   * Pure predicate so tests can cover it without timers.
+   */
+  static bool processExists(qint64 pid);
+
 signals:
   void gameDetected(const QString &gameName, qint64 pid);
   void gameClosed(const QString &gameName);
@@ -90,6 +99,7 @@ private slots:
   void onSocketReadyRead();
   void onSocketDisconnected();
   void onMonitorWindowsChanged();
+  void onLivenessTimeout();
 
 private:
   // Grant the test class access to private members (fixes your build errors)
@@ -137,6 +147,9 @@ private:
   QLocalServer *m_server;
   QMap<QLocalSocket *, qint64> m_activeConnections;
   QMap<qint64, QString> m_pidToGameName;
+  // Liveness watchdog for the tracked game (see onLivenessTimeout): a
+  // single targeted kill(pid, 0) every few seconds — not a scan.
+  QTimer *m_livenessTimer = nullptr;
   // Shim reporters that did not (yet) pass the confidence gate. Pruned
   // on STOP/disconnect; re-checked whenever window state changes so a
   // game that starts windowed still detects when it goes fullscreen.

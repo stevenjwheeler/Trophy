@@ -597,4 +597,54 @@ TEST_F(GameDetectionServiceTest, ReconcileResolvesSteamClassToDisplayName) {
   EXPECT_EQ(service.currentGamePid(), pid);
 }
 
+TEST_F(GameDetectionServiceTest, ProcessExistsReflectsLiveness) {
+  EXPECT_TRUE(GameDetectionService::processExists(
+      QCoreApplication::applicationPid()));
+  EXPECT_FALSE(GameDetectionService::processExists(0));
+  EXPECT_FALSE(GameDetectionService::processExists(-7));
+
+  // A spawned child exists until reaped, then it is gone.
+  QProcess child;
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  EXPECT_TRUE(GameDetectionService::processExists(pid));
+  child.kill();
+  ASSERT_TRUE(child.waitForFinished(5000));
+  EXPECT_FALSE(GameDetectionService::processExists(pid));
+}
+
+TEST_F(GameDetectionServiceTest, LivenessWatchdogClosesDeadGame) {
+  // Live regression (2026-10-02): quitting Deadlock produced no STOP
+  // (no vkDestroyInstance on quit) and the socket lingered, so the
+  // session outlived the game by 8s of dead air. The held socket here
+  // silences the disconnect path on purpose: only the watchdog can
+  // close the game.
+  service.addToWhitelist("Liveness Game", "Liveness Game");
+
+  QProcess child;
+  child.start("sleep", {"60"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+
+  GameClient game;
+  ASSERT_TRUE(game.connect());
+  QSignalSpy detectedSpy(&service, &GameDetectionService::gameDetected);
+  QSignalSpy closedSpy(&service, &GameDetectionService::gameClosed);
+  ASSERT_TRUE(
+      game.send(QString("START:%1:Liveness Game\n").arg(pid)));
+  pump(300);
+  ASSERT_EQ(detectedSpy.count(), 1);
+  ASSERT_EQ(service.currentGamePid(), pid);
+
+  child.kill();
+  ASSERT_TRUE(child.waitForFinished(5000));
+
+  // Watchdog interval is 5s; the held socket keeps disconnect quiet.
+  ASSERT_TRUE(closedSpy.wait(12000));
+  EXPECT_EQ(closedSpy.count(), 1);
+  EXPECT_TRUE(service.currentGameName().isEmpty());
+  EXPECT_EQ(service.currentGamePid(), 0);
+}
+
 } // namespace TrophyBackend
