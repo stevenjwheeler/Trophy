@@ -570,6 +570,20 @@ void ReplayManager::saveReplay() {
   const double now = elapsedSec();
   finalizeSegment();
 
+  // Resume capture BEFORE remuxing: the remux takes seconds, and every
+  // frame in that window would otherwise be lost — a second clip taken
+  // soon after freezes at the first clip's save point. The remux thread
+  // only ever touches finalized files, so running capture alongside it
+  // is safe.
+  if (m_state == State::Running) {
+    m_rotationTimer->start();
+    if (!beginSegment()) {
+      stopDvr();
+      emit replayFailed("Clips stopped: encoder error.");
+      return;
+    }
+  }
+
   const double window = std::max(1, m_settings->clipBufferSeconds());
   QList<ReplaySegment> segs = selectForWindow(m_segments, now, window);
   // Fallback span when the remux can't report one: within the first
@@ -609,22 +623,11 @@ void ReplayManager::saveReplay() {
           if (!self)
             return;
           self->m_saving = false;
+          // Capture already resumed before the remux (see above); just
+          // publish the result.
           if (ok) {
-            if (self->m_state == State::Running)
-              self->m_rotationTimer->start();
-            // Resume buffering immediately with a fresh segment.
-            if (self->m_state == State::Running && !self->beginSegment()) {
-              self->stopDvr();
-              emit self->replayFailed("Clips stopped.");
-              return;
-            }
             emit self->replaySaved(out, actualSec);
           } else {
-            if (self->m_state == State::Running) {
-              self->m_rotationTimer->start();
-              if (!self->beginSegment())
-                self->stopDvr();
-            }
             emit self->replayFailed(err.isEmpty() ? "Could not save replay."
                                                   : err);
           }
