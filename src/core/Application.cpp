@@ -24,6 +24,7 @@
 #include "WindowService.h"
 #include "audio/AudioDeviceEnumerator.h"
 #include "audio/AudioMixer.h"
+#include "audio/PipeWireAudioSource.h"
 #include "capture/CaptureFactory.h"
 #include "detection/GameDetectionService.h"
 #include "detection/GlShimEnrollment.h"
@@ -305,6 +306,10 @@ void Application::initializeServices() {
   m_windowWaitTimer->setSingleShot(true);
   m_windowWaitTimer->setInterval(kWindowWaitMs);
 
+  m_audioWaitTimer = new QTimer(this);
+  m_audioWaitTimer->setSingleShot(false);
+  m_audioWaitTimer->setInterval(kAudioWaitMs);
+
   m_trayManager = std::make_unique<SystemTrayManager>(this);
   m_autostartManager = std::make_unique<AutostartManager>(this);
   m_replayManager = std::make_unique<ReplayManager>(this);
@@ -396,11 +401,8 @@ void Application::connectSignals() {
             m_pendingWindowGame.clear();
             m_windowWaitTimer->stop();
             qCDebug(appLog) << "Window appeared for" << game
-                            << "- starting deferred capture";
-            if (isRecord)
-              m_recordingManager->startRecording(game);
-            else
-              m_replayManager->startDvr(game);
+                            << "- waiting for settled game audio";
+            startWhenAudioSettled(game, isRecord);
           });
   connect(m_windowWaitTimer, &QTimer::timeout, this, [this]() {
             if (m_pendingWindowGame.isEmpty())
@@ -425,6 +427,42 @@ void Application::connectSignals() {
                                 : m_pendingDvrGame;
     if (!pending.isEmpty()) {
       m_notificationService->showNotification("New Game: " + pending, "Click to authorize Wayland capture for this game.", "trophy", 0, 2, true);
+    }
+  });
+  connect(m_audioWaitTimer, &QTimer::timeout, this, [this]() {
+    if (m_pendingAudioGame.isEmpty()) {
+      m_audioWaitTimer->stop();
+      return;
+    }
+    const QString game = m_pendingAudioGame;
+    const bool isRecord = m_pendingAudioIsRecord;
+    qint64 pid = 0;
+    if (m_gameDetector && m_gameDetector->currentGameName() == game)
+      pid = m_gameDetector->currentGamePid();
+    ++m_audioWaitTicks;
+    if (gameAudioNodePresent(game, pid)) {
+      if (++m_audioWaitHits >= 2) {
+        qCDebug(appLog) << "Game audio settled for" << game << "- starting";
+        m_pendingAudioGame.clear();
+        m_audioWaitTimer->stop();
+        if (isRecord)
+          m_recordingManager->startRecording(game);
+        else
+          m_replayManager->startDvr(game);
+        return;
+      }
+    } else {
+      m_audioWaitHits = 0;
+    }
+    if (m_audioWaitTicks >= kAudioWaitMaxTicks) {
+      qCDebug(appLog) << "Game audio never appeared for" << game
+                      << "- starting anyway (monitor fallback)";
+      m_pendingAudioGame.clear();
+      m_audioWaitTimer->stop();
+      if (isRecord)
+        m_recordingManager->startRecording(game);
+      else
+        m_replayManager->startDvr(game);
     }
   });
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game) {
@@ -455,6 +493,10 @@ void Application::connectSignals() {
             if (m_pendingWindowGame == gameName) {
               m_pendingWindowGame.clear();
               m_windowWaitTimer->stop();
+            }
+            if (m_pendingAudioGame == gameName) {
+              m_pendingAudioGame.clear();
+              m_audioWaitTimer->stop();
             }
             if (m_pendingAutoRecordGame.isEmpty() && m_pendingDvrGame.isEmpty()) {
               m_detectionDebounceTimer->stop();
@@ -688,14 +730,51 @@ void Application::connectSignals() {
 bool Application::isRecording() const { return m_recordingManager && m_recordingManager->isRecording(); }
 QString Application::currentGameName() const { return m_gameDetector ? m_gameDetector->currentGameName() : QString(); }
 
-void Application::startWhenWindowReady(const QString &game, bool isRecord) {
-  if (m_gameDetector && m_gameDetector->hasVisibleWindow()) {
-    qCDebug(appLog) << "Window present for" << game
+bool Application::gameAudioNodePresent(const QString &game, qint64 pid) {
+  // PW_ID_ANY without pulling pipewire headers into Application.
+  constexpr uint32_t kNoNode = 0xFFFFFFFFu;
+  if (pid > 0 &&
+      PipeWireAudioSource::findNodeByPid(static_cast<uint32_t>(pid)) !=
+          kNoNode) {
+    return true;
+  }
+  if (!game.isEmpty() &&
+      PipeWireAudioSource::findNodeByProcessName(game) != kNoNode) {
+    return true;
+  }
+  return false;
+}
+
+void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
+  qint64 pid = 0;
+  if (m_gameDetector && m_gameDetector->currentGameName() == game)
+    pid = m_gameDetector->currentGamePid();
+  if (gameAudioNodePresent(game, pid)) {
+    qCDebug(appLog) << "Game audio present for" << game
                     << "- starting capture immediately";
     if (isRecord)
       m_recordingManager->startRecording(game);
     else
       m_replayManager->startDvr(game);
+    return;
+  }
+  // Node not there yet (launching game): wait for it to appear and look
+  // stable across two polls; the timeout starts anyway with today's
+  // monitor-fallback behavior so a silent game never blocks capture.
+  qCDebug(appLog) << "Deferring capture for" << game
+                  << "until its audio node settles";
+  m_pendingAudioGame = game;
+  m_pendingAudioIsRecord = isRecord;
+  m_audioWaitHits = 0;
+  m_audioWaitTicks = 0;
+  m_audioWaitTimer->start();
+}
+
+void Application::startWhenWindowReady(const QString &game, bool isRecord) {
+  if (m_gameDetector && m_gameDetector->hasVisibleWindow()) {
+    qCDebug(appLog) << "Window present for" << game
+                    << "- waiting for settled game audio";
+    startWhenAudioSettled(game, isRecord);
     return;
   }
   // The portal can only restore against a concrete window; requesting now

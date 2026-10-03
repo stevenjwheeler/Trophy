@@ -174,6 +174,20 @@ private:
   bool m_pendingWindowIsRecord = false;
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
+  // Audio-settled capture: auto-armed recording/DVR waits for the
+  // game's PipeWire node to exist (stable across two polls) before
+  // starting, so launch sessions don't open on monitor fallback and
+  // swap mid-track. Bounded (~20s): the timeout starts anyway with
+  // today's fallback behavior. Manual starts never wait.
+  QTimer *m_audioWaitTimer = nullptr;
+  QString m_pendingAudioGame;
+  bool m_pendingAudioIsRecord = false;
+  int m_audioWaitHits = 0;
+  int m_audioWaitTicks = 0;
+  static constexpr int kAudioWaitMs = 2000;
+  static constexpr int kAudioWaitMaxTicks = 10;
+  void startWhenAudioSettled(const QString &game, bool isRecord);
+  static bool gameAudioNodePresent(const QString &game, qint64 pid);
   bool m_suppressNextStorageNotification = false;
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;
