@@ -14,6 +14,7 @@
 
 #include <QDebug>
 #include <algorithm>
+#include <chrono>
 
 extern "C" {
 #include <pipewire/pipewire.h>
@@ -38,6 +39,14 @@ RecordingSession::RecordingSession(const QString &outputPath,
 
 RecordingSession::~RecordingSession() { stop(); }
 
+int64_t RecordingSession::steadyNowUs() {
+  // Milliseconds; matches m_sessionStartMs units (×1000 at use sites
+  // needing microseconds).
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 bool RecordingSession::start() {
   if (m_running) {
     qWarning() << "Recording session already running";
@@ -50,6 +59,15 @@ bool RecordingSession::start() {
   m_frameCount = 0;
   m_bytesWritten = 0;
   m_running = true;
+  // First-bind gate baseline (game track): nodes sighted with the
+  // session bind at once; later arrivals must prove stability first.
+  m_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+  m_videoStarted = false;
+  m_videoStartWallUs = -1;
+  m_trackOffsetApplied.fill(false);
+  m_mergedOffsetApplied = false;
 
   if (!m_muxer->initialize(m_outputPath)) {
     m_running = false;
@@ -106,6 +124,10 @@ bool RecordingSession::start() {
           m_audioEncoders[i].reset();
           continue;
         }
+        // Wall-clock drift correction for this track (no-op pass-through
+        // if SWR allocation fails).
+        m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
+            audioConfig.sampleRate, audioConfig.channels);
         StreamInfo s;
         s.type = StreamInfo::Type::Audio;
         s.codecId = m_audioEncoders[i]->codecId();
@@ -133,7 +155,39 @@ bool RecordingSession::start() {
 
             EncodedPacket packet;
             std::lock_guard<std::mutex> lock(m_audioEncoderMutexes[trackIndex]);
-            if (m_audioEncoders[trackIndex]->encodeAudio(samples, frameCount,
+            const int64_t nowMs = steadyNowUs();
+            if (!m_videoStarted) {
+              if (m_sessionStartMs >= 0 &&
+                  nowMs - m_sessionStartMs > kVideoWaitTimeoutMs) {
+                m_videoStarted = true; // portal never delivered; record on
+              } else {
+                return; // drop pre-video audio: unpairable head content
+              }
+            }
+            // First feed past the gate starts this track's timestamps at
+            // the video-relative offset (late tracks) instead of zero.
+            if (!m_trackOffsetApplied[trackIndex]) {
+              const int64_t videoStartMs = m_videoStartWallUs >= 0
+                                               ? m_videoStartWallUs / 1000LL
+                                               : nowMs;
+              const int64_t skewMs = nowMs - videoStartMs;
+              if (skewMs > 0 && m_audioMixer) {
+                m_audioEncoders[trackIndex]->setStartOffsetSamples(
+                    skewMs * m_audioMixer->sampleRate() / 1000LL);
+              }
+              m_trackOffsetApplied[trackIndex] = true;
+            }
+            // Lock the track to the wall clock before encoding (timestamps
+            // count corrected samples, so they track video, not the
+            // sound-card crystal).
+            const float *fed = samples;
+            int fedFrames = frameCount;
+            if (auto &corr = m_driftCorrectors[trackIndex]) {
+              fedFrames = corr->process(samples, frameCount, fed);
+              if (fedFrames <= 0)
+                return;
+            }
+            if (m_audioEncoders[trackIndex]->encodeAudio(fed, fedFrames,
                                                          packet)) {
               int streamIdx = m_trackToStreamMap[trackIndex];
               if (streamIdx >= 0) {
@@ -151,6 +205,10 @@ bool RecordingSession::start() {
         qWarning() << "Failed to init merged audio encoder";
         m_mergedEncoder.reset();
       } else {
+        for (int i = 0; i < kAudioTrackCount; ++i) {
+          m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
+              audioConfig.sampleRate, audioConfig.channels);
+        }
         StreamInfo s;
         s.type = StreamInfo::Type::Audio;
         s.codecId = m_mergedEncoder->codecId();
@@ -173,9 +231,29 @@ bool RecordingSession::start() {
 
             std::lock_guard<std::mutex> lock(m_mergeMutex);
 
-            const int incoming = frameCount * channels;
+            // Same origin alignment as separate mode (drops pre-video
+            // audio; the merged origin is set at first mixed output
+            // below, once every active track contributes).
+            const int64_t nowMs = steadyNowUs();
+            if (!m_videoStarted) {
+              if (m_sessionStartMs >= 0 &&
+                  nowMs - m_sessionStartMs > kVideoWaitTimeoutMs) {
+                m_videoStarted = true;
+              } else {
+                return;
+              }
+            }
+
+            const float *fed = samples;
+            int fedFrames = frameCount;
+            if (auto &corr = m_driftCorrectors[trackIndex]) {
+              fedFrames = corr->process(samples, frameCount, fed);
+              if (fedFrames <= 0)
+                return;
+            }
+            const int incoming = fedFrames * channels;
             auto &buf = m_trackAccumulators[trackIndex];
-            buf.insert(buf.end(), samples, samples + incoming);
+            buf.insert(buf.end(), fed, fed + incoming);
 
             const int needed = 1024 * channels;
             while (true) {
@@ -199,6 +277,22 @@ bool RecordingSession::start() {
               }
               for (auto &v : mixed)
                 v = std::clamp(v, -1.0f, 1.0f);
+
+              // Origin alignment at first mixed output (all tracks
+              // contributing): late starts shift forward instead of
+              // baking in the skew.
+              if (!m_mergedOffsetApplied) {
+                const int64_t outMs = steadyNowUs();
+                const int64_t videoStartMs = m_videoStartWallUs >= 0
+                                                 ? m_videoStartWallUs / 1000LL
+                                                 : outMs;
+                const int64_t skewMs = outMs - videoStartMs;
+                if (skewMs > 0 && m_audioMixer) {
+                  m_mergedEncoder->setStartOffsetSamples(
+                      skewMs * m_audioMixer->sampleRate() / 1000LL);
+                }
+                m_mergedOffsetApplied = true;
+              }
 
               EncodedPacket packet;
               if (m_mergedEncoder->encodeAudio(mixed.data(), 1024, packet)) {
@@ -240,6 +334,17 @@ bool RecordingSession::start() {
       if (!m_running)
         return;
 
+      // Latch the video wall clock: audio fed before this is dropped and
+      // late tracks get a one-time encoder origin shift (see the audio
+      // callbacks below), so startup skew never bakes into the file.
+      // Unit is microseconds to match the audio-side steady clock.
+      if (!m_videoStarted) {
+        const int64_t wallUs = steadyNowUs() * 1000LL;
+        int64_t expected = -1;
+        m_videoStartWallUs.compare_exchange_strong(expected, wallUs);
+        m_videoStarted = true;
+      }
+
       // Build a FrameDescriptor and dispatch (non-blocking)
       FrameDescriptor fd;
       if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
@@ -257,6 +362,13 @@ bool RecordingSession::start() {
         fd.pts = frame.timestamp;
         m_frameDispatcher->dispatch(fd);
       } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
+        // Latch the video wall clock (see above).
+        if (!m_videoStarted) {
+          const int64_t wallUs = steadyNowUs() * 1000LL;
+          int64_t expected = -1;
+          m_videoStartWallUs.compare_exchange_strong(expected, wallUs);
+          m_videoStarted = true;
+        }
         // Software frame path: build a QueuedFrame and enqueue directly
         QueuedFrame qf(frame);
         if (qf.data) {
@@ -484,6 +596,8 @@ void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
   }
 
   // (Re)bind — replaces monitor fallback or a dead stream generation.
+  // Startup skew is handled downstream instead (audio gate + encoder
+  // start offsets), so binds happen the moment a node is usable.
   m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
                               nodeId, nodeName, nodeSerial),
                           track);

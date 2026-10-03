@@ -43,6 +43,23 @@ target_include_directories(test_ActivityFeed PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ActivityFeed PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_ActivityFeed)
 
+# --- AudioDriftCorrector (wall-clock servo; fake clock, no HW needed) ---
+add_executable(test_AudioDriftCorrector test_AudioDriftCorrector.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/AudioDriftCorrector.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/AudioDriftCorrector.h
+)
+target_include_directories(test_AudioDriftCorrector PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+target_link_libraries(test_AudioDriftCorrector PRIVATE
+    ${TEST_LINK_LIBS}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+)
+gtest_discover_tests(test_AudioDriftCorrector)
+
 # --- AutostartManager (isolated config home; no session changes) ---
 add_executable(test_Autostart test_Autostart.cpp ${CMAKE_SOURCE_DIR}/src/core/AutostartManager.cpp)
 target_include_directories(test_Autostart PRIVATE ${TEST_INCLUDE_DIRS})
@@ -106,6 +123,7 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/capture/WaylandPortalCapture.cpp
     ${CMAKE_SOURCE_DIR}/src/capture/IVideoCaptureSource.h
     ${CMAKE_SOURCE_DIR}/src/audio/AudioMixer.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/AudioDriftCorrector.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/AudioDeviceEnumerator.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
@@ -132,8 +150,8 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
     ${CMAKE_SOURCE_DIR}/tests/RecordingManagerLinkStubs.cpp
 )
-target_include_directories(test_RecordingBackend PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS})
-target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+target_include_directories(test_RecordingBackend PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS})
+target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES})
 if(EGL_FOUND)
     # PUBLIC so executables linking this static lib inherit the EGL dep.
     target_link_libraries(test_RecordingBackend PUBLIC PkgConfig::EGL)

@@ -90,6 +90,34 @@ TEST(AudioEncoderTest, UnknownCodecFailsInit) {
   EXPECT_FALSE(enc.initialize(cfg));
 }
 
+TEST(AudioEncoderTest, StartOffsetShiftsFirstTimestampOnce) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
+    GTEST_SKIP() << "FFmpeg AAC encoder unavailable";
+
+  AudioEncoder enc;
+  AudioEncoderConfig cfg;
+  cfg.sampleRate = 48000;
+  cfg.channels = 2;
+  cfg.bitrate = 128;
+  cfg.codec = "aac";
+  ASSERT_TRUE(enc.initialize(cfg));
+
+  // 4800 samples @48kHz = 100ms: a track starting 100ms after video.
+  enc.setStartOffsetSamples(4800);
+  enc.setStartOffsetSamples(9600); // second call ignored (one-shot)
+
+  std::vector<float> buf(1024 * 2, 0.0f);
+  EncodedPacket pkt;
+  bool produced = false;
+  for (int i = 0; i < 8 && !produced; ++i)
+    produced = enc.encodeAudio(buf.data(), 1024, pkt);
+  ASSERT_TRUE(produced);
+  // 100ms shift minus AAC's inherent one-frame priming delay
+  // (1024 samples ≈ 21ms): proves the offset landed on the packet.
+  EXPECT_GE(pkt.pts, 79);
+  EXPECT_LE(pkt.pts, 100);
+}
+
 TEST(AudioEncoderTest, NanInputDoesNotCrash) {
   if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
     GTEST_SKIP() << "FFmpeg AAC encoder unavailable";

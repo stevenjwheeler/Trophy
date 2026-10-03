@@ -9,6 +9,7 @@
 
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
+#include "audio/AudioDriftCorrector.h"
 #include <QElapsedTimer>
 #include <QMap>
 #include <QObject>
@@ -123,6 +124,10 @@ private:
   // One encoder per audio track (game audio, voice chat, microphone)
   std::array<std::unique_ptr<AudioEncoder>, kAudioTrackCount> m_audioEncoders;
   std::array<std::mutex, kAudioTrackCount> m_audioEncoderMutexes;
+  // Per-track wall-clock drift correctors (sound-card crystal vs video
+  // clock). Invalid (SWR alloc failed) = pass-through.
+  std::array<std::unique_ptr<AudioDriftCorrector>, kAudioTrackCount>
+      m_driftCorrectors;
 
   // Merged audio track support
   bool m_separateAudioTracks = true;
@@ -138,6 +143,18 @@ private:
   std::atomic<bool> m_running{false};
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};
+  // A/V origin alignment: audio and video pipelines start at different
+  // wall times (portal video negotiates after audio flows) yet both
+  // count timestamps from zero, baking in a constant offset. The first
+  // video frame latches the video wall; audio fed before it is dropped
+  // (unpairable head content) and late tracks get a one-time encoder
+  // start offset. 10s video timeout so a dead portal can't mute audio.
+  std::atomic<bool> m_videoStarted{false};
+  std::atomic<int64_t> m_videoStartWallUs{-1};
+  std::array<bool, kAudioTrackCount> m_trackOffsetApplied{};
+  bool m_mergedOffsetApplied = false;
+  static constexpr int64_t kVideoWaitTimeoutMs = 10000;
+  static int64_t steadyNowUs();
 
   std::thread m_encodingThread;
   std::shared_ptr<TrophyBackend::FrameDispatcher> m_frameDispatcher;
@@ -159,6 +176,8 @@ private:
   // never counts as bound — the retry keeps hunting the real app node.
   std::array<QString, kAudioTrackCount> m_boundSerial{};
   std::array<bool, kAudioTrackCount> m_sourceConnected{};
+  // Session wall start (steady clock): video-wait timeout baseline.
+  int64_t m_sessionStartMs = -1;
   bool m_gameIsFallback = false;
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };

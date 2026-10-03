@@ -202,7 +202,8 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
 
     // Set frame properties
     m_frame->nb_samples = m_requiredFrameSize;
-    m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
+    m_frame->pts =
+        ((m_sampleCount + m_startOffset) * 1000LL) / m_codecCtx->sample_rate;
     m_sampleCount += m_requiredFrameSize;
 
     // Send frame to encoder
@@ -261,7 +262,8 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
         writeFrameSamples();
 
         m_frame->nb_samples = m_requiredFrameSize;
-        m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
+        m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
+                       m_codecCtx->sample_rate;
         m_sampleCount += m_requiredFrameSize;
 
         avcodec_send_frame(m_codecCtx, m_frame);

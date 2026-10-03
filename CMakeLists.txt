@@ -214,6 +214,7 @@ set(AUDIO_SOURCES
     src/audio/AudioMixer.cpp
     src/audio/AudioDeviceEnumerator.cpp
     src/audio/PipeWireAudioSource.cpp
+    src/audio/AudioDriftCorrector.cpp
 )
 
 set(ENCODING_SOURCES
@@ -278,6 +279,7 @@ set(AUDIO_HEADERS
     src/audio/AudioMixer.h
     src/audio/AudioDeviceEnumerator.h
     src/audio/PipeWireAudioSource.h
+    src/audio/AudioDriftCorrector.h
 )
 
 set(ENCODING_HEADERS
