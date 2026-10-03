@@ -16,11 +16,6 @@
 namespace TrophyBackend {
 
 NotificationService::NotificationService(QObject *parent) : QObject(parent) {
-  m_dismissTimer = new QTimer(this);
-  m_dismissTimer->setSingleShot(true);
-  connect(m_dismissTimer, &QTimer::timeout, this, [this]() {
-    closeNotificationById(m_dismissId);
-  });
   QDBusConnection::sessionBus().connect(
       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
       "org.freedesktop.Notifications", "ActionInvoked", this,
@@ -86,20 +81,68 @@ void NotificationService::showNotification(const QString &title,
                                            const QString &icon, int timeout,
                                            int urgency,
                                             bool authorizeAction) {
-  if (!m_enabled) {
+  sendNotification(title, body, icon, timeout, urgency, authorizeAction, true);
+}
+
+void NotificationService::showQueuedNotification(
+    const QString &title, const QString &body, const QString &icon,
+    int timeout, int urgency) {
+  if (!m_enabled)
+    return;
+  if (noteSent(title, body))
+    return;
+  // Coalesce with an identical entry already waiting (e.g. the
+  // launcher-PID handoff re-arms the DVR seconds after the first arm).
+  for (const QueuedNotice &queued : m_noticeQueue) {
+    if (queued.title == title && queued.body == body) {
+      qDebug() << "Coalescing queued duplicate notification:" << title;
+      return;
+    }
+  }
+  if (m_visibleTransients > 0) {
+    m_noticeQueue.append({title, body, icon, timeout, urgency});
     return;
   }
+  sendNotification(title, body, icon, timeout, urgency, false, false);
+}
 
+void NotificationService::drainNoticeQueue() {
+  if (m_noticeQueue.isEmpty() || m_visibleTransients > 0)
+    return;
+  const QueuedNotice next = m_noticeQueue.takeFirst();
+  // The dedup stamp was set when the notice was enqueued; the wait likely
+  // kept it inside the cooldown, so clear it — this send was already
+  // approved above.
+  m_lastSentMs = -1;
+  sendNotification(next.title, next.body, next.icon, next.timeout,
+                   next.urgency, false, false);
+}
+
+bool NotificationService::noteSent(const QString &title, const QString &body) {
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-  const qint64 elapsed =
-      m_lastSentMs < 0 ? -1 : (nowMs - m_lastSentMs);
+  const qint64 elapsed = m_lastSentMs < 0 ? -1 : (nowMs - m_lastSentMs);
   if (isRepeatSuppressed(title, body, m_lastTitle, m_lastBody, elapsed)) {
     qDebug() << "Suppressing duplicate notification within cooldown:" << title;
-    return;
+    return true;
   }
   m_lastTitle = title;
   m_lastBody = body;
   m_lastSentMs = nowMs;
+  return false;
+}
+
+void NotificationService::sendNotification(const QString &title,
+                                           const QString &body,
+                                           const QString &icon, int timeout,
+                                           int urgency, bool authorizeAction,
+                                           bool replacePrevious) {
+  if (!m_enabled) {
+    return;
+  }
+
+  if (noteSent(title, body)) {
+    return;
+  }
 
   QDBusInterface notify(
       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
@@ -124,8 +167,9 @@ void NotificationService::showNotification(const QString &title,
 
   QDBusReply<uint> reply =
       notify.call("Notify",
-                  "Trophy",             // app_name (keep it short)
-                  m_lastNotificationId, // replaces_id
+                  "Trophy", // app_name (keep it short)
+                  replacePrevious ? m_lastNotificationId
+                                  : 0u, // replaces_id (0 = stack alongside)
                   appIcon,              // app_icon
                   title,                // summary
                   body,                 // body
@@ -135,15 +179,29 @@ void NotificationService::showNotification(const QString &title,
       );
 
   if (reply.isValid()) {
-    m_lastNotificationId = reply.value();
-    // Self-dismiss transient notices: timeout 0 means "stay until acted
-    // on" (the authorize prompt); anything else restarts the single
-    // countdown on the latest id, so a replacing notice ("Saved") takes
-    // over from the one it replaced ("Saving…") instead of racing it.
-    m_dismissTimer->stop();
+    const uint id = reply.value();
+    // Only the replace path owns the "last" slot: a stacked popup must
+    // never disturb authorize click-matching or closeLastNotification.
+    if (replacePrevious)
+      m_lastNotificationId = id;
+    // Self-dismiss transient notices per id: timeout 0 means "stay until
+    // acted on" (the authorize prompt). Withdrawing an already-replaced
+    // id is a daemon-side no-op, so each notice owns its own countdown
+    // instead of sharing one timer. The countdown also marks the end of
+    // the on-screen window that queued notices wait for.
     if (timeout > 0) {
-      m_dismissId = reply.value();
-      m_dismissTimer->start(timeout);
+      ++m_visibleTransients;
+      QTimer::singleShot(timeout, this, [this, id]() {
+        closeNotificationById(id);
+        if (m_visibleTransients > 0 && --m_visibleTransients == 0 &&
+            !m_noticeQueue.isEmpty()) {
+          // Hold one beat past the withdraw so the slide-out animation
+          // completes before the queued notice arrives (drainNoticeQueue
+          // still no-ops if another transient appeared meanwhile).
+          QTimer::singleShot(kQueueDrainGraceMs, this,
+                             [this]() { drainNoticeQueue(); });
+        }
+      });
     }
   } else {
     qWarning() << "Failed to send notification:" << reply.error().message();

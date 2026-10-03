@@ -116,8 +116,11 @@ public:
   Q_INVOKABLE float trackLevel(int trackIndex) const;
   // Clip completion chime (pw-play ships with PipeWire; the wav is
   // extracted from resources to cache on first use). Also wired to a
-  // Test button in Settings (preview bypasses the toggle).
+  // Test button in Settings (preview bypasses the toggle). The
+  // recording-stopped chime is the same voice descending (high-low)
+  // so stops read as an ending against the clip's ascending pair.
   Q_INVOKABLE void playClipPing(bool preview);
+  Q_INVOKABLE void playRecordingStoppedPing(bool preview);
   // Global-shortcut record toggle (mirrors F9, with feedback).
   Q_INVOKABLE void requestToggleRecording();
   // --minimized CLI flag: behave like startMinimized for this launch.
@@ -195,6 +198,9 @@ private:
   QObject *qmlRootWindow() const;
   void setMainWindowVisible(bool visible);
   void syncAutostartFile();
+  // Shared pw-play helper behind both chimes (resource -> cache file).
+  void playChime(const QString &resource, const QString &fileName,
+                 bool preview);
 };
 
 } // namespace TrophyBackend

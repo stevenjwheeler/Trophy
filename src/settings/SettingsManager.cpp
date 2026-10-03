@@ -125,7 +125,13 @@ void SettingsManager::load() {
   m_notifyRecordings = notifications["recordings"].toBool(true);
   m_notifyClips = notifications["clips"].toBool(true);
   m_notifyStorage = notifications["storage"].toBool(true);
-  m_clipPingEnabled = notifications["clipPing"].toBool(true);
+  // Renamed from "clipPing" once the recording-stopped chime joined
+  // it; the legacy key is still honoured so existing users keep their
+  // preference (first save rewrites it under the new name).
+  if (notifications.contains("completionSound"))
+    m_completionSoundEnabled = notifications["completionSound"].toBool(true);
+  else
+    m_completionSoundEnabled = notifications["clipPing"].toBool(true);
   
   // Load Wayland restore tokens (per-game map; a legacy singular
   // "waylandRestoreToken" key is ignored — it was never mapped to a game).
@@ -204,7 +210,7 @@ void SettingsManager::save() {
   notifications["recordings"] = m_notifyRecordings;
   notifications["clips"] = m_notifyClips;
   notifications["storage"] = m_notifyStorage;
-  notifications["clipPing"] = m_clipPingEnabled;
+  notifications["completionSound"] = m_completionSoundEnabled;
   root["notifications"] = notifications;
 
   root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
@@ -268,7 +274,7 @@ void SettingsManager::resetToDefaults() {
   emit notifyRecordingsChanged();
   emit notifyClipsChanged();
   emit notifyStorageChanged();
-  emit clipPingEnabledChanged();
+  emit completionSoundEnabledChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -315,7 +321,7 @@ void SettingsManager::loadDefaults() {
   m_notifyRecordings = true;
   m_notifyClips = true;
   m_notifyStorage = true;
-  m_clipPingEnabled = true;
+  m_completionSoundEnabled = true;
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -562,11 +568,11 @@ void SettingsManager::setNotifyStorage(bool enabled) {
   }
 }
 
-void SettingsManager::setClipPingEnabled(bool enabled) {
-  if (m_clipPingEnabled != enabled) {
-    m_clipPingEnabled = enabled;
+void SettingsManager::setCompletionSoundEnabled(bool enabled) {
+  if (m_completionSoundEnabled != enabled) {
+    m_completionSoundEnabled = enabled;
     save();
-    emit clipPingEnabledChanged();
+    emit completionSoundEnabledChanged();
   }
 }
 

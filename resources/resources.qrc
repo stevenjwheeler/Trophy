@@ -18,5 +18,6 @@
     <file>icons/gpu-amd.svg</file>
     <file>icons/gpu-intel.svg</file>
     <file>sounds/clip-saved.wav</file>
+    <file>sounds/recording-stopped.wav</file>
   </qresource>
 </RCC>

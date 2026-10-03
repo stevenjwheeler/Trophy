@@ -7,10 +7,9 @@
 
 #pragma once
 
+#include <QList>
 #include <QObject>
 #include <QString>
-
-class QTimer;
 
 namespace TrophyBackend {
 
@@ -35,6 +34,18 @@ public:
                                     const QString &icon = QString(),
                                     int timeout = 5000, int urgency = 1,
                                     bool authorizeAction = false);
+
+  /**
+   * Queued variant: waits until any currently displayed transient notice
+   * has had its full timeout, then appears stacked alongside (never
+   * replacing). Used for "Ready to clip", which fires seconds after
+   * "Recording Saved" on post-recording DVR resume — sent immediately,
+   * the two popups overlap in one visual slot.
+   */
+  Q_INVOKABLE void showQueuedNotification(const QString &title,
+                                          const QString &body,
+                                          const QString &icon = QString(),
+                                          int timeout = 5000, int urgency = 1);
 
   Q_INVOKABLE void showRecordingStarted(const QString &gameName);
   Q_INVOKABLE void showRecordingStopped(const QString &summary);
@@ -84,12 +95,35 @@ private:
   QString m_lastTitle;
   QString m_lastBody;
   qint64 m_lastSentMs = -1;
-  // Single self-dismiss timer, restarted by every transient notice. Since
-  // each Notify replaces the previous one (replaces_id), one countdown
-  // tracking the latest notice is exactly right: "Saving…" can never be
-  // killed from under "Saved" — the latest send always owns the timer.
-  QTimer *m_dismissTimer = nullptr;
-  uint m_dismissId = 0;
+  // Shared Notify body. replacePrevious=false sends replaces_id 0 (a
+  // separate popup) and leaves m_lastNotificationId alone; the transient
+  // self-dismiss is per-notice, since withdrawing an already-replaced id
+  // is a harmless no-op on the daemon side.
+  void sendNotification(const QString &title, const QString &body,
+                        const QString &icon, int timeout, int urgency,
+                        bool authorizeAction, bool replacePrevious);
+  // Duplicate check shared by the immediate and queued paths: drops
+  // identical title+body within the cooldown, otherwise records this
+  // notice as the last sent. Returns true when suppressed.
+  bool noteSent(const QString &title, const QString &body);
+  // Queued notices waiting for the screen to clear (see
+  // showQueuedNotification). Drains one entry once no transient is
+  // displayed; the send goes out stacked so a prompt that appeared
+  // meanwhile is never clobbered.
+  struct QueuedNotice {
+    QString title;
+    QString body;
+    QString icon;
+    int timeout = 5000;
+    int urgency = 1;
+  };
+  QList<QueuedNotice> m_noticeQueue;
+  int m_visibleTransients = 0;
+  void drainNoticeQueue();
+  // Extra wait after a withdrawn popup before the queued notice appears,
+  // so the first popup's slide-out animation finishes instead of the two
+  // visually overlapping.
+  static constexpr int kQueueDrainGraceMs = 500;
 };
 
 } // namespace TrophyBackend

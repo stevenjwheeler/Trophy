@@ -638,6 +638,7 @@ void Application::connectSignals() {
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
           [this](const QString &, qint64 durationMs, qint64 sizeBytes) {
+            playRecordingStoppedPing(false);
             if (!m_settingsManager->notifyRecordings())
               return;
             const QString summary = QStringLiteral("%1 · %2").arg(
@@ -681,6 +682,23 @@ void Application::connectSignals() {
           this, [this]() { requestReplay(); });
 
   // --- Clips ---
+  connect(m_replayManager.get(), &ReplayManager::replayStateChanged, this,
+          [this]() {
+            if (!m_replayManager->isActive())
+              return;
+            if (!m_settingsManager->notifyClips())
+              return;
+            const QString game = m_replayManager->currentGame();
+            const int secs =
+                std::max(1, m_settingsManager->clipBufferSeconds());
+            // Queued: waits out "Recording Saved"'s full display window,
+            // then appears stacked alongside (never replacing it).
+            m_notificationService->showQueuedNotification(
+                game.isEmpty() ? QStringLiteral("Ready to clip")
+                               : QStringLiteral("Ready to clip %1").arg(game),
+                QStringLiteral("Buffering the last %1 seconds.").arg(secs),
+                "trophy", 3000, 2); // critical: visible over fullscreen game
+          });
   connect(m_replayManager.get(), &ReplayManager::replaySaved, this,
           [this](const QString &filePath, double seconds) {
             playClipPing(false);
@@ -866,23 +884,35 @@ void Application::requestQuit() {
 }
 
 void Application::playClipPing(bool preview) {
-  if (!preview && (!m_settingsManager || !m_settingsManager->clipPingEnabled()))
+  playChime(QStringLiteral(":/sounds/clip-saved.wav"),
+            QStringLiteral("clip-saved.wav"), preview);
+}
+
+void Application::playRecordingStoppedPing(bool preview) {
+  playChime(QStringLiteral(":/sounds/recording-stopped.wav"),
+            QStringLiteral("recording-stopped.wav"), preview);
+}
+
+void Application::playChime(const QString &resource, const QString &fileName,
+                            bool preview) {
+  if (!preview && (!m_settingsManager || !m_settingsManager->completionSoundEnabled()))
     return;
   // pw-play needs a real file: extract the bundled chime to cache once.
   const QString dest =
       QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
-      QStringLiteral("/trophy/sounds/clip-saved.wav");
+      QStringLiteral("/trophy/sounds/") + fileName;
   if (!QFile::exists(dest)) {
     QDir().mkpath(QFileInfo(dest).path());
-    if (!QFile::copy(QStringLiteral(":/sounds/clip-saved.wav"), dest)) {
-      qCWarning(appLog) << "Could not extract clip chime to" << dest;
+    if (!QFile::copy(resource, dest)) {
+      qCWarning(appLog) << "Could not extract chime" << resource << "to"
+                        << dest;
       return;
     }
   }
   // Fire-and-forget: a missing/slow player must never hang the UI thread.
   if (!QProcess::startDetached(QStringLiteral("pw-play"),
                                QStringList(dest))) {
-    qCWarning(appLog) << "Could not start pw-play for clip chime";
+    qCWarning(appLog) << "Could not start pw-play for chime" << fileName;
   }
 }
 

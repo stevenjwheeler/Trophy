@@ -102,10 +102,11 @@ class SettingsManager : public QObject {
                  notifyClipsChanged)
   Q_PROPERTY(bool notifyStorage READ notifyStorage WRITE setNotifyStorage
                  NOTIFY notifyStorageChanged)
-  // Short chime when a clip finishes saving (played via pw-play, which
-  // ships with PipeWire itself — no extra backend needed).
-  Q_PROPERTY(bool clipPingEnabled READ clipPingEnabled WRITE setClipPingEnabled
-                 NOTIFY clipPingEnabledChanged)
+  // Short chimes when a clip or a recording finishes saving (played
+  // via pw-play, which ships with PipeWire itself — no extra backend
+  // needed).
+  Q_PROPERTY(bool completionSoundEnabled READ completionSoundEnabled WRITE setCompletionSoundEnabled
+                 NOTIFY completionSoundEnabledChanged)
   
   // Wayland Restore Tokens
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
@@ -225,8 +226,8 @@ public:
   bool notifyStorage() const { return m_notifyStorage; }
   void setNotifyStorage(bool enabled);
 
-  bool clipPingEnabled() const { return m_clipPingEnabled; }
-  void setClipPingEnabled(bool enabled);
+  bool completionSoundEnabled() const { return m_completionSoundEnabled; }
+  void setCompletionSoundEnabled(bool enabled);
 
   // Replay cache dir for DVR segments; empty = /tmp/trophy/replay (RAM-backed).
   // Point it at /tmp (tmpfs) to hold the rolling buffer in RAM.
@@ -283,7 +284,7 @@ signals:
   void notifyRecordingsChanged();
   void notifyClipsChanged();
   void notifyStorageChanged();
-  void clipPingEnabledChanged();
+  void completionSoundEnabledChanged();
   void replayCachePathChanged();
   void waylandRestoreTokensChanged();
 
@@ -349,7 +350,7 @@ private:
   bool m_notifyRecordings = true;
   bool m_notifyClips = true;
   bool m_notifyStorage = true;
-  bool m_clipPingEnabled = true;
+  bool m_completionSoundEnabled = true;
   
   // Wayland Restore Tokens
   QVariantMap m_waylandRestoreTokens;

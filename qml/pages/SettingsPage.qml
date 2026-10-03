@@ -1132,23 +1132,28 @@ Page {
                     }
 
                     SettingRow {
-                        label: qsTr("Clip Completion Sound")
-                        help: qsTr("Play a short chime when a clip finishes saving.")
+                        label: qsTr("Completion Sounds")
+                        help: qsTr("Short chimes when a clip or a recording finishes saving.")
 
                         RowLayout {
                             spacing: Theme.spacingSmall
 
                             TrophyButton {
-                                text: qsTr("Test")
+                                text: qsTr("Clip")
                                 onClicked: if (app) app.playClipPing(true)
+                            }
+
+                            TrophyButton {
+                                text: qsTr("Stop")
+                                onClicked: if (app) app.playRecordingStoppedPing(true)
                             }
 
                             TrophySwitch {
                                 Layout.alignment: Qt.AlignVCenter
-                                checked: settingsManager ? settingsManager.clipPingEnabled : true
+                                checked: settingsManager ? settingsManager.completionSoundEnabled : true
                                 onToggled: {
                                     if (settingsManager)
-                                        settingsManager.clipPingEnabled = checked;
+                                        settingsManager.completionSoundEnabled = checked;
                                 }
                             }
                         }

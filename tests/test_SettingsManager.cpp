@@ -172,12 +172,42 @@ TEST_F(SettingsManagerTest, SetNotifyStorageEmitsSignal) {
   EXPECT_FALSE(mgr->notifyStorage());
 }
 
-TEST_F(SettingsManagerTest, ClipPingDefaultsOnAndEmitsSignal) {
-  EXPECT_TRUE(mgr->clipPingEnabled());
-  QSignalSpy spy(mgr.get(), &SettingsManager::clipPingEnabledChanged);
-  mgr->setClipPingEnabled(false);
+TEST_F(SettingsManagerTest, CompletionSoundDefaultsOnAndEmitsSignal) {
+  EXPECT_TRUE(mgr->completionSoundEnabled());
+  QSignalSpy spy(mgr.get(), &SettingsManager::completionSoundEnabledChanged);
+  mgr->setCompletionSoundEnabled(false);
   EXPECT_EQ(spy.count(), 1);
-  EXPECT_FALSE(mgr->clipPingEnabled());
+  EXPECT_FALSE(mgr->completionSoundEnabled());
+}
+
+TEST_F(SettingsManagerTest, LegacyClipPingKeyHonouredOnLoad) {
+  // Pre-rename settings only have notifications.clipPing; it must still
+  // gate both chimes until the first save rewrites it.
+  const QString filePath = mgr->settingsFilePath();
+  QDir().mkpath(QFileInfo(filePath).path());
+  QJsonObject notifications;
+  notifications["clipPing"] = false;
+  QJsonObject root;
+  root["notifications"] = notifications;
+  QFile f(filePath);
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  f.write(QJsonDocument(root).toJson());
+  f.close();
+
+  mgr->load();
+  EXPECT_FALSE(mgr->completionSoundEnabled());
+}
+
+TEST_F(SettingsManagerTest, CompletionSoundKeyWinsAndLegacyNotPersisted) {
+  mgr->setCompletionSoundEnabled(false);
+  mgr->save();
+  QFile f(mgr->settingsFilePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+  const QJsonObject notifications =
+      QJsonDocument::fromJson(f.readAll()).object()["notifications"].toObject();
+  EXPECT_TRUE(notifications.contains("completionSound"));
+  EXPECT_FALSE(notifications.contains("clipPing"));
+  EXPECT_FALSE(notifications["completionSound"].toBool(true));
 }
 
 TEST_F(SettingsManagerTest, SetAutoDetectGamesEmitsSignal) {
