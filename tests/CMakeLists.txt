@@ -167,6 +167,11 @@ target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
 gtest_discover_tests(test_ReplayManager)
 
+add_executable(test_RecordingSession test_RecordingSession.cpp)
+target_include_directories(test_RecordingSession PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS})
+target_link_libraries(test_RecordingSession PRIVATE test_RecordingBackend Qt6::Core Qt6::Test ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES})
+gtest_discover_tests(test_RecordingSession)
+
 
 add_executable(test_Recording test_Recording.cpp ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp)
 target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMAT_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS})

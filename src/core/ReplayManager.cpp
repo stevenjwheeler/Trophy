@@ -151,6 +151,7 @@ void ReplayManager::stopDvr() {
     for (int i = 0; i < AudioMixer::kTrackCount; ++i)
       m_audioMixer->removeSource(i);
   }
+  m_audioSetupKey.clear();
   m_muxer.reset();
   m_encoder.reset();
   m_capture.reset();
@@ -229,7 +230,7 @@ bool ReplayManager::beginCapture() {
 void ReplayManager::onCaptureReady() {
   if (m_state != State::StartingCapture)
     return;
-  if (!beginSegment()) {
+  if (!switchSegment()) {
     qWarning() << "Replay DVR: segment failed to start";
     stopDvr();
     emit replayFailed("Clips could not start buffering.");
@@ -248,12 +249,24 @@ void ReplayManager::onCaptureError(const QString &error) {
     emit replayFailed("Clips stopped: capture error.");
 }
 
-bool ReplayManager::beginSegment() {
+QString ReplayManager::audioSetupKey() const {
+  if (!m_settings)
+    return {};
+  return m_settings->audioMode() + "|" + m_settings->gameAudioDevice() +
+         "|" + m_settings->microphoneDevice() + "|" +
+         m_settings->voiceChatApp().trimmed() + "|" +
+         (m_settings->separateAudioTracks() ? "sep" : "mix");
+}
+
+bool ReplayManager::switchSegment() {
   if (!m_capture || !m_settings)
     return false;
 
-  m_encoder = EncoderFactory::create(m_settings->encoder());
-  if (!m_encoder)
+  // Build the replacement leg while the current session (if any) keeps
+  // recording: encoder init alone costs hundreds of ms, and paying it
+  // up-front is what makes the handoff gapless.
+  auto newEncoder = EncoderFactory::create(m_settings->encoder());
+  if (!newEncoder)
     return false;
 
   EncoderConfig enc;
@@ -278,23 +291,33 @@ bool ReplayManager::beginSegment() {
   enc.useVBR = m_settings->useVBR();
   enc.preset = m_settings->encoderPreset();
   enc.inputPixelFormat = AV_PIX_FMT_BGRA;
-  if (!m_encoder->initialize(enc))
+  if (!newEncoder->initialize(enc))
     return false;
 
-  m_openSegmentStart = elapsedSec();
   const QString path = QString("%1/seg_%2.mkv")
                            .arg(cacheDir())
                            .arg(m_segmentIndex++, 3, 10, QChar('0'));
-  m_openSegmentPath = path;
-  m_muxer = std::make_unique<FFmpegMuxer>();
-  if (!m_muxer->initialize(path))
+  auto newMuxer = std::make_unique<FFmpegMuxer>();
+  if (!newMuxer->initialize(path)) {
+    QFile::remove(path);
     return false;
+  }
 
   QMap<QString, QString> meta;
   meta["title"] = m_gameName;
   meta["creation_time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
   meta["comment"] = "trophy-replay-segment";
 
+  // Audio node lookup; the running PipeWire sources are recreated only
+  // when the audio configuration changed (or on the very first segment).
+  // Otherwise the live streams carry straight over the handoff and only
+  // the encoders rotate — no per-switch renegotiation gap.
+  const QString key = audioSetupKey();
+  const bool rebuildSources = !m_session || key != m_audioSetupKey;
+  if (rebuildSources && m_audioMixer) {
+    for (int i = 0; i < AudioMixer::kTrackCount; ++i)
+      m_audioMixer->removeSource(i);
+  }
   int audioTracks = 0;
   QStringList gameHints;
   uint32_t gamePid = 0;
@@ -302,27 +325,50 @@ bool ReplayManager::beginSegment() {
   int voiceTrack = -1;
   bool voiceFound = false;
   setupAudioSources(audioTracks, gameHints, gamePid, gameFound, voiceTrack,
-                    voiceFound, m_micTrack);
+                    voiceFound, m_micTrack, rebuildSources);
   m_voiceTrack = voiceTrack;
+  if (rebuildSources)
+    m_audioSetupKey = key;
 
-  m_session = std::make_unique<RecordingSession>(
-      path, m_capture.get(), m_encoder.get(), m_muxer.get(), m_audioMixer.get(),
-      m_settings->separateAudioTracks(), 192, audioTracks, meta);
-  connect(m_session.get(), &RecordingSession::errorOccurred, this,
+  auto newSession = std::make_unique<RecordingSession>(
+      path, m_capture.get(), newEncoder.get(), newMuxer.get(),
+      m_audioMixer.get(), m_settings->separateAudioTracks(), 192, audioTracks,
+      meta);
+  connect(newSession.get(), &RecordingSession::errorOccurred, this,
           &ReplayManager::onCaptureError);
   // Wire the session's node retry (the DVR previously never re-checked:
   // voice joining mid-game and stream churn never healed until rotation).
-  m_session->setGameAudioHints(gamePid, gameHints);
-  m_session->setVoiceChatApp(m_settings->voiceChatApp().trimmed());
-  m_session->setVoiceTrack(voiceTrack);
-  m_session->setGameIsFallback(!gameFound);
+  newSession->setGameAudioHints(gamePid, gameHints);
+  newSession->setVoiceChatApp(m_settings->voiceChatApp().trimmed());
+  newSession->setVoiceTrack(voiceTrack);
+  newSession->setGameIsFallback(!gameFound);
   if (gameFound)
-    m_session->markSourceConnected(0);
+    newSession->markSourceConnected(0);
   if (voiceFound && voiceTrack >= 0)
-    m_session->markSourceConnected(voiceTrack);
+    newSession->markSourceConnected(voiceTrack);
   // No dispatcher: segments ARE the buffer.
-  if (!m_session->start())
+  if (!newSession->start()) {
+    QFile::remove(path);
     return false;
+  }
+
+  // The successor owns the live routing now (capture + mixer callbacks
+  // swapped atomically inside start). Retire the old leg with a handoff
+  // stop: it drains its queues, flushes its encoders and finalizes its
+  // file, but leaves capture, mixer sources and callbacks live.
+  const double switchSec = elapsedSec();
+  if (m_session) {
+    m_session->stop(true, true);
+    m_session.reset();
+    m_segments.push_back({m_openSegmentPath, m_openSegmentStart,
+                          std::max(0.0, switchSec - m_openSegmentStart)});
+    m_openSegmentPath.clear();
+  }
+  m_encoder = std::move(newEncoder);
+  m_muxer = std::move(newMuxer);
+  m_session = std::move(newSession);
+  m_openSegmentStart = switchSec;
+  m_openSegmentPath = path;
   return true;
 }
 
@@ -330,7 +376,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
                                        QStringList &gameHints,
                                        uint32_t &gamePid, bool &gameFound,
                                        int &voiceTrack, bool &voiceFound,
-                                       int &micTrack) {
+                                       int &micTrack, bool createSources) {
   trackCount = 0;
   gameHints.clear();
   gamePid = 0;
@@ -344,16 +390,20 @@ void ReplayManager::setupAudioSources(int &trackCount,
   const bool isSeparate = m_settings->separateAudioTracks();
   const QString mode = m_settings->audioMode();
   if (mode == "desktop") {
-    const QString dev = m_settings->gameAudioDevice();
-    auto desktopSrc = PipeWireAudioSource::createMonitorSource(
-        dev == "default" ? QString() : dev);
-    desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
-    m_audioMixer->addSource(std::move(desktopSrc), 0);
-    const QString micDev = m_settings->microphoneDevice();
-    auto desktopMicSrc = PipeWireAudioSource::createInputSource(
-        micDev == "default" ? QString() : micDev);
-    desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
-    m_audioMixer->addSource(std::move(desktopMicSrc), 1);
+    // Lookup-only refresh skips source creation: the running monitor
+    // streams carry over the handoff untouched.
+    if (createSources) {
+      const QString dev = m_settings->gameAudioDevice();
+      auto desktopSrc = PipeWireAudioSource::createMonitorSource(
+          dev == "default" ? QString() : dev);
+      desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
+      m_audioMixer->addSource(std::move(desktopSrc), 0);
+      const QString micDev = m_settings->microphoneDevice();
+      auto desktopMicSrc = PipeWireAudioSource::createInputSource(
+          micDev == "default" ? QString() : micDev);
+      desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
+      m_audioMixer->addSource(std::move(desktopMicSrc), 1);
+    }
     trackCount = 2;
     micTrack = 1;
     return;
@@ -386,14 +436,18 @@ void ReplayManager::setupAudioSources(int &trackCount,
                                                           &nodeSerial);
     }
     if (nodeId == 0xFFFFFFFFu) {
-      auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString());
-      fallbackSrc->setStreamName(QStringLiteral("trophy-game"));
-      m_audioMixer->addSource(std::move(fallbackSrc), gameTrack);
+      if (createSources) {
+        auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString());
+        fallbackSrc->setStreamName(QStringLiteral("trophy-game"));
+        m_audioMixer->addSource(std::move(fallbackSrc), gameTrack);
+      }
     } else {
-      auto gameSrc = PipeWireAudioSource::createApplicationSource(
-          nodeId, nodeName, nodeSerial);
-      gameSrc->setStreamName(QStringLiteral("trophy-game"));
-      m_audioMixer->addSource(std::move(gameSrc), gameTrack);
+      if (createSources) {
+        auto gameSrc = PipeWireAudioSource::createApplicationSource(
+            nodeId, nodeName, nodeSerial);
+        gameSrc->setStreamName(QStringLiteral("trophy-game"));
+        m_audioMixer->addSource(std::move(gameSrc), gameTrack);
+      }
       gameFound = true;
     }
     trackCount++;
@@ -405,10 +459,12 @@ void ReplayManager::setupAudioSources(int &trackCount,
         vcApp, &vcName, &vcSerial);
     if (vcNode != 0xFFFFFFFFu) {
       voiceTrack = isSeparate ? 1 : nextContiguous++;
-      auto voiceSrc = PipeWireAudioSource::createApplicationSource(
-          vcNode, vcName, vcSerial);
-      voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
-      m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
+      if (createSources) {
+        auto voiceSrc = PipeWireAudioSource::createApplicationSource(
+            vcNode, vcName, vcSerial);
+        voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
+        m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
+      }
       trackCount++;
       voiceFound = true;
     } else if (isSeparate) {
@@ -418,14 +474,18 @@ void ReplayManager::setupAudioSources(int &trackCount,
       voiceTrack = 1;
     }
   }
-  auto micSrc = PipeWireAudioSource::createInputSource(
-      m_settings->microphoneDevice() == "default"
-          ? QString()
-          : m_settings->microphoneDevice());
-  micSrc->setStreamName(QStringLiteral("trophy-mic"));
-  const int micSlot = isSeparate ? 2 : nextContiguous++;
-  m_audioMixer->addSource(std::move(micSrc), micSlot);
-  micTrack = micSlot;
+  if (createSources) {
+    auto micSrc = PipeWireAudioSource::createInputSource(
+        m_settings->microphoneDevice() == "default"
+            ? QString()
+            : m_settings->microphoneDevice());
+    micSrc->setStreamName(QStringLiteral("trophy-mic"));
+    const int micSlot = isSeparate ? 2 : nextContiguous++;
+    m_audioMixer->addSource(std::move(micSrc), micSlot);
+    micTrack = micSlot;
+  } else {
+    micTrack = isSeparate ? 2 : nextContiguous++;
+  }
   trackCount++;
 #else
   Q_UNUSED(trackCount);
@@ -497,35 +557,17 @@ void ReplayManager::applyVoiceChatApp() {  if (!m_session || !m_audioMixer || !m
   qDebug() << "DVR live-applied voice chat app:" << app;
 }
 
-void ReplayManager::finalizeSegment() {
-  if (!m_session)
-    return; // nothing open; capture (if any) keeps running
-  // Keep the portal capture running; only the encode/mux leg stops.
-  m_session->stop(true);
-  m_session.reset();
-  if (m_audioMixer) {
-    for (int i = 0; i < AudioMixer::kTrackCount; ++i)
-      m_audioMixer->removeSource(i);
-  }
-  m_muxer.reset();
-  m_encoder.reset();
-  const double now = elapsedSec();
-  m_segments.push_back({m_openSegmentPath, m_openSegmentStart,
-                        std::max(0.0, now - m_openSegmentStart)});
-  m_openSegmentPath.clear();
-}
-
 void ReplayManager::rotateSegment() {
   if (m_state != State::Running)
     return;
   const double now = elapsedSec();
-  finalizeSegment();
-  pruneOldSegments(now);
-  if (!beginSegment()) {
+  if (!switchSegment()) {
     qWarning() << "Replay DVR: rotation failed";
     stopDvr();
     emit replayFailed("Clips stopped: encoder error.");
+    return;
   }
+  pruneOldSegments(now);
 }
 
 void ReplayManager::pruneOldSegments(double now) {
@@ -565,23 +607,17 @@ void ReplayManager::saveReplay() {
   if (m_saving)
     return;
   m_saving = true;
-  m_rotationTimer->stop();
 
+  // Gapless switch first: the new segment is already recording before the
+  // remux thread starts, so nothing is lost during the remux (and a
+  // rotation firing mid-remux is harmless — it only touches live legs).
+  // The remux itself only ever reads finalized files.
   const double now = elapsedSec();
-  finalizeSegment();
-
-  // Resume capture BEFORE remuxing: the remux takes seconds, and every
-  // frame in that window would otherwise be lost — a second clip taken
-  // soon after freezes at the first clip's save point. The remux thread
-  // only ever touches finalized files, so running capture alongside it
-  // is safe.
-  if (m_state == State::Running) {
-    m_rotationTimer->start();
-    if (!beginSegment()) {
-      stopDvr();
-      emit replayFailed("Clips stopped: encoder error.");
-      return;
-    }
+  if (!switchSegment()) {
+    m_saving = false;
+    stopDvr();
+    emit replayFailed("Clips stopped: encoder error.");
+    return;
   }
 
   const double window = std::max(1, m_settings->clipBufferSeconds());
@@ -623,8 +659,7 @@ void ReplayManager::saveReplay() {
           if (!self)
             return;
           self->m_saving = false;
-          // Capture already resumed before the remux (see above); just
-          // publish the result.
+          // Buffering never paused (gapless switch above); just publish.
           if (ok) {
             emit self->replaySaved(out, actualSec);
           } else {

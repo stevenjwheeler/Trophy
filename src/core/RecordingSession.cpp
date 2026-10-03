@@ -59,12 +59,11 @@ bool RecordingSession::start() {
   m_frameCount = 0;
   m_bytesWritten = 0;
   m_running = true;
-  // First-bind gate baseline (game track): nodes sighted with the
-  // session bind at once; later arrivals must prove stability first.
+  // A/V origin alignment baseline (see header): session wall start for
+  // the video timeout, origins reset per session.
   m_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count();
-  m_videoStarted = false;
   m_videoStartWallUs = -1;
   m_trackOffsetApplied.fill(false);
   m_mergedOffsetApplied = false;
@@ -155,25 +154,23 @@ bool RecordingSession::start() {
 
             EncodedPacket packet;
             std::lock_guard<std::mutex> lock(m_audioEncoderMutexes[trackIndex]);
-            const int64_t nowMs = steadyNowUs();
-            if (!m_videoStarted) {
-              if (m_sessionStartMs >= 0 &&
-                  nowMs - m_sessionStartMs > kVideoWaitTimeoutMs) {
-                m_videoStarted = true; // portal never delivered; record on
-              } else {
-                return; // drop pre-video audio: unpairable head content
-              }
+            // Drop audio until the first video frame exists (unpairable
+            // head content); timeout force-opens so a dead portal can't
+            // mute audio.
+            if (m_videoStartWallUs.load() < 0 &&
+                (m_sessionStartMs < 0 ||
+                 steadyNowUs() - m_sessionStartMs <= kVideoWaitTimeoutMs)) {
+              return;
             }
-            // First feed past the gate starts this track's timestamps at
-            // the video-relative offset (late tracks) instead of zero.
+            // Latch audio origin; a track starting after the first video
+            // frame gets a one-time encoder offset so origins agree.
+            const int64_t nowUs = steadyNowUs() * 1000LL;
             if (!m_trackOffsetApplied[trackIndex]) {
-              const int64_t videoStartMs = m_videoStartWallUs >= 0
-                                               ? m_videoStartWallUs / 1000LL
-                                               : nowMs;
-              const int64_t skewMs = nowMs - videoStartMs;
-              if (skewMs > 0 && m_audioMixer) {
+              const int64_t videoStart = m_videoStartWallUs.load();
+              if (videoStart >= 0 && nowUs > videoStart && m_audioMixer) {
                 m_audioEncoders[trackIndex]->setStartOffsetSamples(
-                    skewMs * m_audioMixer->sampleRate() / 1000LL);
+                    (nowUs - videoStart) * m_audioMixer->sampleRate() /
+                    1000000LL);
               }
               m_trackOffsetApplied[trackIndex] = true;
             }
@@ -231,17 +228,13 @@ bool RecordingSession::start() {
 
             std::lock_guard<std::mutex> lock(m_mergeMutex);
 
-            // Same origin alignment as separate mode (drops pre-video
-            // audio; the merged origin is set at first mixed output
-            // below, once every active track contributes).
-            const int64_t nowMs = steadyNowUs();
-            if (!m_videoStarted) {
-              if (m_sessionStartMs >= 0 &&
-                  nowMs - m_sessionStartMs > kVideoWaitTimeoutMs) {
-                m_videoStarted = true;
-              } else {
-                return;
-              }
+            // Same gate as separate mode: no audio before first video
+            // (timeout force-opens; see above). This also bounds the
+            // accumulators when video never arrives.
+            if (m_videoStartWallUs.load() < 0 &&
+                (m_sessionStartMs < 0 ||
+                 steadyNowUs() - m_sessionStartMs <= kVideoWaitTimeoutMs)) {
+              return;
             }
 
             const float *fed = samples;
@@ -321,6 +314,15 @@ bool RecordingSession::start() {
       if (!m_running)
         return;
 
+      // Latch the video wall clock on the first frame (same as the
+      // dispatcher path below). DVR sessions have no dispatcher, so
+      // without this the audio gate never opens on video and every
+      // segment drops its first 10s of audio to the gate timeout —
+      // clips then carry full video with ~10s-short audio.
+      int64_t expected = -1;
+      m_videoStartWallUs.compare_exchange_strong(
+          expected, steadyNowUs() * 1000LL);
+
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
         m_videoQueue.emplace(frame);
@@ -334,16 +336,12 @@ bool RecordingSession::start() {
       if (!m_running)
         return;
 
-      // Latch the video wall clock: audio fed before this is dropped and
-      // late tracks get a one-time encoder origin shift (see the audio
-      // callbacks below), so startup skew never bakes into the file.
-      // Unit is microseconds to match the audio-side steady clock.
-      if (!m_videoStarted) {
-        const int64_t wallUs = steadyNowUs() * 1000LL;
-        int64_t expected = -1;
-        m_videoStartWallUs.compare_exchange_strong(expected, wallUs);
-        m_videoStarted = true;
-      }
+      // Latch the video wall clock on the first frame. Audio before this
+      // is dropped downstream (unpairable head content); late audio
+      // tracks offset to this origin instead.
+      int64_t expected = -1;
+      m_videoStartWallUs.compare_exchange_strong(
+          expected, steadyNowUs() * 1000LL);
 
       // Build a FrameDescriptor and dispatch (non-blocking)
       FrameDescriptor fd;
@@ -363,12 +361,9 @@ bool RecordingSession::start() {
         m_frameDispatcher->dispatch(fd);
       } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
         // Latch the video wall clock (see above).
-        if (!m_videoStarted) {
-          const int64_t wallUs = steadyNowUs() * 1000LL;
-          int64_t expected = -1;
-          m_videoStartWallUs.compare_exchange_strong(expected, wallUs);
-          m_videoStarted = true;
-        }
+        int64_t expected = -1;
+        m_videoStartWallUs.compare_exchange_strong(
+            expected, steadyNowUs() * 1000LL);
         // Software frame path: build a QueuedFrame and enqueue directly
         QueuedFrame qf(frame);
         if (qf.data) {
@@ -387,7 +382,10 @@ bool RecordingSession::start() {
   }
 
   if (m_audioMixer) {
-    m_audioMixer->startAll();
+    // Start streams that are not already running. DVR switches keep the
+    // mixer's PipeWire sources alive across the handoff; restarting them
+    // would reopen an A/V gap on every rotation.
+    m_audioMixer->ensureSourcesStarted();
   }
 
   if (!m_gameHints.isEmpty() || m_gamePid != 0 || !m_voiceChatApp.isEmpty()) {
@@ -426,7 +424,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
   return false;
 }
 
-void RecordingSession::stop(bool keepCaptureSource) {
+void RecordingSession::stop(bool keepCaptureSource, bool handoffRouting) {
   if (!m_running) {
     return;
   }
@@ -442,16 +440,18 @@ void RecordingSession::stop(bool keepCaptureSource) {
   if (m_capture) {
     if (!keepCaptureSource)
       m_capture->stopCapture();
-    // Always detach, even when the capture keeps running: finalizeSegment
-    // stops with keepCaptureSource=true and then destroys this session
-    // while the stream is still live. A dangling [this] callback firing on
-    // the next PipeWire frame locks a destroyed mutex (std::system_error
-    // -> terminate -> SIGABRT on the stream thread). Seen live on every
+    // Detach the frame callback unless a successor session already owns
+    // the live routing (DVR make-before-break switch): nulling it here
+    // would steal the new session's frames. A dangling [this] callback
+    // firing on the next PipeWire frame locks a destroyed mutex
+    // (std::system_error -> terminate -> SIGABRT on the stream thread),
+    // so the non-handoff path always detaches. Seen live on every
     // clip-key press.
-    m_capture->setFrameCallback(nullptr);
+    if (!handoffRouting)
+      m_capture->setFrameCallback(nullptr);
   }
 
-  if (m_audioMixer) {
+  if (m_audioMixer && !handoffRouting) {
     m_audioMixer->stopAll();
     m_audioMixer->setTrackAudioCallback(nullptr);
   }
@@ -603,6 +603,10 @@ void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
                           track);
   m_sourceConnected[track] = true;
   m_boundSerial[track] = nodeSerial;
+  // A new source restarts this track's origin measurement: the encoder
+  // offset below is one-shot, and a stale flag would pin a previous
+  // source's origin onto new content (constant file-wide skew).
+  m_trackOffsetApplied[track] = false;
   if (isFallback)
     *isFallback = false;
   qDebug() << "Audio node bound for track" << track << ":"

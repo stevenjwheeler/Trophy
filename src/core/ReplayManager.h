@@ -96,8 +96,13 @@ private:
 
   void setState(State s);
   bool beginCapture();
-  bool beginSegment();
-  void finalizeSegment(); // stop session, keep capture running
+  // Gapless segment switch (rotation and clip saves): builds and starts
+  // the successor session while the current one keeps recording, then
+  // retires the old leg with a handoff stop. The old break-before-make
+  // order dropped ~300ms of A/V on every switch (visible as a freeze in
+  // any clip spanning the seam).
+  bool switchSegment();
+  QString audioSetupKey() const;
   void pruneOldSegments(double now);
   void clearSegments();
   QString cacheDir() const;
@@ -109,7 +114,8 @@ private:
   double elapsedSec() const;
   void setupAudioSources(int &trackCount, QStringList &gameHints,
                            uint32_t &gamePid, bool &gameFound, int &voiceTrack,
-                           bool &voiceFound, int &micTrack);
+                           bool &voiceFound, int &micTrack,
+                           bool createSources);
 
   State m_state = State::Idle;
   QString m_gameName;
@@ -133,6 +139,10 @@ private:
   // Mixer slots assigned per segment (needed to retarget mid-segment).
   int m_micTrack = -1;
   int m_voiceTrack = -1;
+  // Audio configuration the live mixer sources were built from. While the
+  // key matches, segment switches keep the running PipeWire streams and
+  // only rotate encoders (gapless); a mismatch rebuilds sources.
+  QString m_audioSetupKey;
 
   // Test seam (same pattern as GameDetectionServiceTest).
   friend class ReplayManagerTest;

@@ -54,7 +54,11 @@ public:
   bool start();
   // keepCaptureSource skips stopping the capture + callbacks, so a new
   // session can attach to the still-running stream (DVR rotation).
-  void stop(bool keepCaptureSource = false);
+  // handoffRouting (DVR make-before-break switch) additionally leaves the
+  // live routing alone: the successor session already owns the capture
+  // callback and the mixer callback/sources, so this session only drains
+  // its queues, flushes its encoders and finalizes its file.
+  void stop(bool keepCaptureSource = false, bool handoffRouting = false);
 
   bool isRunning() const { return m_running; }
 
@@ -144,12 +148,11 @@ private:
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};
   // A/V origin alignment: audio and video pipelines start at different
-  // wall times (portal video negotiates after audio flows) yet both
-  // count timestamps from zero, baking in a constant offset. The first
-  // video frame latches the video wall; audio fed before it is dropped
-  // (unpairable head content) and late tracks get a one-time encoder
-  // start offset. 10s video timeout so a dead portal can't mute audio.
-  std::atomic<bool> m_videoStarted{false};
+  // wall times yet both count timestamps from zero, baking in a constant
+  // offset. Audio before the first video frame is dropped (unpairable
+  // head content, 10s timeout force-open); tracks starting after it get
+  // a one-time encoder start offset. First-wins latches (atomics: video
+  // and audio run on different threads).
   std::atomic<int64_t> m_videoStartWallUs{-1};
   std::array<bool, kAudioTrackCount> m_trackOffsetApplied{};
   bool m_mergedOffsetApplied = false;
@@ -176,7 +179,7 @@ private:
   // never counts as bound — the retry keeps hunting the real app node.
   std::array<QString, kAudioTrackCount> m_boundSerial{};
   std::array<bool, kAudioTrackCount> m_sourceConnected{};
-  // Session wall start (steady clock): video-wait timeout baseline.
+  // Session wall start (steady clock).
   int64_t m_sessionStartMs = -1;
   bool m_gameIsFallback = false;
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
