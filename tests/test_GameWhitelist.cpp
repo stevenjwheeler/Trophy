@@ -63,6 +63,79 @@ TEST_F(GameWhitelistTest, WhitelistEmptyByDefault) {
   EXPECT_TRUE(wl->whitelistEntries().isEmpty());
 }
 
+TEST_F(GameWhitelistTest, KeysNormalizeCaseAndExeSuffix) {
+  wl->addToWhitelist("DeadLock.EXE", "Deadlock");
+  EXPECT_TRUE(wl->isWhitelisted("deadlock"));
+  EXPECT_TRUE(wl->isWhitelisted("Deadlock.exe"));
+  EXPECT_TRUE(wl->isWhitelisted("DEADLOCK"));
+  EXPECT_TRUE(wl->whitelistEntries().contains("deadlock"));
+  EXPECT_EQ(wl->getWhitelistName("DeadLock.exe"), "Deadlock");
+
+  wl->addToBlacklist("OBS64");
+  EXPECT_TRUE(wl->isBlacklisted("obs64"));
+  wl->removeFromBlacklist("Obs64.EXE");
+  EXPECT_FALSE(wl->isBlacklisted("OBS64"));
+
+  // Blank keys are refused without touching the lists.
+  const int before = wl->whitelistEntries().size();
+  wl->addToWhitelist("  ");
+  wl->addToBlacklist("");
+  EXPECT_EQ(wl->whitelistEntries().size(), before);
+}
+
+TEST_F(GameWhitelistTest, DefaultListCollapsedToCanonical) {
+  // One row per app: no "Steam"/"steam" or "xalia"/"xalia.exe" dupes.
+  const QStringList entries = wl->blacklistEntries();
+  EXPECT_FALSE(entries.contains("Steam"));
+  EXPECT_FALSE(entries.contains("Discord"));
+  EXPECT_FALSE(entries.contains("xalia.exe"));
+  EXPECT_TRUE(entries.contains("steam"));
+  // ...but every spelling still matches.
+  EXPECT_TRUE(wl->isBlacklisted("Steam"));
+  EXPECT_TRUE(wl->isBlacklisted("steam.exe"));
+  EXPECT_TRUE(wl->isBlacklisted("DISCORD"));
+  EXPECT_TRUE(wl->isBlacklisted("Xalia.EXE"));
+}
+
+TEST_F(GameWhitelistTest, RemovedDefaultsPersistAcrossReload) {
+  // Allowing a built-in (remove from blacklist) survives save/load:
+  // the constructor must not resurrect it.
+  ASSERT_TRUE(wl->isBlacklisted("xalia"));
+  wl->removeFromBlacklist("Xalia.EXE");
+  EXPECT_FALSE(wl->isBlacklisted("xalia"));
+  wl->save();
+
+  auto wl2 = std::make_unique<GameWhitelist>();
+  wl2->load();
+  EXPECT_FALSE(wl2->isBlacklisted("xalia"));
+  // ...while untouched built-ins still seed.
+  EXPECT_TRUE(wl2->isBlacklisted("steam"));
+
+  // Re-blocking clears the marker: present again after reload.
+  wl2->addToBlacklist("xalia");
+  wl2->save();
+  auto wl3 = std::make_unique<GameWhitelist>();
+  wl3->load();
+  EXPECT_TRUE(wl3->isBlacklisted("xalia"));
+}
+
+TEST_F(GameWhitelistTest, PrettySystemNamesCoverAllDefaults) {
+  // Every built-in key renders a non-empty friendly label (some apps
+  // style themselves lowercase: mpv, kitty, foot).
+  for (const QString &key : GameWhitelist::defaultBlacklistEntries())
+    EXPECT_FALSE(GameWhitelist::prettySystemName(key).isEmpty());
+  EXPECT_EQ(GameWhitelist::prettySystemName("steam"), "Steam");
+  EXPECT_EQ(GameWhitelist::prettySystemName("vkcube"), "Vulkan Cube (test app)");
+  EXPECT_EQ(GameWhitelist::prettySystemName("whatever"), "whatever");
+}
+
+TEST_F(GameWhitelistTest, PrettySystemNames) {
+  EXPECT_EQ(GameWhitelist::prettySystemName("steam"), "Steam");
+  EXPECT_EQ(GameWhitelist::prettySystemName("discord"), "Discord");
+  EXPECT_EQ(GameWhitelist::prettySystemName("obs"), "OBS");
+  EXPECT_EQ(GameWhitelist::prettySystemName("whatever"), "whatever");
+}
+
 TEST_F(GameWhitelistTest, BlacklistHasBuiltInDefaults) {
   // Constructor pre-populates well-known non-games so the detector
   // ignores launchers, chat apps, and test tools out of the box.

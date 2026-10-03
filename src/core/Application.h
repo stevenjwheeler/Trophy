@@ -191,6 +191,19 @@ private:
   static constexpr int kAudioWaitMaxTicks = 10;
   void startWhenAudioSettled(const QString &game, bool isRecord);
   static bool gameAudioNodePresent(const QString &game, qint64 pid);
+  // Authorizing capture is explicit user consent: record the game on the
+  // whitelist (raw match key when the detector still tracks it) so future
+  // launches detect instantly and the Games page stays truthful. Runs on
+  // both authorize paths: prompt click and silent restore-token start.
+  void authorizeGame(const QString &game);
+  // Block from the authorize prompt: veto the game in the Games list
+  // (same key resolution as authorizeGame) with no capture. Dismissing
+  // the prompt takes neither path — the game stays on Prompt.
+  void blockGame(const QString &game);
+  // Block veto for a pending game (raw detector key when it still tracks
+  // the game, else the pending name). Both forms normalize, so exe-case
+  // variants match.
+  bool isGameBlocked(const QString &game) const;
   bool m_suppressNextStorageNotification = false;
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;

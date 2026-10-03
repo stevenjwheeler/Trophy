@@ -38,6 +38,24 @@ GameDetectionService::GameDetectionService(QObject *parent)
           &GameDetectionService::onLivenessTimeout);
 
   m_whitelist->load();
+
+  // Games-page model: built once, contents rebuilt on state changes.
+  // Built-in exclusions start hidden (page toggle opts in).
+  m_gamesModel = std::make_unique<GameListModel>(this);
+  m_gamesFilter = new GameListFilterModel(this);
+  m_gamesFilter->setSourceModel(m_gamesModel.get());
+  m_gamesFilter->setShowDefaultEntries(false);
+  connect(this, &GameDetectionService::currentGameChanged, this,
+          &GameDetectionService::rebuildModels);
+  connect(this, &GameDetectionService::recentGamesChanged, this,
+          &GameDetectionService::rebuildModels);
+  connect(this, &GameDetectionService::whitelistChanged, this,
+          &GameDetectionService::rebuildModels);
+  connect(this, &GameDetectionService::blacklistChanged, this,
+          &GameDetectionService::rebuildModels);
+  connect(this, &GameDetectionService::tokenGamesChanged, this,
+          &GameDetectionService::rebuildModels);
+  rebuildModels();
 }
 
 GameDetectionService::~GameDetectionService() { stop(); }
@@ -73,6 +91,7 @@ void GameDetectionService::stop() {
   }
   m_activeConnections.clear();
   m_pidToGameName.clear();
+  m_pidToRawKey.clear();
   m_pendingCandidates.clear();
 }
 
@@ -176,7 +195,8 @@ bool GameDetectionService::isConfidentGame(qint64 pid, const QString &gameName,
   return false;
 }
 
-void GameDetectionService::trackGame(qint64 pid, const QString &gameName) {
+void GameDetectionService::trackGame(qint64 pid, const QString &gameName,
+                                      const QString &rawKey) {
   // Show the user's display name when one is registered; fall back to
   // the raw reporter class either way so dedup stays consistent.
   QString displayName = gameName;
@@ -185,6 +205,10 @@ void GameDetectionService::trackGame(qint64 pid, const QString &gameName) {
     if (!mapped.isEmpty())
       displayName = mapped;
   }
+  // Canonical match key: "Foo.EXE" and "foo" are one entry everywhere
+  // (matching itself normalizes too, so either form would hit).
+  const QString key =
+      GameWhitelist::normalizeKey(rawKey.isEmpty() ? gameName : rawKey);
 
   bool isBetterName = true;
   if (m_pidToGameName.contains(pid)) {
@@ -205,10 +229,11 @@ void GameDetectionService::trackGame(qint64 pid, const QString &gameName) {
     }
 
     m_pidToGameName[pid] = displayName;
+    m_pidToRawKey[pid] = key;
 
     if (isNewName) {
       qDebug() << "Game detected:" << displayName << "(PID:" << pid << ")";
-      updateCurrentGame(displayName, pid);
+      updateCurrentGame(displayName, pid, key);
     } else {
       qDebug() << "Additional process for existing game detected:" << displayName << "(PID:" << pid << ")";
     }
@@ -291,7 +316,7 @@ void GameDetectionService::reconcileRunningGames() {
       }
       qDebug() << "Reconciled already-running game:" << display
                << "(PID:" << w.pid << ")";
-      trackGame(w.pid, display);
+      trackGame(w.pid, display, w.appId.isEmpty() ? w.title : w.appId);
     } else {
       qDebug() << "Reconcile: focused/fullscreen window is not game evidence:"
                << name << "(PID:" << w.pid << ")";
@@ -334,7 +359,7 @@ void GameDetectionService::onSocketReadyRead() {
         // or focused + fullscreen via the window monitor. Anything else
         // waits as a candidate until window state confirms it.
         if (isConfidentGame(pid, gameName, steamAppId)) {
-          trackGame(pid, gameName);
+          trackGame(pid, gameName, parts[2]);
         } else {
           qDebug() << "Low-confidence reporter, watching:" << gameName << "(PID:" << pid << ")";
           m_pendingCandidates[pid] = gameName;
@@ -353,11 +378,13 @@ void GameDetectionService::onSocketReadyRead() {
 
         if (!pidStillActive) {
           m_pidToGameName.remove(pid);
+          m_pidToRawKey.remove(pid);
           m_pendingCandidates.remove(pid);
           if (m_currentGamePid == pid) {
             if (!m_pidToGameName.isEmpty()) {
               qint64 nextPid = m_pidToGameName.keys().last();
-              updateCurrentGame(m_pidToGameName[nextPid], nextPid);
+              updateCurrentGame(m_pidToGameName[nextPid], nextPid,
+                                m_pidToRawKey.value(nextPid));
             } else {
               updateCurrentGame("", 0);
             }
@@ -388,11 +415,13 @@ void GameDetectionService::onSocketDisconnected() {
 
     if (!pidStillActive) {
       m_pidToGameName.remove(pid);
+      m_pidToRawKey.remove(pid);
       m_pendingCandidates.remove(pid);
       if (m_currentGamePid == pid) {
         if (!m_pidToGameName.isEmpty()) {
           qint64 nextPid = m_pidToGameName.keys().last();
-          updateCurrentGame(m_pidToGameName[nextPid], nextPid);
+          updateCurrentGame(m_pidToGameName[nextPid], nextPid,
+                            m_pidToRawKey.value(nextPid));
         } else {
           updateCurrentGame("", 0);
         }
@@ -496,13 +525,15 @@ bool GameDetectionService::hasVisibleWindow() const {
   return false;
 }
 
-void GameDetectionService::updateCurrentGame(const QString &gameName,
-                                             qint64 pid) {  if (gameName == m_currentGameName && pid == m_currentGamePid)
+void GameDetectionService::updateCurrentGame(const QString &gameName, qint64 pid,
+                                             const QString &rawKey) {  if (gameName == m_currentGameName && pid == m_currentGamePid)
     return;
 
   QString oldGame = m_currentGameName;
   m_currentGameName = gameName;
   m_currentGamePid = pid;
+  m_currentGameKey =
+      gameName.isEmpty() ? QString() : (rawKey.isEmpty() ? gameName : rawKey);
 
   // Arm the liveness watchdog while a game is tracked; disarm on clear.
   if (!gameName.isEmpty() && pid > 0) {
@@ -520,42 +551,419 @@ void GameDetectionService::updateCurrentGame(const QString &gameName,
     }
   } else {
     if (oldGame != gameName) {
-      addToRecentGames(gameName);
+      addToRecentGames(gameName, rawKey.isEmpty() ? gameName : rawKey);
       emit gameDetected(gameName, pid);
     }
   }
 }
 
-void GameDetectionService::addToRecentGames(const QString &gameName) {
-  m_recentGames.removeAll(gameName);
+void GameDetectionService::addToRecentGames(const QString &gameName,
+                                      const QString &rawKey) {
+  // Canonical match key: "Foo.EXE" and "foo" are one entry everywhere
+  // (matching itself normalizes too, so either form would hit).
+  const QString key =
+      GameWhitelist::normalizeKey(rawKey.isEmpty() ? gameName : rawKey);
+  const int dup = m_recentGames.indexOf(gameName);
+  if (dup >= 0) {
+    m_recentGames.removeAt(dup);
+    m_recentKeys.removeAt(dup);
+  }
   m_recentGames.prepend(gameName);
-  while (m_recentGames.size() > 10)
+  m_recentKeys.prepend(key);
+  while (m_recentGames.size() > 10) {
     m_recentGames.removeLast();
+    m_recentKeys.removeLast();
+  }
   emit recentGamesChanged();
 }
 
-void GameDetectionService::addToWhitelist(const QString &wc,
+bool GameDetectionService::addToWhitelist(const QString &wc,
                                           const QString &dn) {
-  m_whitelist->addToWhitelist(wc, dn);
+  const QString key = wc.trimmed();
+  if (key.isEmpty())
+    return false;
+  const bool changed = !m_whitelist->isWhitelisted(key) ||
+                         m_whitelist->getWhitelistName(key) != dn.trimmed();
+  m_whitelist->addToWhitelist(key, dn.trimmed());
   m_whitelist->save();
+  emit whitelistChanged(); // rebuilds models either way
+  return changed;
 }
-void GameDetectionService::addToBlacklist(const QString &wc) {
-  m_whitelist->addToBlacklist(wc);
+bool GameDetectionService::addToBlacklist(const QString &wc) {
+  const QString key = wc.trimmed();
+  if (key.isEmpty())
+    return false;
+  const bool changed = !m_whitelist->isBlacklisted(key);
+  m_whitelist->addToBlacklist(key);
+  retireBlockedGame(GameWhitelist::normalizeKey(key));
   m_whitelist->save();
+  emit blacklistChanged(); // rebuilds models either way
+  return changed;
 }
-void GameDetectionService::removeFromWhitelist(const QString &wc) {
-  m_whitelist->removeFromWhitelist(wc);
+bool GameDetectionService::removeFromWhitelist(const QString &wc) {
+  const QString key = wc.trimmed();
+  if (!m_whitelist->isWhitelisted(key))
+    return false;
+  m_whitelist->removeFromWhitelist(key);
   m_whitelist->save();
+  emit whitelistChanged();
+  return true;
 }
-void GameDetectionService::removeFromBlacklist(const QString &wc) {
-  m_whitelist->removeFromBlacklist(wc);
+bool GameDetectionService::removeFromBlacklist(const QString &wc) {
+  const QString key = wc.trimmed();
+  if (!m_whitelist->isBlacklisted(key))
+    return false;
+  m_whitelist->removeFromBlacklist(key);
   m_whitelist->save();
+  emit blacklistChanged();
+  return true;
+}
+bool GameDetectionService::moveToWhitelist(const QString &key,
+                                            const QString &display) {
+  const QString k = GameWhitelist::normalizeKey(key);
+  if (k.isEmpty())
+    return false;
+  const bool changed = !m_whitelist->isWhitelisted(k);
+  m_whitelist->addToWhitelist(k, display.trimmed());
+  m_whitelist->save();
+  emit whitelistChanged();
+  return changed;
+}
+
+bool GameDetectionService::moveToBlacklist(const QString &key) {
+  const QString k = GameWhitelist::normalizeKey(key);
+  if (k.isEmpty())
+    return false;
+  const bool changed = !m_whitelist->isBlacklisted(k);
+  m_whitelist->addToBlacklist(k);
+  retireBlockedGame(k);
+  m_whitelist->save();
+  emit blacklistChanged();
+  return changed;
+}
+
+bool GameDetectionService::unblockGame(const QString &key) {
+  const QString k = GameWhitelist::normalizeKey(key);
+  if (k.isEmpty())
+    return false;
+  const bool changed = m_whitelist->isBlacklisted(k);
+  // removeFromBlacklist records the marker for built-ins so the seed
+  // doesn't resurrect them; plain members just drop out.
+  m_whitelist->removeFromBlacklist(k);
+  if (!changed)
+    return false;
+  m_whitelist->save();
+  emit blacklistChanged();
+  return true;
+}
+
+bool GameDetectionService::isBlocked(const QString &keyOrName) const {
+  return m_whitelist && m_whitelist->isBlacklisted(keyOrName);
+}
+
+void GameDetectionService::retireBlockedGame(const QString &canonicalKey) {
+  if (canonicalKey.isEmpty() || m_currentGameName.isEmpty())
+    return;
+  if (GameWhitelist::normalizeKey(m_currentGameKey) != canonicalKey &&
+      GameWhitelist::normalizeKey(m_currentGameName) != canonicalKey)
+    return;
+  qInfo() << "Blocked live game" << m_currentGameName << "- retiring tracking";
+  m_pidToGameName.remove(m_currentGamePid);
+  m_pidToRawKey.remove(m_currentGamePid);
+  m_pendingCandidates.remove(m_currentGamePid);
+  // Settles everything downstream: watchdog disarms, currentGameChanged
+  // clears the dashboard, gameClosed stops any running capture cleanly.
+  // History keeps the row, which now reads Blocked in the Games pool.
+  updateCurrentGame("", 0);
+}
+
+bool GameDetectionService::addCustomGame(const QString &key,
+                                         const QString &display,
+                                         bool block) {
+  const QString k = GameWhitelist::normalizeKey(key);
+  if (k.isEmpty())
+    return false;
+  m_whitelist->noteCustomKey(k);
+  bool changed;
+  if (block) {
+    changed = !m_whitelist->isBlacklisted(k);
+    m_whitelist->addToBlacklist(k);
+    retireBlockedGame(k);
+  } else {
+    const QString dn = display.trimmed();
+    changed = !m_whitelist->isWhitelisted(k) ||
+              m_whitelist->getWhitelistName(k) != dn;
+    m_whitelist->addToWhitelist(k, dn);
+  }
+  m_whitelist->save();
+  emit whitelistChanged();
+  emit blacklistChanged();
+  return changed;
+}
+
+bool GameDetectionService::forgetGame(const QString &key) {
+  const QString k = GameWhitelist::normalizeKey(key);
+  if (k.isEmpty())
+    return false;
+  bool changed = m_whitelist->isWhitelisted(k) ||
+                 m_whitelist->isBlacklisted(k) ||
+                 m_whitelist->customKeys().contains(k);
+  m_whitelist->removeFromWhitelist(k);
+  m_whitelist->removeFromBlacklist(k);
+  m_whitelist->forgetCustomKey(k);
+  for (int i = m_recentGames.size() - 1; i >= 0; --i) {
+    const QString raw = (i < m_recentKeys.size() && !m_recentKeys.at(i).isEmpty())
+                            ? m_recentKeys.at(i)
+                            : m_recentGames.at(i);
+    if (GameWhitelist::normalizeKey(raw) == k ||
+        GameWhitelist::normalizeKey(m_recentGames.at(i)) == k) {
+      changed = true;
+      m_recentGames.removeAt(i);
+      if (i < m_recentKeys.size())
+        m_recentKeys.removeAt(i);
+    }
+  }
+  if (!changed)
+    return false;
+  m_whitelist->save();
+  emit recentGamesChanged();
+  emit whitelistChanged();
+  emit blacklistChanged();
+  return true;
+}
+
+bool GameDetectionService::addSteamGame(uint appId, const QString &dn) {
+  if (appId == 0)
+    return false;
+  const QString key = QStringLiteral("steam_app_%1").arg(appId);
+  m_whitelist->noteCustomKey(key);
+  return addToWhitelist(key, dn.trimmed());
 }
 QStringList GameDetectionService::whitelist() const {
   return m_whitelist->whitelistEntries();
 }
 QStringList GameDetectionService::blacklist() const {
   return m_whitelist->blacklistEntries();
+}
+
+QString GameDetectionService::gameFilterText() const {
+  return m_gamesFilter ? m_gamesFilter->filterText() : QString();
+}
+
+void GameDetectionService::setGameFilterText(const QString &text) {
+  if (!m_gamesFilter)
+    return;
+  m_gamesFilter->setFilterText(text);
+  emit gameFilterTextChanged();
+}
+
+bool GameDetectionService::showDefaultExclusions() const {
+  return m_gamesFilter && m_gamesFilter->showDefaultEntries();
+}
+
+void GameDetectionService::setShowDefaultExclusions(bool show) {
+  if (!m_gamesFilter)
+    return;
+  m_gamesFilter->setShowDefaultEntries(show);
+  emit showDefaultExclusionsChanged();
+}
+
+void GameDetectionService::setTokenGames(const QStringList &games) {
+  const QSet<QString> next(games.begin(), games.end());
+  if (next == m_tokenGames)
+    return;
+  m_tokenGames = next;
+  emit tokenGamesChanged();
+}
+
+void GameDetectionService::rebuildModels() {
+  if (!m_gamesModel)
+    return;
+  // Sections: the live game pins first ("Now playing"); token holders
+  // ("Ready to capture") prove silent capture — the only approved state;
+  // everything else shares one pool ("Games") carrying per-row
+  // Prompt/Block state. Within a section rows sort alphabetically (the
+  // live game excepted) so taps never teleport a row.
+  QList<GameListEntry> rows;
+  QSet<QString> claimed;
+  const auto claim = [&](const QString &key,
+                         const QString &display) {
+    if (key.isEmpty() || claimed.contains(key) ||
+        (!display.isEmpty() && claimed.contains(display)))
+      return false;
+    claimed.insert(key);
+    if (!display.isEmpty())
+      claimed.insert(display);
+    return true;
+  };
+  const auto listedFlag = [this](const QString &key,
+                                 const QString &display) {
+    // Block veto wins visually too: a watched game with a veto reads
+    // Blocked, otherwise the switch looks stuck on Prompt.
+    if (m_whitelist->isBlacklisted(key) || m_whitelist->isBlacklisted(display))
+      return 2;
+    if (m_whitelist->isWhitelisted(key) || m_whitelist->isWhitelisted(display))
+      return 1;
+    return 0;
+  };
+  const auto tokenFor = [this](const QString &key,
+                               const QString &display) {
+    if (m_tokenGames.contains(key))
+      return key;
+    if (!display.isEmpty() && m_tokenGames.contains(display))
+      return display;
+    return QString();
+  };
+  const auto byDisplay = [](const GameListEntry &a, const GameListEntry &b) {
+    return a.display.compare(b.display, Qt::CaseInsensitive) < 0;
+  };
+
+  if (!m_currentGameName.isEmpty()) {
+    GameListEntry live;
+    live.key =
+        m_currentGameKey.isEmpty() ? m_currentGameName : m_currentGameKey;
+    live.display = m_currentGameName;
+    live.pid = m_currentGamePid;
+    live.running = true;
+    live.steamAppId = steamAppIdFromAppId(live.key);
+    live.listed = listedFlag(live.key, live.display);
+    live.tokenKey = tokenFor(live.key, live.display);
+    live.hasToken = !live.tokenKey.isEmpty();
+    live.section = QStringLiteral("Now playing");
+    rows.push_back(live);
+    claim(live.key, live.display);
+  }
+
+  // Approved: every known identity holding a token (plus bare token-map
+  // names with no other trace this session), alphabetically.
+  QList<GameListEntry> approved;
+  const auto considerApproved = [&](const QString &key,
+                                    const QString &display) {
+    const QString tk = tokenFor(key, display);
+    if (tk.isEmpty())
+      return;
+    QString name = display.isEmpty() ? key : display;
+    if (!claim(key, name))
+      return;
+    GameListEntry e;
+    e.key = key;
+    e.display = name;
+    e.steamAppId = steamAppIdFromAppId(key);
+    if (e.display == e.key && e.steamAppId > 0) {
+      const QString steamName = getSteamAppName(e.steamAppId);
+      if (!steamName.isEmpty())
+        e.display = steamName;
+    }
+    e.listed = listedFlag(key, name);
+    e.hasToken = true;
+    e.tokenKey = tk;
+    e.section = QStringLiteral("Ready to capture");
+    approved.push_back(e);
+  };
+  for (int i = 0; i < m_recentGames.size(); ++i) {
+    const QString raw =
+        (i < m_recentKeys.size() && !m_recentKeys.at(i).isEmpty())
+            ? m_recentKeys.at(i)
+            : m_recentGames.at(i);
+    considerApproved(raw, m_recentGames.at(i));
+  }
+  for (const QString &key : m_whitelist->whitelistEntries()) {
+    QString display = m_whitelist->getWhitelistName(key);
+    if (display.isEmpty())
+      display = key;
+    considerApproved(key, display);
+  }
+  for (const QString &tokenName : m_tokenGames)
+    considerApproved(tokenName, tokenName);
+  std::sort(approved.begin(), approved.end(), byDisplay);
+  rows.append(approved);
+
+  // Pool ("Games"): every non-live, non-approved identity in one
+  // alphabetical run, so taps never teleport a row.
+  QList<GameListEntry> pool;
+  for (const QString &key : m_whitelist->whitelistEntries()) {
+    QString display = m_whitelist->getWhitelistName(key);
+    const uint sid = steamAppIdFromAppId(key);
+    if (display.isEmpty() || display == key) {
+      if (sid > 0) {
+        const QString steamName = getSteamAppName(sid);
+        if (!steamName.isEmpty())
+          display = steamName;
+      }
+      if (display.isEmpty())
+        display = key;
+    }
+    if (!claim(key, display))
+      continue;
+    GameListEntry e;
+    e.key = key;
+    e.display = display;
+    e.steamAppId = sid;
+    e.listed = listedFlag(key, display);
+    e.section = QStringLiteral("Games");
+    pool.push_back(e);
+  }
+
+  for (int i = 0; i < m_recentGames.size(); ++i) {
+    const QString &name = m_recentGames.at(i);
+    const QString raw =
+        (i < m_recentKeys.size() && !m_recentKeys.at(i).isEmpty())
+            ? m_recentKeys.at(i)
+            : name;
+    if (!claim(raw, name))
+      continue;
+    GameListEntry e;
+    e.display = name;
+    e.key = raw;
+    e.pid = 0;
+    e.running = false;
+    e.steamAppId = steamAppIdFromAppId(e.key);
+    e.listed = listedFlag(e.key, e.display);
+    e.section = QStringLiteral("Games");
+    pool.push_back(e);
+  }
+
+  const QStringList defaults = GameWhitelist::defaultBlacklistEntries();
+  const QSet<QString> systemKeys(defaults.begin(), defaults.end());
+  const auto pushBlocked = [&](GameListEntry e) {
+    if (!claim(e.key, e.display))
+      return;
+    pool.push_back(e);
+  };
+  for (const QString &key : m_whitelist->blacklistEntries()) {
+    GameListEntry e;
+    e.key = key;
+    e.listed = 2;
+    e.isDefault = systemKeys.contains(key);
+    e.display = e.isDefault ? GameWhitelist::prettySystemName(key) : key;
+    e.section = QStringLiteral("Games");
+    pushBlocked(e);
+  }
+  for (const QString &key : m_whitelist->removedDefaults()) {
+    GameListEntry e;
+    e.key = key;
+    e.display = GameWhitelist::prettySystemName(key);
+    e.listed = 0;
+    e.isDefault = true;
+    e.section = QStringLiteral("Games");
+    pushBlocked(e);
+  }
+  for (const QString &key : m_whitelist->customKeys()) {
+    GameListEntry e;
+    e.key = key;
+    e.display = m_whitelist->getWhitelistName(key);
+    if (e.display.isEmpty())
+      e.display = key;
+    e.steamAppId = steamAppIdFromAppId(key);
+    e.listed = listedFlag(key, e.display);
+    e.section = QStringLiteral("Games");
+    if (!claim(e.key, e.display))
+      continue;
+    pool.push_back(e);
+  }
+  std::sort(pool.begin(), pool.end(), byDisplay);
+  rows.append(pool);
+  m_gamesModel->setEntries(rows);
 }
 
 } // namespace TrophyBackend

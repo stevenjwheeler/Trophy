@@ -158,11 +158,13 @@ void NotificationService::sendNotification(const QString &title,
   const QVariantMap hints = notificationHints(urgency, authorizeAction);
 
   QStringList actions;
-  // The authorize button belongs only to the DVR authorize prompt — it
-  // used to ride along with any urgency>1 notification, which would have
-  // put an "Authorize Capture" button on critical recording/clip notices.
+  // Action buttons belong only to the authorize prompt — they used to
+  // ride along with any urgency>1 notification, which would have put an
+  // "Authorize Capture" button on critical recording/clip notices.
+  // Approve starts capture (portal token follows); Block vetoes the game
+  // in the Games list; dismissing leaves it on Prompt.
   if (authorizeAction) {
-    actions << "authorize" << "Authorize Capture";
+    actions << "authorize" << "Authorize Capture" << "block" << "Block";
   }
 
   QDBusReply<uint> reply =
@@ -216,17 +218,18 @@ void NotificationService::onActionInvoked(uint id, const QString &action) {
 
 void NotificationService::onNotificationClosed(uint id, uint reason) {
   Q_UNUSED(reason);
-  // Body-clicking a notification closes it without ActionInvoked, so the
-  // authorize channel would never fire for body clicks. Treat closing the
-  // authorize prompt as acknowledgement. Other notifications are ignored
-  // here (Application no-ops without pending authorize anyway, but keep
-  // this narrow so a stray close can't arm anything unexpected).
+  // Dismissing the authorize prompt (timeout, X, body-click — all close
+  // without ActionInvoked) means "leave it on Prompt": report a
+  // dismissal so the game is neither allow-listed nor blocked and no
+  // capture starts. Other notifications are ignored here (Application
+  // no-ops without pending authorize anyway, but keep this narrow so a
+  // stray close can't arm anything unexpected).
   const bool isAuthorize =
       m_lastTitle.startsWith(QStringLiteral("New Game: "));
   if (id == m_lastNotificationId && m_lastNotificationId != 0) {
     m_lastNotificationId = 0;
     if (isAuthorize)
-      emit notificationClicked(QString());
+      emit notificationClicked(QStringLiteral("dismissed"));
   } else if (id == m_lastNotificationId) {
     m_lastNotificationId = 0;
   }

@@ -372,6 +372,7 @@ void Application::connectSignals() {
               if (!token.isEmpty()) {
                 m_detectionDebounceTimer->stop();
                 m_pendingAutoRecordGame.clear();
+                authorizeGame(gameName);
                 startWhenWindowReady(gameName, true);
               } else if (m_pendingAutoRecordGame != gameName ||
                          !m_detectionDebounceTimer->isActive()) {
@@ -384,6 +385,7 @@ void Application::connectSignals() {
               // as recording — never a surprise picker at launch.
               if (!m_settingsManager->getRestoreToken(gameName).isEmpty()) {
                 m_pendingDvrGame.clear();
+                authorizeGame(gameName);
                 startWhenWindowReady(gameName, false);
               } else if (m_pendingDvrGame != gameName ||
                          !m_detectionDebounceTimer->isActive()) {
@@ -392,6 +394,20 @@ void Application::connectSignals() {
               }
             }
           });
+  // Approval is derived from portal restore tokens: whenever the token
+  // map changes, push the holding games to the detector so the Games
+  // page's Ready section stays truthful.
+  connect(m_settingsManager.get(), &SettingsManager::waylandRestoreTokensChanged,
+          this, [this]() {
+            if (m_gameDetector && m_settingsManager) {
+              m_gameDetector->setTokenGames(
+                  m_settingsManager->waylandRestoreTokens().keys());
+            }
+          });
+  if (m_gameDetector && m_settingsManager) {
+    m_gameDetector->setTokenGames(
+        m_settingsManager->waylandRestoreTokens().keys());
+  }
   connect(m_windowMonitor.get(), &WaylandWindowMonitor::windowsChanged, this, [this]() {
             if (m_pendingWindowGame.isEmpty() ||
                 !m_gameDetector->hasVisibleWindow())
@@ -425,9 +441,20 @@ void Application::connectSignals() {
     const QString pending = !m_pendingAutoRecordGame.isEmpty()
                                 ? m_pendingAutoRecordGame
                                 : m_pendingDvrGame;
-    if (!pending.isEmpty()) {
-      m_notificationService->showNotification("New Game: " + pending, "Click to authorize Wayland capture for this game.", "trophy", 0, 2, true);
+    if (pending.isEmpty())
+      return;
+    // A game blocked while detection was pending never prompts: drop it
+    // (unblocking re-arms below, so the row's next state always applies).
+    if (isGameBlocked(pending)) {
+      qCDebug(appLog) << "Skipping authorize prompt for blocked game:"
+                      << pending;
+      if (m_pendingAutoRecordGame == pending)
+        m_pendingAutoRecordGame.clear();
+      if (m_pendingDvrGame == pending)
+        m_pendingDvrGame.clear();
+      return;
     }
+    m_notificationService->showNotification("New Game: " + pending, "Authorize Wayland capture for this game, or Block it.", "trophy", 0, 2, true);
   });
   connect(m_audioWaitTimer, &QTimer::timeout, this, [this]() {
     if (m_pendingAudioGame.isEmpty()) {
@@ -480,6 +507,25 @@ void Application::connectSignals() {
                             << "- re-authorizing via prompt";
             m_settingsManager->removeRestoreToken(game);
             m_pendingDvrGame = game;
+            m_detectionDebounceTimer->start();
+          });
+  // Unblocking the live game re-arms its prompt: the debounce dropped it
+  // as blocked, and same-game re-detects never refire. Tokened games
+  // start silently, so only the no-token prompt paths re-arm.
+  connect(m_gameDetector.get(), &GameDetectionService::blacklistChanged, this, [this]() {
+            if (!m_gameDetector || m_gameDetector->currentGameName().isEmpty())
+              return;
+            const QString game = m_gameDetector->currentGameName();
+            if (isGameBlocked(game) || !m_pendingAutoRecordGame.isEmpty() ||
+                !m_pendingDvrGame.isEmpty() ||
+                !m_settingsManager->getRestoreToken(game).isEmpty())
+              return;
+            if (m_settingsManager->autoRecordEnabled())
+              m_pendingAutoRecordGame = game;
+            else if (m_settingsManager->instantReplayEnabled())
+              m_pendingDvrGame = game;
+            else
+              return;
             m_detectionDebounceTimer->start();
           });
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed, this, [this](const QString &gameName) {
@@ -597,16 +643,42 @@ void Application::connectSignals() {
   // refresh recreates Recording objects (which consult it in addRecording).
   connect(m_storageManager.get(), &StorageManager::recordingRenamed, m_recordingLibrary.get(), &RecordingLibrary::onRecordingRenamed);
   connect(m_storageManager.get(), &StorageManager::recordingRenamed, m_recordingLibrary.get(), &RecordingLibrary::refresh);
-  connect(m_notificationService.get(), &NotificationService::notificationClicked, this, [this](const QString &) {
+  connect(m_notificationService.get(), &NotificationService::notificationClicked, this, [this](const QString &action) {
+            // Three-way authorize prompt: "authorize" starts capture and
+            // allow-lists the game (portal token follows at start);
+            // "block" vetoes it in the Games list with no capture;
+            // anything else is a dismissal — drop pending, change nothing,
+            // start nothing. The game stays on Prompt and re-prompts on
+            // its next launch.
+            if (action != QStringLiteral("authorize") && action != QStringLiteral("block")) {
+              m_pendingAutoRecordGame.clear();
+              m_pendingDvrGame.clear();
+              m_detectionDebounceTimer->stop();
+              return;
+            }
+            QString game;
+            bool isRecord = true;
             if (!m_pendingAutoRecordGame.isEmpty()) {
-              m_notificationService->closeLastNotification();
-              m_recordingManager->startRecording(m_pendingAutoRecordGame);
+              game = m_pendingAutoRecordGame;
               m_pendingAutoRecordGame.clear();
             } else if (!m_pendingDvrGame.isEmpty()) {
-              m_notificationService->closeLastNotification();
-              m_replayManager->startDvr(m_pendingDvrGame);
+              game = m_pendingDvrGame;
+              isRecord = false;
               m_pendingDvrGame.clear();
             }
+            m_notificationService->closeLastNotification();
+            if (game.isEmpty())
+              return;
+            if (action == QStringLiteral("block")) {
+              blockGame(game);
+              return;
+            }
+            if (isRecord)
+              m_recordingManager->startRecording(game);
+            else
+              m_replayManager->startDvr(game);
+            // Prompt click authorizes capture: allow-list the game.
+            authorizeGame(game);
           });
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved, m_storageManager.get(), &StorageManager::refresh);
@@ -786,6 +858,43 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
   m_audioWaitHits = 0;
   m_audioWaitTicks = 0;
   m_audioWaitTimer->start();
+}
+
+void Application::authorizeGame(const QString &game) {
+  if (!m_gameDetector || game.isEmpty())
+    return;
+  // Prefer the detector's raw match key (reporter class / steam_app_<id>)
+  // so future launches re-match; fall back to the display name (Steam
+  // resolution is deterministic, so that re-matches too).
+  QString key = game;
+  if (m_gameDetector->currentGameName() == game &&
+      !m_gameDetector->currentGameKey().isEmpty())
+    key = m_gameDetector->currentGameKey();
+  if (m_gameDetector->addToWhitelist(key, game))
+    qCInfo(appLog) << "Auto-whitelisted authorized game:" << game << "("
+                   << key << ")";
+}
+
+void Application::blockGame(const QString &game) {
+  if (!m_gameDetector || game.isEmpty())
+    return;
+  QString key = game;
+  if (m_gameDetector->currentGameName() == game &&
+      !m_gameDetector->currentGameKey().isEmpty())
+    key = m_gameDetector->currentGameKey();
+  if (m_gameDetector->moveToBlacklist(key))
+    qCInfo(appLog) << "Blocked game from authorize prompt:" << game << "("
+                   << key << ")";
+}
+
+bool Application::isGameBlocked(const QString &game) const {
+  if (!m_gameDetector || game.isEmpty())
+    return false;
+  if (m_gameDetector->currentGameName() == game &&
+      !m_gameDetector->currentGameKey().isEmpty() &&
+      m_gameDetector->isBlocked(m_gameDetector->currentGameKey()))
+    return true;
+  return m_gameDetector->isBlocked(game);
 }
 
 void Application::startWhenWindowReady(const QString &game, bool isRecord) {

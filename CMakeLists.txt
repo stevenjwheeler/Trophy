@@ -296,6 +296,7 @@ set(MUXING_HEADERS
 
 set(DETECTION_HEADERS
     src/detection/GameDetectionService.h
+    src/detection/GameListModel.h
     src/detection/GameWhitelist.h
 )
 
