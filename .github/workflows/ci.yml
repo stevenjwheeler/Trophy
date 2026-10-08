@@ -155,16 +155,25 @@ jobs:
             exit 1
           fi
           echo "Bundling $TROPHY_LIB"
+          TROPHY_BIN=$(find AppDir/usr -name 'trophy' -type f | head -n 1)
+          if [[ -z "$TROPHY_BIN" ]]; then
+            echo "ERROR: trophy binary missing from AppDir install:"
+            find AppDir/usr -maxdepth 3 | sort
+            exit 1
+          fi
+          echo "Bundling $TROPHY_BIN"
 
-          # 4. Environment setup
+          # 4. Environment setup (QML_SOURCES_PATHS must point at the
+          # GENERATED module in build/qml — it holds the qmldir +
+          # plugin lib. The raw source tree has neither.)
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
-          export QML_SOURCES_PATHS=$PWD/qml
+          export QML_SOURCES_PATHS=$PWD/build/qml
           export EXTRA_QT_MODULES="quickcontrols2;multimedia"
           
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --executable AppDir/usr/bin/trophy \
+            --executable "$TROPHY_BIN" \
             --library "$TROPHY_LIB" \
             --desktop-file packaging/trophy.desktop \
             --icon-file resources/icons/trophy.svg \
