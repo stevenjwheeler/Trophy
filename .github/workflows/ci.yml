@@ -144,9 +144,17 @@ jobs:
           wget --tries=3 --waitretry=5 -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
-          # 3. Install to AppDir (DESTDIR already lays out usr/bin,
-          # usr/lib/libTrophy.so, etc. — no manual copying needed)
+          # 3. Install to AppDir (GNUInstallDirs: the lib lands in
+          # usr/lib on Arch but usr/lib/x86_64-linux-gnu on Ubuntu,
+          # so locate it instead of hardcoding the path)
           DESTDIR=AppDir cmake --install build
+          TROPHY_LIB=$(find AppDir/usr -name 'libTrophy.so' | head -n 1)
+          if [[ -z "$TROPHY_LIB" ]]; then
+            echo "ERROR: libTrophy.so missing from AppDir install:"
+            find AppDir/usr -maxdepth 3 | sort
+            exit 1
+          fi
+          echo "Bundling $TROPHY_LIB"
 
           # 4. Environment setup
           export QMAKE=$(which qmake6 || which qmake)
@@ -157,7 +165,7 @@ jobs:
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable AppDir/usr/bin/trophy \
-            --library AppDir/usr/lib/libTrophy.so \
+            --library "$TROPHY_LIB" \
             --desktop-file packaging/trophy.desktop \
             --icon-file resources/icons/trophy.svg \
             --plugin qt \
