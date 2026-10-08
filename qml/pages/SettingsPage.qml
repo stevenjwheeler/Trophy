@@ -1246,6 +1246,20 @@ Page {
                             }
                         }
                     }
+
+                    SettingRow {
+                        label: qsTr("Automatic Update Checks")
+                        help: qsTr("Check GitHub for a new Trophy release once a day. The Check for updates link on the Info page always runs.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.updateCheckEnabled : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.updateCheckEnabled = checked;
+                            }
+                        }
+                    }
                 }
 
                 // ================= DETECTION =================

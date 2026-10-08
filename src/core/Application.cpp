@@ -356,7 +356,7 @@ void Application::initializeServices() {
                 QStringLiteral("open-update"),
                 QStringLiteral("View Release"));
           });
-  // Daily cadence while running: first check ~60s after
+  // Daily cadence while running: first check shortly after
   // startup (never racing launch), then every 24h. The app
   // can't check while closed, so "daily" means once per day
   // the app is actually up.
@@ -367,7 +367,7 @@ void Application::initializeServices() {
     if (m_settingsManager->updateCheckEnabled())
       m_updateChecker->checkNow();
   });
-  QTimer::singleShot(60000, this, [this]() {
+  QTimer::singleShot(kUpdateCheckDelayMs, this, [this]() {
     if (m_settingsManager->updateCheckEnabled())
       m_updateChecker->checkNow();
     m_updateCheckTimer->start();

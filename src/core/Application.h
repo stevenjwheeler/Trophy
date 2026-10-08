@@ -214,6 +214,9 @@ private:
   // seen, so the "View Release" notice action can open it.
   QString m_latestReleaseUrl;
   QTimer *m_updateCheckTimer = nullptr;
+  // First background check after startup (short: launch work
+  // is done in well under this, and the request is async).
+  static constexpr int kUpdateCheckDelayMs = 10000;
   QObject *qmlRootWindow() const;
   void setMainWindowVisible(bool visible);
   void syncAutostartFile();

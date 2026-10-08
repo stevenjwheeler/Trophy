@@ -6,7 +6,6 @@
  */
 
 import TrophyBackend
-import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -20,16 +19,37 @@ Page {
     property string updateStatus: ""
     property bool updateChecking: false
     property bool updateNewer: false
+    // Release page behind the "Version X is available"
+    // verdict, which opens it on click.
+    property string updateReleaseUrl: ""
 
     Connections {
         target: updateChecker
         function onCheckFinished(newerAvailable, latestVersion, releaseUrl) {
             updateChecking = false
             updateNewer = newerAvailable
-            if (newerAvailable)
+            updateReleaseUrl = newerAvailable ? releaseUrl : ""
+            if (newerAvailable) {
+                // Names both versions (they differ) and stays up:
+                // it's actionable.
+                updateDismissTimer.stop()
                 updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, AppVersion)
-            else
-                updateStatus = qsTr("You're on the latest version (%1).").arg(AppVersion)
+            } else {
+                // The badge right above already shows the
+                // version; this confirmation fades shortly.
+                updateStatus = qsTr("You're on the latest version.")
+                updateDismissTimer.restart()
+            }
+        }
+    }
+
+    Timer {
+        id: updateDismissTimer
+        interval: 4000
+        repeat: false
+        onTriggered: {
+            root.updateStatus = ""
+            root.updateNewer = false
         }
     }
 
@@ -50,10 +70,10 @@ Page {
             ColumnLayout {
                 Layout.alignment: Qt.AlignHCenter
                 Layout.fillWidth: true
-                spacing: Theme.spacingMedium
+                spacing: Theme.spacingSmall
 
                 Item {
-                    Layout.preferredHeight: Theme.spacingLarge
+                    Layout.preferredHeight: Theme.spacingLarge * 2
                 }
 
                 Image {
@@ -83,14 +103,79 @@ Page {
                     horizontalAlignment: Text.AlignHCenter
                 }
 
-                Label {
+                // Version in a little red badge.
+                Rectangle {
                     Layout.alignment: Qt.AlignHCenter
-                    text: qsTr("Version %1").arg(AppVersion)
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textMutedColor
-                    horizontalAlignment: Text.AlignHCenter
+                    implicitWidth: versionText.implicitWidth + 18
+                    implicitHeight: versionText.implicitHeight + 8
+                    radius: Theme.radiusSmall
+                    color: Theme.primaryColor
+
+                    Label {
+                        id: versionText
+                        anchors.centerIn: parent
+                        text: AppVersion
+                        color: "white"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.weight: Font.Medium
+                    }
                 }
 
+                // Update verdict from the background check.
+                // The manual link below hides while this (or
+                // "Checking…") shows, and returns when it clears.
+                // A newer-version verdict opens its release page.
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.updateChecking || root.updateStatus !== ""
+                    text: root.updateChecking ? qsTr("Checking…") : root.updateStatus
+                    color: root.updateNewer ? Theme.primaryColor : Theme.textMutedColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.underline: verdictHover.containsMouse && root.updateNewer
+                    horizontalAlignment: Text.AlignHCenter
+
+                    MouseArea {
+                        id: verdictHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: root.updateNewer ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        enabled: root.updateNewer && root.updateReleaseUrl !== ""
+                        onClicked: Qt.openUrlExternally(root.updateReleaseUrl)
+                    }
+                }
+
+                // Text button: manual check lives here, the
+                // automatic-checks toggle lives in Settings.
+                // Hidden while a check runs or its verdict shows,
+                // so the feed can't be spammed.
+                Label {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: !root.updateChecking && root.updateStatus === ""
+                    text: qsTr("Check for updates")
+                    color: checkUpdatesHover.containsMouse ? Theme.primaryColor : Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.underline: checkUpdatesHover.containsMouse
+                    horizontalAlignment: Text.AlignHCenter
+
+                    MouseArea {
+                        id: checkUpdatesHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        enabled: typeof updateChecker !== "undefined"
+                        onClicked: {
+                            root.updateChecking = true
+                            updateChecker.checkNow()
+                        }
+                    }
+                }
+
+            }
+
+            // Breathing room between the header block and the
+            // first card.
+            Item {
+                Layout.preferredHeight: Theme.spacingMedium
             }
 
             // Description
@@ -109,118 +194,11 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, keybinded clipping, smart game detection, and separate audio tracks for easier editing.")
+                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, one-press clipping, smart game detection, and separate audio tracks for easier editing.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
                         horizontalAlignment: Text.AlignHCenter
-                    }
-
-                }
-
-            }
-
-            // License Section
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: licenseLayout.implicitHeight + Theme.spacingMedium * 2
-                radius: Theme.radiusMedium
-                color: Theme.cardColor
-
-                ColumnLayout {
-                    id: licenseLayout
-
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingMedium
-                    spacing: Theme.spacingSmall
-
-                    Label {
-                        text: qsTr("📜 License")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    Label {
-                        Layout.fillWidth: true
-                        text: qsTr("This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).")
-                        wrapMode: Text.WordWrap
-                        color: Theme.textColor
-                        font.pixelSize: Theme.fontSizeNormal
-                    }
-
-                    Label {
-                        Layout.fillWidth: true
-                        text: qsTr("Copyright © 2026")
-                        color: Theme.textMutedColor
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                }
-
-            }
-
-            // Updates Section
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: updatesLayout.implicitHeight + Theme.spacingMedium * 2
-                radius: Theme.radiusMedium
-                color: Theme.cardColor
-
-                ColumnLayout {
-                    id: updatesLayout
-
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingMedium
-                    spacing: Theme.spacingSmall
-
-                    Label {
-                        text: qsTr("🔄 Updates")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    // Status from the background check (empty
-                    // until the first check completes).
-                    Label {
-                        Layout.fillWidth: true
-                        text: updateChecking ? qsTr("Checking…") : updateStatus
-                        color: updateNewer ? Theme.primaryColor : Theme.textMutedColor
-                        font.pixelSize: Theme.fontSizeSmall
-                        wrapMode: Text.WordWrap
-                        visible: updateStatus !== ""
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-
-                        TrophyButton {
-                            text: updateChecking ? qsTr("Checking…") : qsTr("Check for Updates")
-                            enabled: !updateChecking && typeof updateChecker !== "undefined"
-                            onClicked: {
-                                updateChecking = true
-                                updateChecker.checkNow()
-                            }
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        // Opt-out for the daily background check.
-                        // The manual button above always runs.
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.updateCheckEnabled : true
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.updateCheckEnabled = checked
-                            }
-                        }
-                        Label {
-                            text: qsTr("Automatic checks")
-                            color: Theme.textSecondaryColor
-                            font.pixelSize: Theme.fontSizeSmall
-                        }
                     }
 
                 }
@@ -278,6 +256,18 @@ Page {
                             description: qsTr("Auto-cleanup and crash-resilient formats")
                         }
 
+                        FeatureItem {
+                            icon: "⏪"
+                            title: qsTr("Instant Clips")
+                            description: qsTr("Background DVR — save recent moments anytime, buffer length adjustable")
+                        }
+
+                        FeatureItem {
+                            icon: "🔄"
+                            title: qsTr("Automatic Updates")
+                            description: qsTr("Daily release check with a one-click download page")
+                        }
+
                     }
 
                 }
@@ -324,13 +314,31 @@ Page {
                         }
 
                         Label {
-                            text: qsTr("• The Qt Company for the excellent Qt framework")
+                            text: qsTr("• The Qt project for the application framework")
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
                         }
 
                         Label {
-                            text: qsTr("• The Wayland and KWin teams for modern Linux compositing")
+                            text: qsTr("• The Wayland compositor teams (KWin, Hyprland, Sway, GNOME) for modern Linux compositing")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• The xdg-desktop-portal contributors for secure screen capture")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• The Khronos Group for the open Vulkan graphics standard")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
+                            text: qsTr("• LinuxDeploy for AppImage distribution")
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
                         }
@@ -353,83 +361,46 @@ Page {
 
             }
 
-            // Keyboard Shortcuts Section
+            // License Section
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: shortcutsLayout.implicitHeight + Theme.spacingMedium * 2
+                Layout.preferredHeight: licenseLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
 
                 ColumnLayout {
-                    id: shortcutsLayout
+                    id: licenseLayout
 
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
-                    spacing: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingSmall
+
+                        Label {
+                            text: qsTr("📜 License")
+                            font.pixelSize: Theme.fontSizeLarge
+                            font.weight: Font.Medium
+                            color: Theme.textColor
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Label {
+                            text: qsTr("Copyright © 2026")
+                            color: Theme.textMutedColor
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+                    }
 
                     Label {
-                        text: qsTr("⌨️ Keyboard Shortcuts")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    GridLayout {
                         Layout.fillWidth: true
-                        columns: 2
-                        columnSpacing: Theme.spacingLarge
-                        rowSpacing: Theme.spacingSmall
-
-                        Label {
-                            text: "Ctrl+Q"
-                            font.family: "monospace"
-                            font.pixelSize: Theme.fontSizeNormal
-                            color: Theme.primaryColor
-                            Layout.preferredWidth: 100
-                        }
-
-                        Label {
-                            text: qsTr("Quit Application")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                    }
-
-                }
-
-            }
-
-            // Logo Section
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: logoLayout.implicitHeight + Theme.spacingMedium * 2
-                radius: Theme.radiusMedium
-                color: Theme.cardColor
-
-                ColumnLayout {
-                    id: logoLayout
-
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingMedium
-                    spacing: Theme.spacingMedium
-
-                    Label {
-                        text: qsTr("🏆 What's the logo?")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
+                        text: qsTr("This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).")
+                        wrapMode: Text.WordWrap
                         color: Theme.textColor
-                    }
-
-                    GridLayout {
-                        Layout.fillWidth: true
-
-                        Label {
-                            text: qsTr("It's a trophy from the top down, which also happens to look like a recording indicator!")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
+                        font.pixelSize: Theme.fontSizeNormal
                     }
 
                 }
@@ -441,9 +412,7 @@ Page {
                 Layout.fillWidth: true
                 Layout.preferredHeight: disclaimerLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
-                color: Theme.withOpacity(Theme.primaryColor, 0.1)
-                border.width: 1
-                border.color: Theme.withOpacity(Theme.primaryColor, 0.3)
+                color: Theme.cardColor
 
                 ColumnLayout {
                     id: disclaimerLayout
@@ -474,20 +443,22 @@ Page {
             // Links
             RowLayout {
                 Layout.alignment: Qt.AlignHCenter
-                spacing: Theme.spacingMedium
+                spacing: Theme.spacingLarge
 
-                Button {
-                    flat: true
-                    background: null
-                    icon.source: "qrc:/icons/github.svg"
-                    icon.color: Theme.textColor
+                FooterLink {
                     text: "GitHub"
-                    onClicked: Qt.openUrlExternally("https://github.com/stevenjwheeler/Trophy")
+                    url: "https://github.com/OasisLab-Software/Trophy"
+                    iconSource: "qrc:/icons/github.svg"
+                }
 
-                    HoverHandler {
-                        cursorShape: Qt.PointingHandCursor
-                    }
+                FooterLink {
+                    text: qsTr("Report an Issue")
+                    url: "https://github.com/OasisLab-Software/Trophy/issues/new"
+                }
 
+                FooterLink {
+                    text: qsTr("Releases")
+                    url: "https://github.com/OasisLab-Software/Trophy/releases"
                 }
 
             }
@@ -532,41 +503,47 @@ Page {
 
     }
 
-    // Technology Item Component
-    component TechItem: RowLayout {
-        property string name: ""
-        property string description: ""
+    // Footer link: same hover language as the
+    // "Check for updates" text button (primary + underline),
+    // with an optional leading icon. Hover/click use
+    // non-visual handlers: an anchored MouseArea inside a
+    // layout child is undefined behavior (engine warning).
+    component FooterLink: RowLayout {
+        property string text: ""
+        property string url: ""
+        property string iconSource: ""
 
-        Layout.fillWidth: true
-        spacing: Theme.spacingSmall
+        spacing: 4
+
+        Image {
+            visible: parent.iconSource !== ""
+            source: parent.iconSource
+            Layout.preferredWidth: 14
+            Layout.preferredHeight: 14
+            sourceSize: Qt.size(14, 14)
+            Layout.alignment: Qt.AlignVCenter
+        }
 
         Label {
-            text: "•"
-            color: Theme.primaryColor
-            font.pixelSize: Theme.fontSizeMedium
+            text: parent.text
+            color: footerHover.hovered ? Theme.primaryColor : Theme.textSecondaryColor
+            font.pixelSize: Theme.fontSizeSmall
+            font.underline: footerHover.hovered
+            horizontalAlignment: Text.AlignHCenter
+            Layout.alignment: Qt.AlignVCenter
         }
 
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 2
-
-            Label {
-                text: name
-                font.pixelSize: Theme.fontSizeNormal
-                font.weight: Font.Medium
-                color: Theme.textColor
-            }
-
-            Label {
-                Layout.fillWidth: true
-                text: description
-                wrapMode: Text.WordWrap
-                color: Theme.textMutedColor
-                font.pixelSize: Theme.fontSizeSmall
-            }
-
+        HoverHandler {
+            id: footerHover
+            // Cursor lives here, not on the TapHandler:
+            // TapHandler only shows its cursor while pressed,
+            // HoverHandler shows it on hover.
+            cursorShape: Qt.PointingHandCursor
         }
 
+        TapHandler {
+            onTapped: Qt.openUrlExternally(parent.url)
+        }
     }
 
 }
