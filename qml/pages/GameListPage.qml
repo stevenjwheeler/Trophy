@@ -9,6 +9,7 @@ import "../controls"
 import "../styles"
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import QtQuick.Layouts
 
 Page {
@@ -145,7 +146,11 @@ Page {
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
                         font.weight: Font.Bold
-                        topPadding: Theme.spacingSmall
+                        font.capitalization: Font.AllUppercase
+                        font.letterSpacing: 0.5
+                        topPadding: 0
+                        bottomPadding: Theme.spacingTiny
+                        leftPadding: Theme.spacingTiny
                     }
 
                     delegate: GameListItem {
@@ -205,7 +210,6 @@ Page {
             const ok = blacklistRadio.checked ? gameDetector.addCustomGame(key, display, true) : gameDetector.addCustomGame(key, display, false)
             if (ok) {
                 addGameDialog.close()
-                root.flash(qsTr("Game added."))
             } else {
                 root.flash(qsTr("That game is already listed."))
             }
@@ -287,7 +291,7 @@ Page {
                     width: processList.width
                     height: 50
                     padding: 0
-                    highlighted: addGameDialog.pickedWindow !== null && modelData.id === addGameDialog.pickedWindow.id
+                    highlighted: addGameDialog.pickedWindow !== null && modelData === addGameDialog.pickedWindow
                     onClicked: {
                         addGameDialog.pickedWindow = modelData
                         displayField.text = modelData.title || modelData.class || ""
@@ -511,7 +515,7 @@ Page {
 
     }
 
-    component GameListItem: Rectangle {
+    component GameListItem: Item {
         id: gameItem
 
         property string entryKey: ""
@@ -526,10 +530,29 @@ Page {
         signal notice(string text)
 
         height: 60
-        radius: Theme.radiusSmall
-        color: Theme.cardColor
-        border.color: entryRunning ? Theme.successColor : "transparent"
-        border.width: entryRunning ? 1 : 0
+
+        // Backdrop: plain rows stay flat on the card, the running game
+        // gets a green-tinted lift (drawn by the effect below).
+        Rectangle {
+            id: rowCard
+
+            anchors.fill: parent
+            radius: Theme.radiusSmall
+            color: gameItem.entryRunning ? Theme.withOpacity(Theme.successColor, 0.1) : "transparent"
+            border.color: gameItem.entryRunning ? Theme.successColor : "transparent"
+            border.width: gameItem.entryRunning ? 1 : 0
+            visible: false
+        }
+
+        MultiEffect {
+            anchors.fill: rowCard
+            source: rowCard
+            visible: gameItem.entryRunning
+            shadowEnabled: true
+            shadowBlur: 0.4
+            shadowColor: "#70000000"
+            shadowVerticalOffset: 2
+        }
 
         RowLayout {
             anchors.fill: parent
