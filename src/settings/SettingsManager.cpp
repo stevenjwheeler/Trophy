@@ -616,12 +616,6 @@ void SettingsManager::setClipBufferSeconds(int seconds) {
   }
 }
 
-void SettingsManager::clearWaylandToken() {
-  m_waylandRestoreTokens.clear();
-  save();
-  emit waylandRestoreTokensChanged();
-}
-
 QString SettingsManager::getRestoreToken(const QString &key) const {
   return m_waylandRestoreTokens.value(key).toString();
 }

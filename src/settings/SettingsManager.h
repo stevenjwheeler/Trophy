@@ -242,7 +242,6 @@ public:
   // Utility
   Q_INVOKABLE QString settingsFilePath() const;
   Q_INVOKABLE QStringList availableEncoders() const;
-  Q_INVOKABLE void clearWaylandToken();
 
 signals:
   // Video

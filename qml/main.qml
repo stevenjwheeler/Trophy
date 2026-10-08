@@ -236,7 +236,8 @@ ApplicationWindow {
 
         // Search settings (names must match SettingsPage sections)
         var settings = [
-            { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "background clips", "clip buffer", "clip cache", "zero-copy", "dma-buf", "wayland", "permissions", "screen capture"] },
+            { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "zero-copy", "dma-buf"] },
+            { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test"] },
