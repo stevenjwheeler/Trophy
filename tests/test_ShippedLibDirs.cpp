@@ -54,6 +54,17 @@ TEST(ShippedLibDirsTest, BinaryDirStripsTrailingBin) {
             "/tmp/opencode/trophy-build");
 }
 
+TEST(ShippedLibDirsTest, AppDirRootResolvesIntoUsr) {
+  // AppImage launches report the mount root (AppRun symlink), not
+  // usr/bin: a root carrying usr/bin/ (and no bin/ of its own) is an
+  // AppDir whose prefix is its usr/ subtree.
+  QTemporaryDir appDir;
+  ASSERT_TRUE(appDir.isValid());
+  ASSERT_TRUE(QDir().mkpath(appDir.path() + "/usr/bin"));
+  EXPECT_EQ(prefixFromBinaryDir(appDir.path()),
+            QDir(appDir.path() + "/usr").absolutePath());
+}
+
 TEST(ShippedLibDirsTest, ManifestDirYieldsPrefixLibDir) {
   QTemporaryDir prefix;
   ASSERT_TRUE(prefix.isValid());

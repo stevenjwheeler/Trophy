@@ -43,21 +43,33 @@ inline QString prefixFromManifest(const QString &manifestPath) {
 
 /**
  * Binary dir -> install prefix. Only a trailing "bin" is stripped
- * (AppImage /usr/bin, ~/.local/bin, /usr/bin, /app/bin); anything else
- * (e.g. a CMake build tree) is already the useful root.
+ * (AppImage /usr/bin, ~/.local/bin, /usr/bin, /app/bin); an AppDir /
+ * AppImage mount root (AppRun symlink beside usr/, no bin/ of its own)
+ * resolves into its usr/ subtree; anything else (e.g. a CMake build
+ * tree) is already the useful root.
  */
 inline QString prefixFromBinaryDir(const QString &dir) {
-  // Purely lexical (QDir::cdUp refuses non-existent paths, which is all
-  // a unit test ever has): strip one trailing "bin", if present.
+  // Purely lexical except for the AppDir probe below (QDir::cdUp refuses
+  // non-existent paths, which is all a unit test ever has).
   const QFileInfo info(dir);
   if (info.fileName() == QStringLiteral("bin"))
     return info.absolutePath();
+  if (QDir(dir + "/usr/bin").exists() && !QDir(dir + "/bin").exists())
+    return QDir(dir + "/usr").absolutePath();
   return info.absoluteFilePath();
 }
 
 /** <prefix>/bin/trophy -> <prefix>. */
 inline QString prefixFromAppDir() {
-  return prefixFromBinaryDir(QCoreApplication::applicationDirPath());
+  // Resolve launcher symlinks first: under an AppImage the process is
+  // started as <mount>/AppRun (a symlink into usr/bin), and only the
+  // resolved location reveals the real usr/ prefix.
+  const QString real = QFileInfo(QCoreApplication::applicationFilePath())
+                           .canonicalFilePath();
+  const QString dir =
+      real.isEmpty() ? QCoreApplication::applicationDirPath()
+                     : QFileInfo(real).absolutePath();
+  return prefixFromBinaryDir(dir);
 }
 
 /** Library subdirs under one install prefix (incl. multilib layouts). */
