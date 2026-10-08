@@ -16,6 +16,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/version.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 }
@@ -59,9 +60,11 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   m_codecCtx->bit_rate = config.bitrate * 1000;
   // Negotiate the sample format with the codec: prefer planar float, fall
   // back to the codec's first supported format (e.g. libopus wants S16).
-  // Uses avcodec_get_supported_config (FFmpeg 5.1+; AVCodec.sample_fmts
-  // was removed in FFmpeg 8).
+  // FFmpeg 7.1+ exposes the list via avcodec_get_supported_config;
+  // older releases (e.g. distro 6.x) still carry AVCodec.sample_fmts
+  // (removed in FFmpeg 8, which is why the new API is preferred).
   m_sampleFmt = AV_SAMPLE_FMT_NONE;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 19, 100)
   const enum AVSampleFormat *fmts = nullptr;
   int numFmts = 0;
   if (avcodec_get_supported_config(m_codecCtx, codec,
@@ -79,6 +82,19 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
       m_sampleFmt = fmts[0];
     // NOTE: fmts points to codec-owned static data; do not free it.
   }
+#else
+  if (codec->sample_fmts) {
+    for (const enum AVSampleFormat *f = codec->sample_fmts;
+         *f != AV_SAMPLE_FMT_NONE; ++f) {
+      if (*f == AV_SAMPLE_FMT_FLTP) {
+        m_sampleFmt = AV_SAMPLE_FMT_FLTP;
+        break;
+      }
+    }
+    if (m_sampleFmt == AV_SAMPLE_FMT_NONE)
+      m_sampleFmt = codec->sample_fmts[0];
+  }
+#endif
   if (m_sampleFmt == AV_SAMPLE_FMT_NONE)
     m_sampleFmt = AV_SAMPLE_FMT_FLTP; // codec accepts anything
   if (m_sampleFmt != AV_SAMPLE_FMT_FLTP && m_sampleFmt != AV_SAMPLE_FMT_FLT &&

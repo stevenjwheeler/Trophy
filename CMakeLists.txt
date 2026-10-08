@@ -25,14 +25,20 @@ endif()
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Get version from Git tag
-execute_process(
-    COMMAND git describe --tags --always
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_VERSION
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
+# Get version from Git tag, unless CI (or the user) passes -DAPP_VERSION
+# explicitly — that wins so the stamped binary always matches the
+# artifact name.
+if(DEFINED APP_VERSION AND NOT APP_VERSION STREQUAL "")
+  set(GIT_VERSION ${APP_VERSION})
+else()
+  execute_process(
+      COMMAND git describe --tags --always
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+      OUTPUT_VARIABLE GIT_VERSION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+  )
+endif()
 
 # Fallback if git fails or no tags exist
 if(NOT GIT_VERSION)
