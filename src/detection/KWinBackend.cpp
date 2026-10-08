@@ -19,6 +19,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include "detection/ShippedLibDirs.h"
+
 namespace TrophyBackend {
 
 KWinBackend::KWinBackend(QObject *parent) : QObject(parent) {}
@@ -68,7 +70,15 @@ QString KWinBackend::findScriptSourceDir() {
     qWarning() << "TROPHY_KWIN_SCRIPT_DIR set but has no metadata.json:" << env;
   }
 
-  // 2. Installed location: <datadir>/trophy/kwin/trophy-monitor.
+  // 2. Our own install prefix (AppImage included): the bundled copy
+  // matches the running code, so it wins over any copy an older
+  // install left in the shared datadir.
+  const QString bundled =
+      findScriptSourceDirForAppDir(QCoreApplication::applicationDirPath());
+  if (!bundled.isEmpty())
+    return bundled;
+
+  // 3. Installed location: <datadir>/trophy/kwin/trophy-monitor.
   const QString installed = QStandardPaths::locate(
       QStandardPaths::GenericDataLocation,
       "trophy/kwin/trophy-monitor/metadata.json");
@@ -84,6 +94,14 @@ QString KWinBackend::findScriptSourceDir() {
     if (QFile::exists(dir + "/metadata.json"))
       return dir;
   }
+  return QString();
+}
+
+QString KWinBackend::findScriptSourceDirForAppDir(const QString &appDir) {
+  const QString candidate =
+      prefixFromBinaryDir(appDir) + "/share/trophy/kwin/trophy-monitor";
+  if (QFile::exists(candidate + "/metadata.json"))
+    return candidate;
   return QString();
 }
 

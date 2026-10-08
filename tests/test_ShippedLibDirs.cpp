@@ -44,6 +44,27 @@ TEST(ShippedLibDirsTest, FilePathEntryMatchesNothing) {
   EXPECT_TRUE(findShippedLib("libtrophy_nonexistent_1234.so").isEmpty());
 }
 
+TEST(ShippedLibDirsTest, BinaryDirStripsTrailingBin) {
+  // Install layouts (AppImage /usr/bin, ~/.local/bin, /usr/bin) resolve
+  // to the prefix; anything else (build trees) is used as-is.
+  EXPECT_EQ(prefixFromBinaryDir("/opt/trophy/bin"), "/opt/trophy");
+  EXPECT_EQ(prefixFromBinaryDir("/home/u/.local/bin"), "/home/u/.local");
+  EXPECT_EQ(prefixFromBinaryDir("/usr/bin"), "/usr");
+  EXPECT_EQ(prefixFromBinaryDir("/tmp/opencode/trophy-build"),
+            "/tmp/opencode/trophy-build");
+}
+
+TEST(ShippedLibDirsTest, AppDirRootResolvesIntoUsr) {
+  // AppImage launches report the mount root (AppRun symlink), not
+  // usr/bin: a root carrying usr/bin/ (and no bin/ of its own) is an
+  // AppDir whose prefix is its usr/ subtree.
+  QTemporaryDir appDir;
+  ASSERT_TRUE(appDir.isValid());
+  ASSERT_TRUE(QDir().mkpath(appDir.path() + "/usr/bin"));
+  EXPECT_EQ(prefixFromBinaryDir(appDir.path()),
+            QDir(appDir.path() + "/usr").absolutePath());
+}
+
 TEST(ShippedLibDirsTest, ManifestDirYieldsPrefixLibDir) {
   QTemporaryDir prefix;
   ASSERT_TRUE(prefix.isValid());

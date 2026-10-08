@@ -41,9 +41,42 @@ inline QString prefixFromManifest(const QString &manifestPath) {
   return info.absolutePath();
 }
 
+/**
+ * Binary dir -> install prefix. Only a trailing "bin" is stripped
+ * (AppImage /usr/bin, ~/.local/bin, /usr/bin, /app/bin); an AppDir /
+ * AppImage mount root (AppRun symlink beside usr/, no bin/ of its own)
+ * resolves into its usr/ subtree; anything else (e.g. a CMake build
+ * tree) is already the useful root.
+ */
+inline QString prefixFromBinaryDir(const QString &dir) {
+  // Purely lexical except for the AppDir probe below (QDir::cdUp refuses
+  // non-existent paths, which is all a unit test ever has).
+  const QFileInfo info(dir);
+  if (info.fileName() == QStringLiteral("bin"))
+    return info.absolutePath();
+  if (QDir(dir + "/usr/bin").exists() && !QDir(dir + "/bin").exists())
+    return QDir(dir + "/usr").absolutePath();
+  return info.absoluteFilePath();
+}
+
 /** <prefix>/bin/trophy -> <prefix>. */
 inline QString prefixFromAppDir() {
-  return QFileInfo(QCoreApplication::applicationDirPath()).absolutePath();
+  // Resolve launcher symlinks first: under an AppImage the process is
+  // started as <mount>/AppRun (a symlink into usr/bin), and only the
+  // resolved location reveals the real usr/ prefix.
+  const QString real = QFileInfo(QCoreApplication::applicationFilePath())
+                           .canonicalFilePath();
+  const QString dir =
+      real.isEmpty() ? QCoreApplication::applicationDirPath()
+                     : QFileInfo(real).absolutePath();
+  return prefixFromBinaryDir(dir);
+}
+
+/** Library subdirs under one install prefix (incl. multilib layouts). */
+inline QStringList libSubDirs(const QString &prefix) {
+  return {prefix + "/lib/trophy", prefix + "/lib64/trophy",
+          prefix + "/lib/x86_64-linux-gnu/trophy",
+          prefix + "/lib/aarch64-linux-gnu/trophy"};
 }
 
 /** Directories that may hold shipped libraries, most likely first. */
@@ -55,11 +88,8 @@ inline QStringList shippedLibDirs(const QString &manifestPath = QString()) {
   prefixes << prefixFromAppDir();
 
   QStringList dirs;
-  for (const QString &prefix : prefixes) {
-    dirs << prefix + "/lib/trophy" << prefix + "/lib64/trophy"
-         << prefix + "/lib/x86_64-linux-gnu/trophy"
-         << prefix + "/lib/aarch64-linux-gnu/trophy";
-  }
+  for (const QString &prefix : prefixes)
+    dirs += libSubDirs(prefix);
   dirs << "/usr/lib/trophy" << "/usr/lib64/trophy"
        << "/usr/local/lib/trophy" << "/usr/local/lib64/trophy";
   return dirs;

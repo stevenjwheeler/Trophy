@@ -37,6 +37,14 @@ QString VulkanLayer::sourceManifestPath() {
   if (QFile::exists(dev))
     return dev;
 
+  // Our own install prefix (AppImage included): the bundled template
+  // matches the running code, so it wins over any copy an older
+  // install left in the shared datadir.
+  const QString bundled = prefixFromBinaryDir(appDir) +
+                          "/share/trophy/vulkan_layer/" + kFileName;
+  if (QFile::exists(bundled))
+    return bundled;
+
   // Installed datadir.
   const QString installed = QStandardPaths::locate(
       QStandardPaths::GenericDataLocation,

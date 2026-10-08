@@ -35,7 +35,9 @@ QString GlShimEnrollment::libraryPath() {
 }
 
 QString GlShimEnrollment::libraryPathForAppDir(const QString &appDir) {
-  return findShippedLib(kLibName, {appDir + "/gl_shim"});
+  QStringList dirs{appDir + "/gl_shim"};
+  dirs += libSubDirs(prefixFromBinaryDir(appDir));
+  return findShippedLib(kLibName, dirs);
 }
 
 QString GlShimEnrollment::confFilePath() {

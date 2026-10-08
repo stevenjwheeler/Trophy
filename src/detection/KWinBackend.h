@@ -56,6 +56,8 @@ public:
   static QString installedScriptDir();
   static bool isScriptInstalled();
   static bool isScriptEnabled();
+  /** Bundled package under an install prefix (AppImage included). */
+  static QString findScriptSourceDirForAppDir(const QString &appDir);
   /** Install the bundled package if missing or outdated. */
   bool ensureScriptInstalled();
   /** Remove a previously installed package (used on explicit opt-out). */
@@ -70,7 +72,8 @@ public slots:
 
 private:
   // Locate the bundled script package: $TROPHY_KWIN_SCRIPT_DIR override,
-  // installed datadir, then the CMake build-tree copy for dev runs.
+  // our own install prefix (AppImage included), installed datadir,
+  // then the CMake build-tree copy for dev runs.
   static QString findScriptSourceDir();
   bool installScript(bool *changed);
   bool ensureScriptEnabled(bool *changed);
