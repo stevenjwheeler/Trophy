@@ -92,6 +92,13 @@ private:
   qint64 m_maxSize = 50LL * 1024 * 1024 * 1024; // 50 GB default
   bool m_autoDeleteOldest = false;
   QString m_excludedRecordingPath;
+  // Latch so the limit notices fire once per over-limit episode instead
+  // of on every progress tick / directory change while over. Cleared
+  // whenever usage drops back under the limit or the limit settings
+  // change (a new situation is worth one fresh notice).
+  bool m_limitNotified = false;
+  void notifyLimitReached();
+  void notifyLimitCannotCleanup();
 
   QFileSystemWatcher m_watcher;
 };

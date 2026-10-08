@@ -118,10 +118,11 @@ void RecordingManager::startRecording(const QString &gameName,
   if (m_isManualRecording && m_manualWindowId != 0 && m_windowService) {
     m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
     if (m_currentGameName.isEmpty()) {
-      m_currentGameName = "Recording";
+      m_currentGameName = QStringLiteral("Manual Recording");
     }
   } else {
-    m_currentGameName = gameName.isEmpty() ? "Recording" : gameName;
+    m_currentGameName =
+        gameName.isEmpty() ? QStringLiteral("Manual Recording") : gameName;
   }
   emit currentGameNameChanged();
 
@@ -173,8 +174,12 @@ void RecordingManager::startRecording(const QString &gameName,
   // never pruned for missing recordings.
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenUpdated,
           this, [this](const QString &token) {
+            // Manual recordings share one display name, so their tokens
+            // must never be saved: the next manual start would silently
+            // restore some unrelated earlier source.
             if (m_settings && !m_currentGameName.isEmpty() &&
-                m_currentGameName != "Recording") {
+                m_currentGameName != "Recording" &&
+                m_currentGameName != QStringLiteral("Manual Recording")) {
               qDebug() << "Saving Wayland restore token for game:"
                        << m_currentGameName
                        << "(fp:" << token.left(4) << ")";
@@ -254,22 +259,27 @@ void RecordingManager::finishPipelineAndStart() {
     }
 
     if (m_isManualRecording) {
-      if (!label.isEmpty()) {
-        m_currentGameName = label;
+      // Adopt the portal label only when it names something real. The
+      // portal never reports which item was picked (privacy by design),
+      // so a generic label ("kwin_wayland") must not become the file
+      // name — the recording stays "Manual Recording".
+      QString manualName;
+      if (!label.isEmpty() && !isGenericSourceLabel(label)) {
+        manualName = label;
+      } else if (m_manualWindowId != 0 && m_windowService) {
+        // Fallback for manual capture where capture source provides a
+        // generic label (or none): the picked window's title.
+        manualName = m_windowService->getWindowTitle(m_manualWindowId);
+      }
+      if (manualName.isEmpty()) {
+        manualName = QStringLiteral("Manual Recording");
+      }
+      if (manualName != m_currentGameName) {
+        m_currentGameName = manualName;
         emit currentGameNameChanged();
         m_currentFilePath = generateOutputPath();
         if (m_storage)
           m_storage->setExcludedRecordingPath(m_currentFilePath);
-      } else if (m_manualWindowId != 0 && m_windowService) {
-        // Fallback for manual capture where capture source provides empty
-        // label
-        m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
-        if (!m_currentGameName.isEmpty()) {
-          emit currentGameNameChanged();
-          m_currentFilePath = generateOutputPath();
-          if (m_storage)
-            m_storage->setExcludedRecordingPath(m_currentFilePath);
-        }
       }
     } else {
       // Automatic recording: the capture should be the detected game

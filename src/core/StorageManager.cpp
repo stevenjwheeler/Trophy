@@ -67,11 +67,12 @@ void StorageManager::setMaxSize(qint64 bytes) {
     m_maxSize = bytes;
     emit maxSizeChanged();
     refresh();
+    m_limitNotified = false;
     if (isOverLimit()) {
       if (m_autoDeleteOldest) {
-        emit storageLimitReached();
+        notifyLimitReached();
       } else {
-        emit storageLimitCannotCleanup();
+        notifyLimitCannotCleanup();
       }
     }
   }
@@ -102,6 +103,9 @@ void StorageManager::refresh() {
     m_usedSize = newSize;
     emit usedSizeChanged();
   }
+  if (!isOverLimit()) {
+    m_limitNotified = false;
+  }
 }
 
 void StorageManager::setAutoDeleteOldest(bool enabled) {
@@ -109,11 +113,12 @@ void StorageManager::setAutoDeleteOldest(bool enabled) {
     m_autoDeleteOldest = enabled;
     emit autoDeleteOldestChanged();
     refresh();
+    m_limitNotified = false;
     if (isOverLimit()) {
       if (m_autoDeleteOldest) {
-        emit storageLimitReached();
+        notifyLimitReached();
       } else {
-        emit storageLimitCannotCleanup();
+        notifyLimitCannotCleanup();
       }
     }
   }
@@ -147,6 +152,22 @@ bool StorageManager::isOverLimit() const {
   return m_maxSize > 0 && m_usedSize > m_maxSize;
 }
 
+void StorageManager::notifyLimitReached() {
+  if (m_limitNotified) {
+    return;
+  }
+  m_limitNotified = true;
+  emit storageLimitReached();
+}
+
+void StorageManager::notifyLimitCannotCleanup() {
+  if (m_limitNotified) {
+    return;
+  }
+  m_limitNotified = true;
+  emit storageLimitCannotCleanup();
+}
+
 bool StorageManager::enforceStorageLimit(bool allowDelete) {
   refresh();
 
@@ -157,7 +178,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
 
   if (!m_autoDeleteOldest && !allowDelete) {
     if (m_usedSize > m_maxSize) {
-      emit storageLimitCannotCleanup();
+      notifyLimitCannotCleanup();
       return false;
     }
     return true;
@@ -171,7 +192,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
       // If we can't delete the oldest, check if it's because it's the current recording
       QStringList recordings = getRecordingsSortedByDate();
       if (!recordings.isEmpty() && recordings.first() == m_excludedRecordingPath) {
-        emit storageLimitCannotCleanup();
+        notifyLimitCannotCleanup();
       }
       break;
     }
@@ -179,8 +200,11 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
     refresh();
   }
 
-  if (m_usedSize > m_maxSize * 0.9) {
-    emit storageLimitReached();
+  // Only genuinely over-limit states notify now: the old >90% early
+  // warning cried "Storage Full" (and logged activity) on every progress
+  // tick without deleting anything, since there was nothing to delete.
+  if (isOverLimit()) {
+    notifyLimitReached();
   }
 
   return !isOverLimit();

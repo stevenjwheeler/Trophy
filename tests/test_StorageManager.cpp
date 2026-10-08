@@ -356,10 +356,10 @@ TEST_F(StorageManagerTest, EnforceStorageLimitFailsWhenOnlyExcludedRecordingRema
 
   StorageManager mgr(tempDir.path());
   mgr.setExcludedRecordingPath(tempDir.path() + "/current.mkv");
+  QSignalSpy spy(&mgr, &StorageManager::storageLimitCannotCleanup);
   mgr.setMaxSize(6000);
   mgr.setAutoDeleteOldest(true);
 
-  QSignalSpy spy(&mgr, &StorageManager::storageLimitCannotCleanup);
   EXPECT_FALSE(mgr.enforceStorageLimit());
   EXPECT_EQ(spy.count(), 1);
 
@@ -375,10 +375,10 @@ TEST_F(StorageManagerTest, EnforceStorageLimitDoesNotDeleteOverLimitWhenAutoClea
   createDummyFile("new.mkv", 5000);
 
   StorageManager mgr(tempDir.path());
+  QSignalSpy spy(&mgr, &StorageManager::storageLimitCannotCleanup);
   mgr.setMaxSize(6000);
   mgr.setAutoDeleteOldest(false);
 
-  QSignalSpy spy(&mgr, &StorageManager::storageLimitCannotCleanup);
   EXPECT_FALSE(mgr.enforceStorageLimit());
   EXPECT_EQ(spy.count(), 1);
 
@@ -386,6 +386,51 @@ TEST_F(StorageManagerTest, EnforceStorageLimitDoesNotDeleteOverLimitWhenAutoClea
   auto files = dir.entryList({"*.mkv"}, QDir::Files);
   EXPECT_EQ(files.size(), 2);
   EXPECT_GT(mgr.usedSize(), mgr.maxSize());
+}
+
+TEST_F(StorageManagerTest, NoWarningNearButUnderLimit) {
+  // 95% full with auto-cleanup on: the old >90% early warning fired
+  // storageLimitReached on every enforce call without deleting anything.
+  createDummyFile("a.mkv", 9500);
+
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(10000);
+  mgr.setAutoDeleteOldest(true);
+
+  QSignalSpy reached(&mgr, &StorageManager::storageLimitReached);
+  QSignalSpy cannot(&mgr, &StorageManager::storageLimitCannotCleanup);
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+  EXPECT_EQ(reached.count(), 0);
+  EXPECT_EQ(cannot.count(), 0);
+
+  QDir dir(tempDir.path());
+  EXPECT_EQ(dir.entryList({"*.mkv"}, QDir::Files).size(), 1);
+}
+
+TEST_F(StorageManagerTest, OverLimitNoticeSentOncePerEpisode) {
+  createDummyFile("a.mkv", 4000);
+  createDummyFile("b.mkv", 4000);
+
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(10000);
+
+  QSignalSpy reached(&mgr, &StorageManager::storageLimitReached);
+  QSignalSpy cannot(&mgr, &StorageManager::storageLimitCannotCleanup);
+  createDummyFile("c.mkv", 4000); // 12000 > 10000, cleanup off
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_EQ(cannot.count(), 1);
+  EXPECT_EQ(reached.count(), 0);
+
+  // Back under the limit resets the latch: the next episode notifies again.
+  ASSERT_TRUE(mgr.deleteRecording(tempDir.path() + "/a.mkv"));
+  ASSERT_TRUE(mgr.deleteRecording(tempDir.path() + "/b.mkv"));
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+  createDummyFile("d.mkv", 8000);
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_EQ(cannot.count(), 2);
 }
 
 TEST_F(StorageManagerTest, RefreshEmitsSignalOnSizeChange) {

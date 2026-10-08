@@ -107,9 +107,9 @@ ApplicationWindow {
         if (window.app.isWayland) {
             // A detected game records directly (same as the hotkey/tray
             // paths); the picker is only for idle manual capture. The
-            // portal reports every KWin source as generic "kwin_wayland",
-            // so a picker choice made while a game runs could never be
-            // named correctly anyway.
+            // portal reports every KWin source as generic "kwin_wayland"
+            // and never names the picked item, so manual captures keep
+            // the "Manual Recording" display name instead.
             if (window.gameDetector && window.gameDetector.currentGameName !== "")
                 window.recordingManager.startRecording(window.gameDetector.currentGameName);
             else

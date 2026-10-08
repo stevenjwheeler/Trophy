@@ -107,6 +107,7 @@ TEST_F(RecordingManagerTest, GenericSourceLabelsCarryNoIdentity) {
   EXPECT_TRUE(RecordingManager::isGenericSourceLabel(""));
   EXPECT_TRUE(RecordingManager::isGenericSourceLabel("Unknown Game"));
   EXPECT_TRUE(RecordingManager::isGenericSourceLabel("KWin Wayland"));
+  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("kwin_wayland"));
   EXPECT_TRUE(RecordingManager::isGenericSourceLabel("steam_app_1422450"));
   EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Deadlock"));
   EXPECT_FALSE(RecordingManager::isGenericSourceLabel("deadlock.exe"));
