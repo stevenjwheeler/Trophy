@@ -26,6 +26,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libdrm/drm_fourcc.h>
 #include <libswscale/swscale.h>
+#include <libavutil/pixdesc.h>
 }
 
 #ifdef HAVE_EGL
@@ -587,10 +588,19 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
         int srcStride[4] = {(int)frame.stride, 0, 0, 0};
         
         if (!m_swsCtx) {
-            m_swsCtx = sws_getContext(frame.width, frame.height, (AVPixelFormat)frame.pixelFormat,
-                                      m_config.width, m_config.height,
-                                      (AVPixelFormat)m_frame->format,
-                                      SWS_BICUBIC, nullptr, nullptr, nullptr);
+            // Reject garbage formats before swscale sees them: distro
+            // builds keep FFmpeg assertions enabled, and an invalid
+            // format aborts the process there (release builds merely
+            // fail the context). Falls through to the drop path below.
+            const AVPixelFormat srcFmt = (AVPixelFormat)frame.pixelFormat;
+            if (!av_pix_fmt_desc_get(srcFmt)) {
+                qWarning() << "FFmpegEncoder: rejecting frame with invalid pixel format" << frame.pixelFormat;
+            } else {
+                m_swsCtx = sws_getContext(frame.width, frame.height, srcFmt,
+                                          m_config.width, m_config.height,
+                                          (AVPixelFormat)m_frame->format,
+                                          SWS_BICUBIC, nullptr, nullptr, nullptr);
+            }
         }
 
         if (m_swsCtx) {
