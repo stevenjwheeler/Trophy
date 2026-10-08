@@ -494,8 +494,21 @@ Page {
                                     function getRelativeTime(d) {
                                         var diffMins = Math.floor((new Date() - new Date(d)) / 60000)
                                         if (diffMins < 1) return "Just now"
-                                        if (diffMins < 60) return diffMins + " mins ago"
-                                        return Math.floor(diffMins / 60) + " hours ago"
+                                        if (diffMins < 60) return diffMins === 1 ? "1 min ago" : diffMins + " mins ago"
+                                        var diffHours = Math.floor(diffMins / 60)
+                                        if (diffHours < 24) return diffHours === 1 ? "1 hour ago" : diffHours + " hours ago"
+                                        var diffDays = Math.floor(diffHours / 24)
+                                        if (diffDays < 7) return diffDays === 1 ? "1 day ago" : diffDays + " days ago"
+                                        if (diffDays < 30) {
+                                            var weeks = Math.floor(diffDays / 7)
+                                            return weeks === 1 ? "1 week ago" : weeks + " weeks ago"
+                                        }
+                                        if (diffDays < 365) {
+                                            var months = Math.floor(diffDays / 30)
+                                            return months === 1 ? "1 month ago" : months + " months ago"
+                                        }
+                                        var years = Math.floor(diffDays / 365)
+                                        return years === 1 ? "1 year ago" : years + " years ago"
                                     }
                                 }
 

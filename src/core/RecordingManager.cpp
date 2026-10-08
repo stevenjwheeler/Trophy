@@ -27,6 +27,7 @@ extern "C" {
 #include "encoding/EncoderFactory.h"
 #include "encoding/IEncoder.h"
 #include "muxing/FFmpegMuxer.h"
+#include "muxing/TrophyMetadata.h"
 #include "settings/SettingsManager.h"
 
 #include <QDateTime>
@@ -607,9 +608,10 @@ bool RecordingManager::buildPipeline() {
   outputMetadata[QStringLiteral("title")] = m_currentGameName;
   outputMetadata[QStringLiteral("creation_time")] =
       QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-  // Media kind survives renames (unlike the _Replay filename suffix),
-  // so cards and the activity feed can always tell clips apart.
-  outputMetadata[QStringLiteral("trophy-kind")] = QStringLiteral("recording");
+  // Media kind + recorder version + local capture date/time survive
+  // renames (unlike the _Replay filename suffix and timestamp), so cards
+  // and the activity feed never depend on the filename.
+  stampTrophyTags(outputMetadata, QStringLiteral("recording"));
 
   // Create recording session to coordinate everything
     m_session = std::make_unique<RecordingSession>(

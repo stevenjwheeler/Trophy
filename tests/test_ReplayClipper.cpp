@@ -18,6 +18,7 @@
 #include "capture/IVideoCaptureSource.h"
 #include "muxing/FFmpegMuxer.h"
 #include "muxing/ReplayClipper.h"
+#include "muxing/TrophyMetadata.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -99,6 +100,12 @@ protected:
 
     QMap<QString, QString> meta;
     meta["title"] = "ClipperGame";
+    // Stale trophy stamp on purpose: the clip must carry its own save
+    // moment and the running recorder version, never the inherited
+    // segment-start values.
+    meta["trophy-version"] = "0.0.0-stale";
+    meta["trophy-date"] = "2000-01-01";
+    meta["trophy-time"] = "00-00-00";
     ASSERT_TRUE(muxer.setMetadata(meta));
 
     ASSERT_TRUE(muxer.writeHeader());
@@ -247,8 +254,9 @@ TEST_F(ReplayClipperTest, OutputCarriesSegmentTitle) {
 
   // The clip names itself after the game (segment title tag), not its
   // filename — this is what library cards and search display. It also
-  // carries its own save moment (not the segment's start) and its
-  // media kind (survives renames, unlike the _Replay suffix).
+  // carries its own save moment (not the segment's start), its media
+  // kind (survives renames, unlike the _Replay suffix) and the recorder
+  // version.
   AVFormatContext *ctx = nullptr;
   ASSERT_EQ(
       avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr),
@@ -267,6 +275,31 @@ TEST_F(ReplayClipperTest, OutputCarriesSegmentTitle) {
       QString::fromUtf8(created->value).trimmed(), Qt::ISODate);
   EXPECT_TRUE(stamp.isValid());
   EXPECT_LT(qAbs(stamp.secsTo(QDateTime::currentDateTimeUtc())), 300);
+  // Version is the running recorder's, not the stale segment value.
+  AVDictionaryEntry *ver =
+      av_dict_get(ctx->metadata, "trophy-version", nullptr, 0);
+  ASSERT_NE(ver, nullptr);
+  EXPECT_STREQ(ver->value, qPrintable(trophyVersion()));
+  EXPECT_STRNE(ver->value, "0.0.0-stale");
+  // Date/time are the save moment (today), not the segment start — and
+  // the overwrite must replace the inherited tags, not duplicate them
+  // (a stale duplicate first in the dict would win the probe lookup).
+  AVDictionaryEntry *clipDate =
+      av_dict_get(ctx->metadata, "trophy-date", nullptr, 0);
+  AVDictionaryEntry *clipTime =
+      av_dict_get(ctx->metadata, "trophy-time", nullptr, 0);
+  ASSERT_NE(clipDate, nullptr);
+  ASSERT_NE(clipTime, nullptr);
+  const QDateTime clipStamp = trophyDateTimeFromTags(
+      QString::fromUtf8(clipDate->value), QString::fromUtf8(clipTime->value));
+  EXPECT_TRUE(clipStamp.isValid());
+  EXPECT_LT(qAbs(clipStamp.secsTo(QDateTime::currentDateTime())), 300);
+  int dateCount = 0;
+  AVDictionaryEntry *e = nullptr;
+  while ((e = av_dict_get(ctx->metadata, "trophy-date", e,
+                          AV_DICT_IGNORE_SUFFIX)))
+    ++dateCount;
+  EXPECT_EQ(dateCount, 1);
   avformat_close_input(&ctx);
 }
 

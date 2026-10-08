@@ -25,6 +25,7 @@
 #include "encoding/EncoderFactory.h"
 #include "encoding/FFmpegEncoder.h"
 #include "muxing/FFmpegMuxer.h"
+#include "muxing/TrophyMetadata.h"
 #include "settings/SettingsManager.h"
 
 #ifdef HAVE_PIPEWIRE
@@ -307,6 +308,9 @@ bool ReplayManager::switchSegment() {
   meta["title"] = m_gameName;
   meta["creation_time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
   meta["comment"] = "trophy-replay-segment";
+  // Segment start moment (+ recorder version): the clipper inherits these
+  // via av_dict_copy, then overwrites them with its own save moment.
+  stampTrophyVersionDateTime(meta);
 
   // Audio node lookup; the running PipeWire sources are recreated only
   // when the audio configuration changed (or on the very first segment).

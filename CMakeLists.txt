@@ -298,6 +298,7 @@ set(ENCODING_HEADERS
 set(MUXING_HEADERS
     src/muxing/IMuxer.h
     src/muxing/FFmpegMuxer.h
+    src/muxing/TrophyMetadata.h
 )
 
 set(DETECTION_HEADERS
