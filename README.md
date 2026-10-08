@@ -110,16 +110,8 @@ they just launch it.
 
 ## Building from source
 
-### Arch Linux (AUR)
-
 ```bash
-yay -S trophy-git
-```
-
-Or build manually:
-
-```bash
-# Install dependencies
+# Install dependencies (Arch/CachyOS example)
 sudo pacman -S cmake qt6-base qt6-declarative qt6-multimedia \
     ffmpeg pipewire libpulse libva pkgconf
 
