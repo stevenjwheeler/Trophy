@@ -29,8 +29,10 @@ public:
 
   /**
    * Lookup relative to a given application directory (the dev build tree
-   * keeps the lib in <appDir>/gl_shim/). Separated from libraryPath() so
-   * tests can exercise the layout without touching the real install.
+   * keeps the lib in <appDir>/gl_shim/; installs resolve it under the
+   * prefix derived from <appDir>, incl. multilib layouts). Separated
+   * from libraryPath() so tests can exercise the layout without
+   * touching the real install.
    * NOTE: takes a directory — findShippedLib appends the file name, so a
    * full file path here silently matches nothing.
    */

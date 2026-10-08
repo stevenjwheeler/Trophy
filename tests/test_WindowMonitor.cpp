@@ -622,6 +622,26 @@ TEST_F(KWinScriptInstallTest, RemoveWhenAbsentSucceeds) {
   EXPECT_TRUE(KWinBackend::removeInstalledScript());
 }
 
+TEST_F(KWinScriptInstallTest, FindsBundledPackageUnderInstallPrefix) {
+  // AppImage-style layout: binary in <prefix>/bin, package shipped at
+  // <prefix>/share/trophy/kwin/trophy-monitor. Previously only the
+  // shared datadir and the dev tree were consulted, so the bundled
+  // copy was invisible and enabling tracking silently did nothing.
+  QTemporaryDir prefix;
+  ASSERT_TRUE(prefix.isValid());
+  ASSERT_TRUE(QDir().mkpath(prefix.path() + "/bin"));
+  ASSERT_TRUE(
+      QDir().mkpath(prefix.path() + "/share/trophy/kwin/trophy-monitor"));
+  QFile meta(prefix.path() +
+             "/share/trophy/kwin/trophy-monitor/metadata.json");
+  ASSERT_TRUE(meta.open(QIODevice::WriteOnly));
+  meta.write("{\"KPlugin\": {\"Id\": \"trophy-monitor\"}}");
+  meta.close();
+
+  EXPECT_EQ(KWinBackend::findScriptSourceDirForAppDir(prefix.path() + "/bin"),
+            prefix.path() + "/share/trophy/kwin/trophy-monitor");
+}
+
 TEST_F(KWinScriptInstallTest, EnabledFalseWithoutKwinTools) {
   if (!QStandardPaths::findExecutable("kreadconfig6").isEmpty() ||
       !QStandardPaths::findExecutable("kreadconfig5").isEmpty())

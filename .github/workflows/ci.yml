@@ -19,7 +19,29 @@ permissions:
   contents: read
 
 jobs:
+  # A branch push landing exactly on a v* tag would build twice (once
+  # for the branch, once for the tag). The tag run covers it, so skip
+  # the branch build in that case.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [[ "${{ github.ref_type }}" == "branch" ]] && git describe --exact-match --match 'v*' HEAD 2>/dev/null; then
+            echo "Release commit already covered by the tag run — skipping branch build."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
   build-and-test:
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     env:
       APPIMAGE_EXTRACT_AND_RUN: 1

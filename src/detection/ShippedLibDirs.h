@@ -41,9 +41,30 @@ inline QString prefixFromManifest(const QString &manifestPath) {
   return info.absolutePath();
 }
 
+/**
+ * Binary dir -> install prefix. Only a trailing "bin" is stripped
+ * (AppImage /usr/bin, ~/.local/bin, /usr/bin, /app/bin); anything else
+ * (e.g. a CMake build tree) is already the useful root.
+ */
+inline QString prefixFromBinaryDir(const QString &dir) {
+  // Purely lexical (QDir::cdUp refuses non-existent paths, which is all
+  // a unit test ever has): strip one trailing "bin", if present.
+  const QFileInfo info(dir);
+  if (info.fileName() == QStringLiteral("bin"))
+    return info.absolutePath();
+  return info.absoluteFilePath();
+}
+
 /** <prefix>/bin/trophy -> <prefix>. */
 inline QString prefixFromAppDir() {
-  return QFileInfo(QCoreApplication::applicationDirPath()).absolutePath();
+  return prefixFromBinaryDir(QCoreApplication::applicationDirPath());
+}
+
+/** Library subdirs under one install prefix (incl. multilib layouts). */
+inline QStringList libSubDirs(const QString &prefix) {
+  return {prefix + "/lib/trophy", prefix + "/lib64/trophy",
+          prefix + "/lib/x86_64-linux-gnu/trophy",
+          prefix + "/lib/aarch64-linux-gnu/trophy"};
 }
 
 /** Directories that may hold shipped libraries, most likely first. */
@@ -55,11 +76,8 @@ inline QStringList shippedLibDirs(const QString &manifestPath = QString()) {
   prefixes << prefixFromAppDir();
 
   QStringList dirs;
-  for (const QString &prefix : prefixes) {
-    dirs << prefix + "/lib/trophy" << prefix + "/lib64/trophy"
-         << prefix + "/lib/x86_64-linux-gnu/trophy"
-         << prefix + "/lib/aarch64-linux-gnu/trophy";
-  }
+  for (const QString &prefix : prefixes)
+    dirs += libSubDirs(prefix);
   dirs << "/usr/lib/trophy" << "/usr/lib64/trophy"
        << "/usr/local/lib/trophy" << "/usr/local/lib64/trophy";
   return dirs;
