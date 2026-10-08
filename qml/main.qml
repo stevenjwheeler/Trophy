@@ -93,13 +93,14 @@ ApplicationWindow {
     }
 
     function performDeleteSelected() {
-        if (window.storageManager && window.recordingLibrary) {
-            for (var i = 0; i < selectedRecordings.length; i++) {
-                window.storageManager.deleteRecording(selectedRecordings[i]);
-            }
-            window.recordingLibrary.refresh();
+        // Background bulk delete: unlinks on a worker thread and
+        // settles the library with one batch update, so selecting
+        // dozens of recordings no longer freezes the UI. The selection
+        // clears when bulkDeleteFinished arrives (below), keeping the
+        // progress indicator visible until then.
+        if (window.storageManager) {
+            window.storageManager.deleteRecordings(selectedRecordings);
         }
-        clearSelection();
     }
 
     function openWindowPicker() {
@@ -595,6 +596,13 @@ ApplicationWindow {
         function onRecordingError(error) {
             errorDialog.message = error;
             errorDialog.open();
+        }
+    }
+
+    Connections {
+        target: window.storageManager
+        function onBulkDeleteFinished() {
+            window.clearSelection();
         }
     }
 

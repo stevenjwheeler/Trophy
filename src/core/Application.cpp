@@ -646,6 +646,19 @@ void Application::connectSignals() {
                 "dialog-warning", 0, 2);
           });
   connect(m_storageManager.get(), &StorageManager::recordingDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
+  // Bulk-delete chain: the worker unlinks in the background, the batch
+  // signal settles the model once, and finish unsuppresses the watcher
+  // with one catch-up refresh. While suppressed, per-file watcher
+  // refreshes on both sides are skipped (the storm that froze the UI
+  // on multi-select deletes: N size rescans + N model rebuilds).
+  connect(m_storageManager.get(), &StorageManager::recordingsDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecordings);
+  connect(m_storageManager.get(), &StorageManager::bulkDeleteStarted, m_recordingLibrary.get(), [this]() {
+    m_recordingLibrary->setBulkOperationActive(true);
+  });
+  connect(m_storageManager.get(), &StorageManager::bulkDeleteFinished, m_recordingLibrary.get(), [this](int, int) {
+    m_recordingLibrary->setBulkOperationActive(false);
+    m_recordingLibrary->refresh();
+  });
   // Order matters: the rename preference must be recorded before the
   // refresh recreates Recording objects (which consult it in addRecording).
   connect(m_storageManager.get(), &StorageManager::recordingRenamed, m_recordingLibrary.get(), &RecordingLibrary::onRecordingRenamed);
@@ -689,6 +702,7 @@ void Application::connectSignals() {
           });
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved, m_storageManager.get(), &StorageManager::refresh);
+  connect(m_recordingLibrary.get(), &RecordingLibrary::recordingsRemoved, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingManager.get(), &RecordingManager::progressUpdated, this,
           [this](qint64, qint64) { m_storageManager->enforceStorageLimit(); });
 

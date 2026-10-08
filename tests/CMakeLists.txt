@@ -322,6 +322,8 @@ add_executable(test_RecordingLibrary test_RecordingLibrary.cpp
     ${CMAKE_SOURCE_DIR}/src/library/Recording.h
     ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.h
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.h
 )
 target_include_directories(test_RecordingLibrary PRIVATE
     ${TEST_INCLUDE_DIRS}

@@ -10,6 +10,7 @@
 #include <QFileSystemWatcher>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 namespace TrophyBackend {
 
@@ -34,6 +35,10 @@ class StorageManager : public QObject {
   Q_PROPERTY(qint64 driveCapacityBytes READ driveCapacityBytes NOTIFY
                  storagePathChanged)
   Q_PROPERTY(bool autoDeleteOldest READ autoDeleteOldest WRITE setAutoDeleteOldest NOTIFY autoDeleteOldestChanged)
+  // True while a background bulk delete is in flight. Bind UI busy
+  // state to this; per-file deleteRecording() stays synchronous.
+  Q_PROPERTY(bool bulkDeleteInProgress READ bulkDeleteInProgress NOTIFY
+                 bulkDeleteInProgressChanged)
 
 public:
   explicit StorageManager(const QString &storagePath,
@@ -62,6 +67,14 @@ public:
   Q_INVOKABLE bool requestCleanup(bool force = false);
   Q_INVOKABLE bool isOverLimit() const;
   Q_INVOKABLE bool deleteRecording(const QString &filePath);
+  // Delete many recordings without blocking the GUI thread. The file
+  // I/O runs on the global thread pool; completion arrives as
+  // recordingsDeleted(deletedPaths) + a single refresh, then
+  // bulkDeleteFinished(deleted, total). Files outside the storage path
+  // or already gone are skipped (counted in total, not in deleted).
+  // Empty lists are a no-op with no signals.
+  Q_INVOKABLE void deleteRecordings(const QStringList &filePaths);
+  bool bulkDeleteInProgress() const { return m_bulkDeletesActive > 0; }
   Q_INVOKABLE QString renameRecording(const QString &filePath,
                                       const QString &newTitle);
   Q_INVOKABLE bool exportRecording(const QString &sourcePath, const QString &destDir) const;
@@ -75,6 +88,15 @@ signals:
   void maxSizeChanged();
   void autoDeleteOldestChanged();
   void recordingDeleted(const QString &filePath);
+  // Batch counterpart of recordingDeleted, emitted once per
+  // deleteRecordings() completion (only when at least one file was
+  // actually deleted). Wire to RecordingLibrary::removeRecordings so
+  // the model settles once instead of once per file.
+  void recordingsDeleted(const QStringList &filePaths);
+  void bulkDeleteStarted();
+  void bulkDeleteProgress(int deletedCount, int totalCount);
+  void bulkDeleteFinished(int deletedCount, int totalCount);
+  void bulkDeleteInProgressChanged();
   void recordingRenamed(const QString &oldPath, const QString &newPath);
   void storageLimitReached();
   void storageLimitCannotCleanup();
@@ -86,6 +108,9 @@ private:
   qint64 calculateDirectorySize() const;
   QStringList getRecordingsSortedByDate() const;
   bool deleteOldestRecording();
+  // GUI-thread completion for deleteRecordings(): batch signal, single
+  // refresh, progress close-out.
+  void finishBulkDelete(const QStringList &deletedPaths, int totalCount);
 
   QString m_storagePath;
   qint64 m_usedSize = 0;
@@ -100,6 +125,11 @@ private:
   void notifyLimitReached();
   void notifyLimitCannotCleanup();
 
+  // In-flight background bulk deletes. While > 0 the directory
+  // watcher is suppressed (a bulk unlink storm would otherwise
+  // re-enter enforceStorageLimit per file on a stale size); the bulk
+  // completion settles with a single refresh instead.
+  int m_bulkDeletesActive = 0;
   QFileSystemWatcher m_watcher;
 };
 

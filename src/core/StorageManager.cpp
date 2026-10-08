@@ -12,8 +12,10 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QStorageInfo>
+#include <QThreadPool>
 
 namespace TrophyBackend {
 
@@ -245,6 +247,85 @@ bool StorageManager::deleteRecording(const QString &filePath) {
   return false;
 }
 
+void StorageManager::deleteRecordings(const QStringList &filePaths) {
+  if (filePaths.isEmpty()) {
+    return;
+  }
+
+  // Snapshot for the worker: m_storagePath lives on the GUI thread.
+  const QString storagePath = m_storagePath;
+  const int total = filePaths.size();
+
+  ++m_bulkDeletesActive;
+  emit bulkDeleteInProgressChanged();
+  // Emitted before the pool starts so observers (the library's
+  // watcher suppression) are armed before the first unlink lands.
+  emit bulkDeleteStarted();
+
+  // Guarded by QPointer like Recording::loadMetadata: the manager is
+  // app-owned, but a late completion must never touch a dead object.
+  QPointer<StorageManager> self(this);
+  QThreadPool::globalInstance()->start(
+      [self, filePaths, storagePath, total]() {
+        QStringList deleted;
+        int done = 0;
+        for (const QString &filePath : filePaths) {
+          if (self.isNull()) {
+            return;
+          }
+          const QFileInfo info(filePath);
+          // Same guards as deleteRecording(): stay inside the storage
+          // path, skip missing files.
+          if (!info.absoluteFilePath().startsWith(storagePath)) {
+            qWarning() << "Refusing to delete file outside storage path:"
+                       << filePath;
+          } else if (!info.exists()) {
+            qWarning() << "File does not exist:" << filePath;
+          } else if (QFile::remove(filePath)) {
+            const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
+                                      info.completeBaseName() + ".jpg";
+            if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
+              qWarning() << "Failed to delete thumbnail:" << thumbPath;
+            }
+            deleted.append(filePath);
+          } else {
+            qWarning() << "Failed to delete recording:" << filePath;
+          }
+          ++done;
+          QMetaObject::invokeMethod(
+              self, [self, done, total]() {
+                if (!self.isNull()) {
+                  emit self->bulkDeleteProgress(done, total);
+                }
+              },
+              Qt::QueuedConnection);
+        }
+        QMetaObject::invokeMethod(
+            self,
+            [self, deleted, total]() {
+              if (!self.isNull()) {
+                self->finishBulkDelete(deleted, total);
+              }
+            },
+            Qt::QueuedConnection);
+      });
+}
+
+void StorageManager::finishBulkDelete(const QStringList &deletedPaths,
+                                       int totalCount) {
+  qDebug() << "Bulk deleted" << deletedPaths.size() << "/" << totalCount
+           << "recordings";
+  if (!deletedPaths.isEmpty()) {
+    emit recordingsDeleted(deletedPaths);
+  }
+  if (m_bulkDeletesActive > 0) {
+    --m_bulkDeletesActive;
+  }
+  emit bulkDeleteInProgressChanged();
+  refresh();
+  emit bulkDeleteFinished(deletedPaths.size(), totalCount);
+}
+
 bool StorageManager::deleteOldestRecording() {
   const QStringList recordings = getRecordingsSortedByDate();
 
@@ -429,6 +510,13 @@ QString StorageManager::formatSize(qint64 bytes) {
 
 void StorageManager::onDirectoryChanged(const QString &path) {
   Q_UNUSED(path)
+  if (m_bulkDeletesActive > 0) {
+    // A bulk unlink storm would otherwise re-enter
+    // enforceStorageLimit per file on a stale size (and could even
+    // auto-delete an oldest file the user never selected). The bulk
+    // completion settles with a single refresh instead.
+    return;
+  }
   enforceStorageLimit();
 }
 

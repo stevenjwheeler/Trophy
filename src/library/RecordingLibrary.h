@@ -12,6 +12,7 @@
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include <memory>
 #include <vector>
 
@@ -64,6 +65,19 @@ public:
   Q_INVOKABLE Recording *getRecording(const QString &filePath) const;
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
+  // Batch counterpart of removeRecording: erases every listed path in
+  // one pass and settles the filtered model once, then emits
+  // recordingsRemoved with the paths actually dropped. Emits nothing
+  // when none of the paths were tracked. Direct calls are unaffected
+  // by setBulkOperationActive — only watcher refreshes are gated.
+  Q_INVOKABLE void removeRecordings(const QStringList &filePaths);
+
+ public slots:
+  // Suppresses watcher-driven refresh() while a background bulk
+  // delete is unlinking files (each vanished file would otherwise
+  // settle + notify on its own). The bulk completion path calls the
+  // batch removal above and refreshes explicitly.
+  void setBulkOperationActive(bool active);
 
  public slots:
   /**
@@ -82,6 +96,12 @@ signals:
   void libraryPathChanged();
   void recordingAdded(Recording *recording);
   void recordingRemoved(const QString &filePath);
+  // Batch counterpart of recordingRemoved, emitted once per
+  // removeRecordings() with every path actually dropped from the
+  // model. Prefer this over N per-file emissions for bulk flows: each
+  // per-file emit fans out to StorageManager::refresh (a full size
+  // rescan) and a QML model rebuild.
+  void recordingsRemoved(const QStringList &filePaths);
 
 private slots:
   void onDirectoryChanged(const QString &path);
@@ -113,6 +133,9 @@ private:
   // container title tag. Populated by user renames, persisted next to the
   // library so it survives restarts and library moves.
   QSet<QString> m_fileNameTitlePreferred;
+  // Depth of active background bulk deletes (see setBulkOperationActive).
+  // Counter, not bool, so overlapping bulks can't unsuppress each other.
+  int m_bulkOperationDepth = 0;
 };
 
 } // namespace TrophyBackend
