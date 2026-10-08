@@ -78,6 +78,12 @@ target_include_directories(test_ControlServer PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ControlServer PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_ControlServer)
 
+# --- UpdateChecker (pure statics; no network needed) ---
+add_executable(test_UpdateChecker test_UpdateChecker.cpp ${CMAKE_SOURCE_DIR}/src/core/UpdateChecker.cpp)
+target_include_directories(test_UpdateChecker PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
+gtest_discover_tests(test_UpdateChecker)
+
 add_executable(test_SettingsManager test_SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp

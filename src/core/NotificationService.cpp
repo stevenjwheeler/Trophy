@@ -89,8 +89,11 @@ void NotificationService::showNotification(const QString &title,
                                            const QString &body,
                                            const QString &icon, int timeout,
                                            int urgency,
-                                            bool authorizeAction) {
-  sendNotification(title, body, icon, timeout, urgency, authorizeAction, true);
+                                            bool authorizeAction,
+                                            const QString &actionId,
+                                            const QString &actionLabel) {
+  sendNotification(title, body, icon, timeout, urgency, authorizeAction, true,
+                   actionId, actionLabel);
 }
 
 void NotificationService::showQueuedNotification(
@@ -144,7 +147,9 @@ void NotificationService::sendNotification(const QString &title,
                                            const QString &body,
                                            const QString &icon, int timeout,
                                            int urgency, bool authorizeAction,
-                                           bool replacePrevious) {
+                                           bool replacePrevious,
+                                           const QString &actionId,
+                                           const QString &actionLabel) {
   if (!m_enabled) {
     return;
   }
@@ -180,6 +185,14 @@ void NotificationService::sendNotification(const QString &title,
   if (authorizeAction) {
     actions << "authorize" << "Authorize Capture" << "block" << "Block"
             << "default" << "";
+  }
+  // A single caller-supplied button (e.g. the update notice's
+  // "View Release"). Never combined with the authorize prompt —
+  // those two flows are the only action-bearing notices, and
+  // they never coexist.
+  if (!authorizeAction && !actionId.isEmpty() &&
+      !actionLabel.isEmpty()) {
+    actions << actionId << actionLabel;
   }
 
   QDBusReply<uint> reply =

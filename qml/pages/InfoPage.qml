@@ -6,12 +6,32 @@
  */
 
 import TrophyBackend
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Page {
     id: root
+
+    // Update-check state (fed by updateChecker.checkFinished).
+    // updateNewer tints the status; the notice action carries
+    // the releases URL, so the page only needs the verdict.
+    property string updateStatus: ""
+    property bool updateChecking: false
+    property bool updateNewer: false
+
+    Connections {
+        target: updateChecker
+        function onCheckFinished(newerAvailable, latestVersion, releaseUrl) {
+            updateChecking = false
+            updateNewer = newerAvailable
+            if (newerAvailable)
+                updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, AppVersion)
+            else
+                updateStatus = qsTr("You're on the latest version (%1).").arg(AppVersion)
+        }
+    }
 
     ScrollView {
         anchors.fill: parent
@@ -134,6 +154,73 @@ Page {
                         text: qsTr("Copyright © 2026")
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
+                    }
+
+                }
+
+            }
+
+            // Updates Section
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: updatesLayout.implicitHeight + Theme.spacingMedium * 2
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: updatesLayout
+
+                    anchors.fill: parent
+                    anchors.margins: Theme.spacingMedium
+                    spacing: Theme.spacingSmall
+
+                    Label {
+                        text: qsTr("🔄 Updates")
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                    }
+
+                    // Status from the background check (empty
+                    // until the first check completes).
+                    Label {
+                        Layout.fillWidth: true
+                        text: updateChecking ? qsTr("Checking…") : updateStatus
+                        color: updateNewer ? Theme.primaryColor : Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        visible: updateStatus !== ""
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        TrophyButton {
+                            text: updateChecking ? qsTr("Checking…") : qsTr("Check for Updates")
+                            enabled: !updateChecking && typeof updateChecker !== "undefined"
+                            onClicked: {
+                                updateChecking = true
+                                updateChecker.checkNow()
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        // Opt-out for the daily background check.
+                        // The manual button above always runs.
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.updateCheckEnabled : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.updateCheckEnabled = checked
+                            }
+                        }
+                        Label {
+                            text: qsTr("Automatic checks")
+                            color: Theme.textSecondaryColor
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
                     }
 
                 }

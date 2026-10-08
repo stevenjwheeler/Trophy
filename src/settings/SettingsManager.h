@@ -93,6 +93,12 @@ class SettingsManager : public QObject {
                  setInstantReplayEnabled NOTIFY instantReplayEnabledChanged)
   Q_PROPERTY(bool globalShortcutsEnabled READ globalShortcutsEnabled WRITE
                  setGlobalShortcutsEnabled NOTIFY globalShortcutsEnabledChanged)
+  // Daily update check against the GitHub release feed (the
+  // notice points at the releases page; phase 1 does not
+  // download anything). Manual checks from the Info page run
+  // regardless of this toggle.
+  Q_PROPERTY(bool updateCheckEnabled READ updateCheckEnabled WRITE
+                 setUpdateCheckEnabled NOTIFY updateCheckEnabledChanged)
 
   // Notification options (which ambient notices may appear; errors, the
   // DVR authorize prompt and direct keypress feedback always show).
@@ -216,6 +222,9 @@ public:
   bool globalShortcutsEnabled() const { return m_globalShortcutsEnabled; }
   void setGlobalShortcutsEnabled(bool enabled);
 
+  bool updateCheckEnabled() const { return m_updateCheckEnabled; }
+  void setUpdateCheckEnabled(bool enabled);
+
   // Ambient-notice toggles (errors/authorize/keypress feedback always show).
   bool notifyRecordings() const { return m_notifyRecordings; }
   void setNotifyRecordings(bool enabled);
@@ -280,6 +289,7 @@ signals:
   void startOnLoginChanged();
   void instantReplayEnabledChanged();
   void globalShortcutsEnabledChanged();
+  void updateCheckEnabledChanged();
   void notifyRecordingsChanged();
   void notifyClipsChanged();
   void notifyStorageChanged();
@@ -343,6 +353,9 @@ private:
   bool m_instantReplayEnabled = true;
   // Portal global shortcuts (F9/F10); bound on user consent, never silently.
   bool m_globalShortcutsEnabled = true;
+  // Daily GitHub release check (default on; Info page manual
+  // check always runs).
+  bool m_updateCheckEnabled = true;
   QString m_replayCachePath;
   // Ambient-notice toggles (all default on; errors, the DVR authorize
   // prompt and direct keypress feedback always show regardless).

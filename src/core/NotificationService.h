@@ -35,7 +35,9 @@ public:
   Q_INVOKABLE void showNotification(const QString &title, const QString &body,
                                     const QString &icon = QString(),
                                     int timeout = 5000, int urgency = 1,
-                                    bool authorizeAction = false);
+                                    bool authorizeAction = false,
+                                    const QString &actionId = QString(),
+                                    const QString &actionLabel = QString());
 
   /**
    * Queued variant: waits until any currently displayed transient notice
@@ -108,7 +110,9 @@ private:
   // is a harmless no-op on the daemon side.
   void sendNotification(const QString &title, const QString &body,
                         const QString &icon, int timeout, int urgency,
-                        bool authorizeAction, bool replacePrevious);
+                        bool authorizeAction, bool replacePrevious,
+                        const QString &actionId = QString(),
+                        const QString &actionLabel = QString());
   // Duplicate check shared by the immediate and queued paths: drops
   // identical title+body within the cooldown, otherwise records this
   // notice as the last sent. Returns true when suppressed.

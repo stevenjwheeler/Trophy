@@ -14,6 +14,7 @@
 
 // Forward declarations
 namespace TrophyBackend {
+class UpdateChecker;
 class RecordingManager;
 class SettingsManager;
 class StorageManager;
@@ -163,6 +164,7 @@ private:
   std::unique_ptr<GlobalShortcutManager> m_shortcutManager;
   std::unique_ptr<ControlServer> m_controlServer;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
+  std::unique_ptr<UpdateChecker> m_updateChecker;
   
   QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;
@@ -208,6 +210,10 @@ private:
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;
   bool m_forceMinimized = false;
+  // Update check: the releases-page URL of the latest release
+  // seen, so the "View Release" notice action can open it.
+  QString m_latestReleaseUrl;
+  QTimer *m_updateCheckTimer = nullptr;
   QObject *qmlRootWindow() const;
   void setMainWindowVisible(bool visible);
   void syncAutostartFile();

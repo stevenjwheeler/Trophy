@@ -201,6 +201,7 @@ set(CORE_SOURCES
     src/core/ControlServer.cpp
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
+    src/core/UpdateChecker.cpp
     src/core/WindowService.cpp
     src/core/FrameDispatcher.cpp
     src/core/CircularFrameBuffer.cpp
