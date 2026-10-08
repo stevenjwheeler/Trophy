@@ -205,11 +205,14 @@ jobs:
              exit 1
           fi
 
-          # 7. Rename based on the exported VERSION
-          # linuxdeploy usually names it Trophy-$VERSION-x86_64.AppImage or Trophy-x86_64.AppImage
-          # We force a consistent name here:
+          # 7. Consistent artifact name (linuxdeploy usually honors
+          # LINUXDEPLOY_OUTPUT_VERSION already — only rename when the
+          # names differ, since mv onto itself errors out)
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
-          mv "$GENERATED_FILE" "Trophy-${VERSION}-x86_64.AppImage"
+          TARGET="Trophy-${VERSION}-x86_64.AppImage"
+          if [[ "$GENERATED_FILE" != "$TARGET" ]]; then
+            mv "$GENERATED_FILE" "$TARGET"
+          fi
 
       - name: Generate Checksum
         run: |
