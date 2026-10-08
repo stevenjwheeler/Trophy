@@ -66,6 +66,27 @@ public:
                                 QString *outSerial   = nullptr);
 
   /**
+   * @brief Pick the target.object value for a pinned stream.
+   * @return object.serial when known (unambiguous), else the node name
+   * (resolved by name), else the numeric ID as a last resort.
+   *
+   * A bare numeric ID must never be preferred: WirePlumber reads
+   * target.object as a *serial*, and IDs and serials share a namespace
+   * (proven live: easyeffects_source id 73 / serial 74 vs easyeffects_sink
+   * serial 73 — pinning "73" captured the wrong node). Static + public for
+   * tests (no PipeWire needed).
+   */
+  static QString preferredTarget(const QString &serial,
+                                 const QString &nodeName, uint32_t nodeId);
+
+  /** Distinct stream name per track (shows up as the node name in qpwgraph:
+   * "trophy-game", "trophy-voice", "trophy-mic"). */
+  void setStreamName(const QString &name) {
+    if (!name.isEmpty())
+      m_streamName = name;
+  }
+
+  /**
    * @brief Enumerate all active audio applications.
    * @return List of QVariantMap objects with keys: "name", "binary", "nodeId"
    */
@@ -90,6 +111,7 @@ private:
   SourceType m_type;
   QString m_displayName;
   QString m_identifier;
+  QString m_streamName = QStringLiteral("trophy-capture");
   uint32_t m_targetNodeId;
   QString m_targetNodeName;  // PW_KEY_NODE_NAME for target.object hint
   QString m_targetSerial;    // object.serial for WirePlumber 0.5 target.object

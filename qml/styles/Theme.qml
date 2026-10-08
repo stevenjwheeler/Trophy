@@ -16,6 +16,7 @@ QtObject {
     readonly property color cardColor: "#1f2940"
     readonly property color cardHoverColor: "#283553"
     readonly property color primaryColor: "#e94560"
+    readonly property color accentColor: "#e94560"
     readonly property color primaryHoverColor: "#ff6b6b"
     readonly property color secondaryColor: "#0f3460"
     readonly property color highlightedColor: '#1c62b8'

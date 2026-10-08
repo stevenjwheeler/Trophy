@@ -6,8 +6,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <gtest/gtest.h>
 
 #include "library/Recording.h"
@@ -35,6 +38,12 @@ protected:
 
   void SetUp() override { ASSERT_TRUE(tempDir.isValid()); }
 
+  void TearDown() override {
+    // loadMetadata() probes on the global thread pool; make sure no probe
+    // outlives the stack-allocated Recording under test.
+    QThreadPool::globalInstance()->waitForDone(5000);
+  }
+
   // Create a dummy file and return its full path
   QString createFile(const QString &name, qint64 size = 8192) {
     QString path = tempDir.path() + "/" + name;
@@ -45,6 +54,32 @@ protected:
     f.write(QByteArray(size, '\0'));
     f.close();
     return path;
+  }
+
+  // Render a real 1s clip with embedded container tags using the
+  // system ffmpeg. Empty string when ffmpeg is unavailable (callers
+  // should SKIP).
+  QString makeTitledClip(const QString &name, const QString &title,
+                         const QString &kind = QString()) {
+    if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
+      return QString();
+    const QString path = tempDir.path() + "/" + name;
+    QStringList args{"-y",          "-v",     "error", "-f", "lavfi", "-i",
+                     "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt",
+                     "yuv420p",     "-metadata", QString("title=%1").arg(title)};
+    if (!kind.isEmpty())
+      args << "-metadata" << QString("trophy-kind=%1").arg(kind);
+    args << path;
+    QProcess proc;
+    proc.start("ffmpeg", args);
+    if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
+        !QFile::exists(path))
+      return QString();
+    return path;
+  }
+
+  void waitForProbe() {
+    QThreadPool::globalInstance()->waitForDone(10000);
   }
 };
 
@@ -132,6 +167,38 @@ TEST_F(RecordingTest, ParseMP4Extension) {
   EXPECT_EQ(rec.gameName(), "Factorio");
 }
 
+TEST_F(RecordingTest, ParseClipFilename) {
+  QString path = createFile("Deadlock_2026-10-01_19-31-31_Replay.mkv");
+  Recording rec(path);
+  rec.loadMetadata();
+  EXPECT_EQ(rec.gameName(), "Deadlock");
+}
+
+// --- trophy-kind container tag (survives renames, unlike the suffix) ---
+
+TEST_F(RecordingTest, KindTagMarksClipWithoutSuffix) {
+  QString path = makeTitledClip("Custom_Name.mkv", "Deadlock", "clip");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  EXPECT_FALSE(rec.isClip());
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_TRUE(rec.isClip());
+}
+
+TEST_F(RecordingTest, NoKindTagLeavesRecording) {
+  QString path =
+      makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_FALSE(rec.isClip());
+  EXPECT_EQ(rec.gameName(), "Deadlock");
+}
+
 // --- Thumbnail path ---
 
 TEST_F(RecordingTest, ThumbnailPathUpdateEmitsSignal) {
@@ -190,4 +257,48 @@ TEST_F(RecordingTest, DefaultDimensionsZero) {
   EXPECT_EQ(rec.width(), 0);
   EXPECT_EQ(rec.height(), 0);
   EXPECT_EQ(rec.duration(), 0);
+}
+
+// --- Container title vs filename precedence ---
+
+TEST_F(RecordingTest, ContainerTitleOverridesFileNameByDefault) {
+  const QString path =
+      makeTitledClip("Placeholder_2026-01-15_20-30-00.mkv", "Embedded Title");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable or clip render failed";
+
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  // Trophy bakes the game name into the container at record time, and the
+  // probe prefers that tag over the filename.
+  EXPECT_EQ(rec.gameName(), "Embedded Title");
+}
+
+TEST_F(RecordingTest, PreferFileNameTitleKeepsRenamedName) {
+  const QString oldPath =
+      makeTitledClip("Old_Game_2026-01-15_20-30-00.mkv", "Old Game");
+  if (oldPath.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable or clip render failed";
+
+  // Sanity: without the flag the stale embedded title wins.
+  {
+    Recording before(oldPath);
+    before.loadMetadata();
+    waitForProbe();
+    ASSERT_EQ(before.gameName(), "Old Game");
+  }
+
+  // Simulate an in-app rename: new filename, same bytes (stale title tag).
+  const QString newPath = tempDir.path() + "/New_Title_2026-01-15_20-30-00.mkv";
+  ASSERT_TRUE(QFile::rename(oldPath, newPath));
+
+  Recording rec(newPath);
+  rec.setPreferFileNameTitle(true);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.gameName(), "New Title");
+  // Duration/resolution probing still works with the flag set.
+  EXPECT_EQ(rec.width(), 320);
+  EXPECT_EQ(rec.height(), 240);
 }

@@ -27,6 +27,7 @@ ApplicationWindow {
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
     property var selectedRecordings: []
+    property int lastSelectedIndex: -1
 
     function toggleSelection(filePath) {
         var idx = selectedRecordings.indexOf(filePath);
@@ -39,8 +40,40 @@ ApplicationWindow {
         selectedRecordings = temp;
     }
 
+    function shiftSelectRange(currentIndex) {
+        if (lastSelectedIndex === -1 || !recordingLibrary) {
+            // First selection in this sequence - just toggle normally
+            if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
+                var recording = recordingLibrary.get(currentIndex);
+                if (recording) {
+                    toggleSelection(recording.filePath);
+                    lastSelectedIndex = currentIndex;
+                }
+            }
+            return;
+        }
+
+        var startIdx = Math.min(lastSelectedIndex, currentIndex);
+        var endIdx = Math.max(lastSelectedIndex, currentIndex);
+        var temp = selectedRecordings.slice();
+
+        // Select all items in the range
+        for (var i = startIdx; i <= endIdx; i++) {
+            if (recordingLibrary && i >= 0 && i < recordingLibrary.count) {
+                var rec = recordingLibrary.get(i);
+                if (rec && temp.indexOf(rec.filePath) === -1) {
+                    temp.push(rec.filePath);
+                }
+            }
+        }
+
+        selectedRecordings = temp;
+        lastSelectedIndex = currentIndex;
+    }
+
     function clearSelection() {
         selectedRecordings = [];
+        lastSelectedIndex = -1;
     }
 
     function exportSelected() {
@@ -72,8 +105,16 @@ ApplicationWindow {
     function openWindowPicker() {
         console.log("openWindowPicker called. app.isWayland:", window.app.isWayland);
         if (window.app.isWayland) {
-            // On Wayland, the system portal handles window/screen selection.
-            window.recordingManager.startRecording();
+            // A detected game records directly (same as the hotkey/tray
+            // paths); the picker is only for idle manual capture. The
+            // portal reports every KWin source as generic "kwin_wayland"
+            // and never names the picked item, so manual captures keep
+            // the "Manual Recording" display name instead.
+            if (window.gameDetector && window.gameDetector.currentGameName !== "")
+                window.recordingManager.startRecording(window.gameDetector.currentGameName);
+            else
+                // On Wayland, the system portal handles window/screen selection.
+                window.recordingManager.startRecording();
         } else {
             console.log("Opening windowPicker dialog.");
             windowPicker.open();
@@ -104,6 +145,32 @@ ApplicationWindow {
             deleteDialog.fileName = fileName;
             deleteDialog.open();
         }
+    }
+
+    function requestRename(filePath, currentName) {
+        renameDialog.filePath = filePath;
+        renameDialog.renameField.text = currentName || "";
+        renameDialog.errorMessage = "";
+        renameDialog.open();
+        renameDialog.renameField.forceActiveFocus();
+        renameDialog.renameField.selectAll();
+    }
+
+    function performRename() {
+        var newPath = window.storageManager.renameRecording(renameDialog.filePath, renameDialog.renameField.text);
+        if (!newPath) {
+            renameDialog.errorMessage = qsTr("Rename failed. Try a different name using letters, numbers, - or _.");
+            return;
+        }
+        var idx = selectedRecordings.indexOf(renameDialog.filePath);
+        if (idx !== -1) {
+            var temp = selectedRecordings.slice();
+            temp[idx] = newPath;
+            selectedRecordings = temp;
+        }
+        if (window.recordingLibrary)
+            window.recordingLibrary.refresh();
+        renameDialog.close();
     }
 
     function updateGlobalSearchResults(query) {
@@ -160,24 +227,27 @@ ApplicationWindow {
                         "type": "clip",
                         "title": clip.gameName || "Unknown Game",
                         "subtitle": formatSize(clip.size) + " • " + clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm"),
-                        "index": i
+                        "targetIndex": i
                     });
                 }
             }
         }
 
-        // Search settings
+        // Search settings (names must match SettingsPage sections)
         var settings = [
-            { name: "Video Recording", section: "Video Recording", keywords: ["encoder", "av1", "nvenc", "vaapi", "h264", "hevc", "quality", "bitrate", "fps", "resolution", "mkv", "mp4"] },
-            { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "tracks", "desktop", "game"] },
-            { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "limit", "cleanup", "size", "delete"] },
-            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "auto", "record", "launch", "game"] }
+            { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "background clips", "clip buffer", "clip cache", "zero-copy", "dma-buf", "wayland", "permissions", "screen capture"] },
+            { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
+            { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
+            { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test"] },
+            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "window tracking", "vulkan", "opengl", "shim", "auto", "record", "launch", "game"] },
+            { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
+            { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
 
         for (var j = 0; j < settings.length; j++) {
             var setting = settings[j];
             var settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
-                               (setting.keywords || []).some(k => (k || "").toLowerCase().includes(lowerQuery));
+                               (setting.keywords || []).some(k => { const kw = (k || "").toLowerCase(); return kw.includes(lowerQuery) || lowerQuery.includes(kw); });
 
             if (settingMatch) {
                 globalSearchBox.searchResults.append({
@@ -185,7 +255,7 @@ ApplicationWindow {
                     "title": setting.name,
                     "subtitle": "Settings",
                     "section": setting.section,
-                    "index": j
+                    "targetIndex": j
                 });
             }
         }
@@ -205,7 +275,7 @@ ApplicationWindow {
         if (!result) return;
         if (result.type === "clip") {
             window.currentPage = 0; // Dashboard
-            dashboardPage.scrollToRecording(result.index);
+            dashboardPage.scrollToRecording(result.targetIndex);
         } else if (result.type === "setting") {
             window.currentPage = 2; // Settings
             settingsPage.scrollToSection(result.section);
@@ -248,9 +318,22 @@ ApplicationWindow {
     palette.window: "transparent"
 
     onClosing: function(close) {
-        if (window.recordingManager && window.recordingManager.isRecording) {
+        // Close-to-tray keeps Trophy (and any recording) running in the
+        // background; otherwise confirm when recording, else just quit.
+        if (window.app && window.app.minimizeToTray()) {
+            close.accepted = false;
+        } else if (window.recordingManager && window.recordingManager.isRecording) {
             closeConfirmDialog.open();
             close.accepted = false;
+        }
+    }
+
+    // Called from C++ (tray "Quit"): confirm when recording, else quit.
+    function requestQuit() {
+        if (window.recordingManager && window.recordingManager.isRecording) {
+            closeConfirmDialog.open();
+        } else {
+            Qt.quit();
         }
     }
 
@@ -487,6 +570,14 @@ ApplicationWindow {
         }
     }
 
+    Shortcut {
+        sequence: "F10"
+        onActivated: {
+            if (window.app)
+                window.app.requestReplay();
+        }
+    }
+
     TrophyDialog {
         id: closeConfirmDialog
         title: qsTr("Recording in Progress")
@@ -552,6 +643,84 @@ ApplicationWindow {
             performDeleteSelected();
             if (bulkDeleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
+        }
+    }
+
+    Dialog {
+        id: renameDialog
+        property string filePath: ""
+        property string errorMessage: ""
+        property alias renameField: renameField
+        title: qsTr("Rename Recording")
+        modal: true
+        anchors.centerIn: parent
+        width: 400
+        standardButtons: Dialog.NoButton
+
+        background: Rectangle {
+            color: Theme.cardColor || "#212121"
+            radius: Theme.radiusLarge
+            border.color: Theme.withOpacity(Theme.textColor, 0.1)
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingMedium
+
+            Label {
+                text: renameDialog.title
+                font.pixelSize: Theme.fontSizeLarge
+                font.weight: Font.Bold
+                color: Theme.textColor
+                Layout.fillWidth: true
+            }
+
+            TrophyTextField {
+                id: renameField
+                Layout.fillWidth: true
+                placeholderText: qsTr("Recording name")
+                maximumLength: 80
+                onAccepted: {
+                    if (text.trim().length > 0)
+                        window.performRename();
+                }
+                onTextChanged: {
+                    if (renameDialog.errorMessage !== "")
+                        renameDialog.errorMessage = "";
+                }
+            }
+
+            Label {
+                text: qsTr("The recording date is kept automatically.")
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.textMutedColor
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: renameDialog.errorMessage
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.errorColor
+                wrapMode: Text.WordWrap
+                visible: renameDialog.errorMessage !== ""
+                Layout.fillWidth: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                TrophyButton {
+                    text: qsTr("Cancel")
+                    onClicked: renameDialog.reject()
+                }
+                TrophyButton {
+                    text: qsTr("Rename")
+                    baseColor: Theme.accentColor || "#3498db"
+                    enabled: renameField.text.trim().length > 0
+                    onClicked: window.performRename()
+                }
+            }
         }
     }
 

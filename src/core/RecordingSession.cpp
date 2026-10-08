@@ -14,6 +14,7 @@
 
 #include <QDebug>
 #include <algorithm>
+#include <chrono>
 
 extern "C" {
 #include <pipewire/pipewire.h>
@@ -26,15 +27,25 @@ RecordingSession::RecordingSession(const QString &outputPath,
                                    IEncoder *encoder, IMuxer *muxer,
                                    AudioMixer *audioMixer,
                                    bool separateAudioTracks, int audioBitrate,
-                                   int activeAudioTrackCount, QObject *parent)
+                                   int activeAudioTrackCount,
+                                   const QMap<QString, QString> &metadata,
+                                   QObject *parent)
     : QObject(parent), m_outputPath(outputPath), m_capture(capture),
       m_encoder(encoder), m_muxer(muxer), m_audioMixer(audioMixer),
       m_separateAudioTracks(separateAudioTracks), m_audioBitrate(audioBitrate),
-      m_activeTrackCount(activeAudioTrackCount) {
+      m_activeTrackCount(activeAudioTrackCount), m_metadata(metadata) {
   m_trackToStreamMap.fill(-1);
 }
 
 RecordingSession::~RecordingSession() { stop(); }
+
+int64_t RecordingSession::steadyNowUs() {
+  // Milliseconds; matches m_sessionStartMs units (×1000 at use sites
+  // needing microseconds).
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 bool RecordingSession::start() {
   if (m_running) {
@@ -44,8 +55,28 @@ bool RecordingSession::start() {
 
   qDebug() << "Starting recording session to:" << m_outputPath;
 
+  // Initialize state BEFORE starting any threads or callbacks
+  m_frameCount = 0;
+  m_bytesWritten = 0;
+  m_running = true;
+  // A/V origin alignment baseline (see header): session wall start for
+  // the video timeout, origins reset per session.
+  m_sessionStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+  m_videoStartWallUs = -1;
+  m_trackOffsetApplied.fill(false);
+  m_mergedOffsetApplied = false;
+
   if (!m_muxer->initialize(m_outputPath)) {
+    m_running = false;
     emit errorOccurred("Failed to initialize muxer");
+    return false;
+  }
+
+  if (!m_muxer->setMetadata(m_metadata)) {
+    m_running = false;
+    emit errorOccurred("Failed to set muxer metadata");
     return false;
   }
 
@@ -58,9 +89,15 @@ bool RecordingSession::start() {
   videoStream.fps = m_encoder->fps();
   videoStream.bitrate = m_encoder->bitrate();
   videoStream.preset = m_encoder->preset();
+  videoStream.pixelFormat = m_encoder->encodedPixelFormat();
   videoStream.extraData = m_encoder->extraData();
 
+  if (videoStream.extraData.empty()) {
+    qWarning() << "RecordingSession: encoder provided no extradata (SPS/PPS) for video stream";
+  }
+
   if (m_muxer->addStream(videoStream) < 0) {
+    m_running = false;
     emit errorOccurred("Failed to add video stream to muxer");
     return false;
   }
@@ -74,8 +111,6 @@ bool RecordingSession::start() {
     audioConfig.codec = "aac";
 
     if (m_separateAudioTracks) {
-      // One encoder + one muxer stream per track (even if empty initially, for
-      // consistent MKV layout)
       const QStringList trackNames = {"Game Audio", "Voice Chat", "Microphone"};
       qDebug() << "Separate tracks mode: initializing" << kAudioTrackCount
               << "audio tracks";
@@ -88,6 +123,10 @@ bool RecordingSession::start() {
           m_audioEncoders[i].reset();
           continue;
         }
+        // Wall-clock drift correction for this track (no-op pass-through
+        // if SWR allocation fails).
+        m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
+            audioConfig.sampleRate, audioConfig.channels);
         StreamInfo s;
         s.type = StreamInfo::Type::Audio;
         s.codecId = m_audioEncoders[i]->codecId();
@@ -106,55 +145,67 @@ bool RecordingSession::start() {
       m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
-            if (!m_running || m_paused)
+            if (!m_running)
               return;
             if (trackIndex < 0 || trackIndex >= kAudioTrackCount)
               return;
-            if (!m_audioEncoders[trackIndex]) {
-              qDebug() << "Track" << trackIndex << "has no encoder, skipping"
-                       << frameCount << "frames";
+            if (!m_audioEncoders[trackIndex])
               return;
-            }
-            if (!samples) {
-              qWarning() << "Track" << trackIndex << "has null samples!";
-              return;
-            }
-
-            // Debug: log first few samples to check for data
-            float peakSample = 0.0f;
-            for (int i = 0; i < frameCount * channels && i < 1000; ++i) {
-              if (std::abs(samples[i]) > peakSample)
-                peakSample = std::abs(samples[i]);
-            }
-
-            /* static int callCount[3] = {0, 0, 0};
-            if (callCount[trackIndex]++ % 60 == 0) {  // Log every 60th call (~1
-            sec at 60fps) qDebug() << "Track" << trackIndex << ": frames=" <<
-            frameCount
-                       << "sr=" << sampleRate << "ch=" << channels
-                       << "peak=" << peakSample;
-            } */
 
             EncodedPacket packet;
             std::lock_guard<std::mutex> lock(m_audioEncoderMutexes[trackIndex]);
-            if (m_audioEncoders[trackIndex]->encodeAudio(samples, frameCount,
+            // Drop audio until the first video frame exists (unpairable
+            // head content); timeout force-opens so a dead portal can't
+            // mute audio.
+            if (m_videoStartWallUs.load() < 0 &&
+                (m_sessionStartMs < 0 ||
+                 steadyNowUs() - m_sessionStartMs <= kVideoWaitTimeoutMs)) {
+              return;
+            }
+            // Latch audio origin; a track starting after the first video
+            // frame gets a one-time encoder offset so origins agree.
+            const int64_t nowUs = steadyNowUs() * 1000LL;
+            if (!m_trackOffsetApplied[trackIndex]) {
+              const int64_t videoStart = m_videoStartWallUs.load();
+              if (videoStart >= 0 && nowUs > videoStart && m_audioMixer) {
+                m_audioEncoders[trackIndex]->setStartOffsetSamples(
+                    (nowUs - videoStart) * m_audioMixer->sampleRate() /
+                    1000000LL);
+              }
+              m_trackOffsetApplied[trackIndex] = true;
+            }
+            // Lock the track to the wall clock before encoding (timestamps
+            // count corrected samples, so they track video, not the
+            // sound-card crystal).
+            const float *fed = samples;
+            int fedFrames = frameCount;
+            if (auto &corr = m_driftCorrectors[trackIndex]) {
+              fedFrames = corr->process(samples, frameCount, fed);
+              if (fedFrames <= 0)
+                return;
+            }
+            if (m_audioEncoders[trackIndex]->encodeAudio(fed, fedFrames,
                                                          packet)) {
               int streamIdx = m_trackToStreamMap[trackIndex];
               if (streamIdx >= 0) {
                 packet.streamIndex = streamIdx;
-                m_muxer->writePacket(packet);
-                m_bytesWritten = m_muxer->bytesWritten();
+                if (m_muxer->writePacket(packet)) {
+                    m_bytesWritten = m_muxer->bytesWritten();
+                }
               }
             }
           });
 
     } else {
-      // Single merged stream — software mix all active tracks
       m_mergedEncoder = std::make_unique<AudioEncoder>();
       if (!m_mergedEncoder->initialize(audioConfig)) {
         qWarning() << "Failed to init merged audio encoder";
         m_mergedEncoder.reset();
       } else {
+        for (int i = 0; i < kAudioTrackCount; ++i) {
+          m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
+              audioConfig.sampleRate, audioConfig.channels);
+        }
         StreamInfo s;
         s.type = StreamInfo::Type::Audio;
         s.codecId = m_mergedEncoder->codecId();
@@ -170,33 +221,33 @@ bool RecordingSession::start() {
       m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
-            if (!m_running || m_paused)
-              return;
-            if (!m_mergedEncoder)
+            if (!m_running || !m_mergedEncoder)
               return;
             if (trackIndex < 0 || trackIndex >= m_activeTrackCount)
               return;
 
-            float peakSample = 0.0f;
-            for (int i = 0; i < frameCount * channels && i < 1000; ++i)
-              if (std::abs(samples[i]) > peakSample)
-                peakSample = std::abs(samples[i]);
-
-            /* static int callCount[3] = {0, 0, 0};
-            if (callCount[trackIndex]++ % 60 == 0)
-              qDebug() << "Track" << trackIndex << ": frames=" << frameCount
-                       << "sr=" << sampleRate << "ch=" << channels
-                       << "peak=" << peakSample; */
-
             std::lock_guard<std::mutex> lock(m_mergeMutex);
 
-            // Append to this track's own accumulator
-            const int incoming = frameCount * channels;
-            auto &buf = m_trackAccumulators[trackIndex];
-            buf.insert(buf.end(), samples, samples + incoming);
+            // Same gate as separate mode: no audio before first video
+            // (timeout force-opens; see above). This also bounds the
+            // accumulators when video never arrives.
+            if (m_videoStartWallUs.load() < 0 &&
+                (m_sessionStartMs < 0 ||
+                 steadyNowUs() - m_sessionStartMs <= kVideoWaitTimeoutMs)) {
+              return;
+            }
 
-            // Mix and encode as long as ALL active tracks have a full AAC frame
-            // ready
+            const float *fed = samples;
+            int fedFrames = frameCount;
+            if (auto &corr = m_driftCorrectors[trackIndex]) {
+              fedFrames = corr->process(samples, frameCount, fed);
+              if (fedFrames <= 0)
+                return;
+            }
+            const int incoming = fedFrames * channels;
+            auto &buf = m_trackAccumulators[trackIndex];
+            buf.insert(buf.end(), fed, fed + incoming);
+
             const int needed = 1024 * channels;
             while (true) {
               bool allReady = true;
@@ -220,76 +271,166 @@ bool RecordingSession::start() {
               for (auto &v : mixed)
                 v = std::clamp(v, -1.0f, 1.0f);
 
+              // Origin alignment at first mixed output (all tracks
+              // contributing): late starts shift forward instead of
+              // baking in the skew.
+              if (!m_mergedOffsetApplied) {
+                const int64_t outMs = steadyNowUs();
+                const int64_t videoStartMs = m_videoStartWallUs >= 0
+                                                 ? m_videoStartWallUs / 1000LL
+                                                 : outMs;
+                const int64_t skewMs = outMs - videoStartMs;
+                if (skewMs > 0 && m_audioMixer) {
+                  m_mergedEncoder->setStartOffsetSamples(
+                      skewMs * m_audioMixer->sampleRate() / 1000LL);
+                }
+                m_mergedOffsetApplied = true;
+              }
+
               EncodedPacket packet;
               if (m_mergedEncoder->encodeAudio(mixed.data(), 1024, packet)) {
                 packet.streamIndex = 1;
-                m_muxer->writePacket(packet);
-                m_bytesWritten = m_muxer->bytesWritten();
+                if (m_muxer->writePacket(packet)) {
+                    m_bytesWritten = m_muxer->bytesWritten();
+                }
               }
             }
           });
     }
   }
 
-  // --- Write container header (must be after all streams are added) ---
+  // Write container header
   if (!m_muxer->writeHeader()) {
+    m_running = false;
     emit errorOccurred("Failed to write muxer header");
     return false;
   }
 
-  m_running = true;
-  m_paused = false;
-  m_frameCount = 0;
-  m_bytesWritten = 0;
-
   // Set video capture callback
-  m_capture->setFrameCallback([this](const VideoFrame &frame) {
-    if (!m_running || m_paused)
-      return;
+  // Replace direct queuing with FrameDispatcher-based routing if available
+  if (!m_frameDispatcher) {
+    // fallback to original behavior
+    m_capture->setFrameCallback([this](const VideoFrame &frame) {
+      if (!m_running)
+        return;
 
-    std::lock_guard<std::mutex> lock(m_queueMutex);
-    if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
-      m_videoQueue.emplace(frame);
-      m_queueCv.notify_one();
-    } else {
-      qWarning() << "Video queue full, dropping frame";
-    }
-  });
+      // Latch the video wall clock on the first frame (same as the
+      // dispatcher path below). DVR sessions have no dispatcher, so
+      // without this the audio gate never opens on video and every
+      // segment drops its first 10s of audio to the gate timeout —
+      // clips then carry full video with ~10s-short audio.
+      int64_t expected = -1;
+      m_videoStartWallUs.compare_exchange_strong(
+          expected, steadyNowUs() * 1000LL);
+
+      std::lock_guard<std::mutex> lock(m_queueMutex);
+      if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+        m_videoQueue.emplace(frame);
+        m_queueCv.notify_one();
+      } else {
+        qWarning() << "Video queue full, dropping frame";
+      }
+    });
+  } else {
+    m_capture->setFrameCallback([this](const VideoFrame &frame) {
+      if (!m_running)
+        return;
+
+      // Latch the video wall clock on the first frame. Audio before this
+      // is dropped downstream (unpairable head content); late audio
+      // tracks offset to this origin instead.
+      int64_t expected = -1;
+      m_videoStartWallUs.compare_exchange_strong(
+          expected, steadyNowUs() * 1000LL);
+
+      // Build a FrameDescriptor and dispatch (non-blocking)
+      FrameDescriptor fd;
+      if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
+        fd.fd = ::dup(frame.dmaBufFd);
+        if (fd.fd == -1) {
+          return; // cannot dup, drop
+        }
+        fd.width = frame.width;
+        fd.height = frame.height;
+        fd.format = frame.drmFormat;
+        fd.pixelFormat = frame.pixelFormat;
+        fd.drmModifier = frame.drmModifier;
+        fd.dmaBufStride = frame.dmaBufStride;
+        fd.dmaBufOffset = frame.dmaBufOffset;
+        fd.pts = frame.timestamp;
+        m_frameDispatcher->dispatch(fd);
+      } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
+        // Latch the video wall clock (see above).
+        int64_t expected = -1;
+        m_videoStartWallUs.compare_exchange_strong(
+            expected, steadyNowUs() * 1000LL);
+        // Software frame path: build a QueuedFrame and enqueue directly
+        QueuedFrame qf(frame);
+        if (qf.data) {
+          pushQueuedFrame(std::move(qf));
+        }
+      } else {
+        return;
+      }
+    });
+  }
 
   if (!m_capture->startCapture()) {
+    m_running = false;
     emit errorOccurred("Failed to start video capture");
     return false;
   }
 
-  // Start audio capture (driven by PipeWire callbacks, no dedicated thread)
   if (m_audioMixer) {
-    m_audioMixer->startAll();
+    // Start streams that are not already running. DVR switches keep the
+    // mixer's PipeWire sources alive across the handoff; restarting them
+    // would reopen an A/V gap on every rotation.
+    m_audioMixer->ensureSourcesStarted();
   }
 
-  // Set up periodic checking for newly-appeared audio nodes
-  if (!m_gameProcess.isEmpty() || !m_voiceChatApp.isEmpty()) {
+  if (!m_gameHints.isEmpty() || m_gamePid != 0 || !m_voiceChatApp.isEmpty()) {
     m_audioNodeCheckTimer = new QTimer(this);
-    m_audioNodeCheckTimer->setInterval(3000); // Check every 3 seconds
+    m_audioNodeCheckTimer->setInterval(3000);
     connect(m_audioNodeCheckTimer, &QTimer::timeout, this,
             &RecordingSession::checkForNewAudioNodes);
     m_audioNodeCheckTimer->start();
-    checkForNewAudioNodes(); // Immediate first check
+    checkForNewAudioNodes();
   }
 
-  // Start video encoding thread
   m_encodingThread = std::thread([this]() { encodingLoop(); });
 
   return true;
 }
 
-void RecordingSession::stop() {
+bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
+  if (!m_running) {
+    qDebug() << "pushQueuedFrame: rejected (not running)";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(m_queueMutex);
+  if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+    m_videoQueue.push(std::move(frame));
+    // Success logs at 60fps; throttle unless TROPHY_VIDEO_DEBUG is set.
+    static std::atomic<uint64_t> s_pushed{0};
+    const uint64_t n = ++s_pushed;
+    if (qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG") || n == 1 ||
+        n % 600 == 0) {
+      qDebug() << "pushQueuedFrame: enqueued. queue size:" << m_videoQueue.size();
+    }
+    m_queueCv.notify_one();
+    return true;
+  }
+  qDebug() << "pushQueuedFrame: queue full, dropping frame";
+  return false;
+}
+
+void RecordingSession::stop(bool keepCaptureSource, bool handoffRouting) {
   if (!m_running) {
     return;
   }
 
   qDebug() << "Stopping recording session...";
 
-  // Stop audio node checking
   if (m_audioNodeCheckTimer) {
     m_audioNodeCheckTimer->stop();
     m_audioNodeCheckTimer->deleteLater();
@@ -297,12 +438,20 @@ void RecordingSession::stop() {
   }
 
   if (m_capture) {
-    m_capture->stopCapture();
-    m_capture->setFrameCallback(nullptr);
+    if (!keepCaptureSource)
+      m_capture->stopCapture();
+    // Detach the frame callback unless a successor session already owns
+    // the live routing (DVR make-before-break switch): nulling it here
+    // would steal the new session's frames. A dangling [this] callback
+    // firing on the next PipeWire frame locks a destroyed mutex
+    // (std::system_error -> terminate -> SIGABRT on the stream thread),
+    // so the non-handoff path always detaches. Seen live on every
+    // clip-key press.
+    if (!handoffRouting)
+      m_capture->setFrameCallback(nullptr);
   }
 
-  // Stop audio capture before flushing
-  if (m_audioMixer) {
+  if (m_audioMixer && !handoffRouting) {
     m_audioMixer->stopAll();
     m_audioMixer->setTrackAudioCallback(nullptr);
   }
@@ -314,7 +463,6 @@ void RecordingSession::stop() {
     m_encodingThread.join();
   }
 
-  // Flush all audio encoders
   for (int i = 0; i < kAudioTrackCount; ++i) {
     if (!m_audioEncoders[i])
       continue;
@@ -329,7 +477,6 @@ void RecordingSession::stop() {
     }
   }
 
-  // Flush merged encoder if used
   if (m_mergedEncoder) {
     std::vector<EncodedPacket> flushed;
     m_mergedEncoder->flush(flushed);
@@ -341,16 +488,13 @@ void RecordingSession::stop() {
 
   if (m_muxer) {
     m_muxer->finalize();
+    
     m_bytesWritten = m_muxer->bytesWritten();
   }
 
   qDebug() << "Recording session stopped. Frames:" << m_frameCount
           << "Size:" << m_bytesWritten << "bytes";
 }
-
-void RecordingSession::pause() { m_paused = true; }
-
-void RecordingSession::resume() { m_paused = false; }
 
 void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread started";
@@ -383,7 +527,6 @@ void RecordingSession::encodingLoop() {
     }
   }
 
-  // Flush video encoder
   std::vector<EncodedPacket> flushedPackets;
   if (m_encoder && m_encoder->flush(flushedPackets) > 0) {
     for (auto &pkt : flushedPackets) {
@@ -395,57 +538,117 @@ void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread stopped";
 }
 
+void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
+                                          const QStringList &hints,
+                                          bool *isFallback) {
+  if (track < 0 || track >= kAudioTrackCount || !m_audioMixer)
+    return;
+
+  // Fresh lookup: PID first (exact), then name hints in order.
+  uint32_t nodeId = PW_ID_ANY;
+  QString nodeName, nodeSerial;
+#ifdef HAVE_PIPEWIRE
+  if (pid != 0) {
+    nodeId = PipeWireAudioSource::findNodeByPid(pid, &nodeName, &nodeSerial);
+  }
+  if (nodeId == PW_ID_ANY) {
+    for (const QString &hint : hints) {
+      if (hint.isEmpty())
+        continue;
+      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                          &nodeSerial);
+      if (nodeId != PW_ID_ANY)
+        break;
+    }
+  }
+#else
+  Q_UNUSED(pid);
+  Q_UNUSED(hints);
+#endif
+
+  if (nodeId == PW_ID_ANY) {
+    // No live node. A previous bind died with its stream (Electron /
+    // Proton streams are recreated constantly) — forget it so the next
+    // appearance re-binds instead of being skipped as "connected".
+    if (m_sourceConnected[track]) {
+      qDebug() << "Audio node vanished for track" << track
+               << "- will re-bind on return";
+      m_sourceConnected[track] = false;
+      m_boundSerial[track].clear();
+    }
+    return;
+  }
+
+  if (m_sourceConnected[track]) {
+    if (m_boundSerial[track].isEmpty()) {
+      if (nodeSerial.isEmpty())
+        return; // serial-less node we can't churn-check; leave it alone
+      // Manager bound this node at build without knowing the serial —
+      // adopt it so later generations read as new, not same.
+      m_boundSerial[track] = nodeSerial;
+      if (isFallback)
+        *isFallback = false;
+      return;
+    }
+    if (nodeSerial.isEmpty() || nodeSerial == m_boundSerial[track])
+      return; // same generation (or uncheckable) — nothing to do
+    qDebug() << "Audio node recreated for track" << track << "- re-binding";
+  }
+
+  // (Re)bind — replaces monitor fallback or a dead stream generation.
+  // Startup skew is handled downstream instead (audio gate + encoder
+  // start offsets), so binds happen the moment a node is usable.
+  m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
+                              nodeId, nodeName, nodeSerial),
+                          track);
+  m_sourceConnected[track] = true;
+  m_boundSerial[track] = nodeSerial;
+  // A new source restarts this track's origin measurement: the encoder
+  // offset below is one-shot, and a stale flag would pin a previous
+  // source's origin onto new content (constant file-wide skew).
+  m_trackOffsetApplied[track] = false;
+  if (isFallback)
+    *isFallback = false;
+  qDebug() << "Audio node bound for track" << track << ":"
+           << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
+}
+
 void RecordingSession::checkForNewAudioNodes() {
   if (!m_running || !m_audioMixer) {
     return;
   }
 
-  bool allConnected = true;
+  // Game track: PID + hints; monitor fallback never counts as bound.
+  if (m_gamePid != 0 || !m_gameHints.isEmpty())
+    reconcileAppTrack(0, m_gamePid, m_gameHints, &m_gameIsFallback);
 
-  // Check for game audio (track 0)
-  if (!m_sourceConnected[0] && !m_gameProcess.isEmpty()) {
-    allConnected = false;
-    uint32_t nodeId = PW_ID_ANY;
-    QString nodeName, nodeSerial;
-
-    // Try process name
-    if (!m_gameProcess.isEmpty()) {
-      nodeId = PipeWireAudioSource::findNodeByProcessName(
-          m_gameProcess, &nodeName, &nodeSerial);
+  if (!m_voiceChatApp.isEmpty()) {
+    if (m_voiceTrack >= 0 && m_voiceTrack < kAudioTrackCount) {
+      // Reserved slot (separate mode always reserves it at build).
+      reconcileAppTrack(m_voiceTrack, 0, {m_voiceChatApp}, nullptr);
+    } else if (!m_separateAudioTracks &&
+               m_activeTrackCount < kAudioTrackCount) {
+      // Merged mode can't reserve a voice slot at build (an empty slot
+      // would stall the mix gate forever), so adopt the next free slot if
+      // the stream exists now. Never clobbers mic: the slot is always fresh.
+      const int probe = m_activeTrackCount;
+      reconcileAppTrack(probe, 0, {m_voiceChatApp}, nullptr);
+      if (m_sourceConnected[probe]) {
+        m_voiceTrack = probe;
+        {
+          std::lock_guard<std::mutex> lock(m_mergeMutex);
+          if (m_activeTrackCount <= probe)
+            m_activeTrackCount = probe + 1;
+        }
+        qDebug() << "Voice adopted merged slot" << probe;
+      }
     }
-
-    if (nodeId != PW_ID_ANY) {
-      qDebug() << "Game audio node appeared, connecting:"
-              << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  nodeId, nodeName, nodeSerial),
-                              0);
-      m_sourceConnected[0] = true;
-    }
+    // (merged + unslotted + absent: skip — binding there would evict mic)
   }
 
-  // Check for voice chat audio (track 1)
-  if (!m_sourceConnected[1] && !m_voiceChatApp.isEmpty()) {
-    allConnected = false;
-    QString nodeName, nodeSerial;
-    uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(
-        m_voiceChatApp, &nodeName, &nodeSerial);
-
-    if (nodeId != PW_ID_ANY) {
-      qDebug() << "Voice chat app node appeared, connecting:"
-              << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
-      m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                  nodeId, nodeName, nodeSerial),
-                              1);
-      m_sourceConnected[1] = true;
-    }
-  }
-
-  // Stop checking once all expected sources are connected
-  if (allConnected && m_audioNodeCheckTimer) {
-    m_audioNodeCheckTimer->stop();
-    qDebug() << "All expected audio nodes connected, stopping node checks";
-  }
+  // The timer intentionally runs for the whole session: app streams churn
+  // (voice join/leave, Proton audio restart) and a pin to a dead serial
+  // delivers silence forever otherwise.
 }
 
 } // namespace TrophyBackend

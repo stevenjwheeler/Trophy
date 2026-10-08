@@ -10,6 +10,7 @@
 #include <QFileSystemWatcher>
 #include <QList>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <memory>
 #include <vector>
@@ -64,6 +65,16 @@ public:
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
 
+ public slots:
+  /**
+   * @brief Record a rename so the new filename stays authoritative.
+   *
+   * Connect to StorageManager::recordingRenamed BEFORE refresh: the
+   * container still carries the pre-rename title tag, so without this the
+   * background probe would revert the displayed name to the stale tag.
+   */
+  void onRecordingRenamed(const QString &oldPath, const QString &newPath);
+
   void setActiveRecordingPath(const QString &path);
 
 signals:
@@ -80,6 +91,9 @@ private:
   void scanDirectory();
   void addRecording(const QString &filePath);
   void updateFilteredRecordings();
+  void loadCustomTitles();
+  void saveCustomTitles() const;
+  QString customTitlesPath() const;
 
   QString m_libraryPath;
   QString m_searchQuery;
@@ -90,6 +104,15 @@ private:
   QFileSystemWatcher m_watcher;
   std::unique_ptr<ThumbnailGenerator> m_thumbnailGenerator;
   bool m_ignoreNextChange = false;
+  // Source path of an in-flight user rename (set by onRecordingRenamed,
+  // consumed by the refresh that follows). The old file is genuinely
+  // gone from disk, but observers must not hear recordingRemoved for
+  // it — otherwise renames show up as deletions in the activity feed.
+  QString m_renameSource;
+  // File names (not paths) whose filename-derived title wins over the
+  // container title tag. Populated by user renames, persisted next to the
+  // library so it survives restarts and library moves.
+  QSet<QString> m_fileNameTitlePreferred;
 };
 
 } // namespace TrophyBackend

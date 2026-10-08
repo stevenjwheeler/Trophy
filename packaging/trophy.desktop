@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=Trophy - Game recording and clipping
-GenericName=Game Recorder
-Comment=Record gameplay on Linux with hardware acceleration
+Name=Trophy
+GenericName=Game recording and clipping
+Comment=Game recording and clipping
 Exec=trophy
 Icon=trophy
 Terminal=false

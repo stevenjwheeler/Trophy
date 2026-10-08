@@ -55,7 +55,6 @@ public:
     Idle,
     Initializing,
     Recording,
-    Paused,
     Stopping,
     Error
   };
@@ -85,15 +84,36 @@ public:
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
                                   unsigned long windowId = 0);
   Q_INVOKABLE void stopRecording();
-  Q_INVOKABLE void pauseRecording();
-  Q_INVOKABLE void resumeRecording();
+
+  /**
+   * @brief Whether a portal source label carries no real identity.
+   *
+   * Empty, compositor-generic (kwin/wayland/Unknown Game) and bare
+   * portal app-ids (steam_app_<id> with no title behind them) say
+   * nothing about what is actually captured.
+   */
+  static bool isGenericSourceLabel(const QString &label);
+  /**
+   * @brief Whether two source names plausibly denote the same target.
+   *
+   * Case-insensitive containment either way ("Deadlock" vs
+   * "deadlock.exe"). Used to decide if the portal's captured source
+   * agrees with the detected game before adopting it as the file name.
+   */
+  static bool sourceLabelsAgree(const QString &a, const QString &b);
 
 signals:
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);
-  void recordingStopped(const QString &filePath);
+  void recordingStopped(const QString &filePath, qint64 durationMs,
+                        qint64 sizeBytes);
   void recordingError(const QString &error);
+  /**
+   * The portal rejected our saved restore token. The app deletes it and
+   * re-authorizes through the New Game prompt — never a bare picker.
+   */
+  void restoreAuthNeeded(const QString &gameName);
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
 
@@ -130,6 +150,20 @@ private:
   // Progress tracking
   QElapsedTimer m_recordingTimer;
   QTimer *m_progressTimer = nullptr;
+
+ public:
+  // Live audio retargeting: swap one track's source on the running
+  // pipeline (mixer hot-swaps; no-ops without an active session, in which
+  // case the next build picks the new setting up). Invoked from
+  // Application's settings-change wiring.
+  void applyMicrophoneDevice();
+  void applyGameAudioDevice();
+  void applyVoiceChatApp();
+
+ private:
+  // Mixer slots assigned at build (needed to retarget mid-session).
+  int m_micTrack = -1;
+  int m_voiceTrack = -1;
 };
 
 } // namespace TrophyBackend

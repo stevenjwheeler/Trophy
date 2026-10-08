@@ -40,6 +40,7 @@ class SettingsManager : public QObject {
   Q_PROPERTY(bool useVBR READ useVBR WRITE setUseVBR NOTIFY useVBRChanged)
   Q_PROPERTY(bool useDmaBuf READ useDmaBuf WRITE setUseDmaBuf NOTIFY
                  useDmaBufChanged)
+  Q_PROPERTY(int clipBufferSeconds READ clipBufferSeconds WRITE setClipBufferSeconds NOTIFY clipBufferSecondsChanged)
   Q_PROPERTY(QString resolution READ resolution NOTIFY videoResolutionChanged)
   Q_PROPERTY(int autoResolutionWidth READ autoResolutionWidth NOTIFY autoResolutionChanged)
   Q_PROPERTY(int autoResolutionHeight READ autoResolutionHeight NOTIFY autoResolutionChanged)
@@ -59,6 +60,13 @@ class SettingsManager : public QObject {
   // Storage settings
   Q_PROPERTY(QString recordingsPath READ recordingsPath WRITE setRecordingsPath
                  NOTIFY recordingsPathChanged)
+  // DVR segment dir; empty means the /tmp default (see ReplayManager).
+  // Was a plain getter until 2026-10-01, so QML reads got `undefined`
+  // (startup "Unable to assign [undefined]" warning) and writes from the
+  // Settings Browse/Default buttons landed on a dynamic property instead
+  // of the C++ member — the whole field was dead.
+  Q_PROPERTY(QString replayCachePath READ replayCachePath WRITE
+                 setReplayCachePath NOTIFY replayCachePathChanged)
   Q_PROPERTY(qint64 maxStorageSize READ maxStorageSize WRITE setMaxStorageSize
                  NOTIFY maxStorageSizeChanged)
   Q_PROPERTY(bool autoDeleteOldest READ autoDeleteOldest WRITE
@@ -69,13 +77,39 @@ class SettingsManager : public QObject {
                  NOTIFY autoDetectGamesChanged)
   Q_PROPERTY(bool autoRecordEnabled READ autoRecordEnabled WRITE
                  setAutoRecordEnabled NOTIFY autoRecordEnabledChanged)
+  Q_PROPERTY(bool windowTrackingEnabled READ windowTrackingEnabled WRITE
+                 setWindowTrackingEnabled NOTIFY windowTrackingEnabledChanged)
+  Q_PROPERTY(bool vulkanLayerEnabled READ vulkanLayerEnabled WRITE
+                 setVulkanLayerEnabled NOTIFY vulkanLayerEnabledChanged)
   Q_PROPERTY(bool setupCompleted READ setupCompleted WRITE setSetupCompleted
                  NOTIFY setupCompletedChanged)
+  Q_PROPERTY(bool minimizeToTray READ minimizeToTray WRITE setMinimizeToTray
+                 NOTIFY minimizeToTrayChanged)
+  Q_PROPERTY(bool startMinimized READ startMinimized WRITE setStartMinimized
+                 NOTIFY startMinimizedChanged)
+  Q_PROPERTY(bool startOnLogin READ startOnLogin WRITE setStartOnLogin
+                 NOTIFY startOnLoginChanged)
+  Q_PROPERTY(bool instantReplayEnabled READ instantReplayEnabled WRITE
+                 setInstantReplayEnabled NOTIFY instantReplayEnabledChanged)
+  Q_PROPERTY(bool globalShortcutsEnabled READ globalShortcutsEnabled WRITE
+                 setGlobalShortcutsEnabled NOTIFY globalShortcutsEnabledChanged)
+
+  // Notification options (which ambient notices may appear; errors, the
+  // DVR authorize prompt and direct keypress feedback always show).
+  Q_PROPERTY(bool notifyRecordings READ notifyRecordings WRITE
+                 setNotifyRecordings NOTIFY notifyRecordingsChanged)
+  Q_PROPERTY(bool notifyClips READ notifyClips WRITE setNotifyClips NOTIFY
+                 notifyClipsChanged)
+  Q_PROPERTY(bool notifyStorage READ notifyStorage WRITE setNotifyStorage
+                 NOTIFY notifyStorageChanged)
+  // Short chimes when a clip or a recording finishes saving (played
+  // via pw-play, which ships with PipeWire itself — no extra backend
+  // needed).
+  Q_PROPERTY(bool completionSoundEnabled READ completionSoundEnabled WRITE setCompletionSoundEnabled
+                 NOTIFY completionSoundEnabledChanged)
   
   // Wayland Restore Tokens
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
-  // Deprecated single token (kept for migration)
-  Q_PROPERTY(QString waylandRestoreToken READ waylandRestoreToken WRITE setWaylandRestoreToken NOTIFY waylandRestoreTokenChanged)
 
 public:
   explicit SettingsManager(QObject *parent = nullptr);
@@ -98,6 +132,12 @@ public:
 
   bool useVBR() const { return m_useVBR; }
   void setUseVBR(bool enabled);
+
+  bool useDmaBuf() const { return m_useDmaBuf; }
+  void setUseDmaBuf(bool enabled);
+
+  int clipBufferSeconds() const { return m_clipBufferSeconds; }
+  void setClipBufferSeconds(int seconds);
 
   QString resolution() const { return m_videoResolution; }
 
@@ -135,9 +175,6 @@ public:
   bool separateAudioTracks() const { return m_separateAudioTracks; }
   void setSeparateAudioTracks(bool separate);
 
-  bool useDmaBuf() const { return m_useDmaBuf; }
-  void setUseDmaBuf(bool enabled);
-
   // Storage settings
   QString recordingsPath() const { return m_recordingsPath; }
   void setRecordingsPath(const QString &path);
@@ -155,11 +192,47 @@ public:
   bool autoRecordEnabled() const { return m_autoRecordEnabled; }
   void setAutoRecordEnabled(bool enabled);
 
+  bool windowTrackingEnabled() const { return m_windowTrackingEnabled; }
+  void setWindowTrackingEnabled(bool enabled);
+
+  bool vulkanLayerEnabled() const { return m_vulkanLayerEnabled; }
+  void setVulkanLayerEnabled(bool enabled);
+
   bool setupCompleted() const { return m_setupCompleted; }
   void setSetupCompleted(bool completed);
 
-  QString waylandRestoreToken() const { return m_waylandRestoreToken; }
-  void setWaylandRestoreToken(const QString &token);
+  bool minimizeToTray() const { return m_minimizeToTray; }
+  void setMinimizeToTray(bool enabled);
+
+  bool startMinimized() const { return m_startMinimized; }
+  void setStartMinimized(bool enabled);
+
+  bool startOnLogin() const { return m_startOnLogin; }
+  void setStartOnLogin(bool enabled);
+
+  bool instantReplayEnabled() const { return m_instantReplayEnabled; }
+  void setInstantReplayEnabled(bool enabled);
+
+  bool globalShortcutsEnabled() const { return m_globalShortcutsEnabled; }
+  void setGlobalShortcutsEnabled(bool enabled);
+
+  // Ambient-notice toggles (errors/authorize/keypress feedback always show).
+  bool notifyRecordings() const { return m_notifyRecordings; }
+  void setNotifyRecordings(bool enabled);
+
+  bool notifyClips() const { return m_notifyClips; }
+  void setNotifyClips(bool enabled);
+
+  bool notifyStorage() const { return m_notifyStorage; }
+  void setNotifyStorage(bool enabled);
+
+  bool completionSoundEnabled() const { return m_completionSoundEnabled; }
+  void setCompletionSoundEnabled(bool enabled);
+
+  // Replay cache dir for DVR segments; empty = /tmp/trophy/replay (RAM-backed).
+  // Point it at /tmp (tmpfs) to hold the rolling buffer in RAM.
+  QString replayCachePath() const { return m_replayCachePath; }
+  void setReplayCachePath(const QString &path);
 
   QVariantMap waylandRestoreTokens() const { return m_waylandRestoreTokens; }
   Q_INVOKABLE QString getRestoreToken(const QString &key) const;
@@ -182,6 +255,7 @@ signals:
   void maxVideoBitrateChanged();
   void useVBRChanged();
   void useDmaBufChanged();
+  void clipBufferSecondsChanged();
   void autoResolutionChanged();
 
   // Audio
@@ -199,8 +273,19 @@ signals:
   // Detection
   void autoDetectGamesChanged();
   void autoRecordEnabledChanged();
+  void windowTrackingEnabledChanged();
+  void vulkanLayerEnabledChanged();
   void setupCompletedChanged();
-  void waylandRestoreTokenChanged();
+  void minimizeToTrayChanged();
+  void startMinimizedChanged();
+  void startOnLoginChanged();
+  void instantReplayEnabledChanged();
+  void globalShortcutsEnabledChanged();
+  void notifyRecordingsChanged();
+  void notifyClipsChanged();
+  void notifyStorageChanged();
+  void completionSoundEnabledChanged();
+  void replayCachePathChanged();
   void waylandRestoreTokensChanged();
 
   // General
@@ -224,6 +309,7 @@ private:
   int m_maxVideoBitrate = 20000;
   bool m_useVBR = true;
   bool m_useDmaBuf = true;
+  int m_clipBufferSeconds = 30;
   int m_autoResolutionWidth = 0;
   int m_autoResolutionHeight = 0;
 
@@ -242,10 +328,31 @@ private:
   // Detection settings
   bool m_autoDetectGames = true;
   bool m_autoRecordEnabled = false;
+  // Compositor window tracking (KWin script etc.). Opt-in via the setup
+  // wizard; nothing is installed until the user enables it.
+  bool m_windowTrackingEnabled = false;
+  // Vulkan detection layer. Opt-in via the setup wizard; never
+  // auto-registered.
+  bool m_vulkanLayerEnabled = false;
   bool m_setupCompleted = false;
+
+  // System tray behaviour
+  bool m_minimizeToTray = true;
+  bool m_startMinimized = false;
+  bool m_startOnLogin = false;
+  // Instant replay DVR (rolling segments while a game runs)
+  bool m_instantReplayEnabled = true;
+  // Portal global shortcuts (F9/F10); bound on user consent, never silently.
+  bool m_globalShortcutsEnabled = true;
+  QString m_replayCachePath;
+  // Ambient-notice toggles (all default on; errors, the DVR authorize
+  // prompt and direct keypress feedback always show regardless).
+  bool m_notifyRecordings = true;
+  bool m_notifyClips = true;
+  bool m_notifyStorage = true;
+  bool m_completionSoundEnabled = true;
   
   // Wayland Restore Tokens
-  QString m_waylandRestoreToken; // Deprecated
   QVariantMap m_waylandRestoreTokens;
 };
 

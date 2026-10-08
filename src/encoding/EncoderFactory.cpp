@@ -155,6 +155,14 @@ std::unique_ptr<IEncoder> EncoderFactory::createBest(bool preferHardware) {
         return create(enc.type);
       }
     }
+  } else {
+    // Explicit software request (e.g. compatibility fallback): first
+    // software encoder wins.
+    for (const auto &enc : encoders) {
+      if (!enc.isHardware) {
+        return create(enc.type);
+      }
+    }
   }
 
   // Use first available (best priority)

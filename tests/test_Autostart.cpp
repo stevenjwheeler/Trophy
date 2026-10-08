@@ -1,0 +1,87 @@
+/*
+ * Trophy - Unit Tests
+ * AutostartManager: desktop-entry lifecycle in an isolated config home.
+ */
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QTemporaryDir>
+#include <gtest/gtest.h>
+
+#include "core/AutostartManager.h"
+
+using namespace TrophyBackend;
+
+class AutostartTestEnvironment : public ::testing::Environment {
+public:
+  void SetUp() override {
+    if (!QCoreApplication::instance()) {
+      static int argc = 1;
+      static char arg0[] = "test";
+      static char *argv[] = {arg0, nullptr};
+      new QCoreApplication(argc, argv);
+    }
+  }
+};
+
+static auto *env =
+    testing::AddGlobalTestEnvironment(new AutostartTestEnvironment);
+
+class AutostartTest : public ::testing::Test {
+protected:
+  QTemporaryDir tempDir;
+  void SetUp() override { ASSERT_TRUE(tempDir.isValid()); }
+};
+
+TEST_F(AutostartTest, DisabledByDefault) {
+  AutostartManager mgr(tempDir.path());
+  EXPECT_FALSE(mgr.isEnabled());
+  EXPECT_FALSE(QFile::exists(mgr.filePath()));
+}
+
+TEST_F(AutostartTest, EnableWritesMinimizedEntry) {
+  AutostartManager mgr(tempDir.path());
+  EXPECT_TRUE(mgr.setEnabled(true, "/usr/bin/trophy"));
+  EXPECT_TRUE(mgr.isEnabled());
+
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
+  const QString content = QString::fromUtf8(f.readAll());
+  EXPECT_TRUE(content.contains("Exec=/usr/bin/trophy --minimized"));
+  EXPECT_TRUE(content.contains("X-GNOME-Autostart-enabled=true"));
+}
+
+TEST_F(AutostartTest, DisableRemovesOwnEntry) {
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.setEnabled(true, "/usr/bin/trophy"));
+  EXPECT_TRUE(mgr.setEnabled(false, "/usr/bin/trophy"));
+  EXPECT_FALSE(mgr.isEnabled());
+  EXPECT_FALSE(QFile::exists(mgr.filePath()));
+}
+
+TEST_F(AutostartTest, DisableLeavesForeignEntryAlone) {
+  AutostartManager mgr(tempDir.path());
+  QDir().mkpath(QFileInfo(mgr.filePath()).absolutePath());
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly | QIODevice::Text));
+  f.write("[Desktop Entry]\nName=UserCustom\n");
+  f.close();
+
+  EXPECT_FALSE(mgr.isEnabled()); // no marker: not ours
+  EXPECT_TRUE(mgr.setEnabled(false, "/usr/bin/trophy"));
+  EXPECT_TRUE(QFile::exists(mgr.filePath())); // untouched
+}
+
+TEST_F(AutostartTest, ReEnableRefreshesExecPath) {
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.setEnabled(true, "/old/path/trophy"));
+  ASSERT_TRUE(mgr.setEnabled(true, "/new/path/trophy"));
+
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
+  EXPECT_TRUE(QString::fromUtf8(f.readAll())
+                  .contains("Exec=/new/path/trophy --minimized"));
+  EXPECT_TRUE(mgr.isEnabled());
+}

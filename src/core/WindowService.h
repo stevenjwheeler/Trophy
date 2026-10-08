@@ -7,8 +7,14 @@
 
 namespace TrophyBackend {
 
+class WaylandWindowMonitor;
+
 /**
- * @brief Service to list available windows for manual recording
+ * @brief Service to list available windows for manual recording.
+ *
+ * Answers from the shared WaylandWindowMonitor backend (KWin first).
+ * Window ids are the compositor's window ids (KWin client.windowId).
+ * Without a monitor attached, all queries return empty/0 (safe no-op).
  */
 class WindowService : public QObject {
   Q_OBJECT
@@ -17,12 +23,20 @@ public:
   explicit WindowService(QObject *parent = nullptr);
   ~WindowService() override;
 
+  /** Attach the shared compositor monitor (owned by Application). */
+  void setWindowMonitor(WaylandWindowMonitor *monitor);
+
   /**
    * @brief Get a list of visible windows
-   * @return List of maps containing window info (id, title, class, pid)
+   * @return List of maps with keys: id, title, class, pid
    */
   Q_INVOKABLE QVariantList getVisibleWindows();
   Q_INVOKABLE QString getWindowTitle(unsigned long windowId);
+
+  /**
+   * @brief Get the owning PID for a compositor window id (0 if unknown).
+   */
+  unsigned long getPidForWindow(unsigned long windowId);
 
   /**
    * @brief Get the process name for a window by its process ID
@@ -34,17 +48,10 @@ public:
    */
   QString getWindowClassForWindow(unsigned long windowId);
 
-  /**
-   * @brief Set the Trophy application window to exclude from listings
-   */
-  void setTrophyWindowId(unsigned long windowId);
-
 private:
   QString fetchWindowTitle(unsigned long windowId);
-  unsigned long getPidForWindow(unsigned long windowId);
 
-private:
-  unsigned long m_trophyWindowId = 0;
+  WaylandWindowMonitor *m_monitor = nullptr;
 };
 
 } // namespace TrophyBackend

@@ -2,31 +2,51 @@ name: Trophy CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ '**' ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+# One run per ref: new pushes cancel stale ones (tags unaffected —
+# each tag is its own ref group, so releases never cancel).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; jobs that publish escalate themselves.
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
       APPIMAGE_EXTRACT_AND_RUN: 1
     
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Full history + tags: version resolution needs
+          # `git describe` to see tags on every event type.
+          fetch-depth: 0
 
-      - name: Sync version from Tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Resolve version
         run: |
-          # Get tag name (removes the 'v' prefix)
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          # Matches "VERSION" followed by any combination of numbers and dots
-          sed -i "s/VERSION [0-9]\+\.[0-9]\+\.[0-9]\+/VERSION $TAG_VERSION/" CMakeLists.txt
-          echo "Syncing CMake version to $TAG_VERSION"
+          SHA=$(git rev-parse --short HEAD)
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "main" ]]; then
+            VERSION=$SHA
+          else
+            BRANCH=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}
+            SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^A-Za-z0-9.-]/-/g')
+            BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+            VERSION="${BASE}-${SAFE_BRANCH}-${SHA}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building Trophy version: $VERSION"
 
       - name: Install System Dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
@@ -36,7 +56,6 @@ jobs:
             cmake
             ninja-build
             ccache
-            xvfb
             libfuse2t64
             wget
             libgl1-mesa-dev
@@ -61,20 +80,23 @@ jobs:
             libgtest-dev
           version: 1.4
           
-      - name: Restore build files from cache if exists
-        uses: actions/cache@v4
+      - name: Restore ccache
+        # Purpose-built action instead of raw actions/cache: stable key
+        # (SHA-pinned keys never restore) and save-always so even failed
+        # builds bank their compiled objects for the next run.
+        uses: hendrikmuhs/ccache-action@v1
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
+          key: ${{ runner.os }}-ccache
+          restore-keys: ${{ runner.os }}-ccache
+          max-size: 2G
+          save-always: true
 
       - name: Restore GTest from cache if exists
         id: cache-gtest
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/gtest_install
-          key: ${{ runner.os }}-gtest-6.10.2-${{ hashFiles('**/CMakeLists.txt') }} 
+          key: ${{ runner.os }}-gtest-6.12.0-${{ hashFiles('**/CMakeLists.txt') }} 
           restore-keys: |
             ${{ runner.os }}-gtest-
 
@@ -84,21 +106,18 @@ jobs:
           cmake -GNinja -S /usr/src/googletest -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
           cmake --build gtest_build --target install
 
-      - name: Prepare Qt 6.10.2 or use from cache
+      - name: Prepare Qt or use from cache
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.10.2'
+          # Pinned to the version local dev runs (nothing in-tree needs
+          # newer; CMakeLists floor is Qt 6.5). Bump deliberately, not
+          # float: a silent major here once broke linuxdeploy bundling.
+          version: '6.12.0'
           modules: 'qtmultimedia'
           cache: 'true'
 
       - name: Configure & Build
         run: |
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          else
-            VERSION=$(git rev-parse --short HEAD)
-          fi
-
           cmake -B build -GNinja \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -109,42 +128,53 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
-      #- name: Run Unit Tests
-      #  run: cd build && ctest --output-on-failure
+      - name: Run Unit Tests
+        run: cd build && ctest --output-on-failure
 
       - name: Generate AppImage
         shell: bash
         run: |
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          else
-            VERSION=$(git rev-parse --short HEAD)
-          fi
-          
           export VERSION=$VERSION
           export LINUXDEPLOY_OUTPUT_VERSION=$VERSION
           echo "Building Trophy version: $VERSION"
 
-          # 2. Download tools
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          # 2. Download tools (retried: a transient drop here used to
+          # kill a 7-minute run after the build had already passed)
+          wget --tries=3 --waitretry=5 -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget --tries=3 --waitretry=5 -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
-          # 3. Install to AppDir
+          # 3. Install to AppDir (GNUInstallDirs: the lib lands in
+          # usr/lib on Arch but usr/lib/x86_64-linux-gnu on Ubuntu,
+          # so locate it instead of hardcoding the path)
           DESTDIR=AppDir cmake --install build
-          mkdir -p AppDir/usr/lib
-          cp build/libTrophy.so AppDir/usr/lib/ || true
+          TROPHY_LIB=$(find AppDir/usr -name 'libTrophy.so' | head -n 1)
+          if [[ -z "$TROPHY_LIB" ]]; then
+            echo "ERROR: libTrophy.so missing from AppDir install:"
+            find AppDir/usr -maxdepth 3 | sort
+            exit 1
+          fi
+          echo "Bundling $TROPHY_LIB"
+          TROPHY_BIN=$(find AppDir/usr -name 'trophy' -type f | head -n 1)
+          if [[ -z "$TROPHY_BIN" ]]; then
+            echo "ERROR: trophy binary missing from AppDir install:"
+            find AppDir/usr -maxdepth 3 | sort
+            exit 1
+          fi
+          echo "Bundling $TROPHY_BIN"
 
-          # 4. Environment setup
+          # 4. Environment setup (QML_SOURCES_PATHS must point at the
+          # GENERATED module in build/qml — it holds the qmldir +
+          # plugin lib. The raw source tree has neither.)
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
-          export QML_SOURCES_PATHS=$PWD/qml
+          export QML_SOURCES_PATHS=$PWD/build/qml
           export EXTRA_QT_MODULES="quickcontrols2;multimedia"
           
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --executable AppDir/usr/bin/trophy \
-            --library AppDir/usr/lib/libTrophy.so \
+            --executable "$TROPHY_BIN" \
+            --library "$TROPHY_LIB" \
             --desktop-file packaging/trophy.desktop \
             --icon-file resources/icons/trophy.svg \
             --plugin qt \
@@ -166,17 +196,23 @@ jobs:
           sleep 5
           if ps -p $APP_PID > /dev/null; then
              echo "App launched successfully (Headless mode)!"
-             kill $APP_PID
+             # Guarded reaps: the app may exit on its own between the
+             # ps check and the kill, which must not fail the step.
+             kill $APP_PID || true
+             wait $APP_PID 2>/dev/null || true
           else
              echo "App crashed! Check if Wayland-only checks are blocking CI."
              exit 1
           fi
 
-          # 7. Rename based on the exported VERSION
-          # linuxdeploy usually names it Trophy-$VERSION-x86_64.AppImage or Trophy-x86_64.AppImage
-          # We force a consistent name here:
+          # 7. Consistent artifact name (linuxdeploy usually honors
+          # LINUXDEPLOY_OUTPUT_VERSION already — only rename when the
+          # names differ, since mv onto itself errors out)
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
-          mv "$GENERATED_FILE" "Trophy-${VERSION}-x86_64.AppImage"
+          TARGET="Trophy-${VERSION}-x86_64.AppImage"
+          if [[ "$GENERATED_FILE" != "$TARGET" ]]; then
+            mv "$GENERATED_FILE" "$TARGET"
+          fi
 
       - name: Generate Checksum
         run: |
@@ -186,10 +222,12 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Trophy-AppImage-x86_64
+          name: Trophy-AppImage-${{ env.VERSION }}-x86_64
           path: |
             Trophy-*-x86_64.AppImage
             SHA256SUMS
+          # Releases embed the files, so per-run artifacts are short-lived.
+          retention-days: 14
           
   create-release:
     needs: build-and-test
@@ -201,7 +239,8 @@ jobs:
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
-          name: Trophy-AppImage-x86_64
+          pattern: Trophy-AppImage-*-x86_64
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -210,10 +249,14 @@ jobs:
             Trophy-*-x86_64.AppImage
             SHA256SUMS
           generate_release_notes: true
+          # Never publish an empty release if the artifact is missing.
+          fail_on_unmatched_files: true
 
   comment-pr:
     needs: build-and-test
-    if: github.event_name == 'pull_request'
+    # Only celebrate green builds: without the result check a failed run
+    # still posted "Build Ready!".
+    if: github.event_name == 'pull_request' && needs.build-and-test.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

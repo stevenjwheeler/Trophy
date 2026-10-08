@@ -9,10 +9,14 @@
  */
 
 #include "core/Application.h"
-#include <QGuiApplication>
+#include "core/ControlServer.h"
+#include <QApplication>
+#include <QCommandLineParser>
 #include <QIcon>
+#include <QLockFile>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QStandardPaths>
 #include <csignal>
 
 namespace {
@@ -33,10 +37,53 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
   QCoreApplication::setApplicationVersion("0.1.0");
-  QGuiApplication::setDesktopFileName("trophy");
+  QApplication::setDesktopFileName("trophy");
 
   // Create application
   TrophyBackend::Application app(argc, argv);
+
+  QCommandLineParser parser;
+  parser.setApplicationDescription("Trophy - Game recording and clipping");
+  parser.addHelpOption();
+  parser.addOptions({
+      {{"m", "minimized"}, "Start minimized to the system tray."},
+      {"toggle-record",
+       "Toggle recording on the running instance, then exit."},
+      {"save-clip",
+       "Save an instant-replay clip on the running instance, then exit."},
+      {"show-window", "Show the running instance's window, then exit."},
+  });
+  parser.process(app);
+  if (parser.isSet("minimized")) {
+    app.setForceMinimized(true);
+  }
+
+  // Single-shot remote commands for native compositor keybinds: if an
+  // instance is already listening, forward and exit. Otherwise fall
+  // through and start normally (the command is dropped).
+  const QStringList remoteCommands = {"toggle-record", "save-clip",
+                                      "show-window"};
+  for (const QString &cmd : remoteCommands) {
+    if (parser.isSet(cmd)) {
+      if (TrophyBackend::ControlServer::sendCommand(cmd)) {
+        return 0;
+      }
+      break;
+    }
+  }
+
+  // Single-instance guard: a second plain launch raises the running
+  // instance instead of starting a second GUI (which double-recorded).
+  // Held for the process lifetime; a crash leaves a stale lock that
+  // QLockFile clears via PID detection.
+  QLockFile instanceLock(QStandardPaths::writableLocation(
+                             QStandardPaths::RuntimeLocation) +
+                         QStringLiteral("/trophy.lock"));
+  if (!instanceLock.tryLock()) {
+    TrophyBackend::ControlServer::sendCommand(QStringLiteral("show-window")); // best effort
+    qInfo() << "Trophy is already running; showing the existing window.";
+    return 0;
+  }
 
   // Set application icon
   app.setWindowIcon(QIcon(":/icons/trophy.svg"));

@@ -80,6 +80,7 @@ void SettingsManager::load() {
   m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
   m_useVBR = video["useVBR"].toBool(true);
   m_useDmaBuf = video["useDmaBuf"].toBool(true);
+  m_clipBufferSeconds = video["clipBufferSeconds"].toInt(30);
 
   // Load audio settings
   QJsonObject audio = root["audio"].toObject();
@@ -87,7 +88,10 @@ void SettingsManager::load() {
   m_gameAudioDevice = audio["gameAudioDevice"].toString("default");
   m_microphoneDevice = audio["microphoneDevice"].toString("default");
   m_voiceChatApp = audio["voiceChatApp"].toString("discord");
-  m_separateAudioTracks = audio["separateTracks"].toBool(false);
+  // Separate tracks is the default: per-track isolation means one dead
+  // stream (voice churn, missing node) can't stall the whole mix, and the
+  // file layout is always game/voice/mic. Matches the header initializer.
+  m_separateAudioTracks = audio["separateTracks"].toBool(true);
 
   // Load storage settings
   QJsonObject storage = root["storage"].toObject();
@@ -103,10 +107,34 @@ void SettingsManager::load() {
   QJsonObject detection = root["detection"].toObject();
   m_autoDetectGames = detection["autoDetect"].toBool(true);
   m_autoRecordEnabled = detection["autoRecord"].toBool(false);
+  m_windowTrackingEnabled = detection["windowTracking"].toBool(false);
+  m_vulkanLayerEnabled = detection["vulkanLayer"].toBool(false);
   m_setupCompleted = detection["setupCompleted"].toBool(false);
+
+  // Load general settings
+  QJsonObject general = root["general"].toObject();
+  m_minimizeToTray = general["minimizeToTray"].toBool(true);
+  m_startMinimized = general["startMinimized"].toBool(false);
+  m_startOnLogin = general["startOnLogin"].toBool(false);
+  m_instantReplayEnabled = general["instantReplay"].toBool(true);
+  m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
+  m_replayCachePath = general["replayCachePath"].toString();
+
+  // Load notification options (all default on)
+  QJsonObject notifications = root["notifications"].toObject();
+  m_notifyRecordings = notifications["recordings"].toBool(true);
+  m_notifyClips = notifications["clips"].toBool(true);
+  m_notifyStorage = notifications["storage"].toBool(true);
+  // Renamed from "clipPing" once the recording-stopped chime joined
+  // it; the legacy key is still honoured so existing users keep their
+  // preference (first save rewrites it under the new name).
+  if (notifications.contains("completionSound"))
+    m_completionSoundEnabled = notifications["completionSound"].toBool(true);
+  else
+    m_completionSoundEnabled = notifications["clipPing"].toBool(true);
   
-  // Load Wayland restore tokens
-  m_waylandRestoreToken = root["waylandRestoreToken"].toString();
+  // Load Wayland restore tokens (per-game map; a legacy singular
+  // "waylandRestoreToken" key is ignored — it was never mapped to a game).
   if (root.contains("waylandRestoreTokens")) {
     m_waylandRestoreTokens = root["waylandRestoreTokens"].toObject().toVariantMap();
   }
@@ -138,6 +166,7 @@ void SettingsManager::save() {
   video["maxBitrate"] = m_maxVideoBitrate;
   video["useVBR"] = m_useVBR;
   video["useDmaBuf"] = m_useDmaBuf;
+  video["clipBufferSeconds"] = m_clipBufferSeconds;
   root["video"] = video;
 
   // Audio settings
@@ -161,10 +190,29 @@ void SettingsManager::save() {
   QJsonObject detection;
   detection["autoDetect"] = m_autoDetectGames;
   detection["autoRecord"] = m_autoRecordEnabled;
+  detection["windowTracking"] = m_windowTrackingEnabled;
+  detection["vulkanLayer"] = m_vulkanLayerEnabled;
   detection["setupCompleted"] = m_setupCompleted;
   root["detection"] = detection;
 
-  root["waylandRestoreToken"] = m_waylandRestoreToken;
+  // General settings
+  QJsonObject general;
+  general["minimizeToTray"] = m_minimizeToTray;
+  general["startMinimized"] = m_startMinimized;
+  general["startOnLogin"] = m_startOnLogin;
+  general["instantReplay"] = m_instantReplayEnabled;
+  general["globalShortcuts"] = m_globalShortcutsEnabled;
+  general["replayCachePath"] = m_replayCachePath;
+  root["general"] = general;
+
+  // Notification options
+  QJsonObject notifications;
+  notifications["recordings"] = m_notifyRecordings;
+  notifications["clips"] = m_notifyClips;
+  notifications["storage"] = m_notifyStorage;
+  notifications["completionSound"] = m_completionSoundEnabled;
+  root["notifications"] = notifications;
+
   root["waylandRestoreTokens"] = QJsonObject::fromVariantMap(m_waylandRestoreTokens);
 
   // Write atomically using QSaveFile
@@ -200,6 +248,7 @@ void SettingsManager::resetToDefaults() {
   emit encoderPresetChanged();
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
+  emit clipBufferSecondsChanged();
 
   emit audioModeChanged();
   emit gameAudioDeviceChanged();
@@ -213,7 +262,19 @@ void SettingsManager::resetToDefaults() {
 
   emit autoDetectGamesChanged();
   emit autoRecordEnabledChanged();
+  emit windowTrackingEnabledChanged();
+  emit vulkanLayerEnabledChanged();
   emit setupCompletedChanged();
+  emit minimizeToTrayChanged();
+  emit startMinimizedChanged();
+  emit startOnLoginChanged();
+  emit instantReplayEnabledChanged();
+  emit globalShortcutsEnabledChanged();
+  emit replayCachePathChanged();
+  emit notifyRecordingsChanged();
+  emit notifyClipsChanged();
+  emit notifyStorageChanged();
+  emit completionSoundEnabledChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -227,13 +288,14 @@ void SettingsManager::loadDefaults() {
   m_maxVideoBitrate = 20000;
   m_useVBR = true;
   m_useDmaBuf = true;
+  m_clipBufferSeconds = 30;
 
   // Audio
   m_audioMode = "game";
   m_gameAudioDevice = "default";
   m_microphoneDevice = "default";
   m_voiceChatApp = "discord";
-  m_separateAudioTracks = false;
+  m_separateAudioTracks = true;
 
   // Storage
   m_recordingsPath =
@@ -245,6 +307,21 @@ void SettingsManager::loadDefaults() {
   // Detection
   m_autoDetectGames = true;
   m_autoRecordEnabled = false;
+  m_windowTrackingEnabled = false;
+  m_vulkanLayerEnabled = false;
+
+  // System tray
+  m_minimizeToTray = true;
+  m_startMinimized = false;
+  m_startOnLogin = false;
+  m_instantReplayEnabled = true;
+  m_globalShortcutsEnabled = true;
+
+  // Notifications (all on)
+  m_notifyRecordings = true;
+  m_notifyClips = true;
+  m_notifyStorage = true;
+  m_completionSoundEnabled = true;
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -411,6 +488,102 @@ void SettingsManager::setAutoRecordEnabled(bool enabled) {
   }
 }
 
+void SettingsManager::setWindowTrackingEnabled(bool enabled) {
+  if (m_windowTrackingEnabled != enabled) {
+    m_windowTrackingEnabled = enabled;
+    save();
+    emit windowTrackingEnabledChanged();
+  }
+}
+
+void SettingsManager::setVulkanLayerEnabled(bool enabled) {
+  if (m_vulkanLayerEnabled != enabled) {
+    m_vulkanLayerEnabled = enabled;
+    save();
+    emit vulkanLayerEnabledChanged();
+  }
+}
+
+void SettingsManager::setMinimizeToTray(bool enabled) {
+  if (m_minimizeToTray != enabled) {
+    m_minimizeToTray = enabled;
+    save();
+    emit minimizeToTrayChanged();
+  }
+}
+
+void SettingsManager::setStartMinimized(bool enabled) {
+  if (m_startMinimized != enabled) {
+    m_startMinimized = enabled;
+    save();
+    emit startMinimizedChanged();
+  }
+}
+
+void SettingsManager::setStartOnLogin(bool enabled) {
+  if (m_startOnLogin != enabled) {
+    m_startOnLogin = enabled;
+    save();
+    emit startOnLoginChanged();
+  }
+}
+
+void SettingsManager::setInstantReplayEnabled(bool enabled) {
+  if (m_instantReplayEnabled != enabled) {
+    m_instantReplayEnabled = enabled;
+    save();
+    emit instantReplayEnabledChanged();
+  }
+}
+
+void SettingsManager::setGlobalShortcutsEnabled(bool enabled) {
+  if (m_globalShortcutsEnabled != enabled) {
+    m_globalShortcutsEnabled = enabled;
+    save();
+    emit globalShortcutsEnabledChanged();
+  }
+}
+
+void SettingsManager::setNotifyRecordings(bool enabled) {
+  if (m_notifyRecordings != enabled) {
+    m_notifyRecordings = enabled;
+    save();
+    emit notifyRecordingsChanged();
+  }
+}
+
+void SettingsManager::setNotifyClips(bool enabled) {
+  if (m_notifyClips != enabled) {
+    m_notifyClips = enabled;
+    save();
+    emit notifyClipsChanged();
+  }
+}
+
+void SettingsManager::setNotifyStorage(bool enabled) {
+  if (m_notifyStorage != enabled) {
+    m_notifyStorage = enabled;
+    save();
+    emit notifyStorageChanged();
+  }
+}
+
+void SettingsManager::setCompletionSoundEnabled(bool enabled) {
+  if (m_completionSoundEnabled != enabled) {
+    m_completionSoundEnabled = enabled;
+    save();
+    emit completionSoundEnabledChanged();
+  }
+}
+
+void SettingsManager::setReplayCachePath(const QString &path) {
+  if (m_replayCachePath != path) {
+    m_replayCachePath = path;
+    save();
+    emit replayCachePathChanged();
+  }
+}
+
 void SettingsManager::setMaxVideoBitrate(int bitrate) {
   if (m_maxVideoBitrate != bitrate) {
     m_maxVideoBitrate = bitrate;
@@ -435,19 +608,17 @@ void SettingsManager::setUseDmaBuf(bool enabled) {
   }
 }
 
-void SettingsManager::setWaylandRestoreToken(const QString &token) {
-  if (m_waylandRestoreToken != token) {
-    m_waylandRestoreToken = token;
+void SettingsManager::setClipBufferSeconds(int seconds) {
+  if (m_clipBufferSeconds != seconds) {
+    m_clipBufferSeconds = seconds;
     save();
-    emit waylandRestoreTokenChanged();
+    emit clipBufferSecondsChanged();
   }
 }
 
 void SettingsManager::clearWaylandToken() {
-  m_waylandRestoreToken = "";
   m_waylandRestoreTokens.clear();
   save();
-  emit waylandRestoreTokenChanged();
   emit waylandRestoreTokensChanged();
 }
 

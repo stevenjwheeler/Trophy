@@ -16,6 +16,9 @@ Item {
     property string label: ""
     property real level: 0 // 0.0 to 1.0
     property bool muted: false
+    // Dashboard card uses the horizontal icon+bar rows; default is the
+    // vertical bar. Only one layout is visible at a time.
+    property bool horizontal: false
 
     function getIcon() {
         var labelLower = label.toLowerCase();
@@ -35,6 +38,7 @@ Item {
     implicitHeight: 120
 
     ColumnLayout {
+        visible: !root.horizontal
         anchors.fill: parent
         spacing: Theme.spacingTiny
 
@@ -44,9 +48,9 @@ Item {
             Layout.preferredWidth: 12
             Layout.fillHeight: true
             radius: Theme.radiusSmall
-            color: Theme.cardColor
+            color: root.muted ? Theme.withOpacity(Theme.errorColor, 0.15) : Theme.cardColor
             border.width: 1
-            border.color: Theme.borderColor
+            border.color: root.muted ? Theme.errorColor : Theme.borderColor
 
             // Level fill
             Rectangle {
@@ -105,7 +109,9 @@ Item {
             contentItem: Label {
                 id: iconLabel
 
-                text: getIcon()
+                // Emoji glyphs ignore text color, so muted state swaps the
+                // glyph itself (a red recolor would never render).
+                text: root.muted ? "🔇" : getIcon()
                 color: root.muted ? Theme.errorColor : Theme.textColor
                 font.pixelSize: Theme.fontSizeNormal
                 horizontalAlignment: Text.AlignHCenter
@@ -123,6 +129,88 @@ Item {
             background: Rectangle {
                 radius: Theme.radiusSmall
                 color: parent.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
+            }
+
+        }
+
+    }
+
+    // Horizontal icon+bar row for tight cards (dashboard). Same mute
+    // behavior and gradient as the vertical bar.
+    RowLayout {
+        visible: root.horizontal
+        anchors.fill: parent
+        spacing: Theme.spacingSmall
+
+        AbstractButton {
+            Layout.alignment: Qt.AlignVCenter
+            implicitWidth: iconLabelH.implicitWidth + 4
+            implicitHeight: iconLabelH.implicitHeight + 4
+            onClicked: root.muted = !root.muted
+
+            contentItem: Label {
+                id: iconLabelH
+
+                text: root.muted ? "🔇" : getIcon()
+                color: root.muted ? Theme.errorColor : Theme.textColor
+                font.pixelSize: Theme.fontSizeNormal
+                horizontalAlignment: Text.AlignHCenter
+                opacity: parent.hovered ? 1 : 0.8
+
+                Behavior on color {
+                    ColorAnimation {
+                        duration: 150
+                    }
+
+                }
+
+            }
+
+            background: Rectangle {
+                radius: Theme.radiusSmall
+                color: parent.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
+            }
+
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignVCenter
+            Layout.preferredHeight: 10
+            radius: height / 2
+            color: root.muted ? Theme.withOpacity(Theme.errorColor, 0.15) : Theme.cardColor
+            border.width: 1
+            border.color: root.muted ? Theme.errorColor : Theme.borderColor
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.margins: 2
+                width: (parent.width - 4) * Math.min(root.level, 1)
+                radius: height / 2
+                opacity: root.muted ? 0.5 : 1
+
+                gradient: Gradient {
+                    GradientStop {
+                        position: 0
+                        color: root.muted ? Theme.errorColor : (root.level > 0.9 ? Theme.errorColor : root.level > 0.7 ? Theme.warningColor : Theme.successColor)
+                    }
+
+                    GradientStop {
+                        position: 1
+                        color: root.muted ? Theme.errorColor : Theme.successColor
+                    }
+
+                }
+
+                Behavior on width {
+                    NumberAnimation {
+                        duration: 50
+                    }
+
+                }
+
             }
 
         }

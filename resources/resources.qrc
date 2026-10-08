@@ -12,5 +12,12 @@
     <file>icons/trash.svg</file>
     <file>icons/search.svg</file>
     <file>icons/video.svg</file>
+    <file>icons/edit.svg</file>
+    <file>icons/gpu.svg</file>
+    <file>icons/gpu-nvidia.svg</file>
+    <file>icons/gpu-amd.svg</file>
+    <file>icons/gpu-intel.svg</file>
+    <file>sounds/clip-saved.wav</file>
+    <file>sounds/recording-stopped.wav</file>
   </qresource>
 </RCC>

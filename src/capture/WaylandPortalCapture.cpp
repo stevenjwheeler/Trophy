@@ -7,6 +7,8 @@
 
 #include "WaylandPortalCapture.h"
 
+#include "capture/EglDmaBuf.h"
+
 #include <QDBusArgument>
 #include <QDBusConnection>
 #include <QDBusInterface>
@@ -17,6 +19,7 @@
 #include <QDBusReply>
 #include <QDebug>
 #include <QMap>
+#include <QStringList>
 #include <QUuid>
 #include <chrono>
 
@@ -26,6 +29,9 @@
 #include <spa/param/buffers.h>
 #include <spa/utils/result.h>
 #include <spa/pod/iter.h>
+#include <algorithm>
+#include <cstring>
+#include <vector>
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -97,9 +103,40 @@ WaylandPortalCapture::~WaylandPortalCapture() {
 bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
   m_config = config;
   m_restoreToken = config.waylandRestoreToken;
+  m_restoreTokenUsed = !m_restoreToken.isEmpty();
   m_resolution = QSize(0, 0); // Will be updated by PipeWire
   m_useDmaBuf = config.useDmaBuf;
   m_dmaBufNegotiated = false;
+  m_offeredModifiers.clear();
+  m_buffersResultLogged = false;
+#ifdef HAVE_EGL
+  if (m_useDmaBuf) {
+    const auto mods = queryDmaBufModifiers(DRM_FORMAT_XRGB8888);
+    // Offer tiled (non-LINEAR) modifiers first: LINEAR DMA-BUF is not
+    // allocatable on some drivers (verified NVIDIA), which makes the
+    // compositor agree at format level then fall back to SHM buffers.
+    for (uint64_t m : mods) {
+      if (m != DRM_FORMAT_MOD_LINEAR && m != DRM_FORMAT_MOD_INVALID)
+        m_offeredModifiers.push_back(m);
+    }
+    for (uint64_t m : mods) {
+      if (m == DRM_FORMAT_MOD_LINEAR)
+        m_offeredModifiers.push_back(m);
+    }
+    // Bound the offer list: one EnumFormat pod per modifier.
+    if (m_offeredModifiers.size() > 8)
+      m_offeredModifiers.resize(8);
+    qDebug() << "Wayland Portal: EGL reports" << mods.size()
+             << "DMA-BUF modifiers for XRGB8888, offering"
+             << m_offeredModifiers.size();
+  }
+#endif
+  m_dmaBufFrames = 0;
+  m_shmFrames = 0;
+  m_droppedBuffers = 0;
+  m_lastBufferType = -1;
+  m_multiPlaneWarned = false;
+  m_gpuOnlyWarned = false;
 
   qDebug() << "Wayland Portal capture initialized. Restore token available:"
            << !m_restoreToken.isEmpty()
@@ -108,6 +145,7 @@ bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
 }
 
 void WaylandPortalCapture::setFrameCallback(FrameCallback callback) {
+  std::lock_guard<std::mutex> lock(m_callbackMutex);
   m_callback = std::move(callback);
 }
 
@@ -121,12 +159,36 @@ bool WaylandPortalCapture::startCapture() {
 
 void WaylandPortalCapture::stopCapture() {
   if (!m_capturing) {
+    // Still drop a lingering portal session (e.g. init'd but never
+    // started, or stopped twice) so no tray indicator is left behind.
+    closePortalSession();
     return;
   }
   stopPipeWireStream();
   m_capturing = false;
+  closePortalSession();
   emit captureStopped();
   qDebug() << "Wayland Portal capture stopped";
+}
+
+void WaylandPortalCapture::closePortalSession() {
+  if (m_sessionHandle.isEmpty())
+    return;
+  const QString handle = m_sessionHandle;
+  m_sessionHandle.clear();
+  if (!QDBusConnection::sessionBus().isConnected())
+    return;
+  QDBusInterface session("org.freedesktop.portal.Desktop", handle,
+                         "org.freedesktop.portal.Session",
+                         QDBusConnection::sessionBus());
+  if (!session.isValid()) {
+    qDebug() << "Wayland Portal: no session interface for" << handle;
+    return;
+  }
+  // Fire-and-forget: a blocking Close on the GUI thread can hang teardown
+  // if the portal side is ever slow to answer.
+  session.asyncCall("Close");
+  qDebug() << "Wayland Portal: session closed:" << handle;
 }
 
 bool WaylandPortalCapture::isCapturing() const { return m_capturing; }
@@ -200,6 +262,10 @@ void WaylandPortalCapture::onSessionCreated(unsigned int response,
   m_sessionHandle = results["session_handle"].toString();
   qDebug() << "Wayland Portal: Session created:" << m_sessionHandle;
 
+  requestSelectSources();
+}
+
+void WaylandPortalCapture::requestSelectSources() {
   // 2. Select Sources
   QDBusInterface portal(
       "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
@@ -210,14 +276,26 @@ void WaylandPortalCapture::onSessionCreated(unsigned int response,
   QVariantMap options;
   options["handle_token"] = token;
   options["multiple"] = false;
-  options["types"] =
-      static_cast<unsigned int>(1 | 2); // 1 = Monitor, 2 = Window
+  // Game approvals list windows only (shorter picker); manual recordings
+  // keep monitors as well. 1 = Monitor, 2 = Window.
+  const unsigned int sourceTypes =
+      m_config.windowOnly ? 2u : (1u | 2u);
+  options["types"] = sourceTypes;
   options["cursor_mode"] = static_cast<unsigned int>(2); // Embedded = 2
   options["persist_mode"] = static_cast<unsigned int>(2);
 
   if (!m_restoreToken.isEmpty()) {
     options["restore_token"] = m_restoreToken;
   }
+  // Fingerprint (not the token itself) + requested types: a restore that
+  // still shows a picker is diagnosable from the log — e.g. a token saved
+  // by a differently-attributed process, or a monitor token against a
+  // windows-only request.
+  qDebug() << "Wayland Portal: SelectSources types:" << sourceTypes
+           << "restore token:"
+           << (m_restoreToken.isEmpty()
+                   ? QStringLiteral("none")
+                   : m_restoreToken.left(4) + QStringLiteral("..."));
 
   QDBusMessage msg =
       portal.call("SelectSources", QDBusObjectPath(m_sessionHandle), options);
@@ -239,6 +317,17 @@ void WaylandPortalCapture::onSourcesSelected(unsigned int response,
   m_pendingRequestPath.clear();
 
   if (response != 0) {
+    // A saved restore token may have gone stale (game reinstalled, portal
+    // reset permissions). Do NOT retry without it here: that would pop a
+    // bare portal picker with no context. Hand back to the app, which
+    // deletes the stale token and re-authorizes through the New Game prompt
+    // (a picker following that click is the user's own action).
+    if (m_restoreTokenUsed) {
+      qWarning() << "Wayland Portal: source selection rejected saved restore "
+                    "token; re-authorize instead of showing a picker";
+      emit restoreTokenStale(m_restoreToken);
+      return;
+    }
     qWarning() << "Wayland Portal: Source selection failed or cancelled";
     emit captureError("Wayland Portal: Source selection failed or cancelled");
     return;
@@ -274,6 +363,13 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
   m_pendingRequestPath.clear();
 
   if (response != 0) {
+    // Same rule at Start stage: no silent picker retry — re-authorize.
+    if (m_restoreTokenUsed) {
+      qWarning() << "Wayland Portal: Start rejected saved restore token; "
+                    "re-authorize instead of showing a picker";
+      emit restoreTokenStale(m_restoreToken);
+      return;
+    }
     qWarning() << "Wayland Portal: Failed to start screencast";
     emit captureError("Wayland Portal: Failed to start screencast");
     return;
@@ -476,8 +572,6 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
   emit screenShareGranted(QString::number(nodeId));
 }
 
-void WaylandPortalCapture::setupPortalConnection() {}
-
 void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   pw_init(nullptr, nullptr);
 
@@ -530,40 +624,55 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   pw_stream_add_listener(m_pw_stream, &m_pw_stream_listener, &stream_events,
                          this);
 
-  uint8_t buffer[2048];
+  uint8_t buffer[4096];
   spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
   if (m_useDmaBuf) {
-    // --- DMA-BUF negotiation ---
-    // Offer the compositor two format choices:
-    //   1. XRGB8888 via DMA-BUF (preferred – zero-copy)
-    //   2. BGRx via shared memory (MemFd fallback)
-    //
-    // The compositor picks the first format it supports. If it doesn't
-    // support DMA-BUF it falls back to the second choice automatically.
+    // --- DMA-BUF negotiation (Stage A) ---
+    // Offer one XRGB8888 format per EGL-queried modifier (tiled first,
+    // LINEAR last), then BGRx shared memory as the final fallback.
+    // The compositor picks the first format it can back with real
+    // buffers. Without EGL data a single modifier-agnostic format is
+    // offered, as before.
+    std::vector<const spa_pod *> params;
+    params.reserve(m_offeredModifiers.size() + 2);
+    if (!m_offeredModifiers.empty()) {
+      QStringList modHex;
+      for (uint64_t mod : m_offeredModifiers) {
+        modHex << QString::number(mod, 16);
+        params.push_back(reinterpret_cast<const spa_pod *>(
+            spa_pod_builder_add_object(
+                &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+                SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+                SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+                SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_xRGB),
+                SPA_FORMAT_VIDEO_modifier,
+                SPA_POD_Long(static_cast<int64_t>(mod)))));
+      }
+      qDebug() << "Wayland Portal: offering DMA-BUF modifiers:"
+               << modHex.join(u',');
+    } else {
+      params.push_back(reinterpret_cast<const spa_pod *>(
+          spa_pod_builder_add_object(
+              &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+              SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+              SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+              SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_xRGB),
+              SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_FLAGS_Long(0))));
+    }
 
-    // Build format 1: XRGB8888 (DMA-BUF)
-    const spa_pod *params[2];
-    params[0] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
-        &b,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_xRGB),
-        SPA_FORMAT_VIDEO_modifier, SPA_POD_CHOICE_FLAGS_Long(0)));
-
-    // Build format 2: BGRx (shared memory fallback)
-    params[1] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
-        &b,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
+    // Final choice: BGRx (shared memory fallback)
+    params.push_back(reinterpret_cast<const spa_pod *>(
+        spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx))));
 
     int res = pw_stream_connect(m_pw_stream, PW_DIRECTION_INPUT, nodeId,
                                 (pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT |
                                                   PW_STREAM_FLAG_MAP_BUFFERS),
-                                params, 2);
+                                params.data(), params.size());
     if (res < 0) {
       qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
     }
@@ -587,6 +696,12 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
 }
 
 void WaylandPortalCapture::stopPipeWireStream() {
+  const uint64_t totalFrames = m_dmaBufFrames + m_shmFrames;
+  if (totalFrames > 0 || m_droppedBuffers > 0) {
+    qDebug() << "Wayland Portal: capture summary DMA-BUF frames:" << m_dmaBufFrames
+             << "SHM frames:" << m_shmFrames
+             << "dropped buffers:" << m_droppedBuffers;
+  }
   if (m_pw_loop) {
     pw_thread_loop_stop(m_pw_loop);
   }
@@ -633,26 +748,93 @@ void WaylandPortalCapture::on_stream_param_changed(
   if (!param)
     return;
 
+  if (id == SPA_PARAM_Buffers && !self->m_buffersResultLogged) {
+    // Ground truth for whether the DmaBuf buffer-type request was honored
+    // by the compositor. Logged once per capture.
+    self->m_buffersResultLogged = true;
+    QStringList typeNames;
+    auto describeMask = [&typeNames](int32_t mask) {
+      if (mask & (1 << SPA_DATA_MemPtr))
+        typeNames << "MemPtr";
+      if (mask & (1 << SPA_DATA_MemFd))
+        typeNames << "MemFd";
+      if (mask & (1 << SPA_DATA_DmaBuf))
+        typeNames << "DmaBuf";
+    };
+    if (spa_pod_is_object(param)) {
+      const struct spa_pod_object *obj =
+          reinterpret_cast<const struct spa_pod_object *>(param);
+      const struct spa_pod_prop *prop = nullptr;
+      SPA_POD_OBJECT_FOREACH(obj, prop) {
+        if (prop->key != SPA_PARAM_BUFFERS_dataType)
+          continue;
+        if (SPA_POD_TYPE(&prop->value) == SPA_TYPE_Int) {
+          describeMask(
+              reinterpret_cast<const struct spa_pod_int *>(&prop->value)
+                  ->value);
+        } else if (SPA_POD_TYPE(&prop->value) == SPA_TYPE_Choice) {
+          const struct spa_pod_choice *c =
+              reinterpret_cast<const struct spa_pod_choice *>(&prop->value);
+          if (SPA_POD_CHOICE_VALUE_SIZE(c) == sizeof(int32_t) &&
+              SPA_POD_CHOICE_N_VALUES(c) > 0)
+            describeMask(
+                *(const int32_t *)SPA_POD_CHOICE_VALUES(c));
+        }
+      }
+    }
+    qDebug() << "Wayland Portal: negotiated buffer types:"
+             << (typeNames.isEmpty() ? QStringLiteral("(unparsed)")
+                                     : typeNames.join(u','));
+  }
+
   if (id == SPA_PARAM_Format) {
     // Check whether the compositor negotiated a DMA-BUF modifier-aware format.
     // If so, SPA_FORMAT_VIDEO_modifier will be present in the format object.
-    spa_video_info_raw info;
+    // NOTE: zero-initialized — when the compositor picks the SHM fallback
+    // (BGRx, no modifier property) the parser leaves .modifier untouched,
+    // and stack garbage here once faked "DMA-BUF active".
+    spa_video_info_raw info{};
     if (spa_format_video_raw_parse(param, &info) < 0)
       return;
 
-    // A modifier of DRM_FORMAT_MOD_INVALID means the compositor was NOT able
-    // to negotiate a modifier-aware (DMA-BUF) path – treat as shm.
-    self->m_dmaBufNegotiated = self->m_useDmaBuf &&
-                               (info.modifier != DRM_FORMAT_MOD_INVALID);
+    // DMA-BUF is active only when the compositor picked one of our xRGB +
+    // modifier offers. The BGRx offer is the shared-memory fallback.
+    const bool pickedDmaBufFormat = (info.format == SPA_VIDEO_FORMAT_xRGB);
+    self->m_dmaBufNegotiated = self->m_useDmaBuf && pickedDmaBufFormat &&
+                                (info.modifier != DRM_FORMAT_MOD_INVALID);
 
     // Store the actual negotiated modifier for use per-frame.
     self->m_negotiatedModifier = self->m_dmaBufNegotiated
                                      ? info.modifier
                                      : DRM_FORMAT_MOD_LINEAR;
 
+    // Convert SPA video format to DRM format for DMA-BUF descriptor
+    switch (info.format) {
+    case SPA_VIDEO_FORMAT_BGRx:
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      break;
+    case SPA_VIDEO_FORMAT_RGBx:
+      self->m_negotiatedFormat = DRM_FORMAT_XBGR8888;
+      break;
+    case SPA_VIDEO_FORMAT_xRGB:
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      break;
+    case SPA_VIDEO_FORMAT_xBGR:
+      self->m_negotiatedFormat = DRM_FORMAT_XBGR8888;
+      break;
+    default:
+      // Fallback to XRGB8888 for unknown formats
+      self->m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+      qWarning() << "Unknown SPA video format:" << info.format 
+                 << "falling back to DRM_FORMAT_XRGB8888";
+      break;
+    }
+
     self->m_resolution = QSize(info.size.width, info.size.height);
     qDebug() << "Wayland Portal: Negotiated resolution:" << self->m_resolution
-             << "DMA-BUF active:" << self->m_dmaBufNegotiated;
+             << "DMA-BUF active:" << self->m_dmaBufNegotiated
+             << "Format:" << QString::number(self->m_negotiatedFormat, 16)
+             << "Modifier:" << QString::number(self->m_negotiatedModifier, 16);
 
     // ---- Stage 2: Buffer-type negotiation ----
     // Now that we know the compositor CAN export DMA-BUF, explicitly request
@@ -689,6 +871,21 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   spa_buffer *buf = b->buffer;
   const auto &d = buf->datas[0];
 
+  // Per-frame qDebug at 60fps floods the log; only log verbosely when
+  // TROPHY_VIDEO_DEBUG is set, otherwise log the first frame of each
+  // buffer type, buffer-type transitions, and every 600th frame.
+  const bool verbose = qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG");
+  auto noteBufferType = [self, verbose](int curType, uint64_t count,
+                                        const char *kind) {
+    const bool changed =
+        self->m_lastBufferType != -1 && self->m_lastBufferType != curType;
+    self->m_lastBufferType = curType;
+    if (verbose || changed || count == 1 || count % 600 == 0) {
+      qDebug() << "WaylandPortalCapture:" << kind << "frame #" << count
+               << (changed ? "(buffer-type transition)" : "");
+    }
+  };
+
   // --- Timestamp (shared by both paths) ---
   const int64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
@@ -699,23 +896,48 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   frame.height    = self->m_resolution.height();
   frame.timestamp = ts;
 
-  if (self->m_dmaBufNegotiated && d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
+  if (d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
     // ---- Zero-copy DMA-BUF path ----
-    frame.isDmaBuf    = true;
-    frame.dmaBufFd    = static_cast<int>(d.fd);
+    frame.isDmaBuf    = true;    frame.dmaBufFd    = static_cast<int>(d.fd);
     frame.dmaBufStride  = d.chunk->stride;
     frame.dmaBufOffset  = static_cast<int>(d.chunk->offset);
     // The modifier was captured during format negotiation and stored as
     // m_resolution is to the geometry. We expose it via the DRM format
-    // constant for XRGB8888 (the format we requested).
-    frame.drmFormat   = DRM_FORMAT_XRGB8888;
+    // constant for the negotiated format.
+    frame.drmFormat   = self->m_negotiatedFormat;
     frame.drmModifier = self->m_negotiatedModifier;
-    frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
-    frame.data        = nullptr;
+    frame.data        = d.data ? static_cast<const uint8_t *>(d.data) : nullptr; // CPU fallback if available
     frame.stride      = frame.dmaBufStride;
+    
+    // Set pixel format based on available data
+    if (frame.data) {
+      frame.pixelFormat = AV_PIX_FMT_BGRA; // CPU data is in BGRA format
+    } else {
+      frame.pixelFormat = AV_PIX_FMT_DRM_PRIME; // GPU-only DMA-BUF
+    }
 
-    if (self->m_callback)
-      self->m_callback(frame);
+    // Validate that we only have single-plane DMA-BUF (common for screen capture)
+    if (buf->n_datas > 1 && !self->m_multiPlaneWarned) {
+      self->m_multiPlaneWarned = true;
+      qWarning() << "Multi-plane DMA-BUF not supported, has" << buf->n_datas << "planes (using plane 0; further occurrences suppressed)";
+    }
+
+    if (!frame.data && !self->m_gpuOnlyWarned) {
+      self->m_gpuOnlyWarned = true;
+      qWarning() << "WaylandPortalCapture: GPU-only DMA-BUF frame (no CPU mapping); encoders without a working hwmap import will drop it (further occurrences suppressed)";
+    }
+
+    // Invoke under the callback lock: setFrameCallback (session teardown)
+    // blocks until this delivery finishes, so the session can't be
+    // destroyed mid-invoke.
+    {
+      std::lock_guard<std::mutex> lock(self->m_callbackMutex);
+      if (self->m_callback) {
+        self->m_dmaBufFrames++;
+        noteBufferType(1, self->m_dmaBufFrames, "dmaBuf");
+        self->m_callback(frame);
+      }
+    }
   } else if (d.data) {
     // ---- Shared-memory (MemFd / mmap) path ----
     frame.isDmaBuf    = false;
@@ -723,11 +945,21 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     frame.stride      = d.chunk->stride;
     frame.pixelFormat = AV_PIX_FMT_BGRA;
 
-    if (self->m_callback)
-      self->m_callback(frame);
+    {
+      std::lock_guard<std::mutex> lock(self->m_callbackMutex);
+      if (self->m_callback) {
+        self->m_shmFrames++;
+        noteBufferType(0, self->m_shmFrames, "shm");
+        self->m_callback(frame);
+      }
+    }
   } else {
     // No valid data pointer and no FD — skip silently.
-    qWarning() << "PipeWire: buffer has neither DMA-BUF fd nor mapped data";
+    self->m_droppedBuffers++;
+    if (verbose || self->m_droppedBuffers == 1 || self->m_droppedBuffers % 600 == 0) {
+      qWarning() << "PipeWire: buffer has neither DMA-BUF fd nor mapped data"
+                 << "(total dropped:" << self->m_droppedBuffers << ")";
+    }
   }
 
   pw_stream_queue_buffer(self->m_pw_stream, b);

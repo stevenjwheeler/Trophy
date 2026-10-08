@@ -9,11 +9,14 @@
 #include "IEncoder.h"
 
 #include <QDebug>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/version.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 }
@@ -29,12 +32,16 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
     cleanup();
   }
 
-  // Find encoder
+  // Find encoder. Only advertised codecs are accepted; anything else is
+  // a caller bug, not something to silently remap.
   const AVCodec *codec = nullptr;
   if (config.codec == "opus") {
     codec = avcodec_find_encoder(AV_CODEC_ID_OPUS);
-  } else {
+  } else if (config.codec == "aac") {
     codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+  } else {
+    qCritical() << "Unknown audio codec:" << config.codec;
+    return false;
   }
 
   if (!codec) {
@@ -51,7 +58,53 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   // Configure encoder
   m_codecCtx->sample_rate = config.sampleRate;
   m_codecCtx->bit_rate = config.bitrate * 1000;
-  m_codecCtx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+  // Negotiate the sample format with the codec: prefer planar float, fall
+  // back to the codec's first supported format (e.g. libopus wants S16).
+  // FFmpeg 7.1+ exposes the list via avcodec_get_supported_config;
+  // older releases (e.g. distro 6.x) still carry AVCodec.sample_fmts
+  // (removed in FFmpeg 8, which is why the new API is preferred).
+  m_sampleFmt = AV_SAMPLE_FMT_NONE;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 19, 100)
+  const enum AVSampleFormat *fmts = nullptr;
+  int numFmts = 0;
+  if (avcodec_get_supported_config(m_codecCtx, codec,
+                                   AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+                                   (const void **)&fmts,
+                                   &numFmts) == 0 &&
+      fmts) {
+    for (int i = 0; i < numFmts; ++i) {
+      if (fmts[i] == AV_SAMPLE_FMT_FLTP) {
+        m_sampleFmt = AV_SAMPLE_FMT_FLTP;
+        break;
+      }
+    }
+    if (m_sampleFmt == AV_SAMPLE_FMT_NONE && numFmts > 0)
+      m_sampleFmt = fmts[0];
+    // NOTE: fmts points to codec-owned static data; do not free it.
+  }
+#else
+  if (codec->sample_fmts) {
+    for (const enum AVSampleFormat *f = codec->sample_fmts;
+         *f != AV_SAMPLE_FMT_NONE; ++f) {
+      if (*f == AV_SAMPLE_FMT_FLTP) {
+        m_sampleFmt = AV_SAMPLE_FMT_FLTP;
+        break;
+      }
+    }
+    if (m_sampleFmt == AV_SAMPLE_FMT_NONE)
+      m_sampleFmt = codec->sample_fmts[0];
+  }
+#endif
+  if (m_sampleFmt == AV_SAMPLE_FMT_NONE)
+    m_sampleFmt = AV_SAMPLE_FMT_FLTP; // codec accepts anything
+  if (m_sampleFmt != AV_SAMPLE_FMT_FLTP && m_sampleFmt != AV_SAMPLE_FMT_FLT &&
+      m_sampleFmt != AV_SAMPLE_FMT_S16 && m_sampleFmt != AV_SAMPLE_FMT_S32) {
+    qCritical() << "Unsupported sample format for audio encoder";
+    avcodec_free_context(&m_codecCtx);
+    m_codecCtx = nullptr;
+    return false;
+  }
+  m_codecCtx->sample_fmt = m_sampleFmt;
   m_codecCtx->time_base = {1, 1000};
 
   // Set channel layout
@@ -105,6 +158,40 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
   return true;
 }
 
+void AudioEncoder::writeFrameSamples() {
+  const int channels = m_frame->ch_layout.nb_channels;
+  auto clean = [](float v) { return std::isfinite(v) ? v : 0.0f; };
+
+  if (m_sampleFmt == AV_SAMPLE_FMT_FLTP) {
+    for (int ch = 0; ch < channels; ch++) {
+      float *dst = reinterpret_cast<float *>(m_frame->data[ch]);
+      for (int s = 0; s < m_requiredFrameSize; s++)
+        dst[s] = clean(m_accumBuffer[s * channels + ch]);
+    }
+  } else if (m_sampleFmt == AV_SAMPLE_FMT_FLT) {
+    float *dst = reinterpret_cast<float *>(m_frame->data[0]);
+    for (int s = 0; s < m_requiredFrameSize; s++)
+      for (int ch = 0; ch < channels; ch++)
+        dst[s * channels + ch] = clean(m_accumBuffer[s * channels + ch]);
+  } else if (m_sampleFmt == AV_SAMPLE_FMT_S16) {
+    int16_t *dst = reinterpret_cast<int16_t *>(m_frame->data[0]);
+    for (int s = 0; s < m_requiredFrameSize; s++)
+      for (int ch = 0; ch < channels; ch++) {
+        float v = clean(m_accumBuffer[s * channels + ch]) * 32767.0f;
+        v = std::clamp(v, -32768.0f, 32767.0f);
+        dst[s * channels + ch] = static_cast<int16_t>(v);
+      }
+  } else { // AV_SAMPLE_FMT_S32
+    int32_t *dst = reinterpret_cast<int32_t *>(m_frame->data[0]);
+    for (int s = 0; s < m_requiredFrameSize; s++)
+      for (int ch = 0; ch < channels; ch++) {
+        double v = (double)clean(m_accumBuffer[s * channels + ch]) * 2147483647.0;
+        v = std::clamp(v, -2147483648.0, 2147483647.0);
+        dst[s * channels + ch] = static_cast<int32_t>(v);
+      }
+  }
+}
+
 bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
                                EncodedPacket &output) {
   if (!m_initialized) {
@@ -126,18 +213,13 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
       return false;
     }
 
-    // Convert interleaved to planar and sanitize NaN/Inf from PipeWire
-    for (int ch = 0; ch < channels; ch++) {
-      float *dst = reinterpret_cast<float *>(m_frame->data[ch]);
-      for (int s = 0; s < m_requiredFrameSize; s++) {
-        float v = m_accumBuffer[s * channels + ch];
-        dst[s] = std::isfinite(v) ? v : 0.0f;
-      }
-    }
+    // Convert interleaved float accumulator to the codec's sample format
+    writeFrameSamples();
 
     // Set frame properties
     m_frame->nb_samples = m_requiredFrameSize;
-    m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
+    m_frame->pts =
+        ((m_sampleCount + m_startOffset) * 1000LL) / m_codecCtx->sample_rate;
     m_sampleCount += m_requiredFrameSize;
 
     // Send frame to encoder
@@ -193,16 +275,11 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
 
       if (av_frame_make_writable(m_frame) == 0) {
         // Convert and send the padded frame
-        for (int ch = 0; ch < channels; ch++) {
-          float *dst = reinterpret_cast<float *>(m_frame->data[ch]);
-          for (int s = 0; s < m_requiredFrameSize; s++) {
-            float v = m_accumBuffer[s * channels + ch];
-            dst[s] = std::isfinite(v) ? v : 0.0f;
-          }
-        }
+        writeFrameSamples();
 
         m_frame->nb_samples = m_requiredFrameSize;
-        m_frame->pts = (m_sampleCount * 1000LL) / m_codecCtx->sample_rate;
+        m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
+                       m_codecCtx->sample_rate;
         m_sampleCount += m_requiredFrameSize;
 
         avcodec_send_frame(m_codecCtx, m_frame);

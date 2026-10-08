@@ -63,7 +63,7 @@ Item {
                     "type": res.type,
                     "title": res.title,
                     "subtitle": res.subtitle,
-                    "index": res.index,
+                    "targetIndex": res.targetIndex,
                     "section": res.section || ""
                 });
             } else {
@@ -141,13 +141,15 @@ Item {
                         anchors.margins: Theme.spacingSmall
                         spacing: Theme.spacingSmall
 
-                        // Icon
+                        // Icon (layout-managed: plain width/height is ignored
+                        // inside a RowLayout, which collapsed the dot and
+                        // shifted the text per row)
                         Rectangle {
-                            width: 8
-                            height: 8
+                            Layout.preferredWidth: 8
+                            Layout.preferredHeight: 8
+                            Layout.alignment: Qt.AlignVCenter
                             radius: 4
                             color: model.type === "clip" ? Theme.primaryColor : Theme.secondaryColor
-                            Layout.alignment: Qt.AlignVCenter
                         }
 
                         ColumnLayout {
@@ -156,6 +158,8 @@ Item {
                             spacing: 2
 
                             Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignLeft
                                 text: model.title
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.weight: Font.Medium
@@ -164,6 +168,8 @@ Item {
                             }
 
                             Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignLeft
                                 text: model.subtitle
                                 font.pixelSize: Theme.fontSizeTiny
                                 color: Theme.textSecondaryColor
@@ -185,7 +191,7 @@ Item {
                             "type": model.type,
                             "title": model.title,
                             "subtitle": model.subtitle,
-                            "index": model.index,
+                            "targetIndex": model.targetIndex,
                             "section": model.section || ""
                         });
                     }

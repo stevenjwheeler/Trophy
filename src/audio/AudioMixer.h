@@ -73,6 +73,10 @@ public:
 
   // Start/stop all sources
   bool startAll();
+  // Start only sources that are not already capturing. DVR segment
+  // switches keep PipeWire streams running across the handoff; blindly
+  // restarting them would reopen a gap on every rotation.
+  bool ensureSourcesStarted();
   void stopAll();
 
 signals:
@@ -88,7 +92,6 @@ private:
     // on the PipeWire callback thread (onAudioReceived).
     std::atomic<float> atomicVolume{1.0f};
     std::atomic<bool>  atomicMuted{false};
-    std::vector<float> buffer;
   };
 
   void onAudioReceived(int trackIndex, const float *samples, int frameCount);

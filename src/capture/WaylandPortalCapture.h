@@ -9,10 +9,13 @@
 
 #include "IVideoCaptureSource.h"
 #include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
 #include <spa/param/buffers.h>
 #include <spa/param/video/format-utils.h>
+#include <vector>
 
 namespace TrophyBackend {
 
@@ -53,8 +56,14 @@ private slots:
   void onStartResponse(unsigned int response, const QVariantMap &results);
 
 private:
-  void setupPortalConnection();
-  
+  // Issue SelectSources on the current session. Extracted so a stale
+  // restore token can retry without it in the same session.
+  void requestSelectSources();
+  // Best-effort Session.Close for the portal handle. Every capture opens a
+  // portal Session (which is what the tray "Screen sharing in progress"
+  // indicator tracks); stopping PipeWire alone leaves the session — and
+  // its indicator — alive forever.
+  void closePortalSession();
   void startPipeWireStream(uint32_t nodeId);
   void stopPipeWireStream();
 
@@ -65,6 +74,9 @@ private:
   QString m_sessionHandle;
   QString m_requestHandle;
   QString m_restoreToken;
+  // True when this capture attempt started with a saved restore token.
+  // Used to retry once without it if the portal rejects the token.
+  bool m_restoreTokenUsed = false;
   QString m_pendingRequestPath;
 
   pw_thread_loop *m_pw_loop = nullptr;
@@ -74,6 +86,13 @@ private:
   spa_hook m_pw_stream_listener;
 
   FrameCallback m_callback;
+  // Guards m_callback: setFrameCallback (GUI thread, incl. session
+  // teardown) blocks until an in-flight on_stream_process delivery
+  // finishes, so clearing it in stop() can never strand a running
+  // invocation over a session that is about to be destroyed (SIGSEGV in
+  // pthread_cond_signal on the freed queue condvar, seen live on DVR
+  // rotation). Invoke holds the lock; callbacks only enqueue downstream.
+  std::mutex m_callbackMutex;
   CaptureConfig m_config;
   std::atomic<bool> m_capturing{false};
   QSize m_resolution;
@@ -84,6 +103,20 @@ private:
   bool m_useDmaBuf = true;        // Set from CaptureConfig
   bool m_dmaBufNegotiated = false; // Whether compositor accepted DMA-BUF
   uint64_t m_negotiatedModifier = 0; // DRM modifier agreed during format negotiation
+  uint32_t m_negotiatedFormat = 0;   // DRM format agreed during format negotiation
+  // Stage A: DMA-BUF modifiers queried from EGL for XRGB8888, offered to the
+  // compositor tiled-first (LINEAR last). Empty = EGL unavailable, legacy
+  // single modifier-agnostic offer is used.
+  std::vector<uint64_t> m_offeredModifiers;
+  bool m_buffersResultLogged = false;
+  // Step-1 observability: per-buffer-type frame accounting for the
+  // zero-copy vs. shared-memory paths. -1 = unknown, 0 = shm, 1 = DMA-BUF.
+  uint64_t m_dmaBufFrames = 0;
+  uint64_t m_shmFrames = 0;
+  uint64_t m_droppedBuffers = 0;
+  int m_lastBufferType = -1;
+  bool m_multiPlaneWarned = false;
+  bool m_gpuOnlyWarned = false;
 };
 
 } // namespace TrophyBackend

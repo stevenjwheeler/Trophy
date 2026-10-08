@@ -7,9 +7,12 @@
 
 #include "RecordingManager.h"
 #include "RecordingSession.h"
+#include "CallbackSink.h"
+#include "CircularFrameBuffer.h"
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
+#include <QMap>
 #include <qlogging.h>
 #ifdef HAVE_PIPEWIRE
 #include "audio/PipeWireAudioSource.h"
@@ -28,9 +31,12 @@ extern "C" {
 
 #include <QDateTime>
 #include <QDir>
+#include <QRegularExpression>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QTimer>
+#include <atomic>
 
 namespace TrophyBackend {
 
@@ -43,8 +49,7 @@ RecordingManager::RecordingManager(QObject *parent) : QObject(parent) {
 }
 
 RecordingManager::~RecordingManager() {
-  if (m_state == RecordingState::Recording ||
-      m_state == RecordingState::Paused) {
+  if (m_state == RecordingState::Recording) {
     stopRecording();
   }
 }
@@ -69,6 +74,28 @@ void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
   m_gameDetector = detector;
 }
 
+bool RecordingManager::isGenericSourceLabel(const QString &label) {
+  const QString lower = label.trimmed().toLower();
+  if (lower.isEmpty() || lower == "unknown game" || lower.contains("kwin") ||
+      lower.contains("wayland")) {
+    return true;
+  }
+  // Bare portal app-id with no title behind it (e.g. steam_app_1422450):
+  // evidence-free, so the detector guess stays preferable.
+  static const QRegularExpression appIdRe("^steam_app_\\d+$");
+  return appIdRe.match(lower).hasMatch();
+}
+
+bool RecordingManager::sourceLabelsAgree(const QString &a,
+                                         const QString &b) {
+  const QString al = a.trimmed().toLower();
+  const QString bl = b.trimmed().toLower();
+  if (al.isEmpty() || bl.isEmpty()) {
+    return false;
+  }
+  return al.contains(bl) || bl.contains(al);
+}
+
 void RecordingManager::startRecording(const QString &gameName,
                                       unsigned long windowId /*= 0*/) {
   if (m_state != RecordingState::Idle) {
@@ -91,20 +118,28 @@ void RecordingManager::startRecording(const QString &gameName,
   if (m_isManualRecording && m_manualWindowId != 0 && m_windowService) {
     m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
     if (m_currentGameName.isEmpty()) {
-      m_currentGameName = "Recording";
+      m_currentGameName = QStringLiteral("Manual Recording");
     }
   } else {
-    m_currentGameName = gameName.isEmpty() ? "Recording" : gameName;
+    m_currentGameName =
+        gameName.isEmpty() ? QStringLiteral("Manual Recording") : gameName;
   }
   emit currentGameNameChanged();
 
   setState(RecordingState::Initializing);
 
-  // Check storage space
-  m_storage->enforceStorageLimit();
+  // Check storage space and prevent starting if the limit cannot be satisfied.
+  if (!m_storage->enforceStorageLimit()) {
+    qWarning() << "Storage limit cannot be satisfied, aborting recording start";
+    setState(RecordingState::Idle);
+    return;
+  }
 
   // Generate output path
   m_currentFilePath = generateOutputPath();
+  if (m_storage) {
+    m_storage->setExcludedRecordingPath(m_currentFilePath);
+  }
 
   // Ensure output directory exists
   QDir dir = QFileInfo(m_currentFilePath).dir();
@@ -134,28 +169,47 @@ void RecordingManager::startRecording(const QString &gameName,
   connect(m_captureSource.get(), &IVideoCaptureSource::captureError, this,
           &RecordingManager::onEncodingError, Qt::QueuedConnection);
 
-  // Connect restore token update to save it for this game
+  // Connect restore token update to save it for this game.
+  // Tokens are held indefinitely and only overwritten with fresher ones —
+  // never pruned for missing recordings.
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenUpdated,
           this, [this](const QString &token) {
+            // Manual recordings share one display name, so their tokens
+            // must never be saved: the next manual start would silently
+            // restore some unrelated earlier source.
             if (m_settings && !m_currentGameName.isEmpty() &&
-                m_currentGameName != "Recording") {
+                m_currentGameName != "Recording" &&
+                m_currentGameName != QStringLiteral("Manual Recording")) {
               qDebug() << "Saving Wayland restore token for game:"
-                       << m_currentGameName;
+                       << m_currentGameName
+                       << "(fp:" << token.left(4) << ")";
               m_settings->setRestoreToken(m_currentGameName, token);
             }
+          });
+  connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenStale, this,
+          [this](const QString &oldToken) {
+            Q_UNUSED(oldToken)
+            qWarning() << "Saved restore token rejected for"
+                       << m_currentGameName << "- re-authorizing";
+            teardownPipeline();
+            emit restoreAuthNeeded(m_currentGameName);
           });
 
   CaptureConfig capConfig;
   capConfig.targetFps = m_settings->fps();
   capConfig.windowId = m_manualWindowId;
   capConfig.useDmaBuf = m_settings->useDmaBuf();
+  // Game-targeted (non-manual) recordings get a windows-only picker;
+  // manual recordings keep the full monitor + window choice.
+  capConfig.windowOnly = !isManual;
 
   // Use restore token only for automatic recordings, always prompt for manual
   if (!isManual) {
     capConfig.waylandRestoreToken =
         m_settings->getRestoreToken(m_currentGameName);
     if (!capConfig.waylandRestoreToken.isEmpty()) {
-      qDebug() << "Using saved Wayland restore token for:" << m_currentGameName;
+      qDebug() << "Using saved Wayland restore token for:" << m_currentGameName
+               << "(fp:" << capConfig.waylandRestoreToken.left(4) << ")";
     }
   }
 
@@ -205,24 +259,50 @@ void RecordingManager::finishPipelineAndStart() {
     }
 
     if (m_isManualRecording) {
-      if (!label.isEmpty()) {
+      // Adopt the portal label only when it names something real. The
+      // portal never reports which item was picked (privacy by design),
+      // so a generic label ("kwin_wayland") must not become the file
+      // name — the recording stays "Manual Recording".
+      QString manualName;
+      if (!label.isEmpty() && !isGenericSourceLabel(label)) {
+        manualName = label;
+      } else if (m_manualWindowId != 0 && m_windowService) {
+        // Fallback for manual capture where capture source provides a
+        // generic label (or none): the picked window's title.
+        manualName = m_windowService->getWindowTitle(m_manualWindowId);
+      }
+      if (manualName.isEmpty()) {
+        manualName = QStringLiteral("Manual Recording");
+      }
+      if (manualName != m_currentGameName) {
+        m_currentGameName = manualName;
+        emit currentGameNameChanged();
+        m_currentFilePath = generateOutputPath();
+        if (m_storage)
+          m_storage->setExcludedRecordingPath(m_currentFilePath);
+      }
+    } else {
+      // Automatic recording: the capture should be the detected game
+      // (silent restore / windows-only picker), but the user may still
+      // have picked another window. Trust a truthful portal label over
+      // the detector guess so captures of other windows aren't misnamed
+      // after a merely-detected game.
+      if (!label.isEmpty() && !isGenericSourceLabel(label) &&
+          !sourceLabelsAgree(label, m_currentGameName)) {
+        qDebug() << "RecordingManager: captured source" << label
+                 << "disagrees with detected game" << m_currentGameName
+                 << "- naming the recording after the captured source";
         m_currentGameName = label;
         emit currentGameNameChanged();
         m_currentFilePath = generateOutputPath();
-      } else if (m_manualWindowId != 0 && m_windowService) {
-        // Fallback for manual capture where capture source provides empty
-        // label
-        m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
-        if (!m_currentGameName.isEmpty()) {
-          emit currentGameNameChanged();
-          m_currentFilePath = generateOutputPath();
-        }
+        if (m_storage)
+          m_storage->setExcludedRecordingPath(m_currentFilePath);
+      } else {
+        qDebug() << "RecordingManager: Automatic recording, keeping detected "
+                    "game name:"
+                 << m_currentGameName;
+        // Do nothing, preserving the game name passed into startRecording
       }
-    } else {
-      qDebug() << "RecordingManager: Automatic recording, keeping detected game "
-                 "name:"
-              << m_currentGameName;
-      // Do nothing, preserving the game name passed into startRecording
     }
   }
 
@@ -244,8 +324,7 @@ void RecordingManager::finishPipelineAndStart() {
 }
 
 void RecordingManager::stopRecording() {
-  if (m_state != RecordingState::Recording &&
-      m_state != RecordingState::Paused) {
+  if (m_state != RecordingState::Recording) {
     qWarning() << "Cannot stop recording: not recording";
     return;
   }
@@ -255,6 +334,10 @@ void RecordingManager::stopRecording() {
 
   // Finalize and teardown pipeline
   teardownPipeline();
+
+  if (m_storage) {
+    m_storage->clearExcludedRecordingPath();
+  }
 
   QString filePath = m_currentFilePath;
   m_currentFilePath.clear();
@@ -266,32 +349,15 @@ void RecordingManager::stopRecording() {
     m_storage->refresh();
   }
 
-  emit recordingStopped(filePath);
+  // Duration + size for the "Recording Saved" notice (file is finalized by
+  // now, so read the size off disk).
+  const qint64 durationMs =
+      m_recordingTimer.isValid() ? m_recordingTimer.elapsed() : 0;
+  const qint64 sizeBytes = QFileInfo(filePath).size();
+  emit recordingStopped(filePath, durationMs, sizeBytes);
   emit currentGameNameChanged();
 
   qInfo() << "Recording stopped:" << filePath;
-}
-
-void RecordingManager::pauseRecording() {
-  if (m_state != RecordingState::Recording) {
-    qWarning() << "Cannot pause: not recording";
-    return;
-  }
-
-  // TODO: Implement pause logic in capture/encoding
-  setState(RecordingState::Paused);
-  qInfo() << "Recording paused";
-}
-
-void RecordingManager::resumeRecording() {
-  if (m_state != RecordingState::Paused) {
-    qWarning() << "Cannot resume: not paused";
-    return;
-  }
-
-  // TODO: Implement resume logic in capture/encoding
-  setState(RecordingState::Recording);
-  qInfo() << "Recording resumed";
 }
 
 void RecordingManager::setState(RecordingState newState) {
@@ -375,7 +441,11 @@ bool RecordingManager::buildPipeline() {
   QString gameProcess;
   QString vcApp;
   bool gameSourceAdded = false;
+  bool gameIsFallback = false;
   bool vcSourceAdded = false;
+  int voiceTrack = -1;
+  uint32_t gameTargetPid = 0;
+  QStringList gameHints;
 
   if (m_audioMixer) {
     QString mode = m_settings->audioMode();
@@ -384,19 +454,21 @@ bool RecordingManager::buildPipeline() {
       // Track 0: all system audio (sink monitor)
       QString gameDeviceId = m_settings->gameAudioDevice();
       qDebug() << "Desktop mode: using game audio device:" << gameDeviceId;
-      m_audioMixer->addSource(
-          PipeWireAudioSource::createMonitorSource(
-              gameDeviceId == "default" ? QString() : gameDeviceId),
-          0);
+      auto desktopSrc = PipeWireAudioSource::createMonitorSource(
+          gameDeviceId == "default" ? QString() : gameDeviceId);
+      desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
+      m_audioMixer->addSource(std::move(desktopSrc), 0);
       activeAudioTrackCount++;
       // Track 1: microphone
       QString micDeviceId = m_settings->microphoneDevice();
       qDebug() << "Desktop mode: using microphone device:" << micDeviceId;
-      m_audioMixer->addSource(
-          PipeWireAudioSource::createInputSource(
-              micDeviceId == "default" ? QString() : micDeviceId),
-          1);
+      auto desktopMicSrc = PipeWireAudioSource::createInputSource(
+          micDeviceId == "default" ? QString() : micDeviceId);
+      desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
+      m_audioMixer->addSource(std::move(desktopMicSrc), 1);
       activeAudioTrackCount++;
+      m_micTrack = 1;
+      m_voiceTrack = -1; // desktop mode has no voice track
 
     } else { // "game" mode
       // Separate mode uses fixed positions so the MKV always has 3 named audio
@@ -407,12 +479,30 @@ bool RecordingManager::buildPipeline() {
       int activeSources = 0;
 
       // === Game audio (always at track 0) ===
-      uint32_t targetPid = 0;
+      // Proton/Wine playback nodes expose no PID, no binary and no app-id
+      // (verified live: deadlock.exe has only app/node name) — so the
+      // detector's display name ("Deadlock") is a first-class hint: the
+      // contains-match catches the exe basename.
+      gameTargetPid = 0;
+      gameHints.clear();
       if (m_manualWindowId != 0 && m_windowService) {
         gameProcess =
             m_windowService->getProcessNameForWindow(m_manualWindowId);
+        if (!gameProcess.isEmpty())
+          gameHints << gameProcess;
       } else if (m_captureSource) {
-        targetPid = m_captureSource->sourcePid();
+        gameTargetPid = m_captureSource->sourcePid();
+      }
+      if (m_captureSource) {
+        const QString hint = m_captureSource->sourceProcessName();
+        if (!hint.isEmpty() && !gameHints.contains(hint))
+          gameHints << hint;
+      }
+      if (m_gameDetector && m_gameDetector->isGameRunning()) {
+        const QString detected = m_gameDetector->currentGameName();
+        if (!detected.isEmpty() &&
+            !gameHints.contains(detected, Qt::CaseInsensitive))
+          gameHints << detected;
       }
 
       {
@@ -422,48 +512,41 @@ bool RecordingManager::buildPipeline() {
         QString nodeName, nodeSerial;
 
         // Try PID search first if we have one (more accurate on Wayland)
-        if (targetPid != 0) {
-          nodeId = PipeWireAudioSource::findNodeByPid(targetPid, &nodeName,
+        if (gameTargetPid != 0) {
+          nodeId = PipeWireAudioSource::findNodeByPid(gameTargetPid, &nodeName,
                                                       &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
-            qDebug() << "Game audio: found node via PID" << targetPid;
+            qDebug() << "Game audio: found node via PID" << gameTargetPid;
         }
 
-        // Try process name / app id from capture source
-        if (nodeId == 0xFFFFFFFFu && m_captureSource) {
-          QString hint = m_captureSource->sourceProcessName();
-          if (!hint.isEmpty()) {
-            nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
-                                                                &nodeSerial);
-            if (nodeId != 0xFFFFFFFFu)
-              qDebug() << "Game audio: found node via capture source hint"
-                      << hint;
-          }
-        }
-
-        // Try derived process name (standard behavior)
-        if (nodeId == 0xFFFFFFFFu && !gameProcess.isEmpty()) {
-          nodeId = PipeWireAudioSource::findNodeByProcessName(
-              gameProcess, &nodeName, &nodeSerial);
+        // Then each name hint in order (window process, portal app-id,
+        // detector display name / exe basename).
+        for (const QString &hint : gameHints) {
+          if (nodeId != 0xFFFFFFFFu || hint.isEmpty())
+            break;
+          nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
+                                                              &nodeSerial);
           if (nodeId != 0xFFFFFFFFu)
-            qDebug() << "Game audio: found node via process name" << gameProcess;
+            qDebug() << "Game audio: found node via hint" << hint;
         }
 
         if (nodeId != 0xFFFFFFFFu) {
-          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                      nodeId, nodeName, nodeSerial),
-                                  gameTrack);
+          auto gameSrc = PipeWireAudioSource::createApplicationSource(
+              nodeId, nodeName, nodeSerial);
+          gameSrc->setStreamName(QStringLiteral("trophy-game"));
+          m_audioMixer->addSource(std::move(gameSrc), gameTrack);
           activeSources++;
           gameSourceAdded = true;
         } else {
           // Fallback to default monitor (whole system audio) if no specific
-          // game found
+          // game found. This is NOT marked connected: the session retry
+          // keeps hunting the real app node and hot-swaps when it appears.
           qDebug() << "Game audio: no specific node found, falling back to "
                         "default monitor for track"
                      << gameTrack;
           m_audioMixer->addSource(
               PipeWireAudioSource::createMonitorSource(QString()), gameTrack);
-          gameSourceAdded = true;
+          gameIsFallback = true;
           activeSources++;
         }
       }
@@ -471,32 +554,43 @@ bool RecordingManager::buildPipeline() {
       // === Voice chat (track 1 in separate; next contiguous slot in merged)
       // ===
       vcApp = m_settings->voiceChatApp().trimmed();
+      voiceTrack = -1;
       if (!vcApp.isEmpty()) {
         QString vcNodeName, vcSerial;
         uint32_t nodeId = PipeWireAudioSource::findNodeByProcessName(
             vcApp, &vcNodeName, &vcSerial);
         if (nodeId != 0xFFFFFFFF) {
-          const int voiceTrack = isSeparate ? 1 : nextContiguous++;
-          m_audioMixer->addSource(PipeWireAudioSource::createApplicationSource(
-                                      nodeId, vcNodeName, vcSerial),
-                                  voiceTrack);
+          voiceTrack = isSeparate ? 1 : nextContiguous++;
+          auto voiceSrc = PipeWireAudioSource::createApplicationSource(
+              nodeId, vcNodeName, vcSerial);
+          voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
+          m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
           activeSources++;
           vcSourceAdded = true;
         } else {
-          qDebug() << "No PipeWire node for voice chat app:" << vcApp;
+          qDebug() << "No PipeWire node for voice chat app:" << vcApp
+                   << "- retry will bind it when the stream appears";
+          // Separate mode reserves the slot so the retry has somewhere to
+          // bind. Merged mode can't reserve (an empty slot would stall the
+          // mix gate), so the retry skips voice instead of clobbering mic.
+          if (isSeparate)
+            voiceTrack = 1;
         }
       }
+      m_voiceTrack = voiceTrack;
 
       // === Microphone (track 2 in separate; next contiguous slot in merged)
       // ===
       {
         const int micTrack = isSeparate ? 2 : nextContiguous++;
-        m_audioMixer->addSource(PipeWireAudioSource::createInputSource(
-                                    m_settings->microphoneDevice() == "default"
-                                        ? QString()
-                                        : m_settings->microphoneDevice()),
-                                micTrack);
+        auto micSrc = PipeWireAudioSource::createInputSource(
+            m_settings->microphoneDevice() == "default"
+                ? QString()
+                : m_settings->microphoneDevice());
+        micSrc->setStreamName(QStringLiteral("trophy-mic"));
+        m_audioMixer->addSource(std::move(micSrc), micTrack);
         activeSources++;
+        m_micTrack = micTrack;
       }
 
       // Separate: always 3 streams so the file layout is consistent.
@@ -508,25 +602,81 @@ bool RecordingManager::buildPipeline() {
   int activeAudioTrackCount = 0;
 #endif
 
+  // Augment encoded file with metadata tags for later playback and indexing.
+  QMap<QString, QString> outputMetadata;
+  outputMetadata[QStringLiteral("title")] = m_currentGameName;
+  outputMetadata[QStringLiteral("creation_time")] =
+      QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+  // Media kind survives renames (unlike the _Replay filename suffix),
+  // so cards and the activity feed can always tell clips apart.
+  outputMetadata[QStringLiteral("trophy-kind")] = QStringLiteral("recording");
+
   // Create recording session to coordinate everything
-  m_session = std::make_unique<RecordingSession>(
+    m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
       m_muxer.get(), m_audioMixer, m_settings->separateAudioTracks(),
       192, // Audio bitrate: hard-coded to 192 kbps (CD quality)
-      activeAudioTrackCount);
+      activeAudioTrackCount, outputMetadata);
 
-  // Set app names for periodic node checking during recording
-  m_session->setGameApps(gameProcess);
+  // Create a FrameDispatcher and provide a CircularFrameBuffer sink for clips
+  auto dispatcher = std::make_shared<TrophyBackend::FrameDispatcher>();
+  auto bufferSeconds = std::max(1, m_settings->clipBufferSeconds());
+  auto circular = std::make_shared<TrophyBackend::CircularFrameBuffer>(static_cast<size_t>(m_settings->fps() * bufferSeconds));
+  circular->start();
+  dispatcher->registerSink(circular);
+  // Register encoder sink that forwards frames to the recording session queue
+  auto encoderSink = std::make_shared<TrophyBackend::CallbackSink>(
+      [this](TrophyBackend::FrameDescriptor &&frame) -> bool {
+          // Convert FrameDescriptor to VideoFrame and then to QueuedFrame
+          TrophyBackend::VideoFrame vf{};
+          vf.data = nullptr;
+          vf.width = static_cast<int>(frame.width);
+          vf.height = static_cast<int>(frame.height);
+          vf.stride = 0;
+          vf.timestamp = static_cast<int64_t>(frame.pts);
+          // Prefer explicit encoded pixel format if provided; otherwise use
+          // the DRM/format field as a best-effort fallback.
+          vf.pixelFormat = frame.pixelFormat != 0 ? static_cast<int>(frame.pixelFormat) : static_cast<int>(frame.format);
+          vf.isDmaBuf = true;
+          vf.dmaBufFd = frame.fd;
+          vf.drmFormat = frame.format;
+          vf.drmModifier = frame.drmModifier;
+          vf.dmaBufStride = frame.dmaBufStride;
+          vf.dmaBufOffset = frame.dmaBufOffset;
+          TrophyBackend::QueuedFrame qf(vf);
+          bool pushed = m_session->pushQueuedFrame(std::move(qf));
+          // Per-frame success logs flood at 60fps; always log drops, and
+          // throttle successes unless TROPHY_VIDEO_DEBUG is set.
+          static std::atomic<uint64_t> s_sinkFrames{0};
+          const uint64_t n = ++s_sinkFrames;
+          if (!pushed || qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG") ||
+              n == 1 || n % 600 == 0) {
+            qDebug() << "Encoder sink: pushed frame to session?" << pushed << "pts:" << vf.timestamp << "fd:" << vf.dmaBufFd << "pixfmt:" << vf.pixelFormat;
+          }
+          return pushed;
+      });
+  dispatcher->registerSink(encoderSink);
+  // Provide dispatcher to session
+  m_session->setFrameDispatcher(dispatcher);
+
+  // Set app names for periodic node checking during recording. The timer
+  // reconciles for the whole session: game upgrades past monitor fallback,
+  // voice binds on appearance and re-binds when Electron recreates streams.
+  // NOTE: gameProcess is only the manual-window name — the detector display
+  // name (exe-basename match for Proton) rides along in gameHints.
+  m_session->setGameAudioHints(gameTargetPid, gameHints);
   m_session->setVoiceChatApp(vcApp);
+  m_session->setVoiceTrack(voiceTrack);
+  m_session->setGameIsFallback(gameIsFallback);
 
 #ifdef HAVE_PIPEWIRE
-  // If sources were already found and added during buildPipeline, mark them as
-  // connected so the node-check timer doesn't replace the already-running
-  // sources.
+  // True app binds adopt their serial on the first retry tick (so later
+  // stream generations read as new). Fallback monitor is never marked —
+  // the retry replaces it with the real node on appearance.
   if (gameSourceAdded)
     m_session->markSourceConnected(0);
-  if (vcSourceAdded)
-    m_session->markSourceConnected(1);
+  if (vcSourceAdded && voiceTrack >= 0)
+    m_session->markSourceConnected(voiceTrack);
 #endif
 
   // Connect error signals
@@ -562,6 +712,65 @@ void RecordingManager::teardownPipeline() {
   m_muxer.reset();
   m_videoEncoder.reset();
   m_captureSource.reset();
+  m_micTrack = -1;
+  m_voiceTrack = -1;
+}
+
+void RecordingManager::applyMicrophoneDevice() {
+  if (!m_session || !m_audioMixer || !m_settings || m_micTrack < 0)
+    return;
+  const QString dev = m_settings->microphoneDevice();
+  auto src = PipeWireAudioSource::createInputSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-mic"));
+  // Mixer hot-swap: replaces the running source, initializes + starts it
+  // immediately (AudioMixer late-add path).
+  m_audioMixer->addSource(std::move(src), m_micTrack);
+  qDebug() << "Live-applied microphone device:" << dev << "to track"
+           << m_micTrack;
+}
+
+void RecordingManager::applyGameAudioDevice() {
+  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  // Only desktop mode captures a named device; game mode hunts the app node.
+  if (m_settings->audioMode() != "desktop")
+    return;
+  const QString dev = m_settings->gameAudioDevice();
+  auto src = PipeWireAudioSource::createMonitorSource(
+      dev == "default" ? QString() : dev);
+  src->setStreamName(QStringLiteral("trophy-desktop"));
+  m_audioMixer->addSource(std::move(src), 0);
+  qDebug() << "Live-applied system audio device:" << dev;
+}
+
+void RecordingManager::applyVoiceChatApp() {
+  if (!m_session || !m_audioMixer || !m_settings)
+    return;
+  const QString app = m_settings->voiceChatApp().trimmed();
+  m_session->setVoiceChatApp(app);
+  const bool isSeparate = m_settings->separateAudioTracks();
+  if (app.isEmpty()) {
+    // Voice disabled mid-session: drop the source. Slot stays reserved in
+    // separate mode so re-enabling rebinds without a rebuild.
+    if (m_voiceTrack >= 0) {
+      m_audioMixer->removeSource(m_voiceTrack);
+      m_session->forgetTrack(m_voiceTrack);
+    }
+    qDebug() << "Voice chat disabled mid-session";
+    return;
+  }
+  if (m_voiceTrack < 0 && isSeparate) {
+    m_voiceTrack = 1;
+    m_session->setVoiceTrack(1);
+  }
+  if (m_voiceTrack >= 0) {
+    m_audioMixer->removeSource(m_voiceTrack);
+    m_session->forgetTrack(m_voiceTrack);
+  }
+  // The session retry binds the new app on appearance (or adopts a fresh
+  // merged slot when unslotted).
+  qDebug() << "Live-applied voice chat app:" << app;
 }
 
 QString RecordingManager::generateOutputPath() const {
@@ -593,14 +802,23 @@ QString RecordingManager::generateOutputPath() const {
 }
 
 qint64 RecordingManager::recordingDuration() const {
-  if (m_state == RecordingState::Recording ||
-      m_state == RecordingState::Paused) {
+  if (m_state == RecordingState::Recording) {
     return m_recordingTimer.elapsed();
   }
   return 0;
 }
 
 qint64 RecordingManager::recordingSize() const {
+  // While recording, prefer the muxer's byte counter (AVIO position,
+  // updated per packet) over the on-disk size: encoder queues,
+  // interleave buffering and AVIO buffering all delay bytes reaching
+  // disk, so stat() can lag the true size by megabytes.
+  if (m_session && m_state == RecordingState::Recording) {
+    const qint64 live = m_session->bytesWritten();
+    if (live > 0) {
+      return live;
+    }
+  }
   if (m_currentFilePath.isEmpty()) {
     return 0;
   }

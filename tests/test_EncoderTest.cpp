@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QSize>
 #include <gtest/gtest.h>
+#include <libavutil/pixfmt.h>
 #include <tuple>
 #include <vector>
 
@@ -28,15 +29,18 @@ protected:
       return "h264_nvenc";
     case FFmpegEncoder::EncoderType::NVENC_HEVC:
       return "hevc_nvenc";
+    case FFmpegEncoder::EncoderType::NVENC_AV1:
+      return "av1_nvenc";
     case FFmpegEncoder::EncoderType::VAAPI_H264:
       return "h264_vaapi";
     case FFmpegEncoder::EncoderType::VAAPI_HEVC:
       return "hevc_vaapi";
+    case FFmpegEncoder::EncoderType::VAAPI_AV1:
+      return "av1_vaapi";
     case FFmpegEncoder::EncoderType::Software_x264:
       return "libx264";
-    default:
-      return "";
     }
+    return "";
   }
 };
 
@@ -79,6 +83,9 @@ TEST_P(EncoderMatrixTest, FullPipelineTest) {
   frame.height = srcH;
   frame.stride = srcW * 4;
   frame.timestamp = 0;
+  frame.pixelFormat = AV_PIX_FMT_RGBA; // must match the dummy bytes above;
+  // pixelFormat has no default init, and leaving it unset feeds garbage
+  // into swscale (which aborts on assertion-enabled distro builds).
 
   EncodedPacket output;
   bool frameAccepted = false;
@@ -103,8 +110,43 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::Values(FFmpegEncoder::EncoderType::NVENC_H264,
                           FFmpegEncoder::EncoderType::NVENC_HEVC,
+                          FFmpegEncoder::EncoderType::NVENC_AV1,
                           FFmpegEncoder::EncoderType::VAAPI_H264,
                           FFmpegEncoder::EncoderType::VAAPI_HEVC,
+                          FFmpegEncoder::EncoderType::VAAPI_AV1,
                           FFmpegEncoder::EncoderType::Software_x264),
         ::testing::Values("ultrafast", "medium"),
         ::testing::Values(QSize(1280, 720), QSize(1080, 1296))));
+
+TEST(EncoderRejectTest, InvalidPixelFormatDroppedWithoutAbort) {
+  // A frame carrying no valid format must be dropped, never handed to
+  // swscale: assertion-enabled distro builds abort the process there.
+  if (!QCoreApplication::instance()) {
+    static int argc = 1;
+    static char arg0[] = "test";
+    static char *argv[] = {arg0, nullptr};
+    new QCoreApplication(argc, argv);
+  }
+  FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264,
+                        "libx264");
+  EncoderConfig config;
+  config.width = 1280;
+  config.height = 720;
+  config.fps = 60;
+  config.bitrate = 5000;
+  config.preset = "ultrafast";
+  if (!encoder.initialize(config))
+    GTEST_SKIP() << "libx264 not available.";
+
+  std::vector<uint8_t> dummyData(64 * 64 * 4, 0xAB);
+  VideoFrame frame;
+  frame.data = dummyData.data();
+  frame.width = 64;
+  frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.timestamp = 0;
+  frame.pixelFormat = -1; // AV_PIX_FMT_NONE: no identity at all
+
+  EncodedPacket output;
+  EXPECT_FALSE(encoder.encodeFrame(frame, output));
+}

@@ -21,11 +21,11 @@ struct VideoFrame; // Forward declaration
  */
 struct EncodedPacket {
   std::vector<uint8_t> data;
-  int64_t pts; // Presentation timestamp
-  int64_t dts; // Decode timestamp
-  int64_t duration; // Frame duration
-  bool isKeyframe;
-  int streamIndex; // For muxer
+  int64_t pts = 0; // Presentation timestamp
+  int64_t dts = 0; // Decode timestamp
+  int64_t duration = 0; // Frame duration
+  bool isKeyframe = false;
+  int streamIndex = 0; // For muxer
 };
 
 /**
@@ -89,8 +89,9 @@ public:
   /**
    * @brief Encode a video frame
    * @param frame Input frame to encode
-   * @param output Encoded packet output
-   * @return true if packet was produced
+   * @param output Encoded packet output (only valid when true is returned)
+   * @return true if a packet was produced and `output` is safe to mux;
+   *         false if the frame was buffered (EAGAIN), dropped, or errored.
    */
   virtual bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) = 0;
 
@@ -125,6 +126,11 @@ public:
    * @brief Get the codec's FFmpeg codec ID
    */
   virtual int codecId() const = 0;
+
+  /**
+   * @brief Get the encoder's output pixel format for container metadata
+   */
+  virtual int encodedPixelFormat() const = 0;
 
 signals:
   void encodingError(const QString &error);

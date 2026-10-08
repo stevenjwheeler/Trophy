@@ -243,6 +243,12 @@ Page {
                         }
 
                         Label {
+                            text: qsTr("• The Wayland and KWin teams for modern Linux compositing")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        Label {
                             text: qsTr("• The PipeWire team for modern Linux audio")
                             color: Theme.textColor
                             font.pixelSize: Theme.fontSizeNormal
@@ -286,20 +292,6 @@ Page {
                         columns: 2
                         columnSpacing: Theme.spacingLarge
                         rowSpacing: Theme.spacingSmall
-
-                        Label {
-                            text: "F9"
-                            font.family: "monospace"
-                            font.pixelSize: Theme.fontSizeNormal
-                            color: Theme.primaryColor
-                            Layout.preferredWidth: 100
-                        }
-
-                        Label {
-                            text: qsTr("Start/Stop Recording")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
 
                         Label {
                             text: "Ctrl+Q"

@@ -171,6 +171,35 @@ bool AudioMixer::startAll() {
   return allStarted;
 }
 
+bool AudioMixer::ensureSourcesStarted() {
+  std::lock_guard<std::mutex> lock(m_mutex);
+
+  m_started = true;
+  bool allStarted = true;
+  for (auto &track : m_tracks) {
+    if (track.source && !track.source->isCapturing()) {
+      AudioConfig config;
+      config.sampleRate = m_sampleRate;
+      config.channels = m_channels;
+
+      if (!track.source->initialize(config)) {
+        qWarning() << "Failed to initialize audio source for track"
+                   << track.config.index;
+        allStarted = false;
+        continue;
+      }
+
+      if (!track.source->start()) {
+        qWarning() << "Failed to start audio source for track"
+                   << track.config.index;
+        allStarted = false;
+      }
+    }
+  }
+
+  return allStarted;
+}
+
 void AudioMixer::stopAll() {
   std::lock_guard<std::mutex> lock(m_mutex);
 

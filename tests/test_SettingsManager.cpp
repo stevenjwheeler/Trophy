@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaProperty>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -120,6 +121,95 @@ TEST_F(SettingsManagerTest, SetSeparateAudioTracksEmitsSignal) {
   EXPECT_FALSE(mgr->separateAudioTracks());
 }
 
+// Live-apply wiring depends on these three signals (Application routes
+// them to the running pipeline's hot-swap).
+TEST_F(SettingsManagerTest, SetMicrophoneDeviceEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::microphoneDeviceChanged);
+  mgr->setMicrophoneDevice("easyeffects_source");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->microphoneDevice(), "easyeffects_source");
+}
+
+TEST_F(SettingsManagerTest, SetGameAudioDeviceEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::gameAudioDeviceChanged);
+  mgr->setGameAudioDevice("easyeffects_sink");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->gameAudioDevice(), "easyeffects_sink");
+}
+
+TEST_F(SettingsManagerTest, SetVoiceChatAppEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::voiceChatAppChanged);
+  mgr->setVoiceChatApp("teamspeak");
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_EQ(mgr->voiceChatApp(), "teamspeak");
+}
+
+// Notification options (all default on; round-trip through the setters).
+TEST_F(SettingsManagerTest, NotificationTogglesDefaultOn) {
+  EXPECT_TRUE(mgr->notifyRecordings());
+  EXPECT_TRUE(mgr->notifyClips());
+  EXPECT_TRUE(mgr->notifyStorage());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyRecordingsEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyRecordingsChanged);
+  mgr->setNotifyRecordings(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyRecordings());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyClipsEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyClipsChanged);
+  mgr->setNotifyClips(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyClips());
+}
+
+TEST_F(SettingsManagerTest, SetNotifyStorageEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::notifyStorageChanged);
+  mgr->setNotifyStorage(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->notifyStorage());
+}
+
+TEST_F(SettingsManagerTest, CompletionSoundDefaultsOnAndEmitsSignal) {
+  EXPECT_TRUE(mgr->completionSoundEnabled());
+  QSignalSpy spy(mgr.get(), &SettingsManager::completionSoundEnabledChanged);
+  mgr->setCompletionSoundEnabled(false);
+  EXPECT_EQ(spy.count(), 1);
+  EXPECT_FALSE(mgr->completionSoundEnabled());
+}
+
+TEST_F(SettingsManagerTest, LegacyClipPingKeyHonouredOnLoad) {
+  // Pre-rename settings only have notifications.clipPing; it must still
+  // gate both chimes until the first save rewrites it.
+  const QString filePath = mgr->settingsFilePath();
+  QDir().mkpath(QFileInfo(filePath).path());
+  QJsonObject notifications;
+  notifications["clipPing"] = false;
+  QJsonObject root;
+  root["notifications"] = notifications;
+  QFile f(filePath);
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  f.write(QJsonDocument(root).toJson());
+  f.close();
+
+  mgr->load();
+  EXPECT_FALSE(mgr->completionSoundEnabled());
+}
+
+TEST_F(SettingsManagerTest, CompletionSoundKeyWinsAndLegacyNotPersisted) {
+  mgr->setCompletionSoundEnabled(false);
+  mgr->save();
+  QFile f(mgr->settingsFilePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+  const QJsonObject notifications =
+      QJsonDocument::fromJson(f.readAll()).object()["notifications"].toObject();
+  EXPECT_TRUE(notifications.contains("completionSound"));
+  EXPECT_FALSE(notifications.contains("clipPing"));
+  EXPECT_FALSE(notifications["completionSound"].toBool(true));
+}
+
 TEST_F(SettingsManagerTest, SetAutoDetectGamesEmitsSignal) {
   QSignalSpy spy(mgr.get(), &SettingsManager::autoDetectGamesChanged);
   mgr->setAutoDetectGames(false);
@@ -151,6 +241,198 @@ TEST_F(SettingsManagerTest, SetSameEncoderNoSignal) {
   QSignalSpy spy(mgr.get(), &SettingsManager::encoderChanged);
   mgr->setEncoder("auto"); // Already default
   EXPECT_EQ(spy.count(), 0);
+}
+
+TEST_F(SettingsManagerTest, DefaultWindowTrackingDisabled) {
+  // Opt-in: nothing is installed until the user enables it in the wizard.
+  EXPECT_FALSE(mgr->windowTrackingEnabled());
+}
+
+TEST_F(SettingsManagerTest, SetWindowTrackingEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::windowTrackingEnabledChanged);
+  mgr->setWindowTrackingEnabled(true);
+  EXPECT_TRUE(mgr->windowTrackingEnabled());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setWindowTrackingEnabled(true);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, WindowTrackingPersistsRoundTrip) {
+  mgr->setWindowTrackingEnabled(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_TRUE(mgr2->windowTrackingEnabled());
+}
+
+TEST_F(SettingsManagerTest, DefaultVulkanLayerDisabled) {
+  EXPECT_FALSE(mgr->vulkanLayerEnabled());
+}
+
+TEST_F(SettingsManagerTest, SetVulkanLayerEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::vulkanLayerEnabledChanged);
+  mgr->setVulkanLayerEnabled(true);
+  EXPECT_TRUE(mgr->vulkanLayerEnabled());
+  EXPECT_EQ(spy.count(), 1);
+}
+
+TEST_F(SettingsManagerTest, VulkanLayerPersistsRoundTrip) {
+  mgr->setVulkanLayerEnabled(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_TRUE(mgr2->vulkanLayerEnabled());
+}
+
+TEST_F(SettingsManagerTest, DefaultTrayBehaviour) {
+  EXPECT_TRUE(mgr->minimizeToTray());
+  EXPECT_FALSE(mgr->startMinimized());
+}
+
+TEST_F(SettingsManagerTest, SetTrayOptionsEmitSignals) {
+  QSignalSpy minSpy(mgr.get(), &SettingsManager::minimizeToTrayChanged);
+  mgr->setMinimizeToTray(false);
+  EXPECT_FALSE(mgr->minimizeToTray());
+  EXPECT_EQ(minSpy.count(), 1);
+  mgr->setMinimizeToTray(false);
+  EXPECT_EQ(minSpy.count(), 1); // same value: no repeat signal
+
+  QSignalSpy startSpy(mgr.get(), &SettingsManager::startMinimizedChanged);
+  mgr->setStartMinimized(true);
+  EXPECT_TRUE(mgr->startMinimized());
+  EXPECT_EQ(startSpy.count(), 1);
+}
+
+TEST_F(SettingsManagerTest, TrayOptionsPersistRoundTrip) {
+  mgr->setMinimizeToTray(false);
+  mgr->setStartMinimized(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_FALSE(mgr2->minimizeToTray());
+  EXPECT_TRUE(mgr2->startMinimized());
+}
+
+TEST_F(SettingsManagerTest, DefaultStartOnLoginDisabled) {
+  EXPECT_FALSE(mgr->startOnLogin());
+}
+
+TEST_F(SettingsManagerTest, SetStartOnLoginEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::startOnLoginChanged);
+  mgr->setStartOnLogin(true);
+  EXPECT_TRUE(mgr->startOnLogin());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setStartOnLogin(true);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, StartOnLoginPersistsRoundTrip) {
+  mgr->setStartOnLogin(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_TRUE(mgr2->startOnLogin());
+}
+
+TEST_F(SettingsManagerTest, DefaultInstantReplayEnabled) {
+  EXPECT_TRUE(mgr->instantReplayEnabled());
+}
+
+TEST_F(SettingsManagerTest, SetInstantReplayEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::instantReplayEnabledChanged);
+  mgr->setInstantReplayEnabled(false);
+  EXPECT_FALSE(mgr->instantReplayEnabled());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setInstantReplayEnabled(false);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, InstantReplayPersistsRoundTrip) {
+  mgr->setInstantReplayEnabled(false);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_FALSE(mgr2->instantReplayEnabled());
+}
+
+TEST_F(SettingsManagerTest, DefaultGlobalShortcutsEnabled) {
+  EXPECT_TRUE(mgr->globalShortcutsEnabled());
+}
+
+TEST_F(SettingsManagerTest, SetGlobalShortcutsEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::globalShortcutsEnabledChanged);
+  mgr->setGlobalShortcutsEnabled(false);
+  EXPECT_FALSE(mgr->globalShortcutsEnabled());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setGlobalShortcutsEnabled(false);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, GlobalShortcutsPersistsRoundTrip) {
+  mgr->setGlobalShortcutsEnabled(false);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_FALSE(mgr2->globalShortcutsEnabled());
+}
+
+TEST_F(SettingsManagerTest, DefaultReplayCachePathEmpty) {
+  EXPECT_TRUE(mgr->replayCachePath().isEmpty());
+}
+
+TEST_F(SettingsManagerTest, SetReplayCachePathEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::replayCachePathChanged);
+  mgr->setReplayCachePath("/tmp/trophy-replay");
+  EXPECT_EQ(mgr->replayCachePath(), "/tmp/trophy-replay");
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setReplayCachePath("/tmp/trophy-replay");
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, ReplayCachePathPersistsRoundTrip) {
+  mgr->setReplayCachePath("/tmp/trophy-replay");
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_EQ(mgr2->replayCachePath(), "/tmp/trophy-replay");
+}
+
+TEST_F(SettingsManagerTest, ReplayCachePathIsQmlExposed) {
+  // Regression: the getter/setter/signal existed without Q_PROPERTY, so
+  // QML reads got `undefined` (startup warning) and writes from Settings
+  // landed on a dynamic QObject property instead of the C++ member.
+  const QMetaObject *mo = mgr->metaObject();
+  const int idx = mo->indexOfProperty("replayCachePath");
+  ASSERT_GE(idx, 0) << "replayCachePath missing from metaobject";
+  const QMetaProperty prop = mo->property(idx);
+  EXPECT_TRUE(prop.isWritable());
+  EXPECT_TRUE(prop.hasNotifySignal());
+  EXPECT_TRUE(mgr->setProperty("replayCachePath", "/tmp/qml-probe"));
+  EXPECT_EQ(mgr->replayCachePath(), "/tmp/qml-probe");
+  EXPECT_EQ(mgr->property("replayCachePath").toString(), "/tmp/qml-probe");
+}
+
+TEST_F(SettingsManagerTest, LegacySingularTokenKeyNotPersisted) {
+  // The old "waylandRestoreToken" key (never mapped to a game) must not be
+  // written anymore; only the per-game map persists. Note the map key
+  // contains the singular as a substring, so compare parsed keys exactly.
+  mgr->setRestoreToken("Deadlock", "tok123");
+  mgr->save();
+  QFile f(mgr->settingsFilePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+  const QJsonDocument doc =
+      QJsonDocument::fromJson(f.readAll());
+  ASSERT_TRUE(doc.isObject());
+  const QStringList keys = doc.object().keys();
+  EXPECT_FALSE(keys.contains("waylandRestoreToken"));
+  EXPECT_TRUE(keys.contains("waylandRestoreTokens"));
 }
 
 // --- Save/Load Round Trip ---

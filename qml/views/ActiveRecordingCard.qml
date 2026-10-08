@@ -15,6 +15,7 @@ Rectangle {
 
     radius: Theme.radiusMedium
     color: Theme.cardColor
+    clip: true
 
     function formatDuration(ms) {
         if (!ms || ms <= 0)
@@ -31,30 +32,37 @@ Rectangle {
     }
 
     function formatSize(bytes) {
-        if (!bytes || bytes <= 0)
-            return "0 MB";
-
-        var gb = bytes / (1024 * 1024 * 1024);
-        if (gb >= 1)
-            return gb.toFixed(1) + " GB";
-
-        var mb = bytes / (1024 * 1024);
-        return mb.toFixed(0) + " MB";
+        if (!bytes || bytes <= 0) return "0 B";
+        var kb = 1024;
+        var mb = kb * 1024;
+        var gb = mb * 1024;
+        if (bytes >= gb) return (bytes / gb).toFixed(1) + " GB";
+        if (bytes >= mb) return (bytes / mb).toFixed(1) + " MB";
+        if (bytes >= kb) return (bytes / kb).toFixed(0) + " KB";
+        return bytes + " B";
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        // Thumbnail section
-        Rectangle {
+        // --- THUMBNAIL SECTION (same geometry as RecordingCard) ---
+        Item {
             Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.margins: Theme.spacingSmall
-            radius: Theme.radiusSmall
-            color: Theme.surfaceColor
+            Layout.preferredHeight: 125
+            clip: true
 
-            // Pulsing record dot
+            // Full-bleed background with top-rounded corners only —
+            // same silhouette as RecordingCard's masked thumbnail.
+            Rectangle {
+                width: parent.width
+                height: parent.height + root.radius
+                topLeftRadius: root.radius
+                topRightRadius: root.radius
+                color: Theme.surfaceColor
+            }
+
+            // Pulsing record dot (the "live" placeholder for a thumbnail)
             Rectangle {
                 anchors.centerIn: parent
                 width: 40
@@ -77,41 +85,17 @@ Rectangle {
                         duration: 700
                         easing.type: Easing.InOutSine
                     }
-
                 }
-
             }
 
-            // Duration badge (bottom-right)
-            Rectangle {
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.margins: Theme.spacingSmall
-                width: durationLabel.width + Theme.spacingTiny * 2
-                height: durationLabel.height + Theme.spacingTiny * 2
-                radius: Theme.radiusSmall
-                color: "#CC000000"
-
-                Label {
-                    id: durationLabel
-
-                    anchors.centerIn: parent
-                    text: recordingManager ? formatDuration(recordingManager.recordingDuration) : "0:00"
-                    color: "white"
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.family: "monospace"
-                }
-
-            }
-
-            // REC badge (top-left)
+            // REC badge (top-left), styled like the duration badge
             Rectangle {
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.margins: Theme.spacingSmall
-                width: recLabel.width + Theme.spacingTiny * 2
-                height: recLabel.height + Theme.spacingTiny * 2
-                radius: Theme.radiusSmall
+                width: recLabel.width + 12
+                height: recLabel.height + 4
+                radius: 4
                 color: Theme.errorColor
 
                 Label {
@@ -120,7 +104,7 @@ Rectangle {
                     anchors.centerIn: parent
                     text: qsTr("REC")
                     color: "white"
-                    font.pixelSize: Theme.fontSizeSmall - 1
+                    font.pixelSize: Theme.fontSizeTiny
                     font.weight: Font.Bold
                 }
 
@@ -139,53 +123,71 @@ Rectangle {
                         duration: 700
                         easing.type: Easing.InOutSine
                     }
-
                 }
-
             }
 
+            // Duration badge (bottom-right) — same metrics as RecordingCard
+            Rectangle {
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: Theme.spacingSmall
+                width: durationLabel.width + 12
+                height: durationLabel.height + 4
+                radius: 4
+                color: "#CC000000"
+
+                Label {
+                    id: durationLabel
+
+                    anchors.centerIn: parent
+                    text: recordingManager ? formatDuration(recordingManager.recordingDuration) : "0:00"
+                    color: "white"
+                    font.pixelSize: Theme.fontSizeTiny
+                }
+            }
         }
 
-        // Metadata section
+        // --- INFO SECTION (same structure as RecordingCard) ---
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.fillHeight: true
             Layout.margins: Theme.spacingSmall
-            Layout.topMargin: 0
             spacing: 2
 
             Label {
                 Layout.fillWidth: true
-                text: recordingManager ? recordingManager.currentGameName : qsTr("Recording...")
+                text: recordingManager ? (recordingManager.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
                 color: Theme.textColor
-                font.pixelSize: Theme.fontSizeNormal
-                font.weight: Font.Medium
+                font.pixelSize: Theme.fontSizeSmall
+                font.weight: Font.Bold
                 elide: Text.ElideRight
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                Label {
-                    text: qsTr("In Progress")
-                    color: Theme.errorColor
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-
-                Item {
-                    Layout.fillWidth: true
-                }
-
-                Label {
-                    text: recordingManager ? formatSize(recordingManager.recordingSize) : ""
-                    color: Theme.textMutedColor
-                    font.pixelSize: Theme.fontSizeSmall
-                }
-
+            Label {
+                text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
+                color: Theme.textSecondaryColor
+                font.pixelSize: Theme.fontSizeTiny
             }
 
-        }
+            Item {
+                Layout.fillHeight: true
+            }
 
+            Label {
+                text: qsTr("In Progress")
+                color: Theme.errorColor
+                font.pixelSize: Theme.fontSizeTiny
+                Layout.alignment: Qt.AlignBottom
+            }
+        }
     }
 
+    // --- BORDER OVERLAY (same as RecordingCard default state) ---
+    Rectangle {
+        anchors.fill: parent
+        radius: root.radius
+        color: "transparent"
+        border.color: Theme.borderColor
+        border.width: 1
+    }
 }

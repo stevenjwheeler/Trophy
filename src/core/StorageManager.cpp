@@ -10,6 +10,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QStorageInfo>
@@ -65,7 +66,15 @@ void StorageManager::setMaxSize(qint64 bytes) {
   if (m_maxSize != bytes) {
     m_maxSize = bytes;
     emit maxSizeChanged();
-    enforceStorageLimit();
+    refresh();
+    m_limitNotified = false;
+    if (isOverLimit()) {
+      if (m_autoDeleteOldest) {
+        notifyLimitReached();
+      } else {
+        notifyLimitCannotCleanup();
+      }
+    }
   }
 }
 
@@ -82,35 +91,123 @@ qint64 StorageManager::availableSpace() const {
   return storage.bytesAvailable();
 }
 
+qint64 StorageManager::driveCapacityBytes() const {
+  QStorageInfo storage(m_storagePath);
+  const qint64 total = storage.bytesTotal();
+  return total > 0 ? total : 0;
+}
+
 void StorageManager::refresh() {
   qint64 newSize = calculateDirectorySize();
   if (m_usedSize != newSize) {
     m_usedSize = newSize;
     emit usedSizeChanged();
   }
+  if (!isOverLimit()) {
+    m_limitNotified = false;
+  }
 }
 
-void StorageManager::enforceStorageLimit() {
+void StorageManager::setAutoDeleteOldest(bool enabled) {
+  if (m_autoDeleteOldest != enabled) {
+    m_autoDeleteOldest = enabled;
+    emit autoDeleteOldestChanged();
+    refresh();
+    m_limitNotified = false;
+    if (isOverLimit()) {
+      if (m_autoDeleteOldest) {
+        notifyLimitReached();
+      } else {
+        notifyLimitCannotCleanup();
+      }
+    }
+  }
+}
+
+void StorageManager::setExcludedRecordingPath(const QString &filePath) {
+  QFileInfo info(filePath);
+  m_excludedRecordingPath = info.canonicalFilePath();
+  if (m_excludedRecordingPath.isEmpty()) {
+    m_excludedRecordingPath = info.absoluteFilePath();
+  }
+}
+
+void StorageManager::clearExcludedRecordingPath() {
+  m_excludedRecordingPath.clear();
+}
+
+bool StorageManager::requestCleanup(bool force) {
+  if (m_maxSize <= 0) {
+    return false;
+  }
+
+  if (!m_autoDeleteOldest && !force) {
+    return false;
+  }
+
+  return enforceStorageLimit(force);
+}
+
+bool StorageManager::isOverLimit() const {
+  return m_maxSize > 0 && m_usedSize > m_maxSize;
+}
+
+void StorageManager::notifyLimitReached() {
+  if (m_limitNotified) {
+    return;
+  }
+  m_limitNotified = true;
+  emit storageLimitReached();
+}
+
+void StorageManager::notifyLimitCannotCleanup() {
+  if (m_limitNotified) {
+    return;
+  }
+  m_limitNotified = true;
+  emit storageLimitCannotCleanup();
+}
+
+bool StorageManager::enforceStorageLimit(bool allowDelete) {
   refresh();
+
+  if (m_maxSize <= 0) {
+    // A non-positive max size means "no limit"; do not delete recordings.
+    return true;
+  }
+
+  if (!m_autoDeleteOldest && !allowDelete) {
+    if (m_usedSize > m_maxSize) {
+      notifyLimitCannotCleanup();
+      return false;
+    }
+    return true;
+  }
 
   while (m_usedSize > m_maxSize) {
     qDebug() << "Storage limit exceeded:" << formatSize(m_usedSize) << "/"
             << formatSize(m_maxSize);
 
-    deleteOldestRecording();
-
-    // Recalculate after deletion
-    qint64 newSize = calculateDirectorySize();
-    if (newSize >= m_usedSize) {
-      // Nothing more to delete or size didn't change
+    if (!deleteOldestRecording()) {
+      // If we can't delete the oldest, check if it's because it's the current recording
+      QStringList recordings = getRecordingsSortedByDate();
+      if (!recordings.isEmpty() && recordings.first() == m_excludedRecordingPath) {
+        notifyLimitCannotCleanup();
+      }
       break;
     }
-    m_usedSize = newSize;
+
+    refresh();
   }
 
-  if (m_usedSize > m_maxSize * 0.9) {
-    emit storageLimitReached();
+  // Only genuinely over-limit states notify now: the old >90% early
+  // warning cried "Storage Full" (and logged activity) on every progress
+  // tick without deleting anything, since there was nothing to delete.
+  if (isOverLimit()) {
+    notifyLimitReached();
   }
+
+  return !isOverLimit();
 }
 
 bool StorageManager::deleteRecording(const QString &filePath) {
@@ -130,6 +227,15 @@ bool StorageManager::deleteRecording(const QString &filePath) {
   QFile file(filePath);
   if (file.remove()) {
     qDebug() << "Deleted recording:" << filePath;
+    // Remove the sidecar thumbnail too, so auto-cleanup doesn't orphan
+    // .thumbnails/<basename>.jpg. Kept idempotent with
+    // RecordingLibrary::removeRecording (which does the same when the
+    // recordingDeleted signal is wired up in Application).
+    const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
+                              info.completeBaseName() + ".jpg";
+    if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
+      qWarning() << "Failed to delete thumbnail:" << thumbPath;
+    }
     emit recordingDeleted(filePath);
     refresh();
     return true;
@@ -137,6 +243,133 @@ bool StorageManager::deleteRecording(const QString &filePath) {
 
   qWarning() << "Failed to delete recording:" << filePath << file.errorString();
   return false;
+}
+
+bool StorageManager::deleteOldestRecording() {
+  const QStringList recordings = getRecordingsSortedByDate();
+
+  if (recordings.isEmpty()) {
+    qWarning() << "No recordings to delete";
+    return false;
+  }
+
+  const QString excludedCanonical =
+      m_excludedRecordingPath.isEmpty()
+          ? QString()
+          : QFileInfo(m_excludedRecordingPath).canonicalFilePath();
+
+  // Delete the oldest recording that is not the in-progress (excluded)
+  // one. Giving up at the first excluded entry would disable auto-cleanup
+  // entirely whenever the active recording happens to be the oldest file.
+  for (const QString &candidate : recordings) {
+    if (!excludedCanonical.isEmpty() &&
+        QFileInfo(candidate).canonicalFilePath() == excludedCanonical) {
+      qDebug() << "Not deleting current recording:" << candidate;
+      continue;
+    }
+    qDebug() << "Auto-deleting oldest recording:" << candidate;
+    return deleteRecording(candidate);
+  }
+
+  qDebug() << "Only the current recording remains; nothing to delete";
+  return false;
+}
+
+QString StorageManager::renameRecording(const QString &filePath,
+                                        const QString &newTitle) {
+  QFileInfo info(filePath);
+  const QString oldAbsolute = info.absoluteFilePath();
+
+  // Security check: ensure file is within storage path
+  if (!oldAbsolute.startsWith(m_storagePath)) {
+    qWarning() << "Refusing to rename file outside storage path:" << filePath;
+    return QString();
+  }
+
+  if (!info.exists() || !info.isFile()) {
+    qWarning() << "Cannot rename, file does not exist:" << filePath;
+    return QString();
+  }
+
+  // Never rename the in-progress recording: the muxer is still writing to it.
+  if (!m_excludedRecordingPath.isEmpty()) {
+    const QString excludedCanonical =
+        QFileInfo(m_excludedRecordingPath).canonicalFilePath();
+    const QString candidateCanonical = info.canonicalFilePath();
+    if (!excludedCanonical.isEmpty() &&
+        candidateCanonical == excludedCanonical) {
+      qWarning() << "Refusing to rename in-progress recording:" << filePath;
+      return QString();
+    }
+  }
+
+  // Sanitize the user-supplied title the same way new recording filenames
+  // are sanitized, so renamed files still parse for game name / timestamp.
+  QString safeName = newTitle.trimmed();
+  safeName.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+  safeName.replace(QRegularExpression("[_-]{2,}"), "_");
+  safeName =
+      safeName.trimmed().replace(QRegularExpression("^[_-]+|[_-]+$"), "");
+  if (safeName.isEmpty()) {
+    qWarning() << "Refusing to rename: title is empty after sanitizing:"
+               << newTitle;
+    return QString();
+  }
+
+  // Keep the timestamp suffix so the recording date stays visible in the
+  // filename and parseFileNameForGameName keeps working.
+  const QString oldBase = info.completeBaseName();
+  static const QRegularExpression timestampRe(
+      "_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}$");
+  QString newBase = safeName;
+  QRegularExpressionMatch match = timestampRe.match(oldBase);
+  if (match.hasMatch()) {
+    newBase += match.captured(0);
+  }
+
+  const QString suffix = info.suffix();
+  QDir dir(info.absolutePath());
+  QString newAbsolute =
+      dir.absoluteFilePath(newBase + (suffix.isEmpty() ? QString() : "." + suffix));
+
+  if (newAbsolute == oldAbsolute) {
+    return oldAbsolute; // No-op: title already matches.
+  }
+
+  // Collision avoidance: same _1/_2 suffix scheme as exportRecording.
+  if (QFile::exists(newAbsolute)) {
+    int counter = 1;
+    while (QFile::exists(newAbsolute)) {
+      newAbsolute = dir.absoluteFilePath(
+          QString("%1_%2.%3").arg(newBase).arg(counter).arg(suffix));
+      counter++;
+    }
+  }
+
+  if (!QFile::rename(oldAbsolute, newAbsolute)) {
+    qWarning() << "Failed to rename recording:" << oldAbsolute << "->"
+               << newAbsolute;
+    return QString();
+  }
+
+  // Move the sidecar thumbnail alongside the video so the library picks it
+  // up instead of regenerating it.
+  const QString thumbDir = info.absolutePath() + "/.thumbnails";
+  const QString oldThumb = thumbDir + "/" + oldBase + ".jpg";
+  if (QFile::exists(oldThumb)) {
+    const QString newThumb =
+        thumbDir + "/" + QFileInfo(newAbsolute).completeBaseName() + ".jpg";
+    if (!QFile::exists(newThumb)) {
+      QFile::rename(oldThumb, newThumb);
+    } else {
+      QFile::remove(oldThumb);
+    }
+  }
+
+  qDebug() << "Renamed recording:" << oldAbsolute << "->" << newAbsolute;
+  emit recordingRenamed(oldAbsolute, newAbsolute);
+  refresh();
+  return newAbsolute;
 }
 
 bool StorageManager::exportRecording(const QString &sourcePath, const QString &destDir) const {
@@ -176,18 +409,6 @@ bool StorageManager::exportRecording(const QString &sourcePath, const QString &d
   return false;
 }
 
-QString StorageManager::generateFilePath(const QString &baseName,
-                                         const QString &extension) const {
-  QString safeName = baseName;
-  safeName.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
-
-  QString timestamp =
-      QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
-  QString fileName = QString("%1_%2.%3").arg(safeName, timestamp, extension);
-
-  return m_storagePath + "/" + fileName;
-}
-
 QString StorageManager::formatSize(qint64 bytes) {
   const qint64 KB = 1024;
   const qint64 MB = KB * 1024;
@@ -208,7 +429,7 @@ QString StorageManager::formatSize(qint64 bytes) {
 
 void StorageManager::onDirectoryChanged(const QString &path) {
   Q_UNUSED(path)
-  refresh();
+  enforceStorageLimit();
 }
 
 qint64 StorageManager::calculateDirectorySize() const {
@@ -239,19 +460,6 @@ QStringList StorageManager::getRecordingsSortedByDate() const {
   }
 
   return paths;
-}
-
-void StorageManager::deleteOldestRecording() {
-  QStringList recordings = getRecordingsSortedByDate();
-
-  if (recordings.isEmpty()) {
-    qWarning() << "No recordings to delete";
-    return;
-  }
-
-  QString oldest = recordings.first();
-  qDebug() << "Auto-deleting oldest recording:" << oldest;
-  deleteRecording(oldest);
 }
 
 } // namespace TrophyBackend

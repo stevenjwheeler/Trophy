@@ -30,6 +30,15 @@ void* get_dispatch_key(void* obj) {
 }
 
 void notify_app(int& fd, const char* app_name) {
+    // Revalidate a cached connection: if Trophy restarted, our socket is
+    // dead. A zero-byte send detects that without any traffic, so the
+    // next instance creation re-reports instead of staying silent.
+    if (fd != -1) {
+        if (send(fd, "", 0, MSG_NOSIGNAL) != 0) {
+            close(fd);
+            fd = -1;
+        }
+    }
     if (fd == -1) {
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd == -1) return;
