@@ -115,6 +115,24 @@ TEST_F(GlShimEnrollmentTest, FallsBackToCustomPrefixLibDir) {
   EXPECT_TRUE(findShippedLib("libtrophy_nope_1234.so").isEmpty());
 }
 
+TEST_F(GlShimEnrollmentTest, FindsLibraryInPrefixMultilibLayout) {
+  // Installed layout (AppImage included): <prefix>/bin/trophy with the
+  // lib under <prefix>/lib/<multiarch>/trophy. This is what failed in
+  // the wild — the lookup only ever consulted the dev gl_shim dir.
+  QTemporaryDir prefix;
+  ASSERT_TRUE(prefix.isValid());
+  ASSERT_TRUE(QDir().mkpath(prefix.path() + "/bin"));
+  ASSERT_TRUE(QDir().mkpath(prefix.path() + "/lib/x86_64-linux-gnu/trophy"));
+  const QString lib =
+      prefix.path() + "/lib/x86_64-linux-gnu/trophy/libtrophy_gl_shim.so";
+  QFile f(lib);
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  f.write("fake");
+  f.close();
+  EXPECT_EQ(GlShimEnrollment::libraryPathForAppDir(prefix.path() + "/bin"),
+            lib);
+}
+
 TEST_F(GlShimEnrollmentTest, FindsLibraryInDevTreeLayout) {
   // The dev build tree keeps the lib in <appDir>/gl_shim/. A regression
   // passed the full file path as a search dir, which silently matched
