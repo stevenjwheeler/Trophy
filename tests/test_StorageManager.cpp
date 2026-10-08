@@ -620,3 +620,86 @@ TEST_F(StorageManagerTest, AutoCleanupRemovesSidecarThumbnails) {
       QDir(tempDir.path() + "/.thumbnails").entryList({"*.jpg"}, QDir::Files).size(),
       1);
 }
+
+TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
+  QStringList paths;
+  for (int i = 0; i < 5; ++i) {
+    const QString name = QString("bulk_%1.mkv").arg(i);
+    createDummyFile(name, 1024);
+    paths << tempDir.path() + "/" + name;
+  }
+  QDir(tempDir.path()).mkpath(".thumbnails");
+  QFile thumb(tempDir.path() + "/.thumbnails/bulk_0.jpg");
+  ASSERT_TRUE(thumb.open(QIODevice::WriteOnly));
+  thumb.write(QByteArray(512, 't'));
+  thumb.close();
+
+  StorageManager mgr(tempDir.path());
+  QSignalSpy startedSpy(&mgr, &StorageManager::bulkDeleteStarted);
+  QSignalSpy progressSpy(&mgr, &StorageManager::bulkDeleteProgress);
+  QSignalSpy deletedSpy(&mgr, &StorageManager::recordingsDeleted);
+  QSignalSpy finishedSpy(&mgr, &StorageManager::bulkDeleteFinished);
+
+  EXPECT_FALSE(mgr.bulkDeleteInProgress());
+  mgr.deleteRecordings(paths);
+  // Returns immediately; the work happens on the thread pool.
+  EXPECT_TRUE(mgr.bulkDeleteInProgress());
+
+  ASSERT_TRUE(finishedSpy.wait(5000));
+  EXPECT_FALSE(mgr.bulkDeleteInProgress());
+  EXPECT_EQ(startedSpy.count(), 1);
+  ASSERT_EQ(deletedSpy.count(), 1);
+  EXPECT_EQ(deletedSpy.first().first().toStringList().size(), 5);
+  ASSERT_EQ(finishedSpy.count(), 1);
+  EXPECT_EQ(finishedSpy.first().at(0).toInt(), 5);
+  EXPECT_EQ(finishedSpy.first().at(1).toInt(), 5);
+  EXPECT_FALSE(progressSpy.isEmpty());
+
+  for (const QString &p : paths) {
+    EXPECT_FALSE(QFile::exists(p));
+  }
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/.thumbnails/bulk_0.jpg"));
+  // Single refresh on completion: size settled back to zero.
+  EXPECT_EQ(mgr.usedSize(), 0);
+}
+
+TEST_F(StorageManagerTest, BulkDeleteRefusesOutsidePath) {
+  // Same sacrificial-sibling-dir guard as DeleteRecordingOutsidePath.
+  QTemporaryDir outsideDir;
+  ASSERT_TRUE(outsideDir.isValid());
+  const QString outsidePath = outsideDir.path() + "/outside.mkv";
+  {
+    QFile f(outsidePath);
+    ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+    f.write(QByteArray(1024, 'x'));
+  }
+  createDummyFile("inside.mkv", 1024);
+
+  StorageManager mgr(tempDir.path());
+  QSignalSpy deletedSpy(&mgr, &StorageManager::recordingsDeleted);
+  QSignalSpy finishedSpy(&mgr, &StorageManager::bulkDeleteFinished);
+
+  mgr.deleteRecordings({tempDir.path() + "/inside.mkv", outsidePath});
+  ASSERT_TRUE(finishedSpy.wait(5000));
+
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/inside.mkv"));
+  EXPECT_TRUE(QFile::exists(outsidePath));
+  ASSERT_EQ(finishedSpy.count(), 1);
+  EXPECT_EQ(finishedSpy.first().at(0).toInt(), 1);
+  EXPECT_EQ(finishedSpy.first().at(1).toInt(), 2);
+  ASSERT_EQ(deletedSpy.count(), 1);
+  EXPECT_EQ(deletedSpy.first().first().toStringList(),
+            QStringList({tempDir.path() + "/inside.mkv"}));
+}
+
+TEST_F(StorageManagerTest, BulkDeleteEmptyListIsNoOp) {
+  StorageManager mgr(tempDir.path());
+  QSignalSpy finishedSpy(&mgr, &StorageManager::bulkDeleteFinished);
+  QSignalSpy startedSpy(&mgr, &StorageManager::bulkDeleteStarted);
+
+  mgr.deleteRecordings({});
+
+  EXPECT_FALSE(mgr.bulkDeleteInProgress());
+  EXPECT_FALSE(startedSpy.wait(250));
+  EXPECT_EQ(finishedSpy.count(), 0);
+}

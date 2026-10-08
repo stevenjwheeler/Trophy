@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QMap>
 #include <QProcess>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -14,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "library/Recording.h"
+#include "muxing/TrophyMetadata.h"
 
 using namespace TrophyBackend;
 
@@ -60,7 +62,8 @@ protected:
   // system ffmpeg. Empty string when ffmpeg is unavailable (callers
   // should SKIP).
   QString makeTitledClip(const QString &name, const QString &title,
-                         const QString &kind = QString()) {
+                         const QString &kind = QString(),
+                         const QMap<QString, QString> &extra = {}) {
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
       return QString();
     const QString path = tempDir.path() + "/" + name;
@@ -69,6 +72,8 @@ protected:
                      "yuv420p",     "-metadata", QString("title=%1").arg(title)};
     if (!kind.isEmpty())
       args << "-metadata" << QString("trophy-kind=%1").arg(kind);
+    for (auto it = extra.constBegin(); it != extra.constEnd(); ++it)
+      args << "-metadata" << QString("%1=%2").arg(it.key(), it.value());
     args << path;
     QProcess proc;
     proc.start("ffmpeg", args);
@@ -197,6 +202,114 @@ TEST_F(RecordingTest, NoKindTagLeavesRecording) {
   waitForProbe();
   EXPECT_FALSE(rec.isClip());
   EXPECT_EQ(rec.gameName(), "Deadlock");
+}
+
+// --- trophy-version container tag ---
+
+TEST_F(RecordingTest, TrophyVersionTagIsExposed) {
+  QMap<QString, QString> extra{{"trophy-version", "9.9.9-test"}};
+  QString path =
+      makeTitledClip("Versioned.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  EXPECT_TRUE(rec.trophyVersion().isEmpty());
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.trophyVersion(), "9.9.9-test");
+}
+
+TEST_F(RecordingTest, NoVersionTagLeavesVersionEmpty) {
+  QString path =
+      makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_TRUE(rec.trophyVersion().isEmpty());
+}
+
+// --- trophy-date + trophy-time container tags (replace filename ts) ---
+
+TEST_F(RecordingTest, TrophyDateTimeTagsSetDate) {
+  // creation_time deliberately disagrees: the explicit pair must win.
+  QMap<QString, QString> extra{{"creation_time", "2021-05-06T07:08:09"},
+                               {"trophy-date", "2020-01-02"},
+                               {"trophy-time", "03-04-05"}};
+  QString path =
+      makeTitledClip("Custom_Name.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.date().toString("yyyy-MM-dd_HH-mm-ss"),
+            QString("2020-01-02_03-04-05"));
+}
+
+TEST_F(RecordingTest, MalformedTrophyDateFallsBackToCreationTime) {
+  // Explicit Z: the matroska muxer normalizes TZ-less creation_time to
+  // UTC on write (one more reason trophy-date/time exist), so pin the
+  // offset to keep this TZ-independent.
+  QMap<QString, QString> extra{{"creation_time", "2021-05-06T07:08:09Z"},
+                               {"trophy-date", "not-a-date"},
+                               {"trophy-time", "03-04-05"}};
+  QString path =
+      makeTitledClip("Custom_Name.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.date().toString("yyyy-MM-dd_HH-mm-ss"),
+            QString("2021-05-06_07-08-09"));
+}
+
+TEST_F(RecordingTest, HalfTrophyDateTimeFallsBackToCreationTime) {
+  // Date without time is not a capture moment: ignore the half pair.
+  QMap<QString, QString> extra{{"creation_time", "2021-05-06T07:08:09Z"},
+                               {"trophy-date", "2020-01-02"}};
+  QString path =
+      makeTitledClip("Custom_Name.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.date().toString("yyyy-MM-dd_HH-mm-ss"),
+            QString("2021-05-06_07-08-09"));
+}
+
+// --- TrophyMetadata helpers (no ffmpeg needed) ---
+
+TEST(TrophyMetadataHelpers, DateTimeRoundTrip) {
+  const QDateTime now = QDateTime::currentDateTime();
+  const QString stamp =
+      now.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss"));
+  const QDateTime parsed = trophyDateTimeFromTags(trophyDateString(now),
+                                                  trophyTimeString(now));
+  EXPECT_TRUE(parsed.isValid());
+  EXPECT_EQ(parsed.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")), stamp);
+  // Recorder stamp is second-granular by construction.
+  EXPECT_EQ(parsed.time().msec(), 0);
+}
+
+TEST(TrophyMetadataHelpers, DateTimeRejectsGarbage) {
+  EXPECT_FALSE(
+      trophyDateTimeFromTags(QStringLiteral("not-a-date"),
+                             QStringLiteral("03-04-05"))
+          .isValid());
+  EXPECT_FALSE(trophyDateTimeFromTags(QStringLiteral("2020-01-02"),
+                                      QStringLiteral(""))
+                   .isValid());
+  EXPECT_FALSE(trophyDateTimeFromTags(QStringLiteral(""),
+                                      QStringLiteral("03-04-05"))
+                   .isValid());
+}
+
+TEST(TrophyMetadataHelpers, VersionIsNeverEmpty) {
+  EXPECT_FALSE(trophyVersion().isEmpty());
 }
 
 // --- Thumbnail path ---

@@ -134,6 +134,12 @@ void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
 
 void RecordingLibrary::onDirectoryChanged(const QString &path) {
   Q_UNUSED(path)
+  if (m_bulkOperationDepth > 0) {
+    // A background bulk delete is unlinking files; the bulk completion
+    // path settles the model once (removeRecordings + refresh), so
+    // per-file watcher refreshes here would just be churn.
+    return;
+  }
   if (m_ignoreNextChange) {
     m_ignoreNextChange = false;
     return;
@@ -269,6 +275,84 @@ void RecordingLibrary::removeRecording(const QString &filePath) {
     } else {
       emit recordingRemoved(filePath);
     }
+  }
+}
+
+void RecordingLibrary::setBulkOperationActive(bool active) {
+  if (active) {
+    ++m_bulkOperationDepth;
+  } else if (m_bulkOperationDepth > 0) {
+    --m_bulkOperationDepth;
+  }
+}
+
+void RecordingLibrary::removeRecordings(const QStringList &filePaths) {
+  if (filePaths.isEmpty()) {
+    return;
+  }
+
+  QSet<QString> doomed;
+  for (const QString &path : filePaths) {
+    doomed.insert(path);
+  }
+
+  // Which of the listed paths do we actually track? Only those are
+  // reported, mirroring removeRecording (unknown files stay quiet).
+  QSet<QString> known;
+  for (const auto &rec : m_recordings) {
+    if (rec && doomed.contains(rec->filePath())) {
+      known.insert(rec->filePath());
+    }
+  }
+  if (known.isEmpty()) {
+    return;
+  }
+
+  // Drop any rename preference for the deleted files (one save).
+  bool prefsChanged = false;
+  for (const QString &path : known) {
+    if (m_fileNameTitlePreferred.remove(QFileInfo(path).fileName())) {
+      prefsChanged = true;
+    }
+    // Best-effort sidecar cleanup, mirroring removeRecording.
+    const QFileInfo videoInfo(path);
+    const QString thumbPath = videoInfo.absolutePath() + "/.thumbnails/" +
+                              videoInfo.completeBaseName() + ".jpg";
+    if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
+      qWarning() << "Failed to delete thumbnail:" << thumbPath;
+    }
+  }
+  if (prefsChanged) {
+    saveCustomTitles();
+  }
+
+  m_recordings.erase(
+      std::remove_if(m_recordings.begin(), m_recordings.end(),
+                     [&doomed](const std::unique_ptr<Recording> &rec) {
+                       return rec && doomed.contains(rec->filePath());
+                     }),
+      m_recordings.end());
+
+  // Settle the filtered list BEFORE emitting (same dangling-pointer
+  // rule as removeRecording: observers calling get() in the slot must
+  // never see freed entries).
+  updateFilteredRecordings();
+
+  // A rename's source path vanishing is not a deletion — same swallow
+  // rule as removeRecording.
+  QStringList removed;
+  for (const QString &path : filePaths) {
+    if (!known.contains(path)) {
+      continue;
+    }
+    if (path == m_renameSource) {
+      m_renameSource.clear();
+      continue;
+    }
+    removed.append(path);
+  }
+  if (!removed.isEmpty()) {
+    emit recordingsRemoved(removed);
   }
 }
 

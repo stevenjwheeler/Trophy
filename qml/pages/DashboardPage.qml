@@ -138,20 +138,32 @@ Page {
                             RowLayout {
                                 spacing: Theme.spacingSmall
                                 visible: window.selectedRecordings && window.selectedRecordings.length > 0
+                                // True while the background bulk delete runs;
+                                // the selection clears on bulkDeleteFinished.
+                                property bool bulkDeleting: window.storageManager && window.storageManager.bulkDeleteInProgress
 
                                 TrophyButton {
                                     text: qsTr("Export Selected (%1)").arg(window.selectedRecordings.length)
                                     icon.source: "qrc:/icons/folder.svg"
                                     implicitHeight: 28
+                                    enabled: !parent.bulkDeleting
                                     onClicked: window.exportSelected()
                                 }
 
                                 TrophyButton {
-                                    text: qsTr("Delete Selected")
+                                    text: parent.bulkDeleting ? qsTr("Deleting…") : qsTr("Delete Selected")
                                     icon.source: "qrc:/icons/trash.svg"
                                     implicitHeight: 28
                                     baseColor: Theme.errorColor
+                                    enabled: !parent.bulkDeleting
                                     onClicked: window.deleteSelected()
+                                }
+
+                                BusyIndicator {
+                                    implicitWidth: 20
+                                    implicitHeight: 20
+                                    visible: parent.bulkDeleting
+                                    running: visible
                                 }
                                 
                                 TrophyButton {
@@ -494,8 +506,21 @@ Page {
                                     function getRelativeTime(d) {
                                         var diffMins = Math.floor((new Date() - new Date(d)) / 60000)
                                         if (diffMins < 1) return "Just now"
-                                        if (diffMins < 60) return diffMins + " mins ago"
-                                        return Math.floor(diffMins / 60) + " hours ago"
+                                        if (diffMins < 60) return diffMins === 1 ? "1 min ago" : diffMins + " mins ago"
+                                        var diffHours = Math.floor(diffMins / 60)
+                                        if (diffHours < 24) return diffHours === 1 ? "1 hour ago" : diffHours + " hours ago"
+                                        var diffDays = Math.floor(diffHours / 24)
+                                        if (diffDays < 7) return diffDays === 1 ? "1 day ago" : diffDays + " days ago"
+                                        if (diffDays < 30) {
+                                            var weeks = Math.floor(diffDays / 7)
+                                            return weeks === 1 ? "1 week ago" : weeks + " weeks ago"
+                                        }
+                                        if (diffDays < 365) {
+                                            var months = Math.floor(diffDays / 30)
+                                            return months === 1 ? "1 month ago" : months + " months ago"
+                                        }
+                                        var years = Math.floor(diffDays / 365)
+                                        return years === 1 ? "1 year ago" : years + " years ago"
                                     }
                                 }
 
@@ -587,6 +612,11 @@ Page {
         function onCountChanged() { activityModel.updateActivity() }
         function onRecordingRemoved(filePath) {
             root.pushActivityEvent("deleted", "orange", qsTr("Deleted: %1").arg(root.activityGameName(filePath)), qsTr("Removed from library"))
+        }
+        function onRecordingsRemoved(filePaths) {
+            for (var i = 0; i < filePaths.length; i++) {
+                root.pushActivityEvent("deleted", "orange", qsTr("Deleted: %1").arg(root.activityGameName(filePaths[i])), qsTr("Removed from library"))
+            }
         }
     }
     Connections { target: recordingManager; function onIsRecordingChanged() { activityModel.updateActivity() } }

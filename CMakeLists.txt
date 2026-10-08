@@ -31,13 +31,53 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(DEFINED APP_VERSION AND NOT APP_VERSION STREQUAL "")
   set(GIT_VERSION ${APP_VERSION})
 else()
+  # Local builds: mirror the CI scheme (<base>-<branch>-<sha>,
+  # base = nearest tag) so a dev-branch binary never shows a
+  # raw "vX.Y.Z-N-gSHA" describe string. Exact tag checkouts
+  # keep the tag itself.
   execute_process(
-      COMMAND git describe --tags --always
+      COMMAND git describe --tags --exact-match
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-      OUTPUT_VARIABLE GIT_VERSION
+      OUTPUT_VARIABLE GIT_EXACT_TAG
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET
   )
+  if(GIT_EXACT_TAG)
+    set(GIT_VERSION ${GIT_EXACT_TAG})
+  else()
+    execute_process(
+        COMMAND git describe --tags --abbrev=0
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_BASE_TAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND git rev-parse --abbrev-ref HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_BRANCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
+      set(GIT_VERSION "${GIT_BASE_TAG}-${GIT_BRANCH}-${GIT_SHA}")
+    else()
+      execute_process(
+          COMMAND git describe --tags --always
+          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+          OUTPUT_VARIABLE GIT_VERSION
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET
+      )
+    endif()
+  endif()
 endif()
 
 # Fallback if git fails or no tags exist
@@ -201,6 +241,7 @@ set(CORE_SOURCES
     src/core/ControlServer.cpp
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
+    src/core/UpdateChecker.cpp
     src/core/WindowService.cpp
     src/core/FrameDispatcher.cpp
     src/core/CircularFrameBuffer.cpp
@@ -298,6 +339,7 @@ set(ENCODING_HEADERS
 set(MUXING_HEADERS
     src/muxing/IMuxer.h
     src/muxing/FFmpegMuxer.h
+    src/muxing/TrophyMetadata.h
 )
 
 set(DETECTION_HEADERS

@@ -26,7 +26,9 @@ class Recording : public QObject {
   Q_PROPERTY(QString fileName READ fileName CONSTANT)
   Q_PROPERTY(QString directory READ directory CONSTANT)
   Q_PROPERTY(QString gameName READ gameName NOTIFY metadataChanged)
-  Q_PROPERTY(QDateTime date READ date CONSTANT)
+  // Produced asynchronously by probeVideoFile: filesystem dates first,
+  // then the container tags (trophy-date/time win over creation_time).
+  Q_PROPERTY(QDateTime date READ date NOTIFY metadataChanged)
   Q_PROPERTY(qint64 duration READ duration NOTIFY metadataChanged)
   Q_PROPERTY(qint64 size READ size CONSTANT)
   Q_PROPERTY(
@@ -36,6 +38,9 @@ class Recording : public QObject {
   // Media kind: container tag (trophy-kind) wins, _Replay filename
   // suffix is the fallback for older files. Survives renames.
   Q_PROPERTY(bool isClip READ isClip NOTIFY metadataChanged)
+  // Recorder version that wrote the file (trophy-version tag; empty on
+  // older files that predate the tag).
+  Q_PROPERTY(QString trophyVersion READ trophyVersion NOTIFY metadataChanged)
 
 public:
   explicit Recording(const QString &filePath, QObject *parent = nullptr);
@@ -52,6 +57,7 @@ public:
   int width() const { return m_width; }
   int height() const { return m_height; }
   bool isClip() const { return m_isClip; }
+  QString trophyVersion() const { return m_trophyVersion; }
 
   void setThumbnailPath(const QString &path);
 
@@ -92,6 +98,7 @@ private:
   int m_height = 0;
   bool m_preferFileNameTitle = false;
   bool m_isClip = false;
+  QString m_trophyVersion;
 };
 
 } // namespace TrophyBackend

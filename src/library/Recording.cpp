@@ -7,6 +7,8 @@
 
 #include "Recording.h"
 
+#include "muxing/TrophyMetadata.h"
+
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
@@ -161,6 +163,28 @@ void Recording::probeVideoFile() {
     if (tag && tag->value) {
       m_isClip = QString::fromUtf8(tag->value).trimmed().compare(
                      QStringLiteral("clip"), Qt::CaseInsensitive) == 0;
+    }
+
+    // Recorder version is informational only; older files predate it.
+    tag = av_dict_get(formatCtx->metadata, "trophy-version", nullptr, 0);
+    if (tag && tag->value) {
+      m_trophyVersion = QString::fromUtf8(tag->value).trimmed();
+    }
+
+    // Capture moment: the explicit trophy-date + trophy-time pair wins
+    // over creation_time (no timezone ambiguity, unaffected by renames
+    // and copies that reset filesystem dates). Half or malformed pairs
+    // fall through to whatever creation_time or the filesystem said.
+    AVDictionaryEntry *dateTag =
+        av_dict_get(formatCtx->metadata, "trophy-date", nullptr, 0);
+    AVDictionaryEntry *timeTag =
+        av_dict_get(formatCtx->metadata, "trophy-time", nullptr, 0);
+    if (dateTag && dateTag->value && timeTag && timeTag->value) {
+      const QDateTime stamped = trophyDateTimeFromTags(
+          QString::fromUtf8(dateTag->value), QString::fromUtf8(timeTag->value));
+      if (stamped.isValid()) {
+        m_date = stamped;
+      }
     }
   }
 

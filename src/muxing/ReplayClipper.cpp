@@ -7,6 +7,8 @@
 
 #include "ReplayClipper.h"
 
+#include "TrophyMetadata.h"
+
 #include <QDateTime>
 #include <QDebug>
 #include <QFileInfo>
@@ -184,10 +186,18 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
     // Carry the segment's container tags (notably title=<game>) so the
     // clip names itself after the game instead of its filename. Must
     // precede the header write. Then stamp the clip's own identity: its
-    // save moment (not the segment's start) and its kind — the kind tag
-    // survives renames, unlike the _Replay filename suffix.
+    // save moment (not the segment's start), its kind and the recorder
+    // version — the kind/date/time tags survive renames, unlike the
+    // _Replay filename suffix and timestamp.
     av_dict_copy(&outCtx->metadata, firstCtx->metadata, 0);
+    const QDateTime nowLocal = QDateTime::currentDateTime();
     av_dict_set(&outCtx->metadata, "trophy-kind", "clip", 0);
+    av_dict_set(&outCtx->metadata, "trophy-version",
+                trophyVersion().toUtf8().constData(), 0);
+    av_dict_set(&outCtx->metadata, "trophy-date",
+                trophyDateString(nowLocal).toUtf8().constData(), 0);
+    av_dict_set(&outCtx->metadata, "trophy-time",
+                trophyTimeString(nowLocal).toUtf8().constData(), 0);
     av_dict_set(&outCtx->metadata, "creation_time",
                 QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toUtf8().constData(), 0);
     for (unsigned s = 0; s < nbStreams; ++s) {

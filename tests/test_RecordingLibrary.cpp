@@ -16,6 +16,7 @@
 
 #include "library/Recording.h"
 #include "library/RecordingLibrary.h"
+#include "core/StorageManager.h"
 
 using namespace TrophyBackend;
 
@@ -283,4 +284,131 @@ TEST_F(RecordingLibraryTest, RenamedNameSurvivesStaleContainerTitle) {
   waitForProbes();
   ASSERT_EQ(relaunched.count(), 1);
   EXPECT_EQ(relaunched.get(0)->gameName(), "New Title");
+}
+
+TEST_F(RecordingLibraryTest, RemoveRecordingsBatchSettlesOnce) {
+  const QString a = createFile("A_2026-01-15_20-30-00.mkv");
+  const QString b = createFile("B_2026-01-15_20-30-00.mkv");
+  const QString c = createFile("C_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 3);
+
+  QSignalSpy changedSpy(&lib, &RecordingLibrary::recordingsChanged);
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  QSignalSpy singleSpy(&lib, &RecordingLibrary::recordingRemoved);
+
+  lib.removeRecordings({a, b});
+
+  // One model settle, one batch signal, zero per-file signals: the
+  // per-file storm (a full StorageManager rescan + QML rebuild each)
+  // is what froze the UI on multi-select deletes.
+  EXPECT_EQ(lib.count(), 1);
+  EXPECT_NE(lib.getRecording(c), nullptr);
+  EXPECT_EQ(singleSpy.count(), 0);
+  ASSERT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({a, b}));
+  EXPECT_GE(changedSpy.count(), 1);
+}
+
+TEST_F(RecordingLibraryTest, RemoveRecordingsIgnoresUntrackedPaths) {
+  const QString a = createFile("A_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 1);
+
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  QSignalSpy singleSpy(&lib, &RecordingLibrary::recordingRemoved);
+
+  // Unknown paths (and empty lists) stay quiet instead of emitting
+  // empty batches that downstream refreshes would chase.
+  lib.removeRecordings({tempDir.path() + "/ghost.mkv"});
+  lib.removeRecordings({});
+  EXPECT_EQ(lib.count(), 1);
+  EXPECT_EQ(batchSpy.count(), 0);
+  EXPECT_EQ(singleSpy.count(), 0);
+
+  // Mixed known + unknown reports only the known drop.
+  lib.removeRecordings({a, tempDir.path() + "/ghost.mkv"});
+  EXPECT_EQ(lib.count(), 0);
+  ASSERT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({a}));
+}
+
+TEST_F(RecordingLibraryTest, RemoveRecordingsWorksWhileBulkSuppressed) {
+  const QString a = createFile("A_2026-01-15_20-30-00.mkv");
+  const QString b = createFile("B_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 2);
+
+  // Suppression gates watcher refreshes only; the direct batch call
+  // the bulk completion path makes must still settle.
+  lib.setBulkOperationActive(true);
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  lib.removeRecordings({a});
+  EXPECT_EQ(lib.count(), 1);
+  ASSERT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({a}));
+  lib.setBulkOperationActive(false);
+  EXPECT_EQ(lib.count(), 1);
+  EXPECT_NE(lib.getRecording(b), nullptr);
+}
+
+TEST_F(RecordingLibraryTest, RemoveRecordingsSwallowsRenameSource) {
+  const QString oldPath = createFile("Old_2026-01-15_20-30-00.mkv");
+  const QString keep = createFile("Keep_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 2);
+
+  // Same rule as the single path: a rename source vanishing from the
+  // model is not a deletion, so it must not reach the activity feed.
+  const QString newPath = tempDir.path() + "/New_2026-01-15_20-30-00.mkv";
+  ASSERT_TRUE(QFile::rename(oldPath, newPath));
+  lib.onRecordingRenamed(oldPath, newPath);
+
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  lib.removeRecordings({oldPath, keep});
+  EXPECT_EQ(lib.count(), 0);
+  ASSERT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({keep}));
+}
+
+TEST_F(RecordingLibraryTest, BulkDeleteWiringSettlesOnceEndToEnd) {
+  // Mirrors the Application.cpp bulk chain: StorageManager worker ->
+  // recordingsDeleted -> library removeRecordings, watcher suppression
+  // around the whole flight, single storage refresh at the end.
+  QStringList paths;
+  for (int i = 0; i < 4; ++i) {
+    paths << createFile(QString("Bulk_%1_2026-01-15_20-30-00.mkv").arg(i));
+  }
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 4);
+
+  QObject::connect(&storage, &StorageManager::recordingsDeleted, &lib,
+                   &RecordingLibrary::removeRecordings);
+  QObject::connect(&storage, &StorageManager::bulkDeleteStarted, &lib,
+                   [&lib]() { lib.setBulkOperationActive(true); });
+  QObject::connect(&storage, &StorageManager::bulkDeleteFinished, &lib,
+                   [&lib](int, int) {
+                     lib.setBulkOperationActive(false);
+                     lib.refresh();
+                   });
+  QObject::connect(&lib, &RecordingLibrary::recordingsRemoved, &storage,
+                   &StorageManager::refresh);
+
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  QSignalSpy singleSpy(&lib, &RecordingLibrary::recordingRemoved);
+  QSignalSpy finishedSpy(&storage, &StorageManager::bulkDeleteFinished);
+
+  storage.deleteRecordings(paths);
+  ASSERT_TRUE(finishedSpy.wait(5000));
+
+  for (const QString &p : paths) {
+    EXPECT_FALSE(QFile::exists(p));
+  }
+  EXPECT_EQ(lib.count(), 0);
+  // Exactly one batch notification, no per-file storm — even though
+  // the watcher saw every unlink in between.
+  EXPECT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(singleSpy.count(), 0);
+  EXPECT_EQ(storage.usedSize(), 0);
 }

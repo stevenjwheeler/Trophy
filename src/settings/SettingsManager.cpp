@@ -118,6 +118,7 @@ void SettingsManager::load() {
   m_startOnLogin = general["startOnLogin"].toBool(false);
   m_instantReplayEnabled = general["instantReplay"].toBool(true);
   m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
+  m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
 
   // Load notification options (all default on)
@@ -202,6 +203,7 @@ void SettingsManager::save() {
   general["startOnLogin"] = m_startOnLogin;
   general["instantReplay"] = m_instantReplayEnabled;
   general["globalShortcuts"] = m_globalShortcutsEnabled;
+  general["updateCheck"] = m_updateCheckEnabled;
   general["replayCachePath"] = m_replayCachePath;
   root["general"] = general;
 
@@ -316,6 +318,7 @@ void SettingsManager::loadDefaults() {
   m_startOnLogin = false;
   m_instantReplayEnabled = true;
   m_globalShortcutsEnabled = true;
+  m_updateCheckEnabled = true;
 
   // Notifications (all on)
   m_notifyRecordings = true;
@@ -544,6 +547,13 @@ void SettingsManager::setGlobalShortcutsEnabled(bool enabled) {
   }
 }
 
+void SettingsManager::setUpdateCheckEnabled(bool enabled) {
+  if (m_updateCheckEnabled != enabled) {
+    m_updateCheckEnabled = enabled;
+    save();
+    emit updateCheckEnabledChanged();
+  }
+}
 void SettingsManager::setNotifyRecordings(bool enabled) {
   if (m_notifyRecordings != enabled) {
     m_notifyRecordings = enabled;
@@ -614,12 +624,6 @@ void SettingsManager::setClipBufferSeconds(int seconds) {
     save();
     emit clipBufferSecondsChanged();
   }
-}
-
-void SettingsManager::clearWaylandToken() {
-  m_waylandRestoreTokens.clear();
-  save();
-  emit waylandRestoreTokensChanged();
 }
 
 QString SettingsManager::getRestoreToken(const QString &key) const {

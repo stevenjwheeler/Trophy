@@ -34,6 +34,7 @@
 #include "library/ActivityFeed.h"
 #include "library/RecordingLibrary.h"
 #include "settings/SettingsManager.h"
+#include "UpdateChecker.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -46,6 +47,7 @@
 #include <QQmlEngine>
 #include <QQuickWindow>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUrl>
 #include <algorithm>
 #include <cmath>
@@ -172,6 +174,7 @@ bool Application::initialize() {
   initialProperties.insert("storageManager", QVariant::fromValue(m_storageManager.get()));
   initialProperties.insert("recordingLibrary", QVariant::fromValue(m_recordingLibrary.get()));
   initialProperties.insert("gameDetector", QVariant::fromValue(m_gameDetector.get()));
+  initialProperties.insert("updateChecker", QVariant::fromValue(m_updateChecker.get()));
 
   m_engine->setInitialProperties(initialProperties);
 
@@ -323,6 +326,52 @@ void Application::initializeServices() {
           [this]() { requestReplay(); });
   connect(m_controlServer.get(), &ControlServer::showWindowRequested, this,
           [this]() { showMainWindow(); });
+
+  // Update check: compares against the GitHub release feed.
+  // applicationVersion() carries APP_VERSION (the CI tag on
+  // release builds). Branch stamps never compare against a
+  // release tag — parseVersion rejects them, so a dev build
+  // stays silent instead of reading as "behind".
+  m_updateChecker = std::make_unique<UpdateChecker>(this);
+  m_updateChecker->setCurrentVersion(
+      QCoreApplication::applicationVersion());
+  connect(m_updateChecker.get(), &UpdateChecker::checkFinished, this,
+          [this](bool newerAvailable, const QString &latestVersion,
+                 const QString &releaseUrl) {
+            m_latestReleaseUrl = releaseUrl;
+            if (!newerAvailable ||
+                !m_settingsManager->updateCheckEnabled())
+              return;
+            // Normal urgency + a single "View Release" button.
+            // Deliberately not critical: an update never needs
+            // to shout over a fullscreen game, and the Info
+            // page carries the same status for anyone who
+            // misses the transient.
+            m_notificationService->showNotification(
+                QStringLiteral("Trophy Update Available"),
+                QStringLiteral("Trophy %1 is available — you're on %2.")
+                    .arg(latestVersion,
+                         QCoreApplication::applicationVersion()),
+                QStringLiteral("trophy"), 8000, 1, false,
+                QStringLiteral("open-update"),
+                QStringLiteral("View Release"));
+          });
+  // Daily cadence while running: first check shortly after
+  // startup (never racing launch), then every 24h. The app
+  // can't check while closed, so "daily" means once per day
+  // the app is actually up.
+  m_updateCheckTimer = new QTimer(this);
+  m_updateCheckTimer->setSingleShot(false);
+  m_updateCheckTimer->setInterval(24 * 60 * 60 * 1000);
+  connect(m_updateCheckTimer, &QTimer::timeout, this, [this]() {
+    if (m_settingsManager->updateCheckEnabled())
+      m_updateChecker->checkNow();
+  });
+  QTimer::singleShot(kUpdateCheckDelayMs, this, [this]() {
+    if (m_settingsManager->updateCheckEnabled())
+      m_updateChecker->checkNow();
+    m_updateCheckTimer->start();
+  });
 }
 
 void Application::registerQmlTypes() {
@@ -346,6 +395,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("audioDeviceEnumerator", m_audioDeviceEnumerator.get());
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());
   context->setContextProperty("replayManager", m_replayManager.get());
+  context->setContextProperty("updateChecker", m_updateChecker.get());
 }
 
 void Application::connectSignals() {
@@ -646,11 +696,34 @@ void Application::connectSignals() {
                 "dialog-warning", 0, 2);
           });
   connect(m_storageManager.get(), &StorageManager::recordingDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
+  // Bulk-delete chain: the worker unlinks in the background, the batch
+  // signal settles the model once, and finish unsuppresses the watcher
+  // with one catch-up refresh. While suppressed, per-file watcher
+  // refreshes on both sides are skipped (the storm that froze the UI
+  // on multi-select deletes: N size rescans + N model rebuilds).
+  connect(m_storageManager.get(), &StorageManager::recordingsDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecordings);
+  connect(m_storageManager.get(), &StorageManager::bulkDeleteStarted, m_recordingLibrary.get(), [this]() {
+    m_recordingLibrary->setBulkOperationActive(true);
+  });
+  connect(m_storageManager.get(), &StorageManager::bulkDeleteFinished, m_recordingLibrary.get(), [this](int, int) {
+    m_recordingLibrary->setBulkOperationActive(false);
+    m_recordingLibrary->refresh();
+  });
   // Order matters: the rename preference must be recorded before the
   // refresh recreates Recording objects (which consult it in addRecording).
   connect(m_storageManager.get(), &StorageManager::recordingRenamed, m_recordingLibrary.get(), &RecordingLibrary::onRecordingRenamed);
   connect(m_storageManager.get(), &StorageManager::recordingRenamed, m_recordingLibrary.get(), &RecordingLibrary::refresh);
   connect(m_notificationService.get(), &NotificationService::notificationClicked, this, [this](const QString &action) {
+            // Update notice: open the releases page the
+            // check reported. Handled before the authorize
+            // dismissal below so it never clears pending
+            // state (the two notices never coexist).
+            if (action == QStringLiteral("open-update")) {
+              if (!m_latestReleaseUrl.isEmpty())
+                QDesktopServices::openUrl(QUrl(m_latestReleaseUrl));
+              m_notificationService->closeLastNotification();
+              return;
+            }
             // Three-way authorize prompt: "authorize" starts capture and
             // allow-lists the game (portal token follows at start);
             // "block" vetoes it in the Games list with no capture;
@@ -689,6 +762,7 @@ void Application::connectSignals() {
           });
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved, m_storageManager.get(), &StorageManager::refresh);
+  connect(m_recordingLibrary.get(), &RecordingLibrary::recordingsRemoved, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingManager.get(), &RecordingManager::progressUpdated, this,
           [this](qint64, qint64) { m_storageManager->enforceStorageLimit(); });
 

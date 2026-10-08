@@ -22,11 +22,15 @@ Page {
         if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
     }
 
+    // Scroll-spy also moves the active pill: keep it on screen.
+    onActiveSectionChanged: ensurePillVisible(activeSection)
+
     // Section navigation (titles must match main.qml global search mapping)
     property string activeSection: qsTr("Video Recording")
     property bool scrollingProgrammatically: false
     property var sections: [
         { title: qsTr("Video Recording"), icon: "🎥" },
+        { title: qsTr("Background Clips"), icon: "✂️" },
         { title: qsTr("Audio Recording"), icon: "🔊" },
         { title: qsTr("Storage Management"), icon: "💾" },
         { title: qsTr("Notifications"), icon: "🔔" },
@@ -39,6 +43,8 @@ Page {
         var card = null;
         if (sectionTitle === "Video Recording")
             card = videoCard;
+        else if (sectionTitle === "Background Clips")
+            card = clipsCard;
         else if (sectionTitle === "Audio Recording")
             card = audioCard;
         else if (sectionTitle === "Storage Management")
@@ -61,6 +67,31 @@ Page {
         var target = Math.max(0, card.y - Theme.spacingSmall);
         var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
         settingsFlick.contentY = Math.min(target, maxY);
+        ensurePillVisible(sectionTitle);
+    }
+
+    // Keep the active pill on screen: the strip scrolls horizontally on
+    // narrow windows, and without this the current section's pill can
+    // sit cut off out of view.
+    function ensurePillVisible(sectionTitle) {
+        var idx = -1;
+        for (var i = 0; i < sections.length; i++) {
+            if (sections[i].title === sectionTitle) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0 || idx >= pillsRow.children.length)
+            return;
+        var item = pillsRow.children[idx];
+        if (!item)
+            return;
+        if (item.x < pillsFlick.contentX) {
+            pillsFlick.contentX = Math.max(0, item.x - Theme.spacingSmall);
+        } else if (item.x + item.width > pillsFlick.contentX + pillsFlick.width) {
+            pillsFlick.contentX = Math.max(0, Math.min(pillsFlick.contentWidth - pillsFlick.width,
+                                                      item.x + item.width - pillsFlick.width + Theme.spacingSmall));
+        }
     }
 
     function updateActiveSectionFromScroll() {
@@ -79,6 +110,8 @@ Page {
             current = "Storage Management";
         else if (audioCard && y >= audioCard.y)
             current = "Audio Recording";
+        else if (clipsCard && y >= clipsCard.y)
+            current = "Background Clips";
 
         activeSection = current;
     }
@@ -227,58 +260,120 @@ Page {
         }
 
         // --- SECTION PILLS ---
-        Flickable {
+        // Single-line strip: chevrons make the horizontal scroll explicit
+        // (dragging works but is undiscoverable), and only appear when
+        // there is overflow in that direction.
+        RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
-            contentWidth: pillsRow.implicitWidth
-            contentHeight: 36
-            flickableDirection: Flickable.HorizontalFlick
-            clip: true
+            spacing: Theme.spacingSmall
 
-            Row {
-                id: pillsRow
-                height: 36
-                spacing: Theme.spacingSmall
+            Rectangle {
+                Layout.preferredWidth: 32
+                Layout.preferredHeight: 32
+                Layout.alignment: Qt.AlignVCenter
+                radius: 16
+                visible: pillsFlick.contentX > 1
+                color: pillLeftHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
+                border.width: 1
+                border.color: Theme.withOpacity(Theme.textColor, 0.12)
 
-                Repeater {
-                    model: root.sections
+                Label {
+                    anchors.centerIn: parent
+                    text: "‹"
+                    font.pixelSize: 18
+                    color: Theme.textSecondaryColor
+                }
 
-                    Rectangle {
-                        property bool isActive: root.activeSection === modelData.title
+                MouseArea {
+                    id: pillLeftHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pillsFlick.contentX = Math.max(0, pillsFlick.contentX - pillsFlick.width * 0.8)
+                }
+            }
 
-                        height: 32
-                        width: pillContent.implicitWidth + Theme.spacingMedium * 2
-                        radius: 16
-                        color: isActive ? Theme.withOpacity(Theme.primaryColor, 0.15) : Theme.withOpacity(Theme.textColor, 0.05)
-                        border.width: 1
-                        border.color: isActive ? Theme.primaryColor : Theme.withOpacity(Theme.textColor, 0.12)
+            Flickable {
+                id: pillsFlick
+                Layout.fillWidth: true
+                Layout.preferredHeight: 36
+                contentWidth: pillsRow.implicitWidth
+                contentHeight: 36
+                flickableDirection: Flickable.HorizontalFlick
+                clip: true
 
-                        Row {
-                            id: pillContent
-                            anchors.centerIn: parent
-                            spacing: 6
+                Row {
+                    id: pillsRow
+                    height: 36
+                    spacing: Theme.spacingSmall
 
-                            Label {
-                                text: modelData.icon
-                                font.pixelSize: Theme.fontSizeSmall
-                                anchors.verticalCenter: parent.verticalCenter
+                    Repeater {
+                        model: root.sections
+
+                        Rectangle {
+                            property bool isActive: root.activeSection === modelData.title
+
+                            height: 32
+                            width: pillContent.implicitWidth + Theme.spacingMedium * 2
+                            radius: 16
+                            color: isActive ? Theme.withOpacity(Theme.primaryColor, 0.15) : Theme.withOpacity(Theme.textColor, 0.05)
+                            border.width: 1
+                            border.color: isActive ? Theme.primaryColor : Theme.withOpacity(Theme.textColor, 0.12)
+
+                            Row {
+                                id: pillContent
+                                anchors.centerIn: parent
+                                spacing: 6
+
+                                Label {
+                                    text: modelData.icon
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Label {
+                                    text: modelData.title
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.weight: isActive ? Font.Medium : Font.Normal
+                                    color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
                             }
 
-                            Label {
-                                text: modelData.title
-                                font.pixelSize: Theme.fontSizeSmall
-                                font.weight: isActive ? Font.Medium : Font.Normal
-                                color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
-                                anchors.verticalCenter: parent.verticalCenter
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.scrollToSection(modelData.title)
                             }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.scrollToSection(modelData.title)
                         }
                     }
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 32
+                Layout.preferredHeight: 32
+                Layout.alignment: Qt.AlignVCenter
+                radius: 16
+                visible: pillsFlick.contentX < pillsFlick.contentWidth - pillsFlick.width - 1
+                color: pillRightHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
+                border.width: 1
+                border.color: Theme.withOpacity(Theme.textColor, 0.12)
+
+                Label {
+                    anchors.centerIn: parent
+                    text: "›"
+                    font.pixelSize: 18
+                    color: Theme.textSecondaryColor
+                }
+
+                MouseArea {
+                    id: pillRightHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: pillsFlick.contentX = Math.min(Math.max(0, pillsFlick.contentWidth - pillsFlick.width),
+                                                             pillsFlick.contentX + pillsFlick.width * 0.8)
                 }
             }
         }
@@ -604,6 +699,29 @@ Page {
                     }
 
                     SettingRow {
+                        label: qsTr("Zero-Copy Capture (DMA-BUF)")
+                        help: qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.useDmaBuf : true
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.useDmaBuf = checked;
+                            }
+                        }
+                    }
+                }
+
+                // ================= BACKGROUND CLIPS =================
+                SectionCard {
+                    id: clipsCard
+                    sectionTitle: qsTr("Background Clips")
+                    iconText: "✂️"
+                    description: qsTr("Quiet background buffering for instant clips. Changes take effect within a minute.")
+
+                    SettingRow {
                         label: qsTr("Background Clips")
                         help: (globalShortcuts && globalShortcuts.boundShortcuts["save-clip"]) ? qsTr("Quietly record while you game, then press %1 to keep the last moments as a clip.").arg(globalShortcuts.boundShortcuts["save-clip"]) : qsTr("Quietly record while you game, then press your clip key to keep the last moments as a clip.")
 
@@ -681,36 +799,6 @@ Page {
                                     if (settingsManager)
                                         settingsManager.replayCachePath = "";
                                 }
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("Zero-Copy Capture (DMA-BUF)")
-                        help: qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.useDmaBuf : true
-                            enabled: !(recordingManager && recordingManager.isRecording)
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.useDmaBuf = checked;
-                            }
-                        }
-                    }
-
-                    SettingStack {
-                        label: qsTr("Wayland Permissions")
-                        help: qsTr("Wayland remembers your screen-sharing choice. Reset here to pick a different monitor or window next time.")
-
-                        TrophyButton {
-                            Layout.alignment: Qt.AlignLeft
-                            text: qsTr("Reset Screen Capture Permissions")
-                            enabled: !(recordingManager && recordingManager.isRecording)
-                            onClicked: {
-                                settingsManager.clearWaylandToken();
-                                notificationService.showNotification(qsTr("Wayland Reset"), qsTr("Permissions cleared. You will be prompted to select a source next time you record."));
                             }
                         }
                     }
@@ -1155,6 +1243,20 @@ Page {
                                     if (settingsManager)
                                         settingsManager.completionSoundEnabled = checked;
                                 }
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Automatic Update Checks")
+                        help: qsTr("Check GitHub for a new Trophy release once a day. The Check for updates link on the Info page always runs.")
+
+                        TrophySwitch {
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.updateCheckEnabled : true
+                            onToggled: {
+                                if (settingsManager)
+                                    settingsManager.updateCheckEnabled = checked;
                             }
                         }
                     }
