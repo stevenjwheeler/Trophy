@@ -13,6 +13,8 @@
 
 namespace TrophyBackend {
 
+class NotificationServiceTest; // test fixture (sets internal state directly)
+
 /**
  * @brief Provides system notification capabilities
  *
@@ -66,7 +68,12 @@ public:
    */
   Q_INVOKABLE void closeNotificationById(uint id);
 
-  /** Hint map for a notice. Static + public for tests (no D-Bus needed). */
+  /**
+   * Withdraw the authorize prompt for one game, if it is the notice
+   * currently holding the "last" slot. Title-matched so closing a game
+   * can never dismiss an unrelated notice that replaced the prompt.
+   */
+  void closeAuthorizePrompt(const QString &game);  /** Hint map for a notice. Static + public for tests (no D-Bus needed). */
   static QVariantMap notificationHints(int urgency, bool authorizeAction);
   /** "2:34" / "1:02:03" for notice bodies. Static + public for tests. */
   static QString formatDuration(qint64 ms);
@@ -124,6 +131,8 @@ private:
   // so the first popup's slide-out animation finishes instead of the two
   // visually overlapping.
   static constexpr int kQueueDrainGraceMs = 500;
+
+  friend class NotificationServiceTest;
 };
 
 } // namespace TrophyBackend

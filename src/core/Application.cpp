@@ -454,7 +454,7 @@ void Application::connectSignals() {
         m_pendingDvrGame.clear();
       return;
     }
-    m_notificationService->showNotification("New Game: " + pending, "Authorize Wayland capture for this game, or Block it.", "trophy", 0, 2, true);
+    m_notificationService->showNotification("New Game: " + pending, "Click to authorize Wayland capture for this game, or Block it.", "trophy", 0, 2, true);
   });
   connect(m_audioWaitTimer, &QTimer::timeout, this, [this]() {
     if (m_pendingAudioGame.isEmpty()) {
@@ -530,6 +530,13 @@ void Application::connectSignals() {
           });
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed, this, [this](const QString &gameName) {
             emit currentGameChanged();
+            // A resident authorize prompt for the closing game must not
+            // linger: it would show a dead name, and clicks on it hit
+            // cleared pendings (vanish, nothing starts).
+            if (m_pendingAutoRecordGame == gameName ||
+                m_pendingDvrGame == gameName) {
+              m_notificationService->closeAuthorizePrompt(gameName);
+            }
             if (m_pendingAutoRecordGame == gameName) {
               m_pendingAutoRecordGame.clear();
             }

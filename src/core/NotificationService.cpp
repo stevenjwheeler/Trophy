@@ -65,6 +65,15 @@ void NotificationService::closeLastNotification() {
   m_lastNotificationId = 0;
 }
 
+void NotificationService::closeAuthorizePrompt(const QString &game) {
+  if (m_lastNotificationId == 0 || game.isEmpty())
+    return;
+  if (m_lastTitle != QStringLiteral("New Game: ") + game)
+    return;
+  closeNotificationById(m_lastNotificationId);
+  m_lastNotificationId = 0;
+}
+
 void NotificationService::closeNotificationById(uint id) {
   QDBusInterface notify(
       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
@@ -162,9 +171,15 @@ void NotificationService::sendNotification(const QString &title,
   // ride along with any urgency>1 notification, which would have put an
   // "Authorize Capture" button on critical recording/clip notices.
   // Approve starts capture (portal token follows); Block vetoes the game
-  // in the Games list; dismissing leaves it on Prompt.
+  // in the Games list; dismissing leaves it on Prompt. The "default"
+  // action renders no button: daemons invoke it on body-click, so
+  // clicking the prompt itself counts as authorize (a bare close still
+  // means dismiss — the spec cannot tell X/timeout apart from an
+  // action-less body click, and daemons without default-action support
+  // fall back to that).
   if (authorizeAction) {
-    actions << "authorize" << "Authorize Capture" << "block" << "Block";
+    actions << "authorize" << "Authorize Capture" << "block" << "Block"
+            << "default" << "";
   }
 
   QDBusReply<uint> reply =
@@ -212,7 +227,13 @@ void NotificationService::sendNotification(const QString &title,
 
 void NotificationService::onActionInvoked(uint id, const QString &action) {
   if (id == m_lastNotificationId || m_lastNotificationId == 0) {
-    emit notificationClicked(action);
+    QString resolved = action;
+    // Body-clicking the authorize prompt invokes the "default" action on
+    // supporting daemons: that counts as authorize, same as the button.
+    if (resolved == QStringLiteral("default") &&
+        m_lastTitle.startsWith(QStringLiteral("New Game: ")))
+      resolved = QStringLiteral("authorize");
+    emit notificationClicked(resolved);
   }
 }
 

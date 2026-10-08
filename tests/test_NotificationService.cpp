@@ -5,6 +5,7 @@
  */
 
 #include <QCoreApplication>
+#include <QSignalSpy>
 #include <QVariantMap>
 #include <gtest/gtest.h>
 
@@ -66,6 +67,50 @@ TEST(NotificationHintsTest, CriticalNoticeIsNotResidentWithoutAuthorize) {
       NotificationService::notificationHints(2, true);
   EXPECT_EQ(authorize.value("urgency").value<uchar>(), 2);
   EXPECT_TRUE(authorize.contains("resident"));
+}
+
+namespace TrophyBackend {
+class NotificationServiceTest : public ::testing::Test {
+protected:
+  // Friendship is not inherited by the TEST_F-generated subclass, so
+  // state goes through fixture helpers (which are members of the friend).
+  static void setLastNotice(NotificationService &svc, uint id,
+                            const QString &title) {
+    svc.m_lastNotificationId = id;
+    svc.m_lastTitle = title;
+  }
+};
+} // namespace TrophyBackend
+
+TEST_F(NotificationServiceTest, DefaultActionCountsAsAuthorize) {
+  // State is set directly: going through showNotification would pop a
+  // real notice on the dev desktop (tests run with a live session bus).
+  // A body-click reported as the "default" action resolves to authorize;
+  // explicit keys pass through untouched.
+  NotificationService svc;
+  setLastNotice(svc, 42, "New Game: TestGame");
+  QSignalSpy spy(&svc, &NotificationService::notificationClicked);
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("default"))));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.last()[0].toString(), QString("authorize"));
+  spy.clear();
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("block"))));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.last()[0].toString(), QString("block"));
+}
+
+TEST_F(NotificationServiceTest, DefaultActionIgnoredOffPrompt) {
+  // The default->authorize mapping only applies to the authorize prompt:
+  // a stray default action with any other last title passes through.
+  NotificationService svc;
+  setLastNotice(svc, 42, "Recording Started");
+  QSignalSpy spy(&svc, &NotificationService::notificationClicked);
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("default"))));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.last()[0].toString(), QString("default"));
 }
 
 TEST(NotificationFormatTest, FormatsDurations) {
