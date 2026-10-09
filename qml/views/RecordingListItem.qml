@@ -33,7 +33,7 @@ ItemDelegate {
 
     width: ListView.view ? ListView.view.width : 0
     height: 70
-    onClicked: Qt.openUrlExternally("file://" + root.recording.filePath)
+    onClicked: window.openPlayer(root.recording.filePath)
 
     background: Rectangle {
         color: root.hovered ? Theme.cardHoverColor : Theme.cardColor
@@ -103,13 +103,18 @@ ItemDelegate {
                 height: 32
                 icon.source: "qrc:/icons/play.svg"
                 icon.color: "white"
-                icon.width: 28
-                icon.height: 28
-                onClicked: Qt.openUrlExternally("file://" + root.recording.filePath)
+                icon.width: 16
+                icon.height: 16
+                Accessible.name: qsTr("Play")
+                ToolTip.text: qsTr("Play")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: window.openPlayer(root.recording.filePath)
 
                 background: Rectangle {
                     radius: 16
                     color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor
+                    Behavior on color { ColorAnimation { duration: 150 } }
                 }
 
             }
@@ -119,13 +124,18 @@ ItemDelegate {
                 height: 32
                 icon.source: "qrc:/icons/folder.svg"
                 icon.color: "white"
-                icon.width: 28
-                icon.height: 28
+                icon.width: 16
+                icon.height: 16
+                Accessible.name: qsTr("Show in folder")
+                ToolTip.text: qsTr("Show in folder")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
                 onClicked: window.openFolder(root.recording.directory)
 
                 background: Rectangle {
                     radius: 16
                     color: parent.hovered ? "#60FFFFFF" : "#40FFFFFF"
+                    Behavior on color { ColorAnimation { duration: 150 } }
                 }
 
             }
@@ -135,13 +145,18 @@ ItemDelegate {
                 height: 32
                 icon.source: "qrc:/icons/edit.svg"
                 icon.color: "white"
-                icon.width: 28
-                icon.height: 28
+                icon.width: 16
+                icon.height: 16
+                Accessible.name: qsTr("Rename")
+                ToolTip.text: qsTr("Rename")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
                 onClicked: window.requestRename(root.recording.filePath, root.recording.gameName)
 
                 background: Rectangle {
                     radius: 16
                     color: parent.hovered ? "#60FFFFFF" : "#40FFFFFF"
+                    Behavior on color { ColorAnimation { duration: 150 } }
                 }
 
             }
@@ -151,13 +166,18 @@ ItemDelegate {
                 height: 32
                 icon.source: "qrc:/icons/trash.svg"
                 icon.color: "white"
-                icon.width: 28
-                icon.height: 28
+                icon.width: 16
+                icon.height: 16
+                Accessible.name: qsTr("Delete")
+                ToolTip.text: qsTr("Delete")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
                 onClicked: window.confirmDelete(root.recording.filePath, root.recording.fileName)
 
                 background: Rectangle {
                     radius: 16
                     color: parent.hovered ? Theme.errorColor : "#40FFFFFF"
+                    Behavior on color { ColorAnimation { duration: 150 } }
                 }
 
             }

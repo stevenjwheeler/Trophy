@@ -76,7 +76,7 @@ GridView {
             cardIndex: parent.recIdx
             onPlay: {
                 if (recording) {
-                    Qt.openUrlExternally("file://" + recording.filePath);
+                    window.openPlayer(recording.filePath);
                 }
             }
             onOpenFolder: {

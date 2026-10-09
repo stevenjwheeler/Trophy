@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "../controls"
 import "../styles"
 import QtMultimedia
 import QtQuick
@@ -16,9 +17,57 @@ Rectangle {
 
     property alias source: mediaPlayer.source
     property alias playing: mediaPlayer.playing
+    // Timeline surface for the player screen (track lanes
+    // read these and drive seek()).
+    property alias position: mediaPlayer.position
+    property alias duration: mediaPlayer.duration
+
+    // Transport is page-driven: the player screen runs one
+    // audio-only MediaPlayer per track alongside this video
+    // output, so play/pause/seek/volume/mute fan out to every
+    // pipeline together (a single output can't mix mutes).
+    signal playRequested()
+    signal pauseRequested()
+    signal seekRequested(double position)
+    signal volumeRequested(double volume)
+    signal muteRequested()
+    signal fullscreenRequested()
+    // Playback rate cycles here; the page fans the new rate out to
+    // every audio pipeline too (lockstep). Snapshot grabs the current
+    // video frame to a file and reports back.
+    signal rateRequested(double rate)
+    signal snapshotRequested()
+    signal snapshotSaved(string path, bool ok)
+
+    // Mirrored from the page (master volume/mute live there).
+    property real volumeLevel: 1.0
+    property bool masterMuted: false
+    // Playback rate, bound to the page (which also drives every
+    // audio-only pipeline). Sticky on the MediaPlayer: set once,
+    // survives play/pause/seek.
+    property alias playbackRate: mediaPlayer.playbackRate
+    property real rate: 1.0
+    readonly property var rateSteps: [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+
+    function nextRate() {
+        var i = rateSteps.indexOf(rate)
+        return rateSteps[(i + 1) % rateSteps.length]
+    }
+    // Mirrored from the page (the fullscreen state lives
+    // there; the window itself is driven by main.qml).
+    // Squares the video corners so the frame fills the
+    // screen edge-to-edge.
+    property bool playerFullscreen: false
+    // Controls hover state (auto-hide timer below).
+    property bool controlsShown: false
 
     function play() {
         mediaPlayer.play();
+    }
+
+    function seek(ms) {
+        if (mediaPlayer.duration > 0)
+            mediaPlayer.position = Math.max(0, Math.min(mediaPlayer.duration, ms));
     }
 
     function pause() {
@@ -27,6 +76,12 @@ Rectangle {
 
     function stop() {
         mediaPlayer.stop();
+    }
+
+    function snapshot(filePath) {
+        videoOutput.grabToImage(function(result) {
+            root.snapshotSaved(filePath, result.saveToFile(filePath))
+        })
     }
 
     function formatTime(ms) {
@@ -41,18 +96,19 @@ Rectangle {
     }
 
     color: "black"
-    radius: Theme.radiusMedium
+    radius: playerFullscreen ? 0 : Theme.radiusMedium
     clip: true
 
     MediaPlayer {
         id: mediaPlayer
 
+        // Video only: the player screen runs a separate
+        // audio-only pipeline per track (true per-track mute),
+        // so this output stays silent.
+        autoPlay: false
         videoOutput: videoOutput
         onErrorOccurred: function(error, errorString) {
             console.error("Video playback error:", errorString);
-        }
-
-        audioOutput: AudioOutput {
         }
 
     }
@@ -61,6 +117,29 @@ Rectangle {
         id: videoOutput
 
         anchors.fill: parent
+    }
+
+    // Hover anywhere over the player reveals the controls
+    // (a non-consuming handler, so clicks still reach
+    // buttons). They fade again after a quiet moment even
+    // while the cursor stays over the video — a bar that
+    // never hides blocks the view, especially in fullscreen.
+    // Mouse movement re-reveals them (see the click area
+    // below).
+    HoverHandler {
+        id: playerHover
+        onHoveredChanged: {
+            if (playerHover.hovered)
+                root.controlsShown = true
+            hideTimer.restart()
+        }
+    }
+
+    Timer {
+        id: hideTimer
+        interval: 2500
+        repeat: false
+        onTriggered: root.controlsShown = false
     }
 
     // Controls overlay
@@ -72,13 +151,24 @@ Rectangle {
         anchors.bottom: parent.bottom
         height: 60
         color: "#CC000000"
-        opacity: controlsArea.containsMouse || !mediaPlayer.playing ? 1 : 0
+        // Match the video area's rounding so the bar never
+        // squares off the bottom corners while visible.
+        bottomLeftRadius: playerFullscreen ? 0 : Theme.radiusMedium
+        bottomRightRadius: playerFullscreen ? 0 : Theme.radiusMedium
+        opacity: root.controlsShown || !mediaPlayer.playing ? 1 : 0
 
-        MouseArea {
-            id: controlsArea
-
-            anchors.fill: parent
-            hoverEnabled: true
+        // The bar stays up while the cursor is over it —
+        // its buttons and slider need the cursor there —
+        // and fades again once it leaves.
+        HoverHandler {
+            onHoveredChanged: {
+                if (hovered) {
+                    root.controlsShown = true
+                    hideTimer.stop()
+                } else {
+                    hideTimer.restart()
+                }
+            }
         }
 
         RowLayout {
@@ -87,15 +177,19 @@ Rectangle {
             spacing: Theme.spacingSmall
 
             // Play/Pause button
-            Button {
-                flat: true
-                icon.name: mediaPlayer.playing ? "media-playback-pause" : "media-playback-start"
-                icon.color: "white"
+            TrophyButton {
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                icon.source: mediaPlayer.playing ? "qrc:/icons/pause.svg" : "qrc:/icons/play.svg"
+                icon.width: 18
+                icon.height: 18
                 onClicked: {
                     if (mediaPlayer.playing)
-                        mediaPlayer.pause();
+                        root.pauseRequested();
                     else
-                        mediaPlayer.play();
+                        root.playRequested();
                 }
             }
 
@@ -107,70 +201,96 @@ Rectangle {
                 font.family: "monospace"
             }
 
-            // Seek slider
-            Slider {
-                id: seekSlider
+            // Seek back 10s
+            TrophyButton {
+                implicitWidth: 52
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                text: qsTr("−10")
+                onClicked: root.seekRequested(Math.max(0, mediaPlayer.position - 10000))
+            }
 
+            // Seek forward 10s
+            TrophyButton {
+                implicitWidth: 52
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                text: qsTr("+10")
+                onClicked: {
+                    var target = mediaPlayer.position + 10000
+                    if (mediaPlayer.duration > 0)
+                        target = Math.min(target, mediaPlayer.duration)
+                    root.seekRequested(target)
+                }
+            }
+
+            Item {
                 Layout.fillWidth: true
-                from: 0
-                to: mediaPlayer.duration
-                value: mediaPlayer.position
-                onMoved: mediaPlayer.position = value
-
-                background: Rectangle {
-                    x: seekSlider.leftPadding
-                    y: seekSlider.topPadding + seekSlider.availableHeight / 2 - height / 2
-                    width: seekSlider.availableWidth
-                    height: 4
-                    radius: 2
-                    color: "#40FFFFFF"
-
-                    Rectangle {
-                        width: seekSlider.visualPosition * parent.width
-                        height: parent.height
-                        radius: 2
-                        color: Theme.primaryColor
-                    }
-
-                }
-
-                handle: Rectangle {
-                    x: seekSlider.leftPadding + seekSlider.visualPosition * (seekSlider.availableWidth - width)
-                    y: seekSlider.topPadding + seekSlider.availableHeight / 2 - height / 2
-                    width: 12
-                    height: 12
-                    radius: 6
-                    color: "white"
-                    visible: seekSlider.hovered || seekSlider.pressed
-                }
-
             }
 
-            // Volume
-            Button {
-                flat: true
-                icon.name: mediaPlayer.audioOutput.muted ? "audio-volume-muted" : "audio-volume-high"
-                icon.color: "white"
-                onClicked: mediaPlayer.audioOutput.muted = !mediaPlayer.audioOutput.muted
+            // Playback speed: cycles 0.25-4x, fanned out to every
+            // pipeline by the page.
+            TrophyButton {
+                implicitWidth: 52
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                text: (root.rate === 1 ? "1×" : root.rate + "×")
+                ToolTip.text: qsTr("Playback speed")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: root.rateRequested(root.nextRate())
             }
 
-            Slider {
+            // Frame snapshot: grabs the current video frame to a PNG
+            // next to the recording.
+            TrophyButton {
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                icon.source: "qrc:/icons/camera.svg"
+                icon.width: 18
+                icon.height: 18
+                ToolTip.text: qsTr("Save frame as image")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: root.snapshotRequested()
+            }
+
+            // Master mute
+            TrophyButton {
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                icon.source: root.masterMuted ? "qrc:/icons/volume-muted.svg" : "qrc:/icons/volume-high.svg"
+                icon.width: 18
+                icon.height: 18
+                onClicked: root.muteRequested()
+            }
+
+            TrophySlider {
                 Layout.preferredWidth: 80
                 from: 0
                 to: 1
-                value: mediaPlayer.audioOutput.volume
-                onMoved: mediaPlayer.audioOutput.volume = value
+                value: root.volumeLevel
+                onMoved: root.volumeRequested(value)
             }
 
-            // Fullscreen (placeholder)
-            Button {
-                // TODO: Implement fullscreen
-
-                flat: true
-                icon.name: "view-fullscreen"
-                icon.color: "white"
-                onClicked: {
-                }
+            // Fullscreen toggle: the window goes fullscreen
+            // and the video fills it (Escape exits).
+            TrophyButton {
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                icon.source: "qrc:/icons/fullscreen.svg"
+                icon.width: 18
+                icon.height: 18
+                onClicked: root.fullscreenRequested()
             }
 
         }
@@ -184,15 +304,22 @@ Rectangle {
 
     }
 
-    // Click to play/pause
+    // Click to play/pause; movement over the video reveals
+    // the controls and restarts their fade (hoverEnabled:
+    // bare movement, not just drags, counts).
     MouseArea {
         anchors.fill: parent
         anchors.bottomMargin: controls.height
+        hoverEnabled: true
         onClicked: {
             if (mediaPlayer.playing)
-                mediaPlayer.pause();
+                root.pauseRequested();
             else
-                mediaPlayer.play();
+                root.playRequested();
+        }
+        onPositionChanged: {
+            root.controlsShown = true
+            hideTimer.restart()
         }
     }
 

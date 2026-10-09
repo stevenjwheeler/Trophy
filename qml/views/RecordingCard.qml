@@ -140,66 +140,86 @@ Rectangle {
                     width: parent.width
                     height: parent.height + root.radius
                     radius: root.radius
-                    color: "#80000000"
+                    color: "#99000000"
                 }
 
                 Row {
                     anchors.centerIn: parent
-                    spacing: Theme.spacingMedium
+                    spacing: 10
 
                     RoundButton {
-                        width: 40; height: 40
-                        icon.source: "qrc:/icons/play.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        width: 42; height: 42
+                        icon.source: "qrc:/icons/play.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
+                        Accessible.name: qsTr("Play")
+                        ToolTip.text: qsTr("Play")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
                         onClicked: root.play()
                         background: Rectangle {
-                            radius: 20
-                            color: parent.hovered ? '#cc303030' : "#00000000"
-                            border.color: "#ffffffff"
-                            border.width: 2
-                            scale: parent.hovered ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                            radius: 21
+                            color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor
+                            border.color: parent.hovered ? "#ffffffff" : "#00ffffff"
+                            border.width: 1.5
+                            scale: parent.hovered ? 1.1 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
-                        width: 40; height: 40
-                        icon.source: "qrc:/icons/folder.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        width: 42; height: 42
+                        icon.source: "qrc:/icons/folder.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
+                        Accessible.name: qsTr("Show in folder")
+                        ToolTip.text: qsTr("Show in folder")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
                         onClicked: root.openFolder()
                         background: Rectangle {
-                            radius: 20
-                            color: parent.hovered ? '#cc303030' : "#00000000"
-                            border.color: "#ffffffff"
-                            border.width: 2
-                            scale: parent.hovered ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                            radius: 21
+                            color: parent.hovered ? "#e6353f5c" : "#b31a2238"
+                            border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                            border.width: 1.5
+                            scale: parent.hovered ? 1.08 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
-                        width: 40; height: 40
-                        icon.source: "qrc:/icons/edit.svg"; icon.color: "white"; icon.width: 24; icon.height: 24
+                        width: 42; height: 42
+                        icon.source: "qrc:/icons/edit.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
+                        Accessible.name: qsTr("Rename")
+                        ToolTip.text: qsTr("Rename")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
                         onClicked: root.renameRequested()
                         background: Rectangle {
-                            radius: 20
-                            color: parent.hovered ? '#cc303030' : "#00000000"
-                            border.color: "#ffffffff"
-                            border.width: 2
-                            scale: parent.hovered ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                            radius: 21
+                            color: parent.hovered ? "#e6353f5c" : "#b31a2238"
+                            border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                            border.width: 1.5
+                            scale: parent.hovered ? 1.08 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
-                        width: 40; height: 40
-                        icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 28; icon.height: 28
+                        width: 42; height: 42
+                        icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
+                        Accessible.name: qsTr("Delete")
+                        ToolTip.text: qsTr("Delete")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
                         onClicked: root.deleteRequested()
                         background: Rectangle {
-                            radius: 20
-                            color: parent.hovered ? '#cc303030' : "#00000000"
-                            border.color: "#ffffffff"
-                            border.width: 2
-                            scale: parent.hovered ? 1.05 : 1.0
-                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                            radius: 21
+                            color: parent.hovered ? Theme.errorColor : "#b31a2238"
+                            border.color: parent.hovered ? "#ffffffff" : "#59ffffff"
+                            border.width: 1.5
+                            scale: parent.hovered ? 1.08 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
                 }

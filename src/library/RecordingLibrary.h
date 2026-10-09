@@ -34,11 +34,12 @@ class RecordingLibrary : public QObject {
       QList<Recording *> recordings READ recordings NOTIFY recordingsChanged)
   Q_PROPERTY(int count READ count NOTIFY recordingsChanged)
   Q_PROPERTY(QString libraryPath READ libraryPath WRITE setLibraryPath NOTIFY
-                 libraryPathChanged)
-  Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY
+                 libraryPathChanged)  Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY
                  recordingsChanged)
   Q_PROPERTY(
       int sortOrder READ sortOrder WRITE setSortOrder NOTIFY recordingsChanged)
+  // True while a player-range clip is remuxing on the worker thread.
+  Q_PROPERTY(bool clipSaving READ clipSaving NOTIFY clipSavingChanged)
 
 public:
   enum SortOrder { NewestFirst = 0, OldestFirst, LargestFirst, NameAZ };
@@ -60,11 +61,24 @@ public:
   int sortOrder() const { return m_sortOrder; }
   void setSortOrder(int order);
 
+  bool clipSaving() const { return m_clipSaving; }
+
   Q_INVOKABLE void refresh();
   Q_INVOKABLE Recording *get(int index) const;
   Q_INVOKABLE Recording *getRecording(const QString &filePath) const;
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
+  /**
+   * @brief Cuts [startSeconds, endSeconds] out of a library file into a
+   * new clip alongside it (same naming/tags as DVR clips).
+   *
+   * Async: the remux runs on a worker thread (.part + atomic rename, so
+   * the watcher never sees a half-written file) and reports back via
+   * clipSaved/clipSaveFailed. While one runs, further calls fail fast
+   * with clipSaveFailed. Guards mirror ReplayClipper::saveRange.
+   */
+  Q_INVOKABLE void saveClipRange(const QString &sourcePath,
+                                 double startSeconds, double endSeconds);
   // Batch counterpart of removeRecording: erases every listed path in
   // one pass and settles the filtered model once, then emits
   // recordingsRemoved with the paths actually dropped. Emits nothing
@@ -102,6 +116,13 @@ signals:
   // per-file emit fans out to StorageManager::refresh (a full size
   // rescan) and a QML model rebuild.
   void recordingsRemoved(const QStringList &filePaths);
+  void clipSavingChanged();
+  // Player-range clip finished: path of the new clip, the game name it
+  // was filed under, and the span the file actually holds (keyframe
+  // overshoot runs up to a GOP over the selection).
+  void clipSaved(const QString &filePath, const QString &gameName,
+                 double seconds);
+  void clipSaveFailed(const QString &reason);
 
 private slots:
   void onDirectoryChanged(const QString &path);
@@ -136,6 +157,11 @@ private:
   // Depth of active background bulk deletes (see setBulkOperationActive).
   // Counter, not bool, so overlapping bulks can't unsuppress each other.
   int m_bulkOperationDepth = 0;
+  // A player-range clip is remuxing (see saveClipRange). Counter like
+  // the bulk depth is overkill — QML gates on the flag and re-entrant
+  // calls fail fast — but the flag itself must only flip on the GUI
+  // thread (worker completion hops back via queued invoke).
+  bool m_clipSaving = false;
 };
 
 } // namespace TrophyBackend

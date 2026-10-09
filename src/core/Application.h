@@ -20,6 +20,8 @@ class SettingsManager;
 class StorageManager;
 class RecordingLibrary;
 class ActivityFeed;
+class WaveformCache;
+class FilmstripCache;
 class GameDetectionService;
 class NotificationService;
 class AudioMixer;
@@ -165,6 +167,8 @@ private:
   std::unique_ptr<ControlServer> m_controlServer;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
+  std::unique_ptr<WaveformCache> m_waveformCache;
+  std::unique_ptr<FilmstripCache> m_filmstripCache;
   
   QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;

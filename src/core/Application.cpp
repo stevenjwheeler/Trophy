@@ -33,6 +33,8 @@
 #include "encoding/EncoderFactory.h"
 #include "library/ActivityFeed.h"
 #include "library/RecordingLibrary.h"
+#include "library/WaveformCache.h"
+#include "library/FilmstripCache.h"
 #include "settings/SettingsManager.h"
 #include "UpdateChecker.h"
 
@@ -51,6 +53,10 @@
 #include <QUrl>
 #include <algorithm>
 #include <cmath>
+
+extern "C" {
+#include <libavutil/log.h>
+}
 #include <cstdio>
 
 Q_LOGGING_CATEGORY(appLog, "trophy.app")
@@ -68,6 +74,16 @@ bool Application::initialize() {
   QLoggingCategory::setFilterRules("*.debug=true\n"
                                    "qt.*.debug=false\n"
                                    "qml.debug=false");
+
+  // FFmpeg (our pipeline and Qt Multimedia's playback backend share
+  // the process-global av_log level) dumps full stream metadata at
+  // INFO on every container open — the player opens each file four
+  // times (video + one audio pipeline per stream), spamming the
+  // console with identical blocks that bypass the message handler
+  // below entirely. Keep warnings/errors; the dumps come back with
+  // TROPHY_FFMPEG_VERBOSE=1 in the environment.
+  if (qEnvironmentVariableIsEmpty("TROPHY_FFMPEG_VERBOSE"))
+    av_log_set_level(AV_LOG_WARNING);
 
   QString configDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/trophy";
   QDir().mkpath(configDir);
@@ -268,6 +284,8 @@ void Application::initializeServices() {
   m_hardwareInfo = std::make_unique<HardwareInfo>(this);
   m_recordingLibrary = std::make_unique<RecordingLibrary>(m_settingsManager->recordingsPath(), this);
   m_activityFeed = std::make_unique<ActivityFeed>(this);
+  m_waveformCache = std::make_unique<WaveformCache>(this);
+  m_filmstripCache = std::make_unique<FilmstripCache>(this);
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
@@ -386,6 +404,8 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("storageManager", m_storageManager.get());
   context->setContextProperty("recordingLibrary", m_recordingLibrary.get());
   context->setContextProperty("activityFeed", m_activityFeed.get());
+  context->setContextProperty("waveformCache", m_waveformCache.get());
+  context->setContextProperty("filmstripCache", m_filmstripCache.get());
   context->setContextProperty("gameDetector", m_gameDetector.get());
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());
@@ -872,6 +892,33 @@ void Application::connectSignals() {
             m_recordingLibrary->refresh();
           });
   connect(m_replayManager.get(), &ReplayManager::replayFailed, this,
+          [this](const QString &reason) {
+            m_notificationService->showNotification(
+                "Couldn't Save Clip", reason, "dialog-warning", 3000, 2);
+          });
+  // Player-range clips take the same completion path as DVR clips: chime,
+  // notice with the real kept span, library refresh (the feed picks the
+  // new _Replay.mkv up like any other clip).
+  connect(m_recordingLibrary.get(), &RecordingLibrary::clipSaved, this,
+          [this](const QString &filePath, const QString &gameName,
+                 double seconds) {
+            playClipPing(false);
+            if (m_settingsManager->notifyClips()) {
+              const qint64 secs = std::max<qint64>(1, llround(seconds));
+              const QString span =
+                  (secs == 1) ? QStringLiteral("1 second")
+                              : QStringLiteral("%1 seconds").arg(secs);
+              const QString size =
+                  StorageManager::formatSize(QFileInfo(filePath).size());
+              m_notificationService->showNotification(
+                  gameName.isEmpty() ? QStringLiteral("Clip saved")
+                                     : QStringLiteral("%1 clip saved").arg(gameName),
+                  QStringLiteral("%1 · %2").arg(span, size),
+                  "trophy", 3000, 2); // critical: visible over screenshare
+            }
+            m_recordingLibrary->refresh();
+          });
+  connect(m_recordingLibrary.get(), &RecordingLibrary::clipSaveFailed, this,
           [this](const QString &reason) {
             m_notificationService->showNotification(
                 "Couldn't Save Clip", reason, "dialog-warning", 3000, 2);

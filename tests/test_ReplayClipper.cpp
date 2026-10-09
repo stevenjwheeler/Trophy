@@ -355,8 +355,7 @@ TEST_F(ReplayClipperTest, OverlappingSegmentsDeduplicate) {
   EXPECT_NE(lastDts, AV_NOPTS_VALUE);
 }
 
-TEST_F(ReplayClipperTest, BadInputsFailCleanly) {
-  QString err;
+TEST_F(ReplayClipperTest, BadInputsFailCleanly) {  QString err;
   EXPECT_FALSE(
       ReplayClipper::saveTail({}, 1.0, tempDir.path() + "/o.mkv", &err));
   EXPECT_FALSE(err.isEmpty());
@@ -373,4 +372,123 @@ TEST_F(ReplayClipperTest, BadInputsFailCleanly) {
   EXPECT_FALSE(ReplayClipper::saveTail({ {"/nonexistent/x.mkv", 0.0} }, 1.0,
                                        tempDir.path() + "/o.mkv", nullptr));
   EXPECT_FALSE(ReplayClipper::saveTail({{s0, 0.0}}, 1.0, "", nullptr));
+}
+
+TEST_F(ReplayClipperTest, RangeCutKeepsMiddleSpan) {
+  if (!haveCodecs())
+    GTEST_SKIP() << "libx264/AAC unavailable";
+  const QString src = tempDir.path() + "/src.mkv";
+  makeSegment(src, 90); // ~3s at 30fps, 1s GOPs
+
+  const QString out = tempDir.path() + "/clip.mkv";
+  QString err;
+  double kept = 0.0;
+  ASSERT_TRUE(ReplayClipper::saveRange(src, 1.0, 2.0, out, &err, &kept))
+      << qPrintable(err);
+
+  auto streams = readStreams(out);
+  ASSERT_EQ(streams.size(), 2);
+  ASSERT_FALSE(streams[0].isEmpty());
+  // Head cut lands on a video keyframe: first packet is a keyframe.
+  EXPECT_TRUE(streams[0].first().key);
+  // 1s range at 30fps: ~30 frames. The end bound is what keeps the tail
+  // out — without it the same cut would keep ~60 frames to EOF. The
+  // head may back up by up to one 1s GOP (keyframe overshoot), never
+  // more.
+  EXPECT_GE(streams[0].size(), 25);
+  EXPECT_LE(streams[0].size(), 65);
+  EXPECT_GE(kept, 1.0);
+  EXPECT_LE(kept, 2.5);
+  // Per-stream clocks never go backwards (same NOPTS-head caveat as the
+  // tail cut: matroska demux yields NOPTS DTS on B-frame heads).
+  for (const auto &s : streams) {
+    int start = 0;
+    while (start < s.size() && s[start].dts == AV_NOPTS_VALUE)
+      ++start;
+    ASSERT_LT(start, s.size());
+    EXPECT_GE(s[start].pts, 0);
+    for (int i = start + 1; i < s.size(); ++i) {
+      if (s[i].dts == AV_NOPTS_VALUE)
+        continue;
+      EXPECT_GE(s[i].dts, s[i - 1].dts);
+      EXPECT_GE(s[i].pts, 0);
+    }
+  }
+  // Same identity stamping as DVR clips: game title carried, kind clip.
+  AVFormatContext *ctx = nullptr;
+  ASSERT_EQ(
+      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr),
+      0);
+  AVDictionaryEntry *title = av_dict_get(ctx->metadata, "title", nullptr, 0);
+  ASSERT_NE(title, nullptr);
+  EXPECT_STREQ(title->value, "ClipperGame");
+  AVDictionaryEntry *kind =
+      av_dict_get(ctx->metadata, "trophy-kind", nullptr, 0);
+  ASSERT_NE(kind, nullptr);
+  EXPECT_STREQ(kind->value, "clip");
+  avformat_close_input(&ctx);
+}
+
+TEST_F(ReplayClipperTest, RangeEndPastEofKeepsToEnd) {
+  if (!haveCodecs())
+    GTEST_SKIP() << "libx264/AAC unavailable";
+  const QString src = tempDir.path() + "/src.mkv";
+  makeSegment(src, 90);
+
+  const QString out = tempDir.path() + "/clip.mkv";
+  QString err;
+  double kept = 0.0;
+  ASSERT_TRUE(ReplayClipper::saveRange(src, 2.0, 60.0, out, &err, &kept))
+      << qPrintable(err);
+  auto streams = readStreams(out);
+  ASSERT_FALSE(streams[0].isEmpty());
+  EXPECT_TRUE(streams[0].first().key);
+  // ~1s of tail: the end bound past EOF changes nothing.
+  EXPECT_GE(streams[0].size(), 20);
+  EXPECT_LE(streams[0].size(), 65);
+}
+
+TEST_F(ReplayClipperTest, RangeStartAtZeroKeepsHead) {
+  if (!haveCodecs())
+    GTEST_SKIP() << "libx264/AAC unavailable";
+  const QString src = tempDir.path() + "/src.mkv";
+  makeSegment(src, 90);
+
+  const QString out = tempDir.path() + "/clip.mkv";
+  QString err;
+  ASSERT_TRUE(ReplayClipper::saveRange(src, 0.0, 2.0, out, &err))
+      << qPrintable(err);
+  auto streams = readStreams(out);
+  ASSERT_FALSE(streams[0].isEmpty());
+  // The cut precedes the first keyframe, so it falls back forward; the
+  // head GOP (whose keyframe lacks a demuxable DTS) may be skipped, but
+  // everything from there to the end bound is kept (~1s at 30fps).
+  EXPECT_TRUE(streams[0].first().key);
+  EXPECT_GE(streams[0].size(), 25);
+  EXPECT_LE(streams[0].size(), 65);
+}
+
+TEST_F(ReplayClipperTest, BadRangesFailCleanly) {
+  // Argument validation runs before any file is opened (the placeholder
+  // is never read on these paths).
+  const QString s0 = tempDir.path() + "/seg0.mkv";
+  QFile f(s0);
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  f.close();
+  QString err;
+  EXPECT_FALSE(
+      ReplayClipper::saveRange(s0, 2.0, 1.0, tempDir.path() + "/o.mkv", &err));
+  EXPECT_FALSE(err.isEmpty());
+  err.clear();
+  EXPECT_FALSE(
+      ReplayClipper::saveRange(s0, 1.0, 1.0, tempDir.path() + "/o.mkv", &err));
+  EXPECT_FALSE(err.isEmpty());
+  EXPECT_FALSE(
+      ReplayClipper::saveRange(s0, -1.0, 1.0, tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(
+      ReplayClipper::saveRange("", 0.0, 1.0, tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveRange("/nonexistent/x.mkv", 0.0, 1.0,
+                                        tempDir.path() + "/o.mkv", nullptr));
+  // A real (if unreadable) file with a bad output still fails cleanly.
+  EXPECT_FALSE(ReplayClipper::saveRange(s0, 0.0, 1.0, "", nullptr));
 }

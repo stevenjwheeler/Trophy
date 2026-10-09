@@ -28,6 +28,24 @@ ApplicationWindow {
     property bool skipDeleteConfirmation: false
     property var selectedRecordings: []
     property int lastSelectedIndex: -1
+    // Maximization the player fullscreen interrupts, so
+    // exiting fullscreen restores it (not a plain window).
+    property bool wasMaximizedBeforeFullscreen: false
+
+    onVisibilityChanged: {
+        // The compositor may leave fullscreen on its own
+        // (its own keybinding): keep the player's flag in
+        // sync so the header and tracks come back.
+        if (window.visibility !== Window.FullScreen && playerPage.playerFullscreen)
+            playerPage.playerFullscreen = false
+    }
+
+    onCurrentPageChanged: {
+        // Other navigation paths (global search results)
+        // also close the overlay player.
+        if (playerPage.visible)
+            playerPage.close()
+    }
 
     function toggleSelection(filePath) {
         var idx = selectedRecordings.indexOf(filePath);
@@ -132,6 +150,25 @@ ApplicationWindow {
             url = `file://${url}`;
         }
         Qt.openUrlExternally(url);
+    }
+
+    // In-app player overlay (content area; Back/Escape closes
+    // and stops playback).
+    function openPlayer(filePath) {
+        if (!filePath)
+            return;
+        var title = filePath;
+        var dateStr = "";
+        if (window.recordingLibrary) {
+            var rec = window.recordingLibrary.getRecording(filePath);
+            if (rec) {
+                title = rec.gameName || rec.fileName || filePath;
+                if (rec.date)
+                    dateStr = Qt.formatDateTime(rec.date, "MMM d, yyyy HH:mm");
+            }
+        }
+        playerPage.open(filePath, title, dateStr);
+        playerPage.visible = true;
     }
 
     function confirmDelete(filePath, fileName) {
@@ -342,20 +379,25 @@ ApplicationWindow {
     Rectangle {
         id: windowBody
         anchors.fill: parent
-        radius: 12
+        // Square and borderless in player fullscreen so
+        // the video runs edge-to-edge.
+        radius: playerPage.playerFullscreen ? 0 : 12
         color: Theme.surfaceColor
-        border.width: 1
+        border.width: playerPage.playerFullscreen ? 0 : 1
         border.color: Theme.borderColor
 
         ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 1
+            anchors.margins: playerPage.playerFullscreen ? 0 : 1
             spacing: 0
 
             Rectangle {
                 id: titleBar
                 Layout.fillWidth: true
                 Layout.preferredHeight: 60
+                // Hidden in player fullscreen (the video
+                // fills the window).
+                visible: !playerPage.playerFullscreen
                 color: Theme.surfaceColor
                 radius: 12
 
@@ -523,8 +565,20 @@ ApplicationWindow {
                 NavigationRail {
                     id: navRail
                     Layout.fillHeight: true
+                    // Hidden in player fullscreen (the video
+                    // fills the window).
+                    visible: !playerPage.playerFullscreen
                     currentIndex: window.currentPage
-                    onNavigate: function(index) { window.currentPage = index; }
+                    onNavigate: function(index) {
+                        // The player is an overlay on the
+                        // content area, not a page: navigating
+                        // anywhere closes it (and stops
+                        // playback) instead of leaving it
+                        // stacked on top of the destination.
+                        if (playerPage.visible)
+                            playerPage.close()
+                        window.currentPage = index
+                    }
                 }
 
                 Item {
@@ -541,17 +595,44 @@ ApplicationWindow {
                         SettingsPage { id: settingsPage }
                         InfoPage { id: infoPage }
                     }
+
+                    // In-app player: overlays the content area only,
+                    // so the title bar and nav rail stay interactive.
+                    PlayerPage {
+                        id: playerPage
+                        anchors.fill: parent
+                        visible: false
+                        // Fullscreen player: the page owns the
+                        // flag; the window answers it (a child
+                        // file can't reach the window id). The
+                        // pre-fullscreen maximization is restored
+                        // on exit, like any standalone player.
+                        onPlayerFullscreenChanged: {
+                            if (playerFullscreen) {
+                                wasMaximizedBeforeFullscreen =
+                                    (window.visibility === Window.Maximized)
+                                window.showFullScreen()
+                            } else {
+                                window.showNormal()
+                                if (wasMaximizedBeforeFullscreen)
+                                    window.showMaximized()
+                            }
+                        }
+                        onFullscreenRequested: playerFullscreen = !playerFullscreen
+                    }
                 }
             }
         }
     }
 
     MouseArea {
+        id: resizeGrip
         width: 15
         height: 15
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         cursorShape: Qt.SizeFDiagCursor
+        visible: !playerPage.playerFullscreen
         onPressed: window.startSystemResize(Qt.RightEdge | Qt.BottomEdge)
     }
 
@@ -665,6 +746,17 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: 400
         standardButtons: Dialog.NoButton
+        // The title renders in the content like TrophyDialog; suppress the
+        // default header so it is not shown twice.
+        header: Item { height: 0 }
+
+        // Dimmed backdrop overlay (matches TrophyDialog)
+        Overlay.modal: Rectangle {
+            color: Theme.withOpacity("#000000", 0.5)
+            Behavior on opacity {
+                NumberAnimation { duration: Theme.animationFast }
+            }
+        }
 
         background: Rectangle {
             color: Theme.cardColor || "#212121"
@@ -673,8 +765,43 @@ ApplicationWindow {
             border.width: 1
         }
 
+        // Open/close animation (matches TrophyDialog)
+        enter: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 0
+                to: 1
+                duration: Theme.animationNormal
+                easing.type: Easing.OutCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 0.92
+                to: 1
+                duration: Theme.animationNormal
+                easing.type: Easing.OutCubic
+            }
+        }
+
+        exit: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: Theme.animationFast
+                easing.type: Easing.InCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 1
+                to: 0.95
+                duration: Theme.animationFast
+                easing.type: Easing.InCubic
+            }
+        }
+
         contentItem: ColumnLayout {
-            spacing: Theme.spacingMedium
+            spacing: 0
 
             Label {
                 text: renameDialog.title
@@ -682,11 +809,16 @@ ApplicationWindow {
                 font.weight: Font.Bold
                 color: Theme.textColor
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.bottomMargin: 0
             }
 
             TrophyTextField {
                 id: renameField
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                Layout.bottomMargin: 0
                 placeholderText: qsTr("Recording name")
                 maximumLength: 80
                 onAccepted: {
@@ -705,6 +837,9 @@ ApplicationWindow {
                 color: Theme.textMutedColor
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                Layout.bottomMargin: 0
             }
 
             Label {
@@ -714,20 +849,29 @@ ApplicationWindow {
                 wrapMode: Text.WordWrap
                 visible: renameDialog.errorMessage !== ""
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: visible ? Theme.spacingSmall : 0
+                Layout.bottomMargin: 0
             }
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                spacing: 0
                 Item { Layout.fillWidth: true }
-                TrophyButton {
-                    text: qsTr("Cancel")
-                    onClicked: renameDialog.reject()
-                }
-                TrophyButton {
-                    text: qsTr("Rename")
-                    baseColor: Theme.accentColor || "#3498db"
-                    enabled: renameField.text.trim().length > 0
-                    onClicked: window.performRename()
+                RowLayout {
+                    spacing: Theme.spacingMedium
+                    TrophyButton {
+                        text: qsTr("Cancel")
+                        onClicked: renameDialog.reject()
+                    }
+                    TrophyButton {
+                        text: qsTr("Rename")
+                        baseColor: Theme.accentColor || "#3498db"
+                        enabled: renameField.text.trim().length > 0
+                        onClicked: window.performRename()
+                    }
                 }
             }
         }

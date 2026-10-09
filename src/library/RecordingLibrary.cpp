@@ -8,7 +8,9 @@
 #include "RecordingLibrary.h"
 #include "Recording.h"
 #include "ThumbnailGenerator.h"
+#include "muxing/ReplayClipper.h"
 
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -16,8 +18,12 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaObject>
+#include <QPointer>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <algorithm>
+#include <thread>
 
 namespace TrophyBackend {
 
@@ -116,6 +122,91 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
 void RecordingLibrary::setActiveRecordingPath(const QString &path) {
   m_activeRecordingPath = path;
   updateFilteredRecordings();
+}
+
+void RecordingLibrary::saveClipRange(const QString &sourcePath,
+                                     double startSeconds,
+                                     double endSeconds) {
+  auto fail = [&](const QString &reason) {
+    qWarning() << "RecordingLibrary::saveClipRange:" << reason;
+    emit clipSaveFailed(reason);
+  };
+  if (m_clipSaving) {
+    fail(tr("A clip is already being saved."));
+    return;
+  }
+  if (sourcePath.isEmpty() || !QFileInfo::exists(sourcePath)) {
+    fail(tr("Source recording not found."));
+    return;
+  }
+  if (!(endSeconds > startSeconds) || startSeconds < 0) {
+    fail(tr("Pick a range on the timeline first."));
+    return;
+  }
+  if (m_libraryPath.isEmpty()) {
+    fail(tr("No library folder configured."));
+    return;
+  }
+  // File under the source's game name so the clip badges like a DVR one.
+  // Recording::gameName is the clean name ("Deadlock", never "Deadlock
+  // Clip"); untracked files fall back to the filename stem.
+  QString game;
+  if (Recording *rec = getRecording(sourcePath))
+    game = rec->gameName();
+  if (game.isEmpty())
+    game = QFileInfo(sourcePath).completeBaseName();
+  QString safe = game;
+  safe.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+  safe.replace(QRegularExpression("[_-]{2,}"), "_");
+  safe = safe.trimmed().replace(QRegularExpression("^[_-]+|[_-]+$"), "");
+  if (safe.isEmpty())
+    safe = "Game";
+  const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+  const QString out = QString("%1/%2_%3_Replay.mkv").arg(m_libraryPath, safe, ts);
+
+  // Remux off the UI thread; completion hops back via queued invoke. The
+  // clip is written to a .part file and atomically renamed: the library
+  // watches this directory and must never see a half-written file (it
+  // would generate a thumbnail for garbage).
+  m_clipSaving = true;
+  emit clipSavingChanged();
+  QPointer<RecordingLibrary> self(this);
+  const QString tmpOut = out + ".part";
+  QFile::remove(tmpOut);
+  std::thread([self, sourcePath, startSeconds, endSeconds, game, out,
+               tmpOut]() {
+    QString err;
+    double keptSec = 0.0;
+    bool ok = ReplayClipper::saveRange(sourcePath, startSeconds, endSeconds,
+                                       tmpOut, &err, &keptSec);
+    const double actualSec = keptSec > 0 ? keptSec : (endSeconds - startSeconds);
+    if (ok && QFile::exists(out))
+      QFile::remove(out);
+    if (ok)
+      ok = QFile::rename(tmpOut, out);
+    else
+      QFile::remove(tmpOut);
+    if (!ok && err.isEmpty())
+      err = "Could not save the clip file.";
+    if (!self)
+      return;
+    QMetaObject::invokeMethod(
+        self,
+        [self, ok, out, game, err, actualSec]() {
+          if (!self)
+            return;
+          self->m_clipSaving = false;
+          emit self->clipSavingChanged();
+          if (ok) {
+            emit self->clipSaved(out, game, actualSec);
+          } else {
+            emit self->clipSaveFailed(err.isEmpty()
+                                          ? self->tr("Could not save the clip.")
+                                          : err);
+          }
+        },
+        Qt::QueuedConnection);
+  }).detach();
 }
 
 void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
