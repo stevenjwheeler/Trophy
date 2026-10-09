@@ -67,6 +67,10 @@ Page {
     // Playback rate, fanned out to the video output and every
     // audio-only pipeline together (lockstep).
     property real playbackRate: 1.0
+    // Scrub-throttle state (see seekTo): last issued seek and the
+    // trailing position a drag burst owes.
+    property double lastScrubMs: 0
+    property double pendingScrubMs: -1
     // True while the library remuxes a snipped range (worker thread).
     readonly property bool clipSaving: typeof recordingLibrary !== "undefined" && recordingLibrary !== null ? recordingLibrary.clipSaving : false
 
@@ -247,7 +251,36 @@ Page {
     }
 
     function seekTo(ms) {
-        seekAll(ms)
+        // Scrub throttle: lane drags fire per-mousemove, and every
+        // FFmpeg seek flushes the decoders and re-decodes up to a GOP
+        // — an unthrottled drag aborts each seek with the next (a 2s
+        // burst delivered ~60 frames headless, pure thrash). At most
+        // one seek per 100ms while scrubbing, plus the exact trailing
+        // position right after, so the landing frame stays precise.
+        // Discrete jumps (±10s, loop wrap) bypass this via seekAll.
+        var now = Date.now()
+        if (now - lastScrubMs >= 100) {
+            lastScrubMs = now
+            pendingScrubMs = -1
+            scrubTimer.stop()
+            seekAll(ms)
+        } else {
+            pendingScrubMs = ms
+            scrubTimer.restart()
+        }
+    }
+
+    Timer {
+        id: scrubTimer
+        interval: 100
+        repeat: false
+        onTriggered: {
+            if (playerPage.pendingScrubMs >= 0) {
+                playerPage.lastScrubMs = Date.now()
+                playerPage.seekAll(playerPage.pendingScrubMs)
+                playerPage.pendingScrubMs = -1
+            }
+        }
     }
 
     // Fullscreen player: the window goes fullscreen and the
