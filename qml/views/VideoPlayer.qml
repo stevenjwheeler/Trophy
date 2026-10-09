@@ -32,10 +32,27 @@ Rectangle {
     signal volumeRequested(double volume)
     signal muteRequested()
     signal fullscreenRequested()
+    // Playback rate cycles here; the page fans the new rate out to
+    // every audio pipeline too (lockstep). Snapshot grabs the current
+    // video frame to a file and reports back.
+    signal rateRequested(double rate)
+    signal snapshotRequested()
+    signal snapshotSaved(string path, bool ok)
 
     // Mirrored from the page (master volume/mute live there).
     property real volumeLevel: 1.0
     property bool masterMuted: false
+    // Playback rate, bound to the page (which also drives every
+    // audio-only pipeline). Sticky on the MediaPlayer: set once,
+    // survives play/pause/seek.
+    property alias playbackRate: mediaPlayer.playbackRate
+    property real rate: 1.0
+    readonly property var rateSteps: [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+
+    function nextRate() {
+        var i = rateSteps.indexOf(rate)
+        return rateSteps[(i + 1) % rateSteps.length]
+    }
     // Mirrored from the page (the fullscreen state lives
     // there; the window itself is driven by main.qml).
     // Squares the video corners so the frame fills the
@@ -59,6 +76,12 @@ Rectangle {
 
     function stop() {
         mediaPlayer.stop();
+    }
+
+    function snapshot(filePath) {
+        videoOutput.grabToImage(function(result) {
+            root.snapshotSaved(filePath, result.saveToFile(filePath))
+        })
     }
 
     function formatTime(ms) {
@@ -205,6 +228,36 @@ Rectangle {
 
             Item {
                 Layout.fillWidth: true
+            }
+
+            // Playback speed: cycles 0.25-4x, fanned out to every
+            // pipeline by the page.
+            TrophyButton {
+                implicitWidth: 52
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                text: (root.rate === 1 ? "1×" : root.rate + "×")
+                ToolTip.text: qsTr("Playback speed")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: root.rateRequested(root.nextRate())
+            }
+
+            // Frame snapshot: grabs the current video frame to a PNG
+            // next to the recording.
+            TrophyButton {
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                horizontalPadding: 0
+                icon.source: "qrc:/icons/camera.svg"
+                icon.width: 18
+                icon.height: 18
+                ToolTip.text: qsTr("Save frame as image")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: root.snapshotRequested()
             }
 
             // Master mute

@@ -370,6 +370,8 @@ add_executable(test_RecordingLibrary test_RecordingLibrary.cpp
     ${CMAKE_SOURCE_DIR}/src/library/Recording.h
     ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.cpp
     ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.h
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.cpp
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.h
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.h
 )

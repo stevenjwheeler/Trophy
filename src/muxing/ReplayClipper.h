@@ -39,6 +39,24 @@ public:
                        double windowSeconds, const QString &outputPath,
                        QString *error = nullptr,
                        double *keptSeconds = nullptr);
+
+  /**
+   * @brief Cuts an arbitrary [startSeconds, endSeconds] range out of a
+   * single library file into a clip.
+   *
+   * Same engine as saveTail (single input at offset 0): the head cut lands
+   * on the last video keyframe at or before startSeconds (first one after
+   * it when the range starts before the first keyframe), so the clip
+   * overshoots the requested start by up to ~one GOP, never undershoots
+   * it. Packets past endSeconds are dropped on every stream. Container
+   * tags are carried and re-stamped exactly like saveTail (trophy-kind
+   * clip, own save moment), so player-made clips badge and date like
+   * DVR clips.
+   */
+  static bool saveRange(const QString &sourcePath, double startSeconds,
+                        double endSeconds, const QString &outputPath,
+                        QString *error = nullptr,
+                        double *keptSeconds = nullptr);
 };
 
 } // namespace TrophyBackend

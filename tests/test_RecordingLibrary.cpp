@@ -56,17 +56,23 @@ protected:
     return path;
   }
 
-  // Render a real 1s clip with an embedded container title using the
+  // Render a real clip with an embedded container title using the
   // system ffmpeg. Empty string when ffmpeg is unavailable (callers
   // should SKIP).
-  QString makeTitledClip(const QString &name, const QString &title) {
+  QString makeTitledClip(const QString &name, const QString &title,
+                         int durationSec = 1) {
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
       return QString();
     const QString path = tempDir.path() + "/" + name;
     QProcess proc;
     proc.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
-                          "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt",
-                          "yuv420p", "-metadata",
+                          QString("testsrc=size=320x240:rate=30:duration=%1")
+                              .arg(durationSec),
+                          "-pix_fmt", "yuv420p",
+                          // Fixed GOP: real recordings have regular
+                          // keyframes; the encoder default here writes a
+                          // single head keyframe, which nothing can cut.
+                          "-g", "12", "-keyint_min", "12", "-metadata",
                           QString("title=%1").arg(title), path});
     if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
         !QFile::exists(path))
@@ -411,4 +417,51 @@ TEST_F(RecordingLibraryTest, BulkDeleteWiringSettlesOnceEndToEnd) {
   EXPECT_EQ(batchSpy.count(), 1);
   EXPECT_EQ(singleSpy.count(), 0);
   EXPECT_EQ(storage.usedSize(), 0);
+}
+
+TEST_F(RecordingLibraryTest, SaveClipRangeRejectsBadInput) {
+  RecordingLibrary lib(tempDir.path());
+  QSignalSpy failed(&lib, &RecordingLibrary::clipSaveFailed);
+  QSignalSpy saved(&lib, &RecordingLibrary::clipSaved);
+  EXPECT_FALSE(lib.clipSaving());
+  // Missing source, then a real file with degenerate ranges (validation
+  // runs before anything is opened, so the zero-filled placeholder is
+  // never read).
+  lib.saveClipRange("/nonexistent/x.mkv", 0.0, 1.0);
+  const QString some = createFile("GameA_2026-01-15_20-30-00.mkv");
+  lib.saveClipRange(some, 2.0, 2.0);
+  lib.saveClipRange(some, 3.0, 1.0);
+  lib.saveClipRange(some, -1.0, 1.0);
+  EXPECT_EQ(failed.count(), 4);
+  EXPECT_EQ(saved.count(), 0);
+  EXPECT_FALSE(lib.clipSaving());
+}
+
+TEST_F(RecordingLibraryTest, SaveClipRangeCutsRealFile) {
+  // 5s source: the single-keyframe 1s file can't be cut at all (its
+  // only keyframe is the DTS-less demux head, so the engine honestly
+  // refuses). Mid-file keyframes carry DTS and cut normally.
+  const QString src =
+      makeTitledClip("Game_2026-01-15_20-30-00.mkv", "ClipGame", 5);
+  if (src.isEmpty())
+    GTEST_SKIP() << "ffmpeg CLI unavailable";
+  RecordingLibrary lib(tempDir.path());
+  waitForProbes();
+  QSignalSpy saved(&lib, &RecordingLibrary::clipSaved);
+  QSignalSpy failed(&lib, &RecordingLibrary::clipSaveFailed);
+  lib.saveClipRange(src, 2.0, 4.0);
+  EXPECT_TRUE(lib.clipSaving());
+  ASSERT_TRUE(saved.wait(15000)) << "clipSaved never arrived";
+  EXPECT_EQ(failed.count(), 0);
+  EXPECT_FALSE(lib.clipSaving());
+  ASSERT_EQ(saved.count(), 1);
+  const QList<QVariant> args = saved.first();
+  const QString out = args.first().toString();
+  EXPECT_TRUE(QFile::exists(out));
+  EXPECT_TRUE(out.endsWith("_Replay.mkv"));
+  // Filed under the source's game, with the span the file holds.
+  EXPECT_EQ(args.at(1).toString(), QString("ClipGame"));
+  const double secs = args.at(2).toDouble();
+  EXPECT_GE(secs, 2.0);
+  EXPECT_LE(secs, 3.0);
 }

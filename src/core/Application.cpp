@@ -896,6 +896,33 @@ void Application::connectSignals() {
             m_notificationService->showNotification(
                 "Couldn't Save Clip", reason, "dialog-warning", 3000, 2);
           });
+  // Player-range clips take the same completion path as DVR clips: chime,
+  // notice with the real kept span, library refresh (the feed picks the
+  // new _Replay.mkv up like any other clip).
+  connect(m_recordingLibrary.get(), &RecordingLibrary::clipSaved, this,
+          [this](const QString &filePath, const QString &gameName,
+                 double seconds) {
+            playClipPing(false);
+            if (m_settingsManager->notifyClips()) {
+              const qint64 secs = std::max<qint64>(1, llround(seconds));
+              const QString span =
+                  (secs == 1) ? QStringLiteral("1 second")
+                              : QStringLiteral("%1 seconds").arg(secs);
+              const QString size =
+                  StorageManager::formatSize(QFileInfo(filePath).size());
+              m_notificationService->showNotification(
+                  gameName.isEmpty() ? QStringLiteral("Clip saved")
+                                     : QStringLiteral("%1 clip saved").arg(gameName),
+                  QStringLiteral("%1 · %2").arg(span, size),
+                  "trophy", 3000, 2); // critical: visible over screenshare
+            }
+            m_recordingLibrary->refresh();
+          });
+  connect(m_recordingLibrary.get(), &RecordingLibrary::clipSaveFailed, this,
+          [this](const QString &reason) {
+            m_notificationService->showNotification(
+                "Couldn't Save Clip", reason, "dialog-warning", 3000, 2);
+          });
   connect(m_settingsManager.get(), &SettingsManager::instantReplayEnabledChanged,
           this, [this]() {
             if (!m_settingsManager->instantReplayEnabled()) {

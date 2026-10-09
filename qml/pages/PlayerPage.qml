@@ -48,6 +48,89 @@ Page {
     readonly property double playPosition: player.position
     readonly property double playDuration: player.duration
 
+    // Clip editor: the scissors toggle in the tracks header opens a
+    // clip bar; two handles on every lane select the range and Snip
+    // cuts it with ReplayClipper::saveRange (same stream-copy engine,
+    // tags and naming as DVR clips). -1 = unset (no overlay).
+    property bool clipMode: false
+    property double clipStartMs: -1
+    property double clipEndMs: -1
+    property string clipError: ""
+    // Loop the selection while reviewing it (audition before
+    // snipping). On by default: the common flow is select-then-snip,
+    // and a static range invites a play-press anyway.
+    property bool loopClip: true
+    // Source file of the in-flight snip: the player switches to the
+    // new clip only while still showing it (if the player moved on or
+    // closed meanwhile, the notice is enough).
+    property string clipSourcePath: ""
+    // Playback rate, fanned out to the video output and every
+    // audio-only pipeline together (lockstep).
+    property real playbackRate: 1.0
+    // True while the library remuxes a snipped range (worker thread).
+    readonly property bool clipSaving: typeof recordingLibrary !== "undefined" && recordingLibrary !== null ? recordingLibrary.clipSaving : false
+
+    // Clip selection helpers (see the clip bar + lane handles below).
+    function clipRangeValid() {
+        return clipMode && clipStartMs >= 0 && clipEndMs > clipStartMs + 400
+    }
+
+    function initClipRange() {
+        if (player.duration > 0) {
+            clipStartMs = 0
+            clipEndMs = player.duration
+        }
+    }
+
+    function toggleClipMode() {
+        clipMode = !clipMode
+        clipError = ""
+        if (clipMode)
+            initClipRange()
+    }
+
+    function clearClipRange() {
+        clipStartMs = -1
+        clipEndMs = -1
+    }
+
+    // Dragged handle (file clock ms), clamped to the file and to a
+    // 500ms minimum span so the cut always has something to keep.
+    function setClipHandle(which, ms) {
+        if (player.duration <= 0)
+            return
+        var t = Math.max(0, Math.min(player.duration, ms))
+        var gap = 500
+        if (which === 0)
+            clipStartMs = (clipEndMs >= 0) ? Math.min(t, clipEndMs - gap) : t
+        else
+            clipEndMs = (clipStartMs >= 0) ? Math.max(t, clipStartMs + gap) : t
+    }
+
+    function setRate(r) {
+        playbackRate = r
+    }
+
+    function snipClip() {
+        if (!clipRangeValid())
+            return
+        clipError = ""
+        clipSourcePath = filePath
+        if (typeof recordingLibrary !== "undefined" && recordingLibrary !== null)
+            recordingLibrary.saveClipRange(filePath, clipStartMs / 1000, clipEndMs / 1000)
+    }
+
+    function snapshotCurrent() {
+        if (filePath === "")
+            return
+        var slash = filePath.lastIndexOf("/")
+        var dir = slash >= 0 ? filePath.substring(0, slash) : "."
+        var base = slash >= 0 ? filePath.substring(slash + 1) : filePath
+        var stem = base.replace(/\.[^.]*$/, "")
+        var ts = Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH-mm-ss")
+        player.snapshot(dir + "/" + stem + "_snapshot_" + ts + ".png")
+    }
+
     // Tracks card height: 0 fits the content (every lane at
     // full height); a positive value is a compressed height
     // dragged on the handle at the card's top edge — the
@@ -68,6 +151,7 @@ Page {
     // bottom of the card.
     readonly property real minTracksHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
+        + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
         + (1 + trackCount) * (minLaneHeight + Theme.spacingSmall)
         + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
@@ -94,6 +178,7 @@ Page {
     // reverts when its `when` releases).
     readonly property real tracksNaturalHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
+        + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
         + (1 + trackCount) * (fullLaneHeight + Theme.spacingSmall)
         + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
@@ -120,6 +205,12 @@ Page {
     function open(path, title, dateStr) {
         player.stop()
         mutedTracks = []
+        clipMode = false
+        clearClipRange()
+        clipError = ""
+        clipSourcePath = ""
+        loopClip = true
+        playbackRate = 1.0
         resetView()
         filePath = path || ""
         fileTitle = title || ""
@@ -143,6 +234,12 @@ Page {
         fileDate = ""
         trackCount = 0
         mutedTracks = []
+        clipMode = false
+        clearClipRange()
+        clipError = ""
+        clipSourcePath = ""
+        loopClip = true
+        playbackRate = 1.0
         resetView()
         tracksHeight = 0
         playerFullscreen = false
@@ -215,6 +312,21 @@ Page {
         var pos = player.position
         if (pos < viewStartMs || pos > viewStartMs + viewSpanMs)
             centerView(pos)
+    }
+
+    // Loop the clip selection while reviewing it (audition before
+    // snipping). Called on every position tick alongside
+    // followPlayhead. Wraps only while playing through the end —
+    // a manual seek must never yank the head back, or the range
+    // could never be extended with Set end while looping. The 1s
+    // window is playback overshoot (one tick); a seek landing
+    // further out escapes the loop and plays on.
+    function loopCheck() {
+        if (!loopClip || !clipRangeValid() || !player.playing)
+            return
+        var pos = player.position
+        if (pos >= clipEndMs && pos < clipEndMs + 1000)
+            seekAll(clipStartMs)
     }
 
     // Lockstep transport across the video output and every
@@ -334,7 +446,18 @@ Page {
             volumeLevel: playerPage.masterVolume
             masterMuted: playerPage.masterMuted
             playerFullscreen: playerPage.playerFullscreen
-            onPositionChanged: playerPage.followPlayhead()
+            playbackRate: playerPage.playbackRate
+            rate: playerPage.playbackRate
+            onPositionChanged: {
+                playerPage.followPlayhead()
+                playerPage.loopCheck()
+            }
+            onDurationChanged: {
+                // The media clock arrives after open(): arm the full
+                // range when clip mode was entered before it landed.
+                if (playerPage.clipMode && playerPage.clipEndMs < 0)
+                    playerPage.initClipRange()
+            }
             onPlayRequested: playerPage.playAll()
             onPauseRequested: playerPage.pauseAll()
             onSeekRequested: function(ms) {
@@ -345,6 +468,18 @@ Page {
             }
             onMuteRequested: playerPage.masterMuted = !playerPage.masterMuted
             onFullscreenRequested: playerPage.playerFullscreen = !playerPage.playerFullscreen
+            onRateRequested: function(r) {
+                playerPage.setRate(r)
+            }
+            onSnapshotRequested: playerPage.snapshotCurrent()
+            onSnapshotSaved: function(path, ok) {
+                if (typeof notificationService === "undefined" || notificationService === null)
+                    return
+                if (ok)
+                    notificationService.showNotification(qsTr("Snapshot saved"), path.substring(path.lastIndexOf("/") + 1), "trophy", 3000, 1)
+                else
+                    notificationService.showError(qsTr("Could not save the snapshot."))
+            }
         }
 
         // One audio-only pipeline per stream, pinned to its
@@ -361,6 +496,7 @@ Page {
             MediaPlayer {
                 source: playerPage.filePath !== "" ? "file://" + playerPage.filePath : ""
                 autoPlay: false
+                playbackRate: playerPage.playbackRate
                 onMediaStatusChanged: {
                     if (mediaStatus === MediaPlayer.LoadedMedia)
                         activeAudioTrack = index
@@ -369,6 +505,29 @@ Page {
                     volume: playerPage.masterVolume
                     muted: playerPage.masterMuted || playerPage.isMuted(index)
                 }
+            }
+        }
+
+        // Player-range clip results (the notice + library refresh
+        // arrive from the Application wiring, chime included).
+        Connections {
+            target: recordingLibrary
+            function onClipSaved(path, game, secs) {
+                // Switch to the fresh clip while still showing its
+                // source (open() resets the editor, so the clip
+                // lands ready to watch). Otherwise the notice
+                // covers it.
+                if (playerPage.clipSourcePath !== "" && playerPage.filePath === playerPage.clipSourcePath) {
+                    var dateStr = Qt.formatDateTime(new Date(), "MMM d, yyyy HH:mm")
+                    var title = game !== "" ? qsTr("%1 Clip").arg(game) : path.substring(path.lastIndexOf("/") + 1)
+                    playerPage.open(path, title, dateStr)
+                }
+                playerPage.clipSourcePath = ""
+                playerPage.clipError = ""
+            }
+            function onClipSaveFailed(reason) {
+                playerPage.clipSourcePath = ""
+                playerPage.clipError = reason
             }
         }
 
@@ -433,6 +592,8 @@ Page {
                 // in below the smallest all-lanes fit).
                 clip: true
 
+                // Tracks header: zoom and clip share one row, so
+                // editing never pushes a lane out of the card.
                 RowLayout {
                     id: zoomRow
                     Layout.fillWidth: true
@@ -440,12 +601,103 @@ Page {
                     spacing: Theme.spacingSmall
 
                     Label {
-                        Layout.fillWidth: true
                         text: qsTr("Tracks")
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
                         font.weight: Font.Bold
                         font.capitalization: Font.AllUppercase
+                    }
+
+                    // Clip mode: range handles on every lane (snip
+                    // cuts via the library).
+                    TrophyButton {
+                        implicitWidth: 32
+                        implicitHeight: 28
+                        padding: 0
+                        horizontalPadding: 0
+                        checkable: true
+                        checked: playerPage.clipMode
+                        outlined: true
+                        icon.source: "qrc:/icons/scissors.svg"
+                        icon.width: 16
+                        icon.height: 16
+                        ToolTip.text: qsTr("Clip a range")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
+                        onClicked: playerPage.toggleClipMode()
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 28
+                        visible: playerPage.clipMode
+                        text: qsTr("Set start")
+                        enabled: playerPage.playDuration > 0
+                        onClicked: playerPage.setClipHandle(0, playerPage.playPosition)
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 28
+                        visible: playerPage.clipMode
+                        text: qsTr("Set end")
+                        enabled: playerPage.playDuration > 0
+                        onClicked: playerPage.setClipHandle(1, playerPage.playPosition)
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        visible: playerPage.clipMode
+                        horizontalAlignment: Text.AlignHCenter
+                        elide: Text.ElideRight
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.family: "monospace"
+                        text: playerPage.clipRangeValid()
+                            ? player.formatTime(playerPage.clipStartMs) + " – " + player.formatTime(playerPage.clipEndMs) + " · " + player.formatTime(playerPage.clipEndMs - playerPage.clipStartMs)
+                            : qsTr("Drag the handles or use Set start/end")
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 28
+                        visible: playerPage.clipMode
+                        checkable: true
+                        checked: playerPage.loopClip
+                        outlined: true
+                        text: qsTr("Loop")
+                        ToolTip.text: qsTr("Loop the selected range")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
+                        onClicked: playerPage.loopClip = !playerPage.loopClip
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 28
+                        visible: playerPage.clipMode
+                        text: qsTr("Clear")
+                        onClicked: playerPage.clearClipRange()
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 28
+                        visible: playerPage.clipMode
+                        text: playerPage.clipSaving ? qsTr("Saving…") : qsTr("Snip")
+                        baseColor: Theme.accentColor || "#3498db"
+                        enabled: playerPage.clipRangeValid() && !playerPage.clipSaving
+                        onClicked: playerPage.snipClip()
+                    }
+
+                    BusyIndicator {
+                        Layout.preferredWidth: 20
+                        Layout.preferredHeight: 20
+                        running: visible
+                        visible: playerPage.clipSaving
+                    }
+
+                    // Spacer while not editing: keeps the zoom
+                    // controls right-aligned (in clip mode the
+                    // range readout takes the slack instead).
+                    Item {
+                        Layout.fillWidth: true
+                        visible: !playerPage.clipMode
                     }
 
                     TrophyButton {
@@ -477,6 +729,16 @@ Page {
                     }
                 }
 
+                Label {
+                    id: clipErrorLabel
+                    Layout.fillWidth: true
+                    visible: playerPage.clipError !== ""
+                    text: playerPage.clipError
+                    color: Theme.errorColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
+                }
+
                 VideoLane {
                     Layout.fillWidth: true
                     laneHeight: playerPage.laneHeight
@@ -485,8 +747,14 @@ Page {
                     playDuration: playerPage.playDuration
                     viewStartMs: playerPage.viewStartMs
                     viewSpanMs: playerPage.viewSpanMs
+                    clipActive: playerPage.clipMode
+                    clipStartMs: playerPage.clipStartMs
+                    clipEndMs: playerPage.clipEndMs
                     onSeekRequested: function(ms) {
                         playerPage.seekTo(ms)
+                    }
+                    onClipHandleMoved: function(which, ms) {
+                        playerPage.setClipHandle(which, ms)
                     }
                     onViewZoomRequested: function(t, frac, zoomIn) {
                         playerPage.zoomAt(t, frac, zoomIn)
@@ -510,8 +778,14 @@ Page {
                         playDuration: playerPage.playDuration
                         viewStartMs: playerPage.viewStartMs
                         viewSpanMs: playerPage.viewSpanMs
+                        clipActive: playerPage.clipMode
+                        clipStartMs: playerPage.clipStartMs
+                        clipEndMs: playerPage.clipEndMs
                         onSeekRequested: function(ms) {
                             playerPage.seekTo(ms)
+                        }
+                        onClipHandleMoved: function(which, ms) {
+                            playerPage.setClipHandle(which, ms)
                         }
                         onZoomRequested: function(t, frac, zoomIn) {
                             playerPage.zoomAt(t, frac, zoomIn)
@@ -561,6 +835,13 @@ Page {
 
         signal seekRequested(double ms)
         signal muteToggled(int track)
+        // Clip range overlay (page-owned selection): the lane only
+        // draws it — drags report back via clipHandleMoved and the
+        // page clamps. Never read player.* here (see page note).
+        property bool clipActive: false
+        property double clipStartMs: -1
+        property double clipEndMs: -1
+        signal clipHandleMoved(int which, double ms)
         // Wheel zoom (anchored at the cursor) and middle-drag
         // pan: neither moves the playhead.
         signal zoomRequested(double cursorMs, double cursorFrac, bool zoomIn)
@@ -574,6 +855,14 @@ Page {
             if (viewSpanMs > 0 && waveArea.width > 0) {
                 seekRequested(viewStartMs + Math.max(0, Math.min(waveArea.width, x)) / waveArea.width * viewSpanMs)
             }
+        }
+
+        // Clip overlay state: shown while the page selection is set
+        // and this lane has a drawable window. Handles position from
+        // it; drags report file-clock ms back to the page.
+        readonly property bool clipShow: lane.clipActive && lane.clipStartMs >= 0 && lane.clipEndMs > lane.clipStartMs && lane.viewSpanMs > 0 && waveArea.width > 0
+        function clipMsToX(ms) {
+            return (ms - lane.viewStartMs) / lane.viewSpanMs * waveArea.width
         }
 
         function refreshPeaks() {
@@ -784,6 +1073,105 @@ Page {
                         lane.zoomRequested(lane.viewStartMs + frac * lane.viewSpanMs, frac, wheel.angleDelta.y > 0)
                     }
                 }
+
+                // Clip range shading: dimmed outside the selection,
+                // tinted inside. Rectangles take no input, so clicks
+                // elsewhere still reach the scrub area beneath; only
+                // the 16px handle bars grab the cursor.
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: 0
+                    width: lane.clipShow ? Math.max(0, lane.clipMsToX(lane.clipStartMs)) : 0
+                    color: "#99000000"
+                    visible: lane.clipShow
+                }
+
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: lane.clipShow ? lane.clipMsToX(lane.clipEndMs) : 0
+                    width: lane.clipShow ? Math.max(0, waveArea.width - x) : 0
+                    color: "#99000000"
+                    visible: lane.clipShow
+                }
+
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: lane.clipShow ? lane.clipMsToX(lane.clipStartMs) : 0
+                    width: lane.clipShow ? Math.max(0, lane.clipMsToX(lane.clipEndMs) - x) : 0
+                    color: Theme.withOpacity(Theme.primaryColor, 0.12)
+                    visible: lane.clipShow
+                }
+
+                Item {
+                    id: waveHandleStart
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 16
+                    x: (lane.clipShow ? lane.clipMsToX(lane.clipStartMs) : 0) - width / 2
+                    visible: lane.clipShow
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 4
+                        height: parent.height
+                        radius: 2
+                        color: waveHandleStartMouse.pressed || waveHandleStartMouse.containsMouse ? Theme.primaryHoverColor : Theme.primaryColor
+                    }
+
+                    MouseArea {
+                        id: waveHandleStartMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.SizeHorCursor
+                        property double grabDx: 0
+                        onPressed: function(mouse) {
+                            grabDx = mouse.x
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || lane.viewSpanMs <= 0 || waveArea.width <= 0)
+                                return
+                            var px = waveHandleStart.x + mouse.x - grabDx + waveHandleStart.width / 2
+                            lane.clipHandleMoved(0, lane.viewStartMs + px / waveArea.width * lane.viewSpanMs)
+                        }
+                    }
+                }
+
+                Item {
+                    id: waveHandleEnd
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 16
+                    x: (lane.clipShow ? lane.clipMsToX(lane.clipEndMs) : 0) - width / 2
+                    visible: lane.clipShow
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 4
+                        height: parent.height
+                        radius: 2
+                        color: waveHandleEndMouse.pressed || waveHandleEndMouse.containsMouse ? Theme.primaryHoverColor : Theme.primaryColor
+                    }
+
+                    MouseArea {
+                        id: waveHandleEndMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.SizeHorCursor
+                        property double grabDx: 0
+                        onPressed: function(mouse) {
+                            grabDx = mouse.x
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || lane.viewSpanMs <= 0 || waveArea.width <= 0)
+                                return
+                            var px = waveHandleEnd.x + mouse.x - grabDx + waveHandleEnd.width / 2
+                            lane.clipHandleMoved(1, lane.viewStartMs + px / waveArea.width * lane.viewSpanMs)
+                        }
+                    }
+                }
             }
         }
 
@@ -831,6 +1219,13 @@ Page {
         // pan: neither moves the playhead.
         signal viewZoomRequested(double cursorMs, double cursorFrac, bool zoomIn)
         signal viewPanRequested(double startMs)
+        // Clip range overlay (page-owned selection): the lane only
+        // draws it — drags report back via clipHandleMoved and the
+        // page clamps. Never read player.* here (see page note).
+        property bool clipActive: false
+        property double clipStartMs: -1
+        property double clipEndMs: -1
+        signal clipHandleMoved(int which, double ms)
 
         function thumbStartTime(i) {
             if (playDuration <= 0 || thumbs.length === 0)
@@ -842,6 +1237,14 @@ Page {
             if (viewSpanMs > 0 && stripArea.width > 0) {
                 seekRequested(viewStartMs + Math.max(0, Math.min(stripArea.width, x)) / stripArea.width * viewSpanMs)
             }
+        }
+
+        // Clip overlay state: shown while the page selection is set
+        // and this lane has a drawable window. Handles position from
+        // it; drags report file-clock ms back to the page.
+        readonly property bool clipShow: vlane.clipActive && vlane.clipStartMs >= 0 && vlane.clipEndMs > vlane.clipStartMs && vlane.viewSpanMs > 0 && stripArea.width > 0
+        function clipMsToX(ms) {
+            return (ms - vlane.viewStartMs) / vlane.viewSpanMs * stripArea.width
         }
 
         function refresh() {
@@ -970,6 +1373,105 @@ Page {
                             return
                         var frac = Math.max(0, Math.min(1, wheel.x / stripArea.width))
                         vlane.viewZoomRequested(vlane.viewStartMs + frac * vlane.viewSpanMs, frac, wheel.angleDelta.y > 0)
+                    }
+                }
+
+                // Clip range shading: dimmed outside the selection,
+                // tinted inside. Rectangles take no input, so clicks
+                // elsewhere still reach the scrub area beneath; only
+                // the 16px handle bars grab the cursor.
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: 0
+                    width: vlane.clipShow ? Math.max(0, vlane.clipMsToX(vlane.clipStartMs)) : 0
+                    color: "#99000000"
+                    visible: vlane.clipShow
+                }
+
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: vlane.clipShow ? vlane.clipMsToX(vlane.clipEndMs) : 0
+                    width: vlane.clipShow ? Math.max(0, stripArea.width - x) : 0
+                    color: "#99000000"
+                    visible: vlane.clipShow
+                }
+
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    x: vlane.clipShow ? vlane.clipMsToX(vlane.clipStartMs) : 0
+                    width: vlane.clipShow ? Math.max(0, vlane.clipMsToX(vlane.clipEndMs) - x) : 0
+                    color: Theme.withOpacity(Theme.primaryColor, 0.12)
+                    visible: vlane.clipShow
+                }
+
+                Item {
+                    id: stripHandleStart
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 16
+                    x: (vlane.clipShow ? vlane.clipMsToX(vlane.clipStartMs) : 0) - width / 2
+                    visible: vlane.clipShow
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 4
+                        height: parent.height
+                        radius: 2
+                        color: stripHandleStartMouse.pressed || stripHandleStartMouse.containsMouse ? Theme.primaryHoverColor : Theme.primaryColor
+                    }
+
+                    MouseArea {
+                        id: stripHandleStartMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.SizeHorCursor
+                        property double grabDx: 0
+                        onPressed: function(mouse) {
+                            grabDx = mouse.x
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || vlane.viewSpanMs <= 0 || stripArea.width <= 0)
+                                return
+                            var px = stripHandleStart.x + mouse.x - grabDx + stripHandleStart.width / 2
+                            vlane.clipHandleMoved(0, vlane.viewStartMs + px / stripArea.width * vlane.viewSpanMs)
+                        }
+                    }
+                }
+
+                Item {
+                    id: stripHandleEnd
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 16
+                    x: (vlane.clipShow ? vlane.clipMsToX(vlane.clipEndMs) : 0) - width / 2
+                    visible: vlane.clipShow
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 4
+                        height: parent.height
+                        radius: 2
+                        color: stripHandleEndMouse.pressed || stripHandleEndMouse.containsMouse ? Theme.primaryHoverColor : Theme.primaryColor
+                    }
+
+                    MouseArea {
+                        id: stripHandleEndMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.SizeHorCursor
+                        property double grabDx: 0
+                        onPressed: function(mouse) {
+                            grabDx = mouse.x
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || vlane.viewSpanMs <= 0 || stripArea.width <= 0)
+                                return
+                            var px = stripHandleEnd.x + mouse.x - grabDx + stripHandleEnd.width / 2
+                            vlane.clipHandleMoved(1, vlane.viewStartMs + px / stripArea.width * vlane.viewSpanMs)
+                        }
                     }
                 }
             }
