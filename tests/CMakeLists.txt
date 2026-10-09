@@ -84,6 +84,48 @@ target_include_directories(test_UpdateChecker PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_UpdateChecker)
 
+# --- WaveformCache (renders fixtures via ffmpeg CLI, skips without it) ---
+add_executable(test_WaveformCache test_WaveformCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/WaveformCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/WaveformCache.h
+)
+target_include_directories(test_WaveformCache PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+)
+target_link_libraries(test_WaveformCache PRIVATE
+    ${TEST_LINK_LIBS}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+)
+gtest_discover_tests(test_WaveformCache)
+
+# --- FilmstripCache (renders a fixture via ffmpeg CLI, skips without it) ---
+add_executable(test_FilmstripCache test_FilmstripCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/FilmstripCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/FilmstripCache.h
+)
+target_include_directories(test_FilmstripCache PRIVATE
+    ${TEST_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${SWSCALE_INCLUDE_DIRS}
+)
+target_link_libraries(test_FilmstripCache PRIVATE
+    ${TEST_LINK_LIBS}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+)
+gtest_discover_tests(test_FilmstripCache)
+
 add_executable(test_SettingsManager test_SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp

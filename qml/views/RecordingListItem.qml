@@ -33,7 +33,7 @@ ItemDelegate {
 
     width: ListView.view ? ListView.view.width : 0
     height: 70
-    onClicked: Qt.openUrlExternally("file://" + root.recording.filePath)
+    onClicked: window.openPlayer(root.recording.filePath)
 
     background: Rectangle {
         color: root.hovered ? Theme.cardHoverColor : Theme.cardColor
@@ -105,7 +105,7 @@ ItemDelegate {
                 icon.color: "white"
                 icon.width: 28
                 icon.height: 28
-                onClicked: Qt.openUrlExternally("file://" + root.recording.filePath)
+                onClicked: window.openPlayer(root.recording.filePath)
 
                 background: Rectangle {
                     radius: 16

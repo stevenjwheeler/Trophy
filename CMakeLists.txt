@@ -288,6 +288,8 @@ set(LIBRARY_SOURCES
     src/library/Recording.cpp
     src/library/ThumbnailGenerator.cpp
     src/library/ActivityFeed.cpp
+    src/library/WaveformCache.cpp
+    src/library/FilmstripCache.cpp
 )
 
 set(SETTINGS_SOURCES
@@ -410,6 +412,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/SetupWizard.qml
         qml/pages/DashboardPage.qml
         qml/pages/InfoPage.qml
+        qml/pages/PlayerPage.qml
         qml/pages/SettingsPage.qml
         qml/pages/GameListPage.qml
         qml/views/RecordingGridView.qml
