@@ -5,6 +5,7 @@
  */
 
 #include <QCoreApplication>
+#include <QFileInfo>
 #include <QSignalSpy>
 #include <QVariantMap>
 #include <gtest/gtest.h>
@@ -121,4 +122,44 @@ TEST(NotificationFormatTest, FormatsDurations) {
   EXPECT_EQ(NotificationService::formatDuration(154000), "2:34");
   EXPECT_EQ(NotificationService::formatDuration(3599000), "59:59");
   EXPECT_EQ(NotificationService::formatDuration(3723000), "1:02:03");
+}
+
+TEST(NotificationIconTest, EmptyAndThemeNameResolveToExtractedFile) {
+  // The Notify app_icon must be a real file: a bare "trophy" theme name
+  // only resolves when the icon is installed to the system, which an
+  // AppImage never does (Plasma then shows a blank-page placeholder).
+  const QString extracted = "/cache/trophy/icons/trophy.svg";
+  EXPECT_EQ(NotificationService::resolveNotificationIcon(QString(), extracted),
+            extracted);
+  EXPECT_EQ(
+      NotificationService::resolveNotificationIcon(QString("trophy"), extracted),
+      extracted);
+}
+
+TEST(NotificationIconTest, ExplicitIconsPassThrough) {
+  // Caller-supplied icons (e.g. dialog-error) are never rewritten, even
+  // when an extracted file is available.
+  EXPECT_EQ(NotificationService::resolveNotificationIcon(
+                QString("dialog-error"), "/cache/trophy/icons/trophy.svg"),
+            "dialog-error");
+}
+
+TEST(NotificationIconTest, FallsBackToThemeNameWithoutExtractedFile) {
+  // Test binaries don't link the qrc, so extraction is unavailable: the
+  // mapping must still yield a usable theme name, never an empty icon.
+  EXPECT_EQ(NotificationService::resolveNotificationIcon(QString(), QString()),
+            "trophy");
+  EXPECT_EQ(
+      NotificationService::resolveNotificationIcon(QString("trophy"), QString()),
+      "trophy");
+}
+
+TEST(NotificationIconTest, IconPathContract) {
+  // Either an existing absolute file (app/lib with the qrc linked) or
+  // empty (test binaries without resources) — never a dangling name.
+  const QString path = NotificationService::notificationIconPath();
+  if (!path.isEmpty()) {
+    EXPECT_TRUE(QFileInfo(path).isAbsolute());
+    EXPECT_TRUE(QFileInfo(path).size() > 0);
+  }
 }

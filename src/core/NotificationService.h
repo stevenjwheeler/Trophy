@@ -79,6 +79,23 @@ public:
   static QVariantMap notificationHints(int urgency, bool authorizeAction);
   /** "2:34" / "1:02:03" for notice bodies. Static + public for tests. */
   static QString formatDuration(qint64 ms);
+  /**
+   * Absolute path of the bundled trophy icon extracted to cache (for the
+   * Notify app_icon field). Daemons resolve a theme name like "trophy"
+   * only when the icon is installed to the system; an AppImage installs
+   * nothing, so the name dangles and Plasma shows a blank-page
+   * placeholder. An absolute file path renders everywhere. Empty when
+   * the bundled icon is unavailable (test binaries don't link the qrc).
+   * Static + public for tests (no D-Bus needed).
+   */
+  static QString notificationIconPath();
+  /**
+   * Pure icon mapping: empty/"trophy" resolve to the extracted file when
+   * available (else the "trophy" theme name); explicit icons (e.g.
+   * "dialog-error") pass through untouched. Static + public for tests.
+   */
+  static QString resolveNotificationIcon(const QString &icon,
+                                         const QString &extractedPath);
 
 signals:
   void enabledChanged();

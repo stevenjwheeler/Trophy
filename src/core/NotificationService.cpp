@@ -11,6 +11,10 @@
 #include <QDBusInterface>
 #include <QDBusReply>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
 #include <QTimer>
 
 namespace TrophyBackend {
@@ -143,6 +147,36 @@ bool NotificationService::noteSent(const QString &title, const QString &body) {
   return false;
 }
 
+QString NotificationService::notificationIconPath() {
+  // Same extract-once pattern as the chime wavs in Application::playChime:
+  // Notify needs a real file, and the resource only exists inside the
+  // binary (installed installs and AppImages alike).
+  static QString cached;
+  if (!cached.isEmpty() && QFileInfo(cached).size() > 0)
+    return cached;
+  cached.clear();
+  const QString dest =
+      QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+      QStringLiteral("/trophy/icons/trophy.svg");
+  QFileInfo info(dest);
+  if (info.size() <= 0) {
+    QDir().mkpath(info.path());
+    QFile::remove(dest);
+    if (!QFile::copy(QStringLiteral(":/icons/trophy.svg"), dest))
+      return QString();
+  }
+  cached = dest;
+  return cached;
+}
+
+QString NotificationService::resolveNotificationIcon(
+    const QString &icon, const QString &extractedPath) {
+  if ((icon.isEmpty() || icon == QStringLiteral("trophy")) &&
+      !extractedPath.isEmpty())
+    return extractedPath;
+  return icon.isEmpty() ? QStringLiteral("trophy") : icon;
+}
+
 void NotificationService::sendNotification(const QString &title,
                                            const QString &body,
                                            const QString &icon, int timeout,
@@ -167,7 +201,7 @@ void NotificationService::sendNotification(const QString &title,
     return;
   }
 
-  QString appIcon = icon.isEmpty() ? "trophy" : icon;
+  QString appIcon = resolveNotificationIcon(icon, notificationIconPath());
 
   const QVariantMap hints = notificationHints(urgency, authorizeAction);
 
