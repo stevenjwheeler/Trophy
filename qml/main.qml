@@ -746,6 +746,17 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: 400
         standardButtons: Dialog.NoButton
+        // The title renders in the content like TrophyDialog; suppress the
+        // default header so it is not shown twice.
+        header: Item { height: 0 }
+
+        // Dimmed backdrop overlay (matches TrophyDialog)
+        Overlay.modal: Rectangle {
+            color: Theme.withOpacity("#000000", 0.5)
+            Behavior on opacity {
+                NumberAnimation { duration: Theme.animationFast }
+            }
+        }
 
         background: Rectangle {
             color: Theme.cardColor || "#212121"
@@ -754,8 +765,43 @@ ApplicationWindow {
             border.width: 1
         }
 
+        // Open/close animation (matches TrophyDialog)
+        enter: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 0
+                to: 1
+                duration: Theme.animationNormal
+                easing.type: Easing.OutCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 0.92
+                to: 1
+                duration: Theme.animationNormal
+                easing.type: Easing.OutCubic
+            }
+        }
+
+        exit: Transition {
+            NumberAnimation {
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: Theme.animationFast
+                easing.type: Easing.InCubic
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 1
+                to: 0.95
+                duration: Theme.animationFast
+                easing.type: Easing.InCubic
+            }
+        }
+
         contentItem: ColumnLayout {
-            spacing: Theme.spacingMedium
+            spacing: 0
 
             Label {
                 text: renameDialog.title
@@ -763,11 +809,16 @@ ApplicationWindow {
                 font.weight: Font.Bold
                 color: Theme.textColor
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.bottomMargin: 0
             }
 
             TrophyTextField {
                 id: renameField
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                Layout.bottomMargin: 0
                 placeholderText: qsTr("Recording name")
                 maximumLength: 80
                 onAccepted: {
@@ -786,6 +837,9 @@ ApplicationWindow {
                 color: Theme.textMutedColor
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                Layout.bottomMargin: 0
             }
 
             Label {
@@ -795,20 +849,29 @@ ApplicationWindow {
                 wrapMode: Text.WordWrap
                 visible: renameDialog.errorMessage !== ""
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: visible ? Theme.spacingSmall : 0
+                Layout.bottomMargin: 0
             }
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                Layout.topMargin: Theme.spacingMedium
+                spacing: 0
                 Item { Layout.fillWidth: true }
-                TrophyButton {
-                    text: qsTr("Cancel")
-                    onClicked: renameDialog.reject()
-                }
-                TrophyButton {
-                    text: qsTr("Rename")
-                    baseColor: Theme.accentColor || "#3498db"
-                    enabled: renameField.text.trim().length > 0
-                    onClicked: window.performRename()
+                RowLayout {
+                    spacing: Theme.spacingMedium
+                    TrophyButton {
+                        text: qsTr("Cancel")
+                        onClicked: renameDialog.reject()
+                    }
+                    TrophyButton {
+                        text: qsTr("Rename")
+                        baseColor: Theme.accentColor || "#3498db"
+                        enabled: renameField.text.trim().length > 0
+                        onClicked: window.performRename()
+                    }
                 }
             }
         }
