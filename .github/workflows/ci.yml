@@ -19,9 +19,10 @@ permissions:
   contents: read
 
 jobs:
-  # A branch push landing exactly on a v* tag would build twice (once
-  # for the branch, once for the tag). The tag run covers it, so skip
-  # the branch build in that case.
+  # A push carrying both a branch ref and a v* tag on the same commit
+  # would build twice (once per ref). Main releases keep the tag run
+  # (branch build skipped); any other branch keeps the branch run and
+  # the tag run is dropped, so non-main tags never cut a release.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -32,12 +33,26 @@ jobs:
           fetch-depth: 0
       - id: check
         run: |
-          if [[ "${{ github.ref_type }}" == "branch" ]] && git describe --exact-match --match 'v*' HEAD 2>/dev/null; then
+          REF_TYPE="${{ github.ref_type }}"
+          REF_NAME="${{ github.ref_name }}"
+          SKIP=false
+          if [[ "$REF_TYPE" == "branch" && "$REF_NAME" == "main" ]] && git describe --exact-match --match 'v*' HEAD 2>/dev/null; then
             echo "Release commit already covered by the tag run — skipping branch build."
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
+            SKIP=true
+          elif [[ "$REF_TYPE" == "tag" && "$REF_NAME" == v* ]]; then
+            if git show-ref --verify --quiet refs/remotes/origin/main; then
+              MAIN_REF="origin/main"
+            elif git show-ref --verify --quiet refs/heads/main; then
+              MAIN_REF="main"
+            else
+              MAIN_REF=""
+            fi
+            if [[ -n "$MAIN_REF" ]] && ! git merge-base --is-ancestor HEAD "$MAIN_REF"; then
+              echo "Tag on a non-main commit — covered by the branch build, skipping tag run."
+              SKIP=true
+            fi
           fi
+          echo "skip=$SKIP" >> $GITHUB_OUTPUT
 
   build-and-test:
     needs: gate
