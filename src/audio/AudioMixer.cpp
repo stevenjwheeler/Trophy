@@ -211,9 +211,23 @@ void AudioMixer::stopAll() {
   }
 }
 
-void AudioMixer::setTrackAudioCallback(TrackAudioCallback callback) {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  m_trackAudioCallback = std::move(callback);
+AudioMixer::TrackAudioCallbackHandle
+AudioMixer::setTrackAudioCallback(TrackAudioCallback callback) {
+  TrackAudioCallbackHandle published;
+  if (callback)
+    published = std::make_shared<TrackAudioCallbackRegistration>(
+        std::move(callback));
+  m_trackAudioCallback.store(published, std::memory_order_release);
+  return published;
+}
+
+void AudioMixer::drainTrackAudioCallback(
+    const TrackAudioCallbackHandle &handle) {
+  if (!handle)
+    return;
+  std::unique_lock<std::mutex> lock(handle->mutex);
+  handle->accepting = false;
+  handle->drained.wait(lock, [&] { return handle->inFlight == 0; });
 }
 
 void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
@@ -239,28 +253,50 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   // PipeWire callback thread (config fields are written from the UI thread).
   const bool muted = track.atomicMuted.load(std::memory_order_relaxed);
   const float volume = track.atomicVolume.load(std::memory_order_relaxed);
-  if (!muted) {
+  if (muted) {
+    // Muted tracks read flat zero so meters park immediately.
+    track.peakLevel.store(0.0f);
+  } else {
     peak *= volume;
-  } else {
-    peak = 0.0f;
-  }
+    // Perceptual mapping: a linear peak parks typical loud content
+    // (-20dB = 0.1) at a 10% sliver. Map -60..0dB onto 0..1 so -20dB
+    // reads ~0.67 and -12dB ~0.8, while quiet content stays low.
+    // Result stays in 0..1 (hotter-than-full-scale clamps at 1).
+    float display = 0.0f;
+    if (peak > 0.0f) {
+      const float dB = 20.0f * std::log10(peak);
+      display = std::clamp((dB + 60.0f) / 60.0f, 0.0f, 1.0f);
+    }
 
-  // Smooth peak decay
-  float currentPeak = track.peakLevel.load();
-  if (peak > currentPeak) {
-    track.peakLevel.store(peak);
-  } else {
-    track.peakLevel.store(currentPeak * 0.95f);
+    // Fast attack, smooth release. Release runs in display space, so the
+    // bar falls linearly instead of diving logarithmically.
+    const float currentPeak = track.peakLevel.load();
+    track.peakLevel.store(display > currentPeak ? display
+                                               : currentPeak * 0.95f);
   }
 
   // Emit level change signal for UI updates
   emit trackLevelChanged(trackIndex, track.peakLevel.load());
 
   // Forward audio to encoder callback (called on PipeWire thread)
-  if (!muted && m_trackAudioCallback) {
-    m_trackAudioCallback(trackIndex, samples, frameCount, m_sampleRate,
-                         m_channels);
+  const auto callback = m_trackAudioCallback.load(std::memory_order_acquire);
+  if (muted || !callback)
+    return;
+  {
+    std::lock_guard<std::mutex> lock(callback->mutex);
+    if (!callback->accepting)
+      return;
+    ++callback->inFlight;
   }
+  struct CallbackCompletion {
+    TrackAudioCallbackHandle registration;
+    ~CallbackCompletion() {
+      std::lock_guard<std::mutex> lock(registration->mutex);
+      if (--registration->inFlight == 0)
+        registration->drained.notify_all();
+    }
+  } completion{callback};
+  callback->callback(trackIndex, samples, frameCount, m_sampleRate, m_channels);
 }
 
 } // namespace TrophyBackend

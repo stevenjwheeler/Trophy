@@ -11,6 +11,8 @@
 #include <QString>
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -69,7 +71,23 @@ public:
   using TrackAudioCallback =
       std::function<void(int trackIndex, const float *samples, int frameCount,
                          int sampleRate, int channels)>;
-  void setTrackAudioCallback(TrackAudioCallback callback);
+  struct TrackAudioCallbackRegistration {
+    explicit TrackAudioCallbackRegistration(TrackAudioCallback cb)
+        : callback(std::move(cb)) {}
+    TrackAudioCallback callback;
+    std::mutex mutex;
+    std::condition_variable drained;
+    size_t inFlight = 0;
+    bool accepting = true;
+  };
+  using TrackAudioCallbackHandle =
+      std::shared_ptr<TrackAudioCallbackRegistration>;
+  TrackAudioCallbackHandle setTrackAudioCallback(TrackAudioCallback callback);
+  // Stop accepting callbacks through this registration and wait for any
+  // callback already in flight. Does not change the currently published
+  // registration, so it is safe to retire a session after its successor
+  // has installed a different callback.
+  void drainTrackAudioCallback(const TrackAudioCallbackHandle &handle);
 
   // Start/stop all sources
   bool startAll();
@@ -101,7 +119,7 @@ private:
   bool m_started = false;  // True after startAll() is called
   std::array<Track, kTrackCount> m_tracks;
   mutable std::mutex m_mutex;
-  TrackAudioCallback m_trackAudioCallback;
+  std::atomic<TrackAudioCallbackHandle> m_trackAudioCallback;
 };
 
 } // namespace TrophyBackend

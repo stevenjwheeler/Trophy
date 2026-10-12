@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "audio/AudioMixer.h"
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
 #include "audio/AudioDriftCorrector.h"
@@ -32,7 +33,6 @@ namespace TrophyBackend {
 class IVideoCaptureSource;
 class IEncoder;
 class IMuxer;
-class AudioMixer;
 
 /**
  * @brief Manages an active recording session
@@ -124,6 +124,7 @@ private:
   IEncoder *m_encoder;
   IMuxer *m_muxer;
   AudioMixer *m_audioMixer;
+  AudioMixer::TrackAudioCallbackHandle m_audioCallbackRegistration;
 
   // One encoder per audio track (game audio, voice chat, microphone)
   std::array<std::unique_ptr<AudioEncoder>, kAudioTrackCount> m_audioEncoders;

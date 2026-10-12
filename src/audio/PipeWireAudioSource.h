@@ -9,10 +9,39 @@
 
 #include "IAudioSource.h"
 #include <QVariantList>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 
 namespace TrophyBackend {
+
+namespace detail {
+
+// Injectable bounded wait used by the synchronous registry helpers. Keeping
+// iteration and completion predicates separate lets tests exercise timeout,
+// completion, and iterator-error paths without a running PipeWire daemon.
+template <typename Iterate, typename IsDone>
+bool waitForPipeWireSync(Iterate &&iterate, IsDone &&isDone, int timeoutMs) {
+  using Clock = std::chrono::steady_clock;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+  while (!isDone()) {
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                              Clock::now())
+            .count();
+    if (remaining <= 0)
+      return false;
+    const int result = iterate(static_cast<int>(
+        std::min<std::chrono::milliseconds::rep>(remaining, 100)));
+    if (result < 0)
+      return false;
+  }
+  return true;
+}
+
+} // namespace detail
 
 /**
  * @brief PipeWire-based audio capture source
@@ -37,8 +66,7 @@ public:
    * @param serial   object.serial of the node (preferred by WirePlumber 0.5).
    */
   static std::unique_ptr<PipeWireAudioSource>
-  createApplicationSource(uint32_t nodeId,
-                          const QString &nodeName = {},
+  createApplicationSource(uint32_t nodeId, const QString &nodeName = {},
                           const QString &serial = {});
   static std::unique_ptr<PipeWireAudioSource>
   createInputSource(const QString &deviceName);
@@ -52,7 +80,7 @@ public:
    */
   static uint32_t findNodeByProcessName(const QString &processName,
                                         QString *outNodeName = nullptr,
-                                        QString *outSerial   = nullptr);
+                                        QString *outSerial = nullptr);
 
   /**
    * @brief Enumerate PipeWire nodes to find one matching a process ID.
@@ -61,9 +89,8 @@ public:
    * @param outSerial   Receives object.serial of the found node.
    * @return PipeWire node ID, or 0xffffffff if not found.
    */
-  static uint32_t findNodeByPid(uint32_t pid,
-                                QString *outNodeName = nullptr,
-                                QString *outSerial   = nullptr);
+  static uint32_t findNodeByPid(uint32_t pid, QString *outNodeName = nullptr,
+                                QString *outSerial = nullptr);
 
   /**
    * @brief Pick the target.object value for a pinned stream.
@@ -76,8 +103,8 @@ public:
    * serial 73 — pinning "73" captured the wrong node). Static + public for
    * tests (no PipeWire needed).
    */
-  static QString preferredTarget(const QString &serial,
-                                 const QString &nodeName, uint32_t nodeId);
+  static QString preferredTarget(const QString &serial, const QString &nodeName,
+                                 uint32_t nodeId);
 
   /** Distinct stream name per track (shows up as the node name in qpwgraph:
    * "trophy-game", "trophy-voice", "trophy-mic"). */
@@ -113,8 +140,8 @@ private:
   QString m_identifier;
   QString m_streamName = QStringLiteral("trophy-capture");
   uint32_t m_targetNodeId;
-  QString m_targetNodeName;  // PW_KEY_NODE_NAME for target.object hint
-  QString m_targetSerial;    // object.serial for WirePlumber 0.5 target.object
+  QString m_targetNodeName; // PW_KEY_NODE_NAME for target.object hint
+  QString m_targetSerial;   // object.serial for WirePlumber 0.5 target.object
   AudioConfig m_config;
   AudioCallback m_callback;
   std::atomic<bool> m_capturing{false};

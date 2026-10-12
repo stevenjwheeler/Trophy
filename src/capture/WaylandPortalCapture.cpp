@@ -18,6 +18,7 @@
 #include <QDBusPendingCall>
 #include <QDBusReply>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QMap>
 #include <QStringList>
 #include <QUuid>
@@ -75,6 +76,8 @@ struct NodeLookupData {
 
   struct pw_main_loop *loop = nullptr;
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool coreFailed = false;
   struct spa_hook coreListener = {};
   struct spa_hook registryListener = {};
 
@@ -85,6 +88,22 @@ struct NodeLookupData {
   uint32_t clientId = 0xFFFFFFFFu;
   QMap<uint32_t, QString> clientNames; // Stores id -> application.name
 };
+
+bool waitForCoreSync(NodeLookupData *data, struct pw_core *core) {
+  data->syncComplete = false;
+  data->pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
+  if (data->pendingSync < 0)
+    return false;
+
+  QElapsedTimer elapsed;
+  elapsed.start();
+  struct pw_loop *loop = pw_main_loop_get_loop(data->loop);
+  while (!data->syncComplete && !data->coreFailed && elapsed.elapsed() < 250) {
+    if (pw_loop_iterate(loop, 50) < 0)
+      return false;
+  }
+  return data->syncComplete && !data->coreFailed;
+}
 } // namespace
 
 namespace TrophyBackend {
@@ -228,13 +247,20 @@ void WaylandPortalCapture::requestScreenShare() {
   options["handle_token"] = token;
 
   QDBusMessage msg = portal.call("CreateSession", options);
-  if (msg.type() == QDBusMessage::ErrorMessage) {
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
     qCritical() << "Failed to call CreateSession:" << msg.errorMessage();
-    emit captureError("Failed to call CreateSession: " + msg.errorMessage());
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    emit captureError("Failed to call CreateSession: " + reason);
     return;
   }
 
   QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    emit captureError("Failed to call CreateSession: invalid request handle");
+    return;
+  }
 
   QDBusConnection::sessionBus().connect(
       "org.freedesktop.portal.Desktop", requestPath.path(),
@@ -260,6 +286,11 @@ void WaylandPortalCapture::onSessionCreated(unsigned int response,
   }
 
   m_sessionHandle = results["session_handle"].toString();
+  if (m_sessionHandle.isEmpty()) {
+    qCritical() << "Wayland Portal: successful CreateSession response has no session handle";
+    emit captureError("Wayland Portal: portal returned no session handle");
+    return;
+  }
   qDebug() << "Wayland Portal: Session created:" << m_sessionHandle;
 
   requestSelectSources();
@@ -299,7 +330,21 @@ void WaylandPortalCapture::requestSelectSources() {
 
   QDBusMessage msg =
       portal.call("SelectSources", QDBusObjectPath(m_sessionHandle), options);
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    qCritical() << "Failed to call SelectSources:" << reason;
+    emit captureError("Failed to select capture source: " + reason);
+    closePortalSession();
+    return;
+  }
   QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    emit captureError("Failed to select capture source: invalid request handle");
+    closePortalSession();
+    return;
+  }
 
   QDBusConnection::sessionBus().connect(
       "org.freedesktop.portal.Desktop", requestPath.path(),
@@ -345,7 +390,21 @@ void WaylandPortalCapture::onSourcesSelected(unsigned int response,
 
   QDBusMessage msg =
       portal.call("Start", QDBusObjectPath(m_sessionHandle), "", options);
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    qCritical() << "Failed to call Start:" << reason;
+    emit captureError("Failed to start portal capture: " + reason);
+    closePortalSession();
+    return;
+  }
   QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    emit captureError("Failed to start portal capture: invalid request handle");
+    closePortalSession();
+    return;
+  }
 
   QDBusConnection::sessionBus().connect(
       "org.freedesktop.portal.Desktop", requestPath.path(),
@@ -419,14 +478,33 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     }
   }
 
+  // Establish capture before asking PipeWire for optional identity metadata.
+  // The metadata query is best-effort and bounded; it must never delay the
+  // start notification or prevent frames from flowing.
+  if (!startPipeWireStream(nodeId)) {
+    closePortalSession();
+    emit captureError("Failed to initialize the PipeWire capture stream");
+    return;
+  }
+  m_capturing = true;
+  emit captureStarted();
+
   // --- PipeWire Meta-data lookup ---
   NodeLookupData lookupData;
   lookupData.targetId = nodeId;
   lookupData.loop = pw_main_loop_new(nullptr);
-
-  struct pw_context *context =
-      pw_context_new(pw_main_loop_get_loop(lookupData.loop), nullptr, 0);
-  struct pw_core *core = pw_context_connect(context, nullptr, 0);
+  struct pw_context *context = nullptr;
+  struct pw_core *core = nullptr;
+  bool lookupReady = false;
+  if (lookupData.loop) {
+    context = pw_context_new(pw_main_loop_get_loop(lookupData.loop), nullptr, 0);
+    if (context)
+      core = pw_context_connect(context, nullptr, 0);
+  }
+  if (!lookupData.loop || !context || !core) {
+    qWarning() << "Wayland Portal: unable to create PipeWire metadata lookup;"
+                  " using portal labels";
+  }
 
   static const struct pw_core_events core_events = [] {
     pw_core_events e = {};
@@ -434,12 +512,18 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     e.done = [](void *data, uint32_t id, int seq) {
       auto *d = static_cast<NodeLookupData *>(data);
       if (id == PW_ID_CORE && seq == d->pendingSync)
-        pw_main_loop_quit(d->loop);
+        d->syncComplete = true;
+    };
+    e.error = [](void *data, uint32_t, int, int, const char *) {
+      static_cast<NodeLookupData *>(data)->coreFailed = true;
     };
     return e;
   }();
-  pw_core_add_listener(core, &lookupData.coreListener, &core_events,
-                       &lookupData);
+  if (core) {
+    pw_core_add_listener(core, &lookupData.coreListener, &core_events,
+                         &lookupData);
+    lookupReady = true;
+  }
 
   static const struct pw_metadata_events metadata_events = [] {
     pw_metadata_events e = {};
@@ -459,8 +543,10 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     return e;
   }();
 
-  struct pw_registry *registry =
-      pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+  struct pw_registry *registry = core
+                                     ? pw_core_get_registry(
+                                           core, PW_VERSION_REGISTRY, 0)
+                                     : nullptr;
   lookupData.registry = registry;
 
   static const struct pw_registry_events reg_events = [] {
@@ -531,20 +617,22 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     };
     return e;
   }();
-  pw_registry_add_listener(registry, &lookupData.registryListener, &reg_events,
-                           &lookupData);
+  if (registry) {
+    pw_registry_add_listener(registry, &lookupData.registryListener,
+                             &reg_events, &lookupData);
+  } else {
+    lookupReady = false;
+  }
 
   // First sync to process all existing globals (nodes, clients, metadata
   // objects)
-  lookupData.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(lookupData.loop);
+  if (lookupReady)
+    lookupReady = waitForCoreSync(&lookupData, core);
 
   // Second sync: If we bound to a metadata object, wait for it to stream its
   // properties
-  if (lookupData.metadata) {
-    lookupData.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-    pw_main_loop_run(lookupData.loop);
-  }
+  if (lookupReady && lookupData.metadata)
+    lookupReady = waitForCoreSync(&lookupData, core);
 
   if (lookupData.found) {
     bool isGeneric = lookupData.name.toLower().contains("kwin") ||
@@ -557,40 +645,49 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
              << "PID:" << m_sourcePid;
   }
 
-  if (lookupData.metadata)
+  if (lookupData.metadata) {
+    spa_hook_remove(&lookupData.metadataListener);
     pw_proxy_destroy((struct pw_proxy *)lookupData.metadata);
-  pw_proxy_destroy((struct pw_proxy *)registry);
-  pw_core_disconnect(core);
-  pw_context_destroy(context);
-  pw_main_loop_destroy(lookupData.loop);
+  }
+  if (registry) {
+    spa_hook_remove(&lookupData.registryListener);
+    pw_proxy_destroy((struct pw_proxy *)registry);
+  }
+  if (core) {
+    spa_hook_remove(&lookupData.coreListener);
+    pw_core_disconnect(core);
+  }
+  if (context)
+    pw_context_destroy(context);
+  if (lookupData.loop)
+    pw_main_loop_destroy(lookupData.loop);
   // ------------------------
 
-  startPipeWireStream(nodeId);
-
-  m_capturing = true;
-  emit captureStarted();
   emit screenShareGranted(QString::number(nodeId));
 }
 
-void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
+bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   pw_init(nullptr, nullptr);
 
   m_pw_loop = pw_thread_loop_new("trophy-wayland-capture", nullptr);
   if (!m_pw_loop) {
     qCritical() << "Failed to create PipeWire thread loop";
-    return;
+    return false;
   }
 
   m_pw_context = pw_context_new(pw_thread_loop_get_loop(m_pw_loop), nullptr, 0);
   if (!m_pw_context) {
     qCritical() << "Failed to create PipeWire context";
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   if (pw_thread_loop_start(m_pw_loop) < 0) {
     qCritical() << "Failed to start PipeWire thread loop";
-    return;
+    stopPipeWireStream();
+    return false;
   }
+  m_pw_loopStarted = true;
 
   pw_thread_loop_lock(m_pw_loop);
 
@@ -598,7 +695,8 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   if (!m_pw_core) {
     qCritical() << "Failed to connect to PipeWire core";
     pw_thread_loop_unlock(m_pw_loop);
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   static const pw_stream_events stream_events = [] {
@@ -618,7 +716,8 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   if (!m_pw_stream) {
     qCritical() << "Failed to create PipeWire stream";
     pw_thread_loop_unlock(m_pw_loop);
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   pw_stream_add_listener(m_pw_stream, &m_pw_stream_listener, &stream_events,
@@ -675,6 +774,9 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
                                 params.data(), params.size());
     if (res < 0) {
       qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+      pw_thread_loop_unlock(m_pw_loop);
+      stopPipeWireStream();
+      return false;
     }
   } else {
     // DMA-BUF disabled by user – always use shared memory
@@ -689,10 +791,14 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
                                 params, 1);
     if (res < 0) {
       qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+      pw_thread_loop_unlock(m_pw_loop);
+      stopPipeWireStream();
+      return false;
     }
   }
 
   pw_thread_loop_unlock(m_pw_loop);
+  return true;
 }
 
 void WaylandPortalCapture::stopPipeWireStream() {
@@ -702,8 +808,9 @@ void WaylandPortalCapture::stopPipeWireStream() {
              << "SHM frames:" << m_shmFrames
              << "dropped buffers:" << m_droppedBuffers;
   }
-  if (m_pw_loop) {
+  if (m_pw_loop && m_pw_loopStarted) {
     pw_thread_loop_stop(m_pw_loop);
+    m_pw_loopStarted = false;
   }
 
   if (m_pw_stream) {

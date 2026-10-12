@@ -64,7 +64,7 @@ private:
   // indicator tracks); stopping PipeWire alone leaves the session — and
   // its indicator — alive forever.
   void closePortalSession();
-  void startPipeWireStream(uint32_t nodeId);
+  bool startPipeWireStream(uint32_t nodeId);
   void stopPipeWireStream();
 
   static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error);
@@ -83,6 +83,7 @@ private:
   pw_context *m_pw_context = nullptr;
   pw_core *m_pw_core = nullptr;
   pw_stream *m_pw_stream = nullptr;
+  bool m_pw_loopStarted = false;
   spa_hook m_pw_stream_listener;
 
   FrameCallback m_callback;

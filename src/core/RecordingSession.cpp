@@ -142,7 +142,7 @@ bool RecordingSession::start() {
         }
       }
 
-      m_audioMixer->setTrackAudioCallback(
+      m_audioCallbackRegistration = m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
             if (!m_running)
@@ -218,7 +218,7 @@ bool RecordingSession::start() {
           qDebug() << "Added merged audio stream" << idx;
       }
 
-      m_audioMixer->setTrackAudioCallback(
+      m_audioCallbackRegistration = m_audioMixer->setTrackAudioCallback(
           [this](int trackIndex, const float *samples, int frameCount,
                  int sampleRate, int channels) {
             if (!m_running || !m_mergedEncoder)
@@ -426,6 +426,10 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
 
 void RecordingSession::stop(bool keepCaptureSource, bool handoffRouting) {
   if (!m_running) {
+    if (m_audioMixer && m_audioCallbackRegistration) {
+      m_audioMixer->drainTrackAudioCallback(m_audioCallbackRegistration);
+      m_audioCallbackRegistration.reset();
+    }
     return;
   }
 
@@ -451,12 +455,18 @@ void RecordingSession::stop(bool keepCaptureSource, bool handoffRouting) {
       m_capture->setFrameCallback(nullptr);
   }
 
-  if (m_audioMixer && !handoffRouting) {
-    m_audioMixer->stopAll();
-    m_audioMixer->setTrackAudioCallback(nullptr);
-  }
-
   m_running = false;
+  if (m_audioMixer) {
+    if (!handoffRouting)
+      m_audioMixer->setTrackAudioCallback(nullptr);
+    // During a DVR handoff the successor's registration is already
+    // published. Drain only this session's registration, leaving the
+    // successor untouched, before flushing/finalizing this session's muxer.
+    m_audioMixer->drainTrackAudioCallback(m_audioCallbackRegistration);
+    m_audioCallbackRegistration.reset();
+    if (!handoffRouting)
+      m_audioMixer->stopAll();
+  }
   m_queueCv.notify_all();
 
   if (m_encodingThread.joinable()) {

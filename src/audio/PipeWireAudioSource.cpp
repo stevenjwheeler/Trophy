@@ -21,6 +21,23 @@
 
 namespace TrophyBackend {
 
+namespace {
+constexpr int kPipeWireSyncTimeoutMs = 3000;
+
+template <typename Complete, typename Failed>
+static bool runCoreSync(struct pw_main_loop *loop, int sequence,
+                        Complete &&complete, Failed &&failed) {
+  if (!loop || sequence < 0)
+    return false;
+  const bool settled = detail::waitForPipeWireSync(
+      [loop](int waitMs) {
+        return pw_loop_iterate(pw_main_loop_get_loop(loop), waitMs);
+      },
+      [&] { return complete() || failed(); }, kPipeWireSyncTimeoutMs);
+  return settled && complete() && !failed();
+}
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Private implementation struct (keeps PipeWire types out of the header)
 // ---------------------------------------------------------------------------
@@ -157,6 +174,8 @@ struct NodeEnumData {
   QString foundSerial;    // object.serial of the matched app node
   uint32_t targetPid = 0; // Search by process ID instead of name
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool syncFailed = false;
   struct pw_main_loop *loop = nullptr;
   struct spa_hook registryListener = {};
   struct spa_hook coreListener = {};
@@ -220,7 +239,7 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
     if (pidStr && QString(pidStr).toUInt() == data->targetPid) {
       const char *serial = spa_dict_lookup(props, "object.serial");
       qDebug() << "Found PipeWire node for PID" << data->targetPid
-              << "-> ID:" << id;
+               << "-> ID:" << id;
       data->nodeId = id;
       if (pwNodeName)
         data->foundNodeName = QString::fromUtf8(pwNodeName);
@@ -243,9 +262,9 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
       matches(appId)) {
     const char *serial = spa_dict_lookup(props, "object.serial");
     qDebug() << "Found PipeWire node for" << data->processName << "-> ID:" << id
-            << "media.class: Stream/Output/Audio"
-            << "name:" << (pwNodeName ? pwNodeName : "?")
-            << "serial:" << (serial ? serial : "?");
+             << "media.class: Stream/Output/Audio"
+             << "name:" << (pwNodeName ? pwNodeName : "?")
+             << "serial:" << (serial ? serial : "?");
     data->nodeId = id;
     if (pwNodeName)
       data->foundNodeName = QString::fromUtf8(pwNodeName);
@@ -259,7 +278,17 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
 static void enumCoreDone(void *userdata, uint32_t id, int seq) {
   auto *data = static_cast<NodeEnumData *>(userdata);
   if (id == PW_ID_CORE && seq == data->pendingSync)
-    pw_main_loop_quit(data->loop);
+    data->syncComplete = true;
+}
+
+static void enumCoreError(void *userdata, uint32_t id, int /*seq*/, int res,
+                          const char *message) {
+  auto *data = static_cast<NodeEnumData *>(userdata);
+  if (id != PW_ID_CORE)
+    return;
+  data->syncFailed = true;
+  qWarning() << "PipeWire node enumeration failed:" << res
+             << (message ? message : "core error");
 }
 
 /**
@@ -301,6 +330,7 @@ static uint32_t findNodeByName(const QString &nodeName,
     struct pw_core_events e = {};
     e.version = PW_VERSION_CORE_EVENTS;
     e.done = enumCoreDone;
+    e.error = enumCoreError;
     return e;
   }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
@@ -318,7 +348,16 @@ static uint32_t findNodeByName(const QString &nodeName,
                            &data);
 
   data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(data.loop);
+  if (!runCoreSync(
+          data.loop, data.pendingSync, [&] { return data.syncComplete; },
+          [&] { return data.syncFailed; })) {
+    qWarning() << "PipeWire node enumeration sync timed out or failed";
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
+    pw_core_disconnect(core);
+    pw_context_destroy(ctx);
+    pw_main_loop_destroy(data.loop);
+    return PW_ID_ANY;
+  }
 
   uint32_t result = data.nodeId;
   if (outNodeName)
@@ -345,6 +384,8 @@ struct DefaultDeviceData {
   QString sourceName;
   bool gotMetadata = false;
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool syncFailed = false;
   struct pw_main_loop *loop = nullptr;
   struct pw_core *core = nullptr;
   struct pw_registry *registry = nullptr;
@@ -417,7 +458,17 @@ static void onDefaultRegistryGlobal(void *userdata, uint32_t id,
 static void onDefaultCoreDone(void *userdata, uint32_t id, int seq) {
   auto *data = static_cast<DefaultDeviceData *>(userdata);
   if (id == PW_ID_CORE && seq == data->pendingSync)
-    pw_main_loop_quit(data->loop);
+    data->syncComplete = true;
+}
+
+static void onDefaultCoreError(void *userdata, uint32_t id, int /*seq*/,
+                               int res, const char *message) {
+  auto *data = static_cast<DefaultDeviceData *>(userdata);
+  if (id != PW_ID_CORE)
+    return;
+  data->syncFailed = true;
+  qWarning() << "PipeWire default-device query failed:" << res
+             << (message ? message : "core error");
 }
 
 /**
@@ -450,6 +501,7 @@ static std::pair<QString, QString> queryDefaultDevices() {
     struct pw_core_events e = {};
     e.version = PW_VERSION_CORE_EVENTS;
     e.done = onDefaultCoreDone;
+    e.error = onDefaultCoreError;
     return e;
   }();
   pw_core_add_listener(data.core, &data.coreListener, &core_events, &data);
@@ -467,15 +519,22 @@ static std::pair<QString, QString> queryDefaultDevices() {
 
   // First sync: enumerate globals and bind to the metadata object
   data.pendingSync = pw_core_sync(data.core, PW_ID_CORE, 0);
-  pw_main_loop_run(data.loop);
+  bool success = runCoreSync(
+      data.loop, data.pendingSync, [&] { return data.syncComplete; },
+      [&] { return data.syncFailed; });
 
   // Second sync: flush metadata property events that arrive after binding
   if (data.gotMetadata) {
+    data.syncComplete = false;
     data.pendingSync = pw_core_sync(data.core, PW_ID_CORE, 0);
-    pw_main_loop_run(data.loop);
+    success = success && runCoreSync(
+                             data.loop, data.pendingSync,
+                             [&] { return data.syncComplete; },
+                             [&] { return data.syncFailed; });
   }
 
-  auto result = std::make_pair(data.sinkName, data.sourceName);
+  auto result = success ? std::make_pair(data.sinkName, data.sourceName)
+                        : std::pair<QString, QString>{};
 
   if (data.metadata)
     pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(data.metadata));
@@ -504,8 +563,8 @@ namespace {
 // ---------------------------------------------------------------------------
 
 struct InfoMatchRequest {
-  QString hintLower; // product-name hint, lowercased (empty if unused)
-  uint32_t pid = 0;  // PID hint (0 if unused)
+  QString hintLower;      // product-name hint, lowercased (empty if unused)
+  uint32_t pid = 0;       // PID hint (0 if unused)
   bool gatherAll = false; // collect every candidate instead of first match
   QVariantList apps;      // gatherAll results: {name, binary, nodeId}
   uint32_t foundId = PW_ID_ANY;
@@ -526,9 +585,11 @@ struct InfoBindEntry {
 
 struct InfoMatchData {
   InfoMatchRequest *req = nullptr;
-  QList<uint32_t> candidates; // Stream/Output/Audio node ids (phase 1)
+  QList<uint32_t> candidates;       // Stream/Output/Audio node ids (phase 1)
   std::vector<InfoBindEntry> binds; // phase 2 (reserved upfront: stable)
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool syncFailed = false;
   struct pw_main_loop *loop = nullptr;
   struct spa_hook registryListener = {};
   struct spa_hook coreListener = {};
@@ -577,8 +638,7 @@ static void infoMatchGather(const struct spa_dict *props, uint32_t id,
   req->apps.append(app);
 }
 
-static void infoMatchNodeInfo(void *userdata,
-                              const struct pw_node_info *info) {
+static void infoMatchNodeInfo(void *userdata, const struct pw_node_info *info) {
   auto *entry = static_cast<InfoBindEntry *>(userdata);
   InfoMatchData *data = entry->owner;
   if (!data || !data->req || data->req->done || entry->gotInfo)
@@ -624,7 +684,17 @@ static void infoMatchRegistryGlobal(void *userdata, uint32_t id,
 static void infoMatchCoreDone(void *userdata, uint32_t id, int seq) {
   auto *data = static_cast<InfoMatchData *>(userdata);
   if (id == PW_ID_CORE && seq == data->pendingSync)
-    pw_main_loop_quit(data->loop);
+    data->syncComplete = true;
+}
+
+static void infoMatchCoreError(void *userdata, uint32_t id, int /*seq*/,
+                               int res, const char *message) {
+  auto *data = static_cast<InfoMatchData *>(userdata);
+  if (id != PW_ID_CORE)
+    return;
+  data->syncFailed = true;
+  qWarning() << "PipeWire info query failed:" << res
+             << (message ? message : "core error");
 }
 
 static void runInfoMatch(InfoMatchRequest &req) {
@@ -656,6 +726,7 @@ static void runInfoMatch(InfoMatchRequest &req) {
     struct pw_core_events e = {};
     e.version = PW_VERSION_CORE_EVENTS;
     e.done = infoMatchCoreDone;
+    e.error = infoMatchCoreError;
     return e;
   }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
@@ -673,7 +744,9 @@ static void runInfoMatch(InfoMatchRequest &req) {
 
   // Phase 1: collect candidate output-stream ids.
   data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(data.loop);
+  bool success = runCoreSync(
+      data.loop, data.pendingSync, [&] { return data.syncComplete; },
+      [&] { return data.syncFailed; });
 
   // Phase 2: bind every candidate and match/gather on current info props.
   // The server answers binds (info) before the sync reply on the same
@@ -687,9 +760,8 @@ static void runInfoMatch(InfoMatchRequest &req) {
   }();
   data.binds.reserve(data.candidates.size());
   for (uint32_t id : data.candidates) {
-    struct pw_node *proxy = static_cast<struct pw_node *>(
-        pw_registry_bind(registry, id, PW_TYPE_INTERFACE_Node,
-                         PW_VERSION_NODE, 0));
+    struct pw_node *proxy = static_cast<struct pw_node *>(pw_registry_bind(
+        registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0));
     if (!proxy)
       continue;
     InfoBindEntry entry;
@@ -701,8 +773,12 @@ static void runInfoMatch(InfoMatchRequest &req) {
                          &node_events, &data.binds.back());
   }
   if (!data.binds.empty()) {
+    data.syncComplete = false;
     data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-    pw_main_loop_run(data.loop);
+    success = success && runCoreSync(
+                             data.loop, data.pendingSync,
+                             [&] { return data.syncComplete; },
+                             [&] { return data.syncFailed; });
   }
 
   for (auto &entry : data.binds) {
@@ -714,6 +790,10 @@ static void runInfoMatch(InfoMatchRequest &req) {
   pw_context_destroy(ctx);
   pw_main_loop_destroy(data.loop);
   data.loop = nullptr;
+  if (!success) {
+    req.foundId = PW_ID_ANY;
+    req.apps.clear();
+  }
 }
 
 } // namespace
@@ -775,8 +855,8 @@ QVariantList PipeWireAudioSource::enumerateAudioApps() {
 }
 
 QString PipeWireAudioSource::preferredTarget(const QString &serial,
-                                                  const QString &nodeName,
-                                                  uint32_t nodeId) {
+                                             const QString &nodeName,
+                                             uint32_t nodeId) {
   if (!serial.isEmpty())
     return serial;
   if (!nodeName.isEmpty())
@@ -978,13 +1058,12 @@ bool PipeWireAudioSource::start() {
     const QString legacyTarget =
         !m_targetNodeName.isEmpty()
             ? m_targetNodeName
-            : preferredTarget(m_targetSerial, m_targetNodeName,
-                              m_targetNodeId);
+            : preferredTarget(m_targetSerial, m_targetNodeName, m_targetNodeId);
     const QByteArray lba = legacyTarget.toUtf8();
     pw_properties_set(props, "node.target", lba.constData());
 
     qDebug() << "Application audio target — node.target:" << legacyTarget
-            << "target.object:" << bestTarget;
+             << "target.object:" << bestTarget;
 
   } else if (m_type == SourceType::Microphone && m_targetNodeId != PW_ID_ANY) {
     // Microphone with an explicit device: pin WirePlumber to that node so it
@@ -997,8 +1076,7 @@ bool PipeWireAudioSource::start() {
     const QString legacyTarget =
         !m_targetNodeName.isEmpty()
             ? m_targetNodeName
-            : preferredTarget(m_targetSerial, m_targetNodeName,
-                              m_targetNodeId);
+            : preferredTarget(m_targetSerial, m_targetNodeName, m_targetNodeId);
     pw_properties_set(props, "node.target", legacyTarget.toUtf8().constData());
 
     qDebug() << "Microphone target pinned — target.object:" << bestTarget;
