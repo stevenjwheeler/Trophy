@@ -19,6 +19,7 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -32,10 +33,38 @@
 
 #define SOCKET_PATH "/tmp/trophy-detection.sock"
 
+typedef void (*glx_swap_fn)(void *, unsigned long);
+typedef int (*egl_swap_fn)(void *, void *);
+typedef void (*sdl_swap_fn)(void *);
+static glx_swap_fn g_real_glx_swap;
+static egl_swap_fn g_real_egl_swap;
+static sdl_swap_fn g_real_sdl_swap;
+
 static int g_sock = -1;
+/* 0 = not reported, 1 = initializing or deliberately disabled, 2 = live. */
 static int g_notified = 0;
 static int g_disabled = -1; /* -1 unknown, 0 no, 1 yes */
 static long g_last_health_check = 0; /* monotonic seconds */
+static long g_last_connect_attempt = 0; /* monotonic seconds */
+
+static int claim_second(long *last, long now) {
+    long observed = __atomic_load_n(last, __ATOMIC_RELAXED);
+    while (observed != now) {
+        if (__atomic_compare_exchange_n(last, &observed, now, 0,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return 1;
+    }
+    return 0;
+}
+
+static int socket_is_alive(int fd) {
+    char byte;
+    ssize_t n = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n > 0 ||
+           (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
+                      errno == EINTR));
+}
 
 /* --- helpers (only run once, not per-frame) --- */
 
@@ -89,29 +118,41 @@ static void app_basename(char *buf, size_t cap) {
 }
 
 static void notify_start(void) {
-    if (__atomic_load_n(&g_notified, __ATOMIC_ACQUIRE) != 0) {
+    int state = __atomic_load_n(&g_notified, __ATOMIC_ACQUIRE);
+    if (state == 2) {
         // Already reported: cheap once-per-second health check so a
         // Trophy restart is noticed and the next swap re-reports.
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        if (ts.tv_sec == g_last_health_check)
+        if (!claim_second(&g_last_health_check, ts.tv_sec))
             return;
-        g_last_health_check = ts.tv_sec;
-        if (g_sock >= 0 && send(g_sock, "", 0, MSG_NOSIGNAL) != 0) {
-            close(g_sock);
+        if (g_sock < 0 || !socket_is_alive(g_sock)) {
+            if (g_sock >= 0)
+                close(g_sock);
             g_sock = -1;
             __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         }
         return;
     }
+    if (state == 1)
+        return; /* another thread is connecting, or detection is disabled */
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    // Retry a failed initial connection at most once per second instead of
+    // opening a socket on every swap while Trophy is not running.
+    if (!claim_second(&g_last_connect_attempt, ts.tv_sec))
+        return;
     if (__atomic_exchange_n(&g_notified, 1, __ATOMIC_ACQ_REL) != 0)
-        return; /* lost the race; winner reports */
+        return;
     if (is_disabled())
         return;
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         return;
+    }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -120,6 +161,7 @@ static void notify_start(void) {
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
+        __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         return;
     }
     g_sock = fd; /* kept open until unload so STOP can reuse it */
@@ -134,13 +176,19 @@ static void notify_start(void) {
     /* Single stack buffer, single send: "START:<pid>:<app>:<appid>\n" */
     char msg[256];
     pid_t pid = getpid();
-    /* manual integer formatting to avoid snprintf locale/malloc concerns? snprintf is fine here (once per process). */
-    int len = snprintf(msg, sizeof(msg), "START:%d:%s:%s\n", (int)pid, app, appid);
+    int len = snprintf(msg, sizeof(msg), "START:%d:%s:%s\n", (int)pid, app,
+                       appid);
     if (len > 0) {
         if ((size_t)len >= sizeof(msg))
             len = (int)sizeof(msg) - 1;
-        (void)send(fd, msg, (size_t)len, MSG_NOSIGNAL);
+        if (send(fd, msg, (size_t)len, MSG_NOSIGNAL) < 0) {
+            close(g_sock);
+            g_sock = -1;
+            __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
+            return;
+        }
     }
+    __atomic_store_n(&g_notified, 2, __ATOMIC_RELEASE);
 }
 
 __attribute__((destructor)) static void trophy_gl_unload(void) {
@@ -160,20 +208,22 @@ __attribute__((destructor)) static void trophy_gl_unload(void) {
 /* --- interposed entry points (ABI-compatible, header-free) --- */
 
 void glXSwapBuffers(void *dpy, unsigned long drawable) {
-    typedef void (*fn_t)(void *, unsigned long);
-    static fn_t real_fn = NULL;
+    glx_swap_fn real_fn = __atomic_load_n(&g_real_glx_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "glXSwapBuffers");
+        real_fn = (glx_swap_fn)dlsym(RTLD_NEXT, "glXSwapBuffers");
+    if (real_fn)
+        __atomic_store_n(&g_real_glx_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         real_fn(dpy, drawable);
 }
 
 int eglSwapBuffers(void *dpy, void *surf) {
-    typedef int (*fn_t)(void *, void *);
-    static fn_t real_fn = NULL;
+    egl_swap_fn real_fn = __atomic_load_n(&g_real_egl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "eglSwapBuffers");
+        real_fn = (egl_swap_fn)dlsym(RTLD_NEXT, "eglSwapBuffers");
+    if (real_fn)
+        __atomic_store_n(&g_real_egl_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         return real_fn(dpy, surf);
@@ -181,10 +231,11 @@ int eglSwapBuffers(void *dpy, void *surf) {
 }
 
 void SDL_GL_SwapWindow(void *window) {
-    typedef void (*fn_t)(void *);
-    static fn_t real_fn = NULL;
+    sdl_swap_fn real_fn = __atomic_load_n(&g_real_sdl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
+        real_fn = (sdl_swap_fn)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
+    if (real_fn)
+        __atomic_store_n(&g_real_sdl_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         real_fn(window);

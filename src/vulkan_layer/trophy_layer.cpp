@@ -4,12 +4,16 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <cerrno>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <map>
 #include <cstring>
 #include <dlfcn.h>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 #define LAYER_NAME "VK_LAYER_TROPHY_detection"
 #define SOCKET_PATH "/tmp/trophy-detection.sock"
@@ -19,10 +23,22 @@ namespace {
 struct LayerData {
     PFN_vkGetInstanceProcAddr nextGetInstanceProcAddr;
     int socket_fd = -1;
+    std::string app_name;
 };
 
 std::mutex g_lock;
 std::map<void*, LayerData> g_instance_data;
+std::atomic_bool g_watch_stop{false};
+std::once_flag g_watch_once;
+std::thread g_connection_watch;
+
+bool socket_is_alive(int fd) {
+    char byte;
+    const ssize_t result = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    return result > 0 ||
+           (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
+                           errno == EINTR));
+}
 
 // Helper to get the dispatch key from a dispatchable object
 void* get_dispatch_key(void* obj) {
@@ -30,11 +46,10 @@ void* get_dispatch_key(void* obj) {
 }
 
 void notify_app(int& fd, const char* app_name) {
-    // Revalidate a cached connection: if Trophy restarted, our socket is
-    // dead. A zero-byte send detects that without any traffic, so the
-    // next instance creation re-reports instead of staying silent.
+    // Revalidate a cached connection so a Trophy restart causes the next
+    // instance creation to reconnect and report again.
     if (fd != -1) {
-        if (send(fd, "", 0, MSG_NOSIGNAL) != 0) {
+        if (!socket_is_alive(fd)) {
             close(fd);
             fd = -1;
         }
@@ -61,7 +76,31 @@ void notify_app(int& fd, const char* app_name) {
     std::string msg = "START:" + std::to_string(getpid()) + ":" + 
                      (app_name ? app_name : "Unknown Vulkan Game") + ":" + 
                      steam_appid + "\n";
-    send(fd, msg.c_str(), msg.length(), 0);
+    send(fd, msg.c_str(), msg.length(), MSG_NOSIGNAL);
+}
+
+void ensureConnectionWatch() {
+    std::call_once(g_watch_once, [] {
+        g_connection_watch = std::thread([] {
+            while (!g_watch_stop.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::lock_guard<std::mutex> lock(g_lock);
+                for (auto& entry : g_instance_data) {
+                    if (entry.second.socket_fd == -1 ||
+                        !socket_is_alive(entry.second.socket_fd)) {
+                        notify_app(entry.second.socket_fd,
+                                   entry.second.app_name.c_str());
+                    }
+                }
+            }
+        });
+    });
+}
+
+__attribute__((destructor)) void stopConnectionWatch() {
+    g_watch_stop.store(true, std::memory_order_release);
+    if (g_connection_watch.joinable())
+        g_connection_watch.join();
 }
 
 // Layer function implementations
@@ -97,8 +136,10 @@ VKAPI_ATTR VkResult VKAPI_CALL Trophy_CreateInstance(
         if (pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->pApplicationName) {
             app_name = pCreateInfo->pApplicationInfo->pApplicationName;
         }
+        data.app_name = app_name ? app_name : "Unknown Vulkan Game";
         
         notify_app(data.socket_fd, app_name);
+        ensureConnectionWatch();
     }
 
     return result;
@@ -115,7 +156,8 @@ VKAPI_ATTR void VKAPI_CALL Trophy_DestroyInstance(
         
         if (it->second.socket_fd != -1) {
             std::string msg = "STOP:" + std::to_string(getpid()) + "\n";
-            send(it->second.socket_fd, msg.c_str(), msg.length(), 0);
+            send(it->second.socket_fd, msg.c_str(), msg.length(),
+                 MSG_NOSIGNAL);
             close(it->second.socket_fd);
         }
         
