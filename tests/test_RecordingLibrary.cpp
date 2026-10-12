@@ -6,6 +6,7 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QProcess>
 #include <QSignalSpy>
@@ -14,9 +15,9 @@
 #include <QThreadPool>
 #include <gtest/gtest.h>
 
+#include "core/StorageManager.h"
 #include "library/Recording.h"
 #include "library/RecordingLibrary.h"
-#include "core/StorageManager.h"
 
 using namespace TrophyBackend;
 
@@ -65,22 +66,26 @@ protected:
       return QString();
     const QString path = tempDir.path() + "/" + name;
     QProcess proc;
-    proc.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
-                          QString("testsrc=size=320x240:rate=30:duration=%1")
-                              .arg(durationSec),
-                          "-pix_fmt", "yuv420p",
-                          // Fixed GOP: real recordings have regular
-                          // keyframes; the encoder default here writes a
-                          // single head keyframe, which nothing can cut.
-                          "-g", "12", "-keyint_min", "12", "-metadata",
-                          QString("title=%1").arg(title), path});
+    proc.start(
+        "ffmpeg",
+        {"-y", "-v", "error", "-f", "lavfi", "-i",
+         QString("testsrc=size=320x240:rate=30:duration=%1").arg(durationSec),
+         "-pix_fmt", "yuv420p",
+         // Fixed GOP: real recordings have regular
+         // keyframes; the encoder default here writes a
+         // single head keyframe, which nothing can cut.
+         "-g", "12", "-keyint_min", "12", "-metadata",
+         QString("title=%1").arg(title), path});
     if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
         !QFile::exists(path))
       return QString();
     return path;
   }
 
-  void waitForProbes() { QThreadPool::globalInstance()->waitForDone(10000); }
+  void waitForProbes() {
+    QThreadPool::globalInstance()->waitForDone(10000);
+    QCoreApplication::processEvents();
+  }
 };
 
 TEST_F(RecordingLibraryTest, ScansDirectoryForVideos) {
@@ -164,6 +169,21 @@ TEST_F(RecordingLibraryTest, DeleteRecordingRemovesFileAndEntry) {
   EXPECT_EQ(removedSpy.count(), 1);
 }
 
+TEST_F(RecordingLibraryTest, DeleteRecordingRejectsSiblingPrefixPath) {
+  QTemporaryDir sibling(tempDir.path() + "-outside-XXXXXX");
+  ASSERT_TRUE(sibling.isValid());
+  const QString outsidePath = sibling.path() + "/outside.mkv";
+  {
+    QFile outside(outsidePath);
+    ASSERT_TRUE(outside.open(QIODevice::WriteOnly));
+    outside.write("outside");
+  }
+
+  RecordingLibrary lib(tempDir.path());
+  lib.deleteRecording(outsidePath);
+  EXPECT_TRUE(QFile::exists(outsidePath));
+}
+
 TEST_F(RecordingLibraryTest, FilteredListSettledBeforeRemovedSignal) {
   createFile("Keep_2026-01-15_20-30-00.mkv");
   const QString doomed = createFile("Doomed_2026-01-15_20-30-00.mkv");
@@ -245,13 +265,13 @@ TEST_F(RecordingLibraryTest, RefreshAfterFilesystemRenameShowsNewName) {
   ASSERT_EQ(lib.count(), 1);
   const QDateTime dateBefore = lib.get(0)->date();
 
-  ASSERT_TRUE(QFile::rename(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
-                            tempDir.path() + "/New_Title_2026-01-15_20-30-00.mkv"));
+  ASSERT_TRUE(
+      QFile::rename(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
+                    tempDir.path() + "/New_Title_2026-01-15_20-30-00.mkv"));
   lib.refresh();
 
   ASSERT_EQ(lib.count(), 1);
-  EXPECT_EQ(lib.get(0)->fileName(),
-            "New_Title_2026-01-15_20-30-00.mkv");
+  EXPECT_EQ(lib.get(0)->fileName(), "New_Title_2026-01-15_20-30-00.mkv");
   EXPECT_EQ(lib.get(0)->gameName(), "New Title");
   // Filesystem rename preserves the recording date.
   EXPECT_EQ(lib.get(0)->date(), dateBefore);
@@ -437,6 +457,48 @@ TEST_F(RecordingLibraryTest, SaveClipRangeRejectsBadInput) {
   EXPECT_FALSE(lib.clipSaving());
 }
 
+TEST_F(RecordingLibraryTest, SaveClipRangeRefusesWhenStorageFull) {
+  const QString src = createFile("GameA_2026-01-15_20-30-00.mkv", 8192);
+  RecordingLibrary lib(tempDir.path());
+  StorageManager storage(tempDir.path());
+  storage.setMaxSize(1024); // over limit: 8192 used > 1024 max
+  ASSERT_TRUE(storage.isOverLimit());
+  lib.setStorageManager(&storage);
+
+  QSignalSpy failed(&lib, &RecordingLibrary::clipSaveFailed);
+  QSignalSpy saved(&lib, &RecordingLibrary::clipSaved);
+  lib.saveClipRange(src, 0.0, 1.0);
+
+  EXPECT_EQ(failed.count(), 1);
+  EXPECT_EQ(saved.count(), 0);
+  EXPECT_FALSE(lib.clipSaving());
+  EXPECT_TRUE(failed.first().first().toString().contains("Storage"));
+  // Refused before any remux thread: the library still holds only the
+  // source (no clip, no .part).
+  EXPECT_EQ(QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files).size(), 1);
+}
+
+TEST_F(RecordingLibraryTest, SaveClipRangeRefusesWhenClipWouldExceedLimit) {
+  const QString src = createFile("GameA_2026-01-15_20-30-00.mkv", 4096);
+  RecordingLibrary lib(tempDir.path());
+  StorageManager storage(tempDir.path());
+  // Under the limit (4096 < 6000) but the clip — ~the full 4096-byte
+  // source, whose duration is unknown on a dummy file — would push
+  // usage to 8192 > 6000.
+  storage.setMaxSize(6000);
+  ASSERT_FALSE(storage.isOverLimit());
+  lib.setStorageManager(&storage);
+
+  QSignalSpy failed(&lib, &RecordingLibrary::clipSaveFailed);
+  QSignalSpy saved(&lib, &RecordingLibrary::clipSaved);
+  lib.saveClipRange(src, 0.0, 1.0);
+
+  EXPECT_EQ(failed.count(), 1);
+  EXPECT_EQ(saved.count(), 0);
+  EXPECT_FALSE(lib.clipSaving());
+  EXPECT_EQ(QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files).size(), 1);
+}
+
 TEST_F(RecordingLibraryTest, SaveClipRangeCutsRealFile) {
   // 5s source: the single-keyframe 1s file can't be cut at all (its
   // only keyframe is the DTS-less demux head, so the engine honestly
@@ -464,4 +526,41 @@ TEST_F(RecordingLibraryTest, SaveClipRangeCutsRealFile) {
   const double secs = args.at(2).toDouble();
   EXPECT_GE(secs, 2.0);
   EXPECT_LE(secs, 3.0);
+}
+
+TEST_F(RecordingLibraryTest, SaveClipRangeUsesUniqueNameOnCollision) {
+  const QString src =
+      makeTitledClip("Game_2026-01-15_20-30-00.mkv", "ClipGame", 5);
+  if (src.isEmpty())
+    GTEST_SKIP() << "ffmpeg CLI unavailable";
+  RecordingLibrary lib(tempDir.path());
+  waitForProbes();
+
+  // Pre-create the same-second destination that the save operation will
+  // choose. Also cover an immediate second rollover while the test starts.
+  const QDateTime now = QDateTime::currentDateTime();
+  QStringList occupied;
+  for (int delta = -1; delta <= 2; ++delta) {
+    const QString ts = now.addSecs(delta).toString("yyyy-MM-dd_HH-mm-ss");
+    const QString path = tempDir.path() + "/ClipGame_" + ts + "_Replay.mkv";
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write("occupied"), 8);
+    occupied.append(path);
+  }
+
+  QSignalSpy saved(&lib, &RecordingLibrary::clipSaved);
+  QSignalSpy failed(&lib, &RecordingLibrary::clipSaveFailed);
+  lib.saveClipRange(src, 2.0, 4.0);
+  ASSERT_TRUE(saved.wait(15000)) << "clipSaved never arrived";
+  EXPECT_EQ(failed.count(), 0);
+  ASSERT_EQ(saved.count(), 1);
+  const QString output = saved.first().first().toString();
+  EXPECT_FALSE(occupied.contains(output));
+  EXPECT_TRUE(QFile::exists(output));
+  for (const QString &path : occupied) {
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    EXPECT_EQ(file.readAll(), QByteArray("occupied"));
+  }
 }

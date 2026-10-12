@@ -8,6 +8,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QFuture>
 #include <QObject>
 #include <QString>
 
@@ -69,9 +70,7 @@ public:
    * overwrite the new filename-derived game name with the stale tag.
    * Must be called before loadMetadata().
    */
-  void setPreferFileNameTitle(bool prefer) {
-    m_preferFileNameTitle = prefer;
-  }
+  void setPreferFileNameTitle(bool prefer) { m_preferFileNameTitle = prefer; }
 
   /**
    * @brief Load metadata from the video file
@@ -83,8 +82,19 @@ signals:
   void metadataChanged();
 
 private:
+  struct ProbeResult {
+    QString gameName;
+    QDateTime date;
+    qint64 duration = 0;
+    int width = 0;
+    int height = 0;
+    bool isClip = false;
+    QString trophyVersion;
+  };
   void parseFileNameForGameName();
-  void probeVideoFile();
+  static ProbeResult probeVideoFile(const QString &filePath, ProbeResult result,
+                                    bool preferFileNameTitle);
+  void applyProbeResult(const ProbeResult &result);
 
   QString m_filePath;
   QString m_fileName;
@@ -99,6 +109,8 @@ private:
   bool m_preferFileNameTitle = false;
   bool m_isClip = false;
   QString m_trophyVersion;
+  QFuture<void> m_probeFuture;
+  quint64 m_probeGeneration = 0;
 };
 
 } // namespace TrophyBackend

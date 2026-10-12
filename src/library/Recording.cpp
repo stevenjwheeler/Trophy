@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QThreadPool>
+#include <QtConcurrent/QtConcurrent>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -42,7 +43,7 @@ Recording::Recording(const QString &filePath, QObject *parent)
   }
 }
 
-Recording::~Recording() = default;
+Recording::~Recording() { m_probeFuture.waitForFinished(); }
 
 void Recording::setThumbnailPath(const QString &path) {
   if (m_thumbnailPath != path) {
@@ -52,22 +53,34 @@ void Recording::setThumbnailPath(const QString &path) {
 }
 
 void Recording::loadMetadata() {
+  // Do not replace a running future: an earlier probe still accesses this
+  // object and must finish before filename-derived fields are reset.
+  if (m_probeFuture.isRunning())
+    m_probeFuture.waitForFinished();
   parseFileNameForGameName();
+  const quint64 generation = ++m_probeGeneration;
+  const ProbeResult initial{m_gameName, m_date, 0, 0, 0, m_isClip, {}};
+  const QString path = m_filePath;
+  const bool preferFileNameTitle = m_preferFileNameTitle;
 
-  // Run probing in a background thread to prevent UI freezing.
-  // Guarded by QPointer: the Recording may be destroyed (e.g. library
-  // refresh during shutdown) before the probe finishes.
+  // Probe into worker-local data only. QML and list sorting may read the
+  // getters while this runs, so the worker must never mutate QObject fields.
   QPointer<Recording> self(this);
-  QThreadPool::globalInstance()->start([self]() {
-    if (self.isNull())
-      return;
-    self->probeVideoFile();
-    if (self.isNull())
-      return;
-    // Notify on the main thread
-    QMetaObject::invokeMethod(self.data(), &Recording::metadataChanged,
-                              Qt::QueuedConnection);
-  });
+  m_probeFuture = QtConcurrent::run(
+      [self, path, initial, preferFileNameTitle, generation]() {
+        const ProbeResult result =
+            probeVideoFile(path, initial, preferFileNameTitle);
+        if (self.isNull())
+          return;
+        QMetaObject::invokeMethod(
+            self,
+            [self, result, generation]() {
+              if (!self || self->m_probeGeneration != generation)
+                return;
+              self->applyProbeResult(result);
+            },
+            Qt::QueuedConnection);
+      });
 }
 
 void Recording::parseFileNameForGameName() {
@@ -103,24 +116,26 @@ void Recording::parseFileNameForGameName() {
   }
 }
 
-void Recording::probeVideoFile() {
+Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
+                                                 ProbeResult result,
+                                                 bool preferFileNameTitle) {
   AVFormatContext *formatCtx = nullptr;
 
   // Skip probing if the file is too small (likely currently being written)
-  QFileInfo fileInfo(m_filePath);
+  QFileInfo fileInfo(filePath);
   if (fileInfo.size() < 4096) {
     // qInfo() << "Skipping probe for small/new file:" << m_filePath;
-    return;
+    return result;
   }
 
-  int ret = avformat_open_input(&formatCtx, m_filePath.toUtf8().constData(),
+  int ret = avformat_open_input(&formatCtx, filePath.toUtf8().constData(),
                                 nullptr, nullptr);
   if (ret < 0) {
     // Only warn if the file isn't tiny
     if (fileInfo.size() > 1024 * 1024) {
-      qWarning() << "Failed to open video file for probing:" << m_filePath;
+      qWarning() << "Failed to open video file for probing:" << filePath;
     }
-    return;
+    return result;
   }
 
   // Read container metadata tags first. These are more reliable than
@@ -128,7 +143,7 @@ void Recording::probeVideoFile() {
   // renamed the file, in which case the embedded title is stale and the
   // filename is authoritative (creation_time stays valid regardless).
   if (formatCtx->metadata) {
-    if (!m_preferFileNameTitle) {
+    if (!preferFileNameTitle) {
       AVDictionaryEntry *titleTag =
           av_dict_get(formatCtx->metadata, "title", nullptr, 0);
       QString containerTitle;
@@ -142,7 +157,7 @@ void Recording::probeVideoFile() {
       }
 
       if (!containerTitle.isEmpty()) {
-        m_gameName = containerTitle;
+        result.gameName = containerTitle;
       }
     }
 
@@ -152,7 +167,7 @@ void Recording::probeVideoFile() {
       QDateTime creationTime = QDateTime::fromString(
           QString::fromUtf8(tag->value).trimmed(), Qt::ISODate);
       if (creationTime.isValid()) {
-        m_date = creationTime;
+        result.date = creationTime;
       }
     }
 
@@ -161,14 +176,16 @@ void Recording::probeVideoFile() {
     // filename said.
     tag = av_dict_get(formatCtx->metadata, "trophy-kind", nullptr, 0);
     if (tag && tag->value) {
-      m_isClip = QString::fromUtf8(tag->value).trimmed().compare(
-                     QStringLiteral("clip"), Qt::CaseInsensitive) == 0;
+      result.isClip =
+          QString::fromUtf8(tag->value)
+              .trimmed()
+              .compare(QStringLiteral("clip"), Qt::CaseInsensitive) == 0;
     }
 
     // Recorder version is informational only; older files predate it.
     tag = av_dict_get(formatCtx->metadata, "trophy-version", nullptr, 0);
     if (tag && tag->value) {
-      m_trophyVersion = QString::fromUtf8(tag->value).trimmed();
+      result.trophyVersion = QString::fromUtf8(tag->value).trimmed();
     }
 
     // Capture moment: the explicit trophy-date + trophy-time pair wins
@@ -183,7 +200,7 @@ void Recording::probeVideoFile() {
       const QDateTime stamped = trophyDateTimeFromTags(
           QString::fromUtf8(dateTag->value), QString::fromUtf8(timeTag->value));
       if (stamped.isValid()) {
-        m_date = stamped;
+        result.date = stamped;
       }
     }
   }
@@ -192,26 +209,39 @@ void Recording::probeVideoFile() {
   for (unsigned int i = 0; i < formatCtx->nb_streams; i++) {
     AVStream *stream = formatCtx->streams[i];
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      m_width = stream->codecpar->width;
-      m_height = stream->codecpar->height;
+      result.width = stream->codecpar->width;
+      result.height = stream->codecpar->height;
       break;
     }
   }
 
   // Only call find_stream_info if we need duration and it's missing from header
   if (formatCtx->duration == AV_NOPTS_VALUE) {
-    // We increase probesize to avoid the warning, and also set max_analyze_duration
-    formatCtx->probesize = 5 * 1024 * 1024; // 5MB
+    // We increase probesize to avoid the warning, and also set
+    // max_analyze_duration
+    formatCtx->probesize = 5 * 1024 * 1024;             // 5MB
     formatCtx->max_analyze_duration = 5 * AV_TIME_BASE; // 5 seconds
     avformat_find_stream_info(formatCtx, nullptr);
   }
 
   // Get duration
   if (formatCtx->duration != AV_NOPTS_VALUE) {
-    m_duration = formatCtx->duration / AV_TIME_BASE;
+    result.duration = formatCtx->duration / AV_TIME_BASE;
   }
 
   avformat_close_input(&formatCtx);
+  return result;
+}
+
+void Recording::applyProbeResult(const ProbeResult &result) {
+  m_gameName = result.gameName;
+  m_date = result.date;
+  m_duration = result.duration;
+  m_width = result.width;
+  m_height = result.height;
+  m_isClip = result.isClip;
+  m_trophyVersion = result.trophyVersion;
+  emit metadataChanged();
 }
 
 } // namespace TrophyBackend
