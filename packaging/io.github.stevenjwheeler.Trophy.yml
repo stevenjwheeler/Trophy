@@ -1,0 +1,49 @@
+app-id: io.github.stevenjwheeler.Trophy
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: trophy
+
+finish-args:
+  # Display & GPU
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=ipc
+
+  # Audio (PulseAudio + PipeWire socket)
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0
+
+  # Storage & Host File Access
+  - --filesystem=xdg-videos
+
+  # D-Bus & Desktop Portals
+  - --socket=session-bus
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.Notifications
+  - --own-name=org.kde.StatusNotifierItem
+
+  # KWin Backend & Window Detection
+  - --talk-name=org.kde.KWin
+  - --own-name=org.trophy.Monitor
+
+  # Autostart & Global Shortcuts
+  - --filesystem=xdg-config/autostart:create
+  - --talk-name=org.kde.KGlobalAccel
+  - --device=input
+
+modules:
+  - name: trophy
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DBUILD_TESTING=OFF
+    post-install:
+      - install -Dm644 packaging/io.github.stevenjwheeler.Trophy.metainfo.xml /app/share/metainfo/io.github.stevenjwheeler.Trophy.metainfo.xml
+      - mv /app/share/applications/trophy.desktop /app/share/applications/io.github.stevenjwheeler.Trophy.desktop
+      - mv /app/share/icons/hicolor/scalable/apps/trophy.svg /app/share/icons/hicolor/scalable/apps/io.github.stevenjwheeler.Trophy.svg
+      - sed -i 's/^Icon=.*/Icon=io.github.stevenjwheeler.Trophy/' /app/share/applications/io.github.stevenjwheeler.Trophy.desktop
+    sources:
+      - type: dir
+        path: ..

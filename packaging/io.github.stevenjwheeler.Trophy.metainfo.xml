@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+    <id>io.github.stevenjwheeler.Trophy</id>
+    <metadata_license>CC0-1.0</metadata_license>
+    <project_license>GPL-3.0-or-later</project_license>
+    <name>Trophy</name>
+    <summary>Wayland-native game recording and clipping tool</summary>
+
+    <description>
+        <p>
+            Trophy is a modern, Wayland-native screen and game recording tool built with Qt 6,
+            PipeWire, and hardware-accelerated video encoding.
+        </p>
+    </description>
+
+    <launchable type="desktop-id">io.github.stevenjwheeler.Trophy.desktop</launchable>
+    <url type="homepage">https://github.com/stevenjwheeler/Trophy</url>
+
+    <developer id="io.github.stevenjwheeler">
+        <name>Steven Wheeler</name>
+    </developer>
+
+    <screenshots>
+        <screenshot type="default">
+            <caption>Main application window</caption>
+            <image type="source">https://raw.githubusercontent.com/stevenjwheeler/Trophy/main/resources/screenshots/main.png</image>
+        </screenshot>
+    </screenshots>
+
+    <releases>
+        <release version="0.1.0" date="2026-10-01"/>
+    </releases>
+
+    <content_rating type="oars-1.1"/>
+</component>
