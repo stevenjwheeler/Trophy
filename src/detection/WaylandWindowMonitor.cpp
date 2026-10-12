@@ -14,6 +14,7 @@
 #include <QDebug>
 #include <QMutexLocker>
 #include <QProcessEnvironment>
+#include <future>
 
 namespace TrophyBackend {
 
@@ -57,6 +58,11 @@ void WaylandWindowMonitor::stopMonitoring() {
 
   m_monitoring = false;
   m_pollTimer->stop();
+  // Polling runs off the GUI thread because the compositor CLI/D-Bus calls
+  // have bounded but potentially multi-second timeouts. Join before deleting
+  // backend objects that the worker may still be using.
+  if (m_pollFuture.valid())
+    m_pollFuture.wait();
   if (m_kwin) {
     m_kwin->stop();
     m_kwin->deleteLater();
@@ -156,12 +162,28 @@ void WaylandWindowMonitor::checkFocusedApp() {
   // window changes); CLI polling backends refresh here.
   if (!m_monitoring)
     return;
-  if (m_gnome)
-    m_gnome->refresh();
-  if (m_hyprland)
-    m_hyprland->refresh();
-  if (m_sway)
-    m_sway->refresh();
+  if (m_pollFuture.valid()) {
+    if (m_pollFuture.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready)
+      return;
+    try {
+      m_pollFuture.get();
+    } catch (const std::exception &e) {
+      qWarning() << "Compositor poll failed:" << e.what();
+    }
+  }
+  try {
+    m_pollFuture = std::async(std::launch::async, [this]() {
+      if (m_gnome)
+        m_gnome->refresh();
+      if (m_hyprland)
+        m_hyprland->refresh();
+      if (m_sway)
+        m_sway->refresh();
+    });
+  } catch (const std::exception &e) {
+    qWarning() << "Unable to start compositor poll:" << e.what();
+  }
 }
 
 void WaylandWindowMonitor::onBackendWindowsUpdated() {

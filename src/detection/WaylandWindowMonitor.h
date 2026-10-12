@@ -14,6 +14,8 @@
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <chrono>
+#include <future>
 
 namespace TrophyBackend {
 
@@ -95,6 +97,7 @@ private:
   GnomeBackend *m_gnome = nullptr;
   HyprlandBackend *m_hyprland = nullptr;
   SwayBackend *m_sway = nullptr;
+  std::future<void> m_pollFuture;
 };
 
 } // namespace TrophyBackend

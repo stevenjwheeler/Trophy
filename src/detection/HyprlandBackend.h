@@ -12,6 +12,7 @@
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <atomic>
 
 namespace TrophyBackend {
 
@@ -33,8 +34,8 @@ public:
   ~HyprlandBackend() override = default;
 
   bool start();
-  void stop() { m_active = false; }
-  bool isActive() const { return m_active; }
+  void stop() { m_active.store(false); }
+  bool isActive() const { return m_active.load(); }
 
   /** One poll round-trip; called by the monitor's 1s watchdog tick. */
   void refresh();
@@ -60,7 +61,7 @@ private:
 
   mutable QMutex m_mutex;
   QList<WindowInfo> m_windows;
-  bool m_active = false;
+  std::atomic_bool m_active{false};
 };
 
 } // namespace TrophyBackend
