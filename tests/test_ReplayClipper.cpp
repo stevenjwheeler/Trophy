@@ -8,14 +8,16 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QMap>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <cmath>
 #include <gtest/gtest.h>
 
+#include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
 #include "encoding/FFmpegEncoder.h"
 #include "encoding/IEncoder.h"
-#include "capture/IVideoCaptureSource.h"
 #include "muxing/FFmpegMuxer.h"
 #include "muxing/ReplayClipper.h"
 #include "muxing/TrophyMetadata.h"
@@ -113,8 +115,9 @@ protected:
     std::vector<uint8_t> bgra(320 * 240 * 4, 0x80);
     for (int f = 0; f < videoFrames; ++f) {
       bgra[f % bgra.size()] = static_cast<uint8_t>(f);
-      VideoFrame frame{bgra.data(), 320, 240, 320 * 4,
-                       (int64_t)f * 1000000 / 30, AV_PIX_FMT_BGRA};
+      VideoFrame frame{
+          bgra.data(),    320, 240, 320 * 4, (int64_t)f * 1000000 / 30,
+          AV_PIX_FMT_BGRA};
       EncodedPacket pkt;
       if (venc.encodeFrame(frame, pkt)) {
         pkt.streamIndex = 0;
@@ -165,8 +168,8 @@ protected:
   QVector<QVector<PktInfo>> readStreams(const QString &path) {
     QVector<QVector<PktInfo>> out;
     AVFormatContext *ctx = nullptr;
-    if (avformat_open_input(&ctx, path.toUtf8().constData(), nullptr,
-                            nullptr) < 0) {
+    if (avformat_open_input(&ctx, path.toUtf8().constData(), nullptr, nullptr) <
+        0) {
       return out;
     }
     if (avformat_find_stream_info(ctx, nullptr) < 0) {
@@ -259,8 +262,7 @@ TEST_F(ReplayClipperTest, OutputCarriesSegmentTitle) {
   // version.
   AVFormatContext *ctx = nullptr;
   ASSERT_EQ(
-      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr),
-      0);
+      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr), 0);
   AVDictionaryEntry *title = av_dict_get(ctx->metadata, "title", nullptr, 0);
   ASSERT_NE(title, nullptr);
   EXPECT_STREQ(title->value, "ClipperGame");
@@ -296,8 +298,8 @@ TEST_F(ReplayClipperTest, OutputCarriesSegmentTitle) {
   EXPECT_LT(qAbs(clipStamp.secsTo(QDateTime::currentDateTime())), 300);
   int dateCount = 0;
   AVDictionaryEntry *e = nullptr;
-  while ((e = av_dict_get(ctx->metadata, "trophy-date", e,
-                          AV_DICT_IGNORE_SUFFIX)))
+  while (
+      (e = av_dict_get(ctx->metadata, "trophy-date", e, AV_DICT_IGNORE_SUFFIX)))
     ++dateCount;
   EXPECT_EQ(dateCount, 1);
   avformat_close_input(&ctx);
@@ -355,7 +357,8 @@ TEST_F(ReplayClipperTest, OverlappingSegmentsDeduplicate) {
   EXPECT_NE(lastDts, AV_NOPTS_VALUE);
 }
 
-TEST_F(ReplayClipperTest, BadInputsFailCleanly) {  QString err;
+TEST_F(ReplayClipperTest, BadInputsFailCleanly) {
+  QString err;
   EXPECT_FALSE(
       ReplayClipper::saveTail({}, 1.0, tempDir.path() + "/o.mkv", &err));
   EXPECT_FALSE(err.isEmpty());
@@ -363,13 +366,13 @@ TEST_F(ReplayClipperTest, BadInputsFailCleanly) {  QString err;
   QFile f(s0); // empty placeholder: never opened (arg validation first)
   ASSERT_TRUE(f.open(QIODevice::WriteOnly));
   f.close();
-  EXPECT_FALSE(
-      ReplayClipper::saveTail({{s0, 0.0}}, 0.0, tempDir.path() + "/o.mkv", nullptr));
-  EXPECT_FALSE(
-      ReplayClipper::saveTail({{s0, 0.0}}, -5.0, tempDir.path() + "/o.mkv", nullptr));
-  EXPECT_FALSE(
-      ReplayClipper::saveTail({{"", 0.0}}, 1.0, tempDir.path() + "/o.mkv", nullptr));
-  EXPECT_FALSE(ReplayClipper::saveTail({ {"/nonexistent/x.mkv", 0.0} }, 1.0,
+  EXPECT_FALSE(ReplayClipper::saveTail({{s0, 0.0}}, 0.0,
+                                       tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveTail({{s0, 0.0}}, -5.0,
+                                       tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveTail({{"", 0.0}}, 1.0,
+                                       tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveTail({{"/nonexistent/x.mkv", 0.0}}, 1.0,
                                        tempDir.path() + "/o.mkv", nullptr));
   EXPECT_FALSE(ReplayClipper::saveTail({{s0, 0.0}}, 1.0, "", nullptr));
 }
@@ -417,8 +420,7 @@ TEST_F(ReplayClipperTest, RangeCutKeepsMiddleSpan) {
   // Same identity stamping as DVR clips: game title carried, kind clip.
   AVFormatContext *ctx = nullptr;
   ASSERT_EQ(
-      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr),
-      0);
+      avformat_open_input(&ctx, out.toUtf8().constData(), nullptr, nullptr), 0);
   AVDictionaryEntry *title = av_dict_get(ctx->metadata, "title", nullptr, 0);
   ASSERT_NE(title, nullptr);
   EXPECT_STREQ(title->value, "ClipperGame");
@@ -468,6 +470,69 @@ TEST_F(ReplayClipperTest, RangeStartAtZeroKeepsHead) {
   EXPECT_LE(streams[0].size(), 65);
 }
 
+TEST_F(ReplayClipperTest, RangeCutRescalesPacketDurationToOutputTimeBase) {
+  if (QStandardPaths::findExecutable("ffmpeg").isEmpty() || !haveCodecs())
+    GTEST_SKIP() << "ffmpeg CLI or libx264 unavailable";
+  const QString src = tempDir.path() + "/timescale.mp4";
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+                          "testsrc=size=320x240:rate=30:duration=5", "-an",
+                          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30",
+                          "-video_track_timescale", "90000", src});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().constData();
+
+  AVFormatContext *input = nullptr;
+  ASSERT_GE(
+      avformat_open_input(&input, src.toUtf8().constData(), nullptr, nullptr),
+      0);
+  ASSERT_GE(avformat_find_stream_info(input, nullptr), 0);
+  AVRational inputTb{0, 1};
+  for (unsigned i = 0; i < input->nb_streams; ++i) {
+    if (input->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+      inputTb = input->streams[i]->time_base;
+      break;
+    }
+  }
+  avformat_close_input(&input);
+  ASSERT_GT(inputTb.num, 0);
+
+  const QString out = tempDir.path() + "/rescaled.mkv";
+  QString err;
+  ASSERT_TRUE(ReplayClipper::saveRange(src, 0.0, 4.0, out, &err))
+      << qPrintable(err);
+  AVFormatContext *output = nullptr;
+  ASSERT_GE(
+      avformat_open_input(&output, out.toUtf8().constData(), nullptr, nullptr),
+      0);
+  ASSERT_GE(avformat_find_stream_info(output, nullptr), 0);
+  int videoIndex = -1;
+  for (unsigned i = 0; i < output->nb_streams; ++i) {
+    if (output->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+      videoIndex = static_cast<int>(i);
+      break;
+    }
+  }
+  ASSERT_GE(videoIndex, 0);
+  const AVRational outputTb = output->streams[videoIndex]->time_base;
+  ASSERT_NE(av_cmp_q(inputTb, outputTb), 0);
+  AVPacket *pkt = av_packet_alloc();
+  ASSERT_NE(pkt, nullptr);
+  int64_t packetDuration = 0;
+  while (av_read_frame(output, pkt) >= 0) {
+    if (pkt->stream_index == videoIndex) {
+      packetDuration = pkt->duration;
+      av_packet_unref(pkt);
+      break;
+    }
+    av_packet_unref(pkt);
+  }
+  av_packet_free(&pkt);
+  avformat_close_input(&output);
+  ASSERT_GT(packetDuration, 0);
+  EXPECT_NEAR(packetDuration * av_q2d(outputTb), 1.0 / 30.0, 0.005);
+}
+
 TEST_F(ReplayClipperTest, BadRangesFailCleanly) {
   // Argument validation runs before any file is opened (the placeholder
   // is never read on these paths).
@@ -483,10 +548,10 @@ TEST_F(ReplayClipperTest, BadRangesFailCleanly) {
   EXPECT_FALSE(
       ReplayClipper::saveRange(s0, 1.0, 1.0, tempDir.path() + "/o.mkv", &err));
   EXPECT_FALSE(err.isEmpty());
-  EXPECT_FALSE(
-      ReplayClipper::saveRange(s0, -1.0, 1.0, tempDir.path() + "/o.mkv", nullptr));
-  EXPECT_FALSE(
-      ReplayClipper::saveRange("", 0.0, 1.0, tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveRange(s0, -1.0, 1.0,
+                                        tempDir.path() + "/o.mkv", nullptr));
+  EXPECT_FALSE(ReplayClipper::saveRange("", 0.0, 1.0, tempDir.path() + "/o.mkv",
+                                        nullptr));
   EXPECT_FALSE(ReplayClipper::saveRange("/nonexistent/x.mkv", 0.0, 1.0,
                                         tempDir.path() + "/o.mkv", nullptr));
   // A real (if unreadable) file with a bad output still fails cleanly.

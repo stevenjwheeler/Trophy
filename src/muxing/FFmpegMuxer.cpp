@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QMap>
+#include <limits>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -112,9 +113,17 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
     }
 
     if (!info.extraData.empty()) {
+        if (info.extraData.size() >
+            static_cast<size_t>(std::numeric_limits<int>::max() -
+                                AV_INPUT_BUFFER_PADDING_SIZE))
+            return -1;
         codecpar->extradata_size = static_cast<int>(info.extraData.size());
         codecpar->extradata = static_cast<uint8_t *>(
             av_mallocz(codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!codecpar->extradata) {
+            codecpar->extradata_size = 0;
+            return -1;
+        }
         memcpy(codecpar->extradata, info.extraData.data(), info.extraData.size());
     }
 
@@ -179,8 +188,15 @@ bool FFmpegMuxer::updateStreamExtraData(int streamIndex, const std::vector<uint8
     }
 
     if (!data.empty()) {
+        if (data.size() > static_cast<size_t>(std::numeric_limits<int>::max() -
+                                              AV_INPUT_BUFFER_PADDING_SIZE))
+            return false;
         codecpar->extradata_size = static_cast<int>(data.size());
         codecpar->extradata = static_cast<uint8_t *>(av_mallocz(codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!codecpar->extradata) {
+            codecpar->extradata_size = 0;
+            return false;
+        }
         memcpy(codecpar->extradata, data.data(), data.size());
     }
 
@@ -188,11 +204,12 @@ bool FFmpegMuxer::updateStreamExtraData(int streamIndex, const std::vector<uint8
 }
 
 bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
-    if (!m_formatCtx || !m_headerWritten) return false;
-    
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    
-    if (packet.streamIndex >= static_cast<int>(m_streams.size())) return false;
+    if (!m_formatCtx || !m_headerWritten) return false;
+    if (packet.streamIndex < 0 ||
+        packet.streamIndex >= static_cast<int>(m_streams.size()) ||
+        packet.data.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return false;
 
     AVPacket *avPacket = av_packet_alloc();
     if (!avPacket) return false;

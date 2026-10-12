@@ -72,6 +72,35 @@ TEST(AudioEncoderTest, AacInitializesAndProducesPackets) {
   EXPECT_GT(encodeSine(enc, 8192), 0);
 }
 
+TEST(AudioEncoderTest, FlushEncodesAllCompleteBufferedFramesBeforeTail) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
+    GTEST_SKIP() << "FFmpeg AAC encoder unavailable";
+
+  AudioEncoder enc;
+  AudioEncoderConfig cfg;
+  cfg.codec = "aac";
+  ASSERT_TRUE(enc.initialize(cfg));
+
+  constexpr int frameSize = 1024;
+  constexpr int completeFrames = 7;
+  constexpr int tailFrames = 137;
+  const int inputFrames = completeFrames * frameSize + tailFrames;
+  std::vector<float> samples(inputFrames * cfg.channels, 0.2f);
+  EncodedPacket first;
+  const bool gotFirst = enc.encodeAudio(samples.data(), inputFrames, first);
+  std::vector<EncodedPacket> packets;
+  if (gotFirst)
+    packets.push_back(std::move(first));
+  enc.flush(packets);
+
+  int64_t encodedDurationMs = 0;
+  for (const EncodedPacket &packet : packets)
+    encodedDurationMs += packet.duration;
+  EXPECT_GE(encodedDurationMs * cfg.sampleRate,
+            static_cast<int64_t>(completeFrames) * frameSize * 1000)
+      << "flush dropped complete frames left behind by a large input batch";
+}
+
 TEST(AudioEncoderTest, OpusInitializesWhenAvailable) {
   if (!avcodec_find_encoder(AV_CODEC_ID_OPUS))
     GTEST_SKIP() << "FFmpeg Opus encoder unavailable";
