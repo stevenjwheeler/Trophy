@@ -225,7 +225,7 @@ Page {
         // video gets the room, and the card expands on
         // drag (or double-click for full height).
         tracksHeight = minTracksHeight
-        player.source = filePath !== "" ? "file://" + filePath : ""
+        player.source = filePath !== "" ? recordingLibrary.localFileUrl(filePath) : ""
         if (filePath !== "")
             playAll()
     }
@@ -527,7 +527,7 @@ Page {
             model: playerPage.trackCount
 
             MediaPlayer {
-                source: playerPage.filePath !== "" ? "file://" + playerPage.filePath : ""
+                source: playerPage.filePath !== "" ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
                 autoPlay: false
                 playbackRate: playerPage.playbackRate
                 onMediaStatusChanged: {
@@ -714,7 +714,7 @@ Page {
                         visible: playerPage.clipMode
                         text: playerPage.clipSaving ? qsTr("Saving…") : qsTr("Snip")
                         baseColor: Theme.accentColor || "#3498db"
-                        enabled: playerPage.clipRangeValid() && !playerPage.clipSaving
+                        enabled: playerPage.clipRangeValid() && !playerPage.clipSaving && !(typeof storageManager !== "undefined" && storageManager !== null && storageManager.maxSize > 0 && storageManager.usedSize > storageManager.maxSize)
                         onClicked: playerPage.snipClip()
                     }
 
@@ -859,6 +859,12 @@ Page {
         property double viewStartMs: 0
         property double viewSpanMs: 0
         property var peaks: []
+        // Set on arrival (even empty) so the spinner stops —
+        // mirrors VideoLane stripDone. The cache emits [] on
+        // failure, so settled-with-empty means no decodable
+        // audio (e.g. an empty voice track), not "still busy".
+        property bool peaksDone: false
+        readonly property bool trackEmpty: peaksDone && peaks.length === 0 && filePath !== ""
         // Track caption (Game/Voice/Mic), resolved once
         // so both header layouts can show it.
         readonly property string headerText: (typeof waveformCache !== "undefined" && waveformCache !== null) ? waveformCache.trackLabel(trackIndex, trackTotal) : ""
@@ -900,6 +906,7 @@ Page {
 
         function refreshPeaks() {
             peaks = []
+            peaksDone = false
             wave.requestPaint()
             if (filePath !== "" && typeof waveformCache !== "undefined" && waveformCache !== null)
                 waveformCache.requestPeaks(filePath, trackIndex)
@@ -925,7 +932,9 @@ Page {
             function onPeaksReady(readyPath, readyTrack, readyPeaks) {
                 if (readyPath === lane.filePath && readyTrack === lane.trackIndex) {
                     lane.peaks = readyPeaks
+                    lane.peaksDone = true
                     wave.requestPaint()
+                    zebra.requestPaint()
                 }
             }
         }
@@ -1060,12 +1069,61 @@ Page {
 
                 // Still decoding: spinner until the first peaks
                 // arrive (even silence resolves — zeros paint).
+                // Gated on the settled flag so an empty/failed
+                // track stops spinning (see trackEmpty below).
                 BusyIndicator {
                     width: 24
                     height: 24
                     anchors.centerIn: parent
                     running: visible
-                    visible: lane.peaks.length === 0 && lane.filePath !== ""
+                    visible: !lane.peaksDone && lane.filePath !== ""
+                }
+
+                // No decodable audio on this track (settled with
+                // an empty peak list, e.g. an empty voice track):
+                // dimmed like the muted state, with diagonal
+                // zebra striping so it reads as "no signal" rather
+                // than "still loading". Non-visual items only, so
+                // scrub/zoom/pan input still reaches the areas
+                // beneath; the header caption stays intact.
+                Item {
+                    anchors.fill: parent
+                    visible: lane.trackEmpty
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#80000000"
+                    }
+
+                    Canvas {
+                        id: zebra
+                        anchors.fill: parent
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.clearRect(0, 0, width, height)
+                            if (width <= 0 || height <= 0)
+                                return
+                            ctx.strokeStyle = Theme.withOpacity(Theme.textMutedColor, 0.35)
+                            ctx.lineWidth = 1
+                            var step = 10
+                            var d = width + height
+                            for (var s = -height; s < d; s += step) {
+                                ctx.beginPath()
+                                ctx.moveTo(s, 0)
+                                ctx.lineTo(s + height, height)
+                                ctx.stroke()
+                            }
+                        }
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                    }
+
+                    Label {
+                        anchors.centerIn: parent
+                        text: qsTr("No audio")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
                 }
 
                 // Shared playhead: positioned overlay, so the
@@ -1359,7 +1417,7 @@ Page {
                         x: (vlane.viewSpanMs > 0 ? (thumbStart - vlane.viewStartMs) / vlane.viewSpanMs * stripArea.width : 0) + 1
                         width: (vlane.viewSpanMs > 0 ? thumbSpan / vlane.viewSpanMs * stripArea.width : 0) - 2
                         height: stripArea.height
-                        source: "file://" + modelData
+                        source: recordingLibrary.localFileUrl(modelData)
                         fillMode: Image.PreserveAspectCrop
                         visible: vlane.viewSpanMs > 0 && x + width > 0 && x < stripArea.width
                     }

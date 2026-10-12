@@ -394,7 +394,9 @@ Page {
                             Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
                             Repeater {
                                 id: dashMeters
-                                model: 3
+                                // Desktop mode merges to one track (system + mic
+                                // mixed); game mode keeps 3.
+                                model: (settingsManager && settingsManager.audioMode === "desktop") ? 1 : 3
 
                                 AudioLevelMeter {
                                     horizontal: true
@@ -428,7 +430,7 @@ Page {
                         onTriggered: {
                             if (!app) return;
                             const live = (recordingManager && recordingManager.isRecording) || (replayManager && replayManager.active);
-                            for (let i = 0; i < 3; i++) {
+                            for (let i = 0; i < dashMeters.count; i++) {
                                 const m = dashMeters.itemAt(i);
                                 if (m) {
                                     m.level = live ? app.trackLevel(i) : 0;

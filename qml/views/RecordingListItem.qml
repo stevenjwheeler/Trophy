@@ -53,7 +53,7 @@ ItemDelegate {
 
             Image {
                 anchors.fill: parent
-                source: root.recording && root.recording.thumbnailPath ? "file://" + root.recording.thumbnailPath : ""
+                source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : ""
                 fillMode: Image.PreserveAspectCrop
                 visible: root.recording && root.recording.thumbnailPath !== ""
             }

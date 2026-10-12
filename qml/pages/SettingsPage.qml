@@ -434,7 +434,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("Video Encoder")
-                        help: qsTr("Auto picks the best hardware encoder (NVENC, VA-API, or AV1). AV1 gives the best quality but needs modern hardware.")
+                        help: qsTr("Auto picks the best hardware encoder (NVENC, VA-API, or x264). AV1 gives the best quality but needs modern hardware.")
 
                         TrophyComboBox {
                             id: encoderBox
@@ -843,6 +843,9 @@ Page {
 
                     SettingStack {
                         label: qsTr("Audio Track Configuration")
+                        // Desktop mode always records one merged track, so
+                        // there is nothing to configure here.
+                        visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -1491,7 +1494,7 @@ Page {
         title: qsTr("Select Recordings Folder")
         onAccepted: {
             if (settingsManager)
-                settingsManager.recordingsPath = selectedFolder.toString().replace("file://", "");
+                settingsManager.recordingsPath = selectedFolder.toLocalFile();
         }
     }
 
@@ -1501,7 +1504,7 @@ Page {
         title: qsTr("Select Clip Cache Folder")
         onAccepted: {
             if (settingsManager)
-                settingsManager.replayCachePath = selectedFolder.toString().replace("file://", "");
+                settingsManager.replayCachePath = selectedFolder.toLocalFile();
         }
     }
 

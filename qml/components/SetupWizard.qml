@@ -300,8 +300,9 @@ Rectangle {
                                         TrophyRadioButton { text: qsTr("Game + Voice"); checked: settingsManager ? settingsManager.audioMode === "game" : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "game" }
                                         TrophyRadioButton { text: qsTr("Entire Desktop"); checked: settingsManager ? settingsManager.audioMode === "desktop" : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "desktop" }
                                     }
-                                    Label { text: qsTr("Recording Tracks"); font.weight: Font.Bold; color: Theme.textColor }
+                                    Label { text: qsTr("Recording Tracks"); font.weight: Font.Bold; color: Theme.textColor; visible: settingsManager && settingsManager.audioMode === "game" }
                                     RowLayout {
+                                        visible: settingsManager && settingsManager.audioMode === "game"
                                         spacing: Theme.spacingLarge
                                         TrophyRadioButton { text: qsTr("Single (Mixed)"); checked: settingsManager ? !settingsManager.separateAudioTracks : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = false }
                                         TrophyRadioButton { text: qsTr("Separate (Multi)"); checked: settingsManager ? settingsManager.separateAudioTracks : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = true }
@@ -925,10 +926,9 @@ Rectangle {
     FolderDialog {
         id: folderDialog
         title: qsTr("Select Recordings Folder")
-        currentFolder: settingsManager ? ("file://" + settingsManager.recordingsPath) : ""
+        currentFolder: settingsManager ? recordingLibrary.localFileUrl(settingsManager.recordingsPath) : ""
         onAccepted: {
-            var path = selectedFolder.toString();
-            if (path.startsWith("file://")) path = path.substring(7);
+            var path = selectedFolder.toLocalFile();
             if (settingsManager) settingsManager.recordingsPath = path;
         }
     }

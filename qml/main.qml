@@ -143,13 +143,7 @@ ApplicationWindow {
     function openFolder(path) {
         if (!path) return;
 
-        var url = path;
-        if (!url.startsWith("file://")) {
-            if (!url.startsWith("/"))
-                url = "/" + url;
-            url = `file://${url}`;
-        }
-        Qt.openUrlExternally(url);
+        Qt.openUrlExternally(recordingLibrary.localFileUrl(path));
     }
 
     // In-app player overlay (content area; Back/Escape closes
@@ -638,7 +632,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Ctrl+Q"
-        onActivated: Qt.quit()
+        onActivated: window.close()
     }
 
     Shortcut {
@@ -881,10 +875,7 @@ ApplicationWindow {
         id: exportDialog
         title: qsTr("Choose Export Directory")
         onAccepted: {
-            var destDir = exportDialog.selectedFolder.toString();
-            if (destDir.startsWith("file://")) {
-                destDir = destDir.substring(7); // remove file://
-            }
+            var destDir = exportDialog.selectedFolder.toLocalFile();
             if (window.storageManager) {
                 for (var i = 0; i < window.selectedRecordings.length; i++) {
                     window.storageManager.exportRecording(window.selectedRecordings[i], destDir);
