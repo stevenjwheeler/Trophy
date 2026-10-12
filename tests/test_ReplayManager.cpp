@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "core/ReplayManager.h"
+#include "core/StorageManager.h"
+#include "settings/SettingsManager.h"
 
 using namespace TrophyBackend;
 
@@ -65,6 +67,13 @@ protected:
   // lives here (same pattern as the fabrication helpers above).
   QString defaultCacheDir(ReplayManager &mgr) { return mgr.cacheDir(); }
   QString legacyCacheDir() { return ReplayManager::legacyCacheDir(); }
+  void forceRunningState(ReplayManager &mgr, SettingsManager *settings,
+                         StorageManager *storage) {
+    mgr.m_settings = settings;
+    mgr.m_storage = storage;
+    mgr.m_state = ReplayManager::State::Running;
+  }
+  QString setupKey(ReplayManager &mgr) { return mgr.audioSetupKey(); }
 };
 
 } // namespace TrophyBackend
@@ -167,6 +176,88 @@ TEST_F(ReplayManagerTest, InactiveByDefaultAndSaveFailsCleanly) {
   mgr.setPaused(true);
   mgr.setPaused(false);
   EXPECT_FALSE(mgr.isActive());
+}
+
+TEST_F(ReplayManagerTest, DesktopAudioSetupKeyIgnoresSeparateFlag) {
+  // Desktop mode always records one merged track, so the separate flag
+  // must neither change the session key (no spurious source rebuild)
+  // nor leak into multi-stream desktop files. Game mode keeps the
+  // distinction. SettingsManager persists on every setter, so isolate
+  // the config home first (never touch the user's real config).
+  QTemporaryDir fakeConfig;
+  ASSERT_TRUE(fakeConfig.isValid());
+  const QByteArray oldConfigHome = qgetenv("XDG_CONFIG_HOME");
+  qputenv("XDG_CONFIG_HOME", fakeConfig.path().toUtf8());
+
+  {
+    SettingsManager settings;
+    ReplayManager mgr;
+    mgr.setSettingsManager(&settings);
+
+    settings.setAudioMode("desktop");
+    settings.setSeparateAudioTracks(false);
+    const QString desktopMerged = setupKey(mgr);
+    ASSERT_FALSE(desktopMerged.isEmpty());
+    EXPECT_TRUE(desktopMerged.endsWith("|mix"));
+    settings.setSeparateAudioTracks(true);
+    EXPECT_EQ(setupKey(mgr), desktopMerged);
+
+    settings.setAudioMode("game");
+    settings.setSeparateAudioTracks(false);
+    const QString gameMixed = setupKey(mgr);
+    EXPECT_TRUE(gameMixed.endsWith("|mix"));
+    settings.setSeparateAudioTracks(true);
+    const QString gameSeparate = setupKey(mgr);
+    EXPECT_TRUE(gameSeparate.endsWith("|sep"));
+    EXPECT_NE(gameSeparate, gameMixed);
+  } // SettingsManager persists here, while XDG_CONFIG_HOME is isolated.
+
+  if (oldConfigHome.isNull())
+    qunsetenv("XDG_CONFIG_HOME");
+  else
+    qputenv("XDG_CONFIG_HOME", oldConfigHome);
+}
+
+TEST_F(ReplayManagerTest, SaveReplayRefusesWhenStorageFull) {
+  // Hermetic config home: SettingsManager persists on destruction, so
+  // it must die before the env override is restored (scoped below).
+  QTemporaryDir fakeConfig;
+  ASSERT_TRUE(fakeConfig.isValid());
+  const QByteArray oldConfigHome = qgetenv("XDG_CONFIG_HOME");
+  qputenv("XDG_CONFIG_HOME", fakeConfig.path().toUtf8());
+
+  QTemporaryDir libDir;
+  ASSERT_TRUE(libDir.isValid());
+  {
+    QFile f(libDir.path() + "/Game_2026-01-15_20-30-00.mkv");
+    ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+    f.write(QByteArray(8192, 'x'));
+  }
+  {
+    SettingsManager settings;
+    StorageManager storage(libDir.path());
+    storage.setMaxSize(1024); // over limit: 8192 used > 1024 max
+    ASSERT_TRUE(storage.isOverLimit());
+
+    ReplayManager mgr;
+    forceRunningState(mgr, &settings, &storage);
+    QSignalSpy failedSpy(&mgr, &ReplayManager::replayFailed);
+    QSignalSpy savedSpy(&mgr, &ReplayManager::replaySaved);
+    mgr.saveReplay();
+
+    EXPECT_EQ(failedSpy.count(), 1);
+    EXPECT_EQ(savedSpy.count(), 0);
+    EXPECT_TRUE(failedSpy.first().first().toString().contains("Storage"));
+    // Refused before the gapless switch/remux: no clip (or .part) file
+    // appeared next to the source.
+    EXPECT_EQ(QDir(libDir.path()).entryList({"*.mkv"}, QDir::Files).size(),
+              1);
+  }
+
+  if (oldConfigHome.isNull())
+    qunsetenv("XDG_CONFIG_HOME");
+  else
+    qputenv("XDG_CONFIG_HOME", oldConfigHome);
 }
 
 TEST_F(ReplayManagerTest, StopDvrClearsOpenAndClosedSegments) {

@@ -130,8 +130,16 @@ void RecordingManager::startRecording(const QString &gameName,
   setState(RecordingState::Initializing);
 
   // Check storage space and prevent starting if the limit cannot be satisfied.
-  if (!m_storage->enforceStorageLimit()) {
+  // An explicit start attempt always notifies (forceNotify): the latched
+  // episode signal would otherwise swallow every repeat press, leaving
+  // keybind/manual-button retries silently dead. recordingError always
+  // fires too, so the in-app error dialog shows even when storage
+  // notices are toggled off.
+  if (!m_storage->enforceStorageLimit(false, true)) {
     qWarning() << "Storage limit cannot be satisfied, aborting recording start";
+    emit recordingError("Storage full: recordings exceed the storage limit. "
+                        "Enable auto-cleanup or delete old recordings to "
+                        "record again.");
     setState(RecordingState::Idle);
     return;
   }
@@ -190,10 +198,15 @@ void RecordingManager::startRecording(const QString &gameName,
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenStale, this,
           [this](const QString &oldToken) {
             Q_UNUSED(oldToken)
+            const QString gameName = m_currentGameName;
             qWarning() << "Saved restore token rejected for"
-                       << m_currentGameName << "- re-authorizing";
+                       << gameName << "- re-authorizing";
             teardownPipeline();
-            emit restoreAuthNeeded(m_currentGameName);
+            if (m_storage)
+              m_storage->clearExcludedRecordingPath();
+            m_currentFilePath.clear();
+            setState(RecordingState::Idle);
+            emit restoreAuthNeeded(gameName);
           });
 
   CaptureConfig capConfig;
@@ -325,6 +338,18 @@ void RecordingManager::finishPipelineAndStart() {
 }
 
 void RecordingManager::stopRecording() {
+  if (m_state == RecordingState::Initializing) {
+    qInfo() << "Cancelling recording initialization for" << m_currentGameName;
+    teardownPipeline();
+    if (m_storage)
+      m_storage->clearExcludedRecordingPath();
+    m_currentFilePath.clear();
+    m_currentGameName.clear();
+    m_manualWindowId = 0;
+    setState(RecordingState::Idle);
+    emit currentGameNameChanged();
+    return;
+  }
   if (m_state != RecordingState::Recording) {
     qWarning() << "Cannot stop recording: not recording";
     return;
@@ -613,10 +638,14 @@ bool RecordingManager::buildPipeline() {
   // and the activity feed never depend on the filename.
   stampTrophyTags(outputMetadata, QStringLiteral("recording"));
 
-  // Create recording session to coordinate everything
+  // Create recording session to coordinate everything.
+  // Desktop mode always records one merged track (system + mic): the
+  // saved separate flag must not produce multi-stream desktop files.
+  const bool useSeparateTracks = m_settings->separateAudioTracks() &&
+                                 m_settings->audioMode() != "desktop";
     m_session = std::make_unique<RecordingSession>(
       m_currentFilePath, m_captureSource.get(), m_videoEncoder.get(),
-      m_muxer.get(), m_audioMixer, m_settings->separateAudioTracks(),
+      m_muxer.get(), m_audioMixer, useSeparateTracks,
       192, // Audio bitrate: hard-coded to 192 kbps (CD quality)
       activeAudioTrackCount, outputMetadata);
 

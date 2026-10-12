@@ -63,7 +63,12 @@ public:
 
   // Operations
   Q_INVOKABLE void refresh();
-  Q_INVOKABLE bool enforceStorageLimit(bool allowDelete = false);
+  // Explicit user-initiated start attempts pass forceNotify=true so every
+  // press emits the limit signal even inside an already-notified episode.
+  // Background ticks (progress updates, directory watch) leave it false
+  // and stay on the once-per-episode latch.
+  Q_INVOKABLE bool enforceStorageLimit(bool allowDelete = false,
+                                       bool forceNotify = false);
   Q_INVOKABLE bool requestCleanup(bool force = false);
   Q_INVOKABLE bool isOverLimit() const;
   Q_INVOKABLE bool deleteRecording(const QString &filePath);
@@ -122,8 +127,8 @@ private:
   // whenever usage drops back under the limit or the limit settings
   // change (a new situation is worth one fresh notice).
   bool m_limitNotified = false;
-  void notifyLimitReached();
-  void notifyLimitCannotCleanup();
+  void notifyLimitReached(bool force = false);
+  void notifyLimitCannotCleanup(bool force = false);
 
   // In-flight background bulk deletes. While > 0 the directory
   // watcher is suppressed (a bulk unlink storm would otherwise

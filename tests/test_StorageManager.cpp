@@ -137,7 +137,9 @@ TEST_F(StorageManagerTest, DeleteRecordingOutsidePath) {
   // Path-traversal guard: the victim is a sacrificial file in a sibling
   // temp dir OUTSIDE the storage path — never a system path. If this guard
   // ever regresses, the worst case is a temp file disappearing.
-  QTemporaryDir outsideDir;
+  // Make the sibling path share the full storage prefix; startsWith()
+  // alone would mistakenly accept it as inside the library.
+  QTemporaryDir outsideDir(tempDir.path() + "-outside-XXXXXX");
   ASSERT_TRUE(outsideDir.isValid());
   const QString outsidePath = outsideDir.path() + "/outside.mkv";
   QFile f(outsidePath);
@@ -244,7 +246,25 @@ TEST_F(StorageManagerTest, EnforceStorageLimitSkipsExcludedRecording) {
   EXPECT_LE(mgr.usedSize(), 6000);
 }
 
-TEST_F(StorageManagerTest, EnforceStorageLimitDoesNotDeleteWhenAutoCleanupDisabled) {
+TEST_F(StorageManagerTest, CleanupFindsNestedMediaCountedByUsage) {
+  const QString nestedDir = tempDir.path() + "/archive/old";
+  ASSERT_TRUE(QDir().mkpath(nestedDir));
+  QFile nested(nestedDir + "/nested.mkv");
+  ASSERT_TRUE(nested.open(QIODevice::WriteOnly));
+  ASSERT_EQ(nested.write(QByteArray(8192, 'x')), 8192);
+  nested.close();
+
+  StorageManager mgr(tempDir.path());
+  EXPECT_EQ(mgr.usedSize(), 8192);
+  mgr.setMaxSize(4096);
+  mgr.setAutoDeleteOldest(true);
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+  EXPECT_FALSE(QFile::exists(nestedDir + "/nested.mkv"));
+  EXPECT_EQ(mgr.usedSize(), 0);
+}
+
+TEST_F(StorageManagerTest,
+       EnforceStorageLimitDoesNotDeleteWhenAutoCleanupDisabled) {
   createDummyFile("old.mkv", 5000);
   createDummyFile("new.mkv", 5000);
 
@@ -274,7 +294,8 @@ TEST_F(StorageManagerTest, SetMaxSizeDoesNotDeleteImmediately) {
   EXPECT_GT(mgr.usedSize(), mgr.maxSize());
 }
 
-TEST_F(StorageManagerTest, EnableAutoDeleteDoesNotDeleteImmediatelyWhenOverLimit) {
+TEST_F(StorageManagerTest,
+       EnableAutoDeleteDoesNotDeleteImmediatelyWhenOverLimit) {
   createDummyFile("old.mkv", 5000);
   createDummyFile("new.mkv", 5000);
 
@@ -304,7 +325,8 @@ TEST_F(StorageManagerTest, RequestCleanupDeletesOldFilesWhenConfirmed) {
   EXPECT_LE(mgr.usedSize(), mgr.maxSize());
 }
 
-TEST_F(StorageManagerTest, RequestCleanupForceDeletesOldFilesWhenAutoCleanupDisabled) {
+TEST_F(StorageManagerTest,
+       RequestCleanupForceDeletesOldFilesWhenAutoCleanupDisabled) {
   createDummyFile("old.mkv", 5000);
   createDummyFile("new.mkv", 5000);
 
@@ -330,8 +352,7 @@ TEST_F(StorageManagerTest, ExcludedOldestDoesNotBlockCleanupOfNewer) {
   auto pinMtime = [](const QString &path, const QDateTime &dt) {
     QFile f(path);
     EXPECT_TRUE(f.open(QIODevice::ReadWrite));
-    EXPECT_TRUE(
-        f.setFileTime(dt, QFileDevice::FileModificationTime));
+    EXPECT_TRUE(f.setFileTime(dt, QFileDevice::FileModificationTime));
     f.close();
   };
   pinMtime(tempDir.path() + "/keeper.mkv",
@@ -350,7 +371,8 @@ TEST_F(StorageManagerTest, ExcludedOldestDoesNotBlockCleanupOfNewer) {
   EXPECT_LE(mgr.usedSize(), 6000);
 }
 
-TEST_F(StorageManagerTest, EnforceStorageLimitFailsWhenOnlyExcludedRecordingRemains) {
+TEST_F(StorageManagerTest,
+       EnforceStorageLimitFailsWhenOnlyExcludedRecordingRemains) {
   createDummyFile("current.mkv", 7000);
   createDummyFile("old.mkv", 5000);
 
@@ -370,7 +392,8 @@ TEST_F(StorageManagerTest, EnforceStorageLimitFailsWhenOnlyExcludedRecordingRema
   EXPECT_GT(mgr.usedSize(), mgr.maxSize());
 }
 
-TEST_F(StorageManagerTest, EnforceStorageLimitDoesNotDeleteOverLimitWhenAutoCleanupDisabled) {
+TEST_F(StorageManagerTest,
+       EnforceStorageLimitDoesNotDeleteOverLimitWhenAutoCleanupDisabled) {
   createDummyFile("old.mkv", 5000);
   createDummyFile("new.mkv", 5000);
 
@@ -433,6 +456,30 @@ TEST_F(StorageManagerTest, OverLimitNoticeSentOncePerEpisode) {
   EXPECT_EQ(cannot.count(), 2);
 }
 
+TEST_F(StorageManagerTest, ForcedNotifyRepeatsEveryExplicitAttempt) {
+  // Explicit user-initiated start attempts (record keybind / manual button
+  // while over limit) must produce feedback on EVERY press, not just the
+  // first of the episode. Background ticks stay on the once-per-episode
+  // latch; forceNotify=true bypasses it.
+  createDummyFile("a.mkv", 4000);
+  createDummyFile("b.mkv", 4000);
+
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(10000);
+  mgr.setAutoDeleteOldest(false);
+
+  QSignalSpy cannot(&mgr, &StorageManager::storageLimitCannotCleanup);
+  createDummyFile("c.mkv", 4000); // 12000 > 10000, cleanup off
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_FALSE(mgr.enforceStorageLimit());
+  EXPECT_EQ(cannot.count(), 1); // latched background path
+
+  EXPECT_FALSE(mgr.enforceStorageLimit(false, true));
+  EXPECT_FALSE(mgr.enforceStorageLimit(false, true));
+  EXPECT_FALSE(mgr.enforceStorageLimit(false, true));
+  EXPECT_EQ(cannot.count(), 4); // every explicit attempt notifies
+}
+
 TEST_F(StorageManagerTest, RefreshEmitsSignalOnSizeChange) {
   StorageManager mgr(tempDir.path());
 
@@ -463,13 +510,11 @@ TEST_F(StorageManagerTest, RenameKeepsTimestampSuffix) {
   StorageManager mgr(tempDir.path());
 
   QSignalSpy spy(&mgr, &StorageManager::recordingRenamed);
-  QString newPath =
-      mgr.renameRecording(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
-                          "New Title");
+  QString newPath = mgr.renameRecording(
+      tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "New Title");
 
   EXPECT_FALSE(newPath.isEmpty());
-  EXPECT_EQ(newPath,
-            tempDir.path() + "/New_Title_2026-01-15_20-30-00.mkv");
+  EXPECT_EQ(newPath, tempDir.path() + "/New_Title_2026-01-15_20-30-00.mkv");
   EXPECT_TRUE(QFile::exists(newPath));
   EXPECT_FALSE(
       QFile::exists(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv"));
@@ -508,11 +553,9 @@ TEST_F(StorageManagerTest, RenameCollisionAddsSuffix) {
   createDummyFile("Taken_2026-01-15_20-30-00.mkv", 1024);
   StorageManager mgr(tempDir.path());
 
-  QString newPath =
-      mgr.renameRecording(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
-                          "Taken");
-  EXPECT_EQ(newPath,
-            tempDir.path() + "/Taken_2026-01-15_20-30-00_1.mkv");
+  QString newPath = mgr.renameRecording(
+      tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "Taken");
+  EXPECT_EQ(newPath, tempDir.path() + "/Taken_2026-01-15_20-30-00_1.mkv");
   EXPECT_TRUE(QFile::exists(newPath));
   // The colliding target is untouched.
   EXPECT_TRUE(QFile::exists(tempDir.path() + "/Taken_2026-01-15_20-30-00.mkv"));
@@ -527,15 +570,14 @@ TEST_F(StorageManagerTest, RenameMovesThumbnail) {
   thumb.close();
 
   StorageManager mgr(tempDir.path());
-  QString newPath =
-      mgr.renameRecording(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
-                          "New Title");
+  QString newPath = mgr.renameRecording(
+      tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "New Title");
 
   EXPECT_FALSE(newPath.isEmpty());
   EXPECT_TRUE(QFile::exists(tempDir.path() +
-                             "/.thumbnails/New_Title_2026-01-15_20-30-00.jpg"));
+                            "/.thumbnails/New_Title_2026-01-15_20-30-00.jpg"));
   EXPECT_FALSE(QFile::exists(tempDir.path() +
-                              "/.thumbnails/Old_Game_2026-01-15_20-30-00.jpg"));
+                             "/.thumbnails/Old_Game_2026-01-15_20-30-00.jpg"));
 }
 
 TEST_F(StorageManagerTest, RenameRejectsEmptyTitle) {
@@ -543,16 +585,18 @@ TEST_F(StorageManagerTest, RenameRejectsEmptyTitle) {
   StorageManager mgr(tempDir.path());
 
   EXPECT_TRUE(mgr.renameRecording(
-                      tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "  ")
+                     tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "  ")
                   .isEmpty());
-  EXPECT_TRUE(mgr.renameRecording(
-                      tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv", "___")
-                  .isEmpty());
-  EXPECT_TRUE(QFile::exists(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv"));
+  EXPECT_TRUE(
+      mgr.renameRecording(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv",
+                          "___")
+          .isEmpty());
+  EXPECT_TRUE(
+      QFile::exists(tempDir.path() + "/Old_Game_2026-01-15_20-30-00.mkv"));
 }
 
 TEST_F(StorageManagerTest, RenameRejectsOutsidePath) {
-  QTemporaryDir outsideDir;
+  QTemporaryDir outsideDir(tempDir.path() + "-outside-XXXXXX");
   ASSERT_TRUE(outsideDir.isValid());
   const QString outsidePath = outsideDir.path() + "/outside.mkv";
   QFile f(outsidePath);
@@ -574,10 +618,11 @@ TEST_F(StorageManagerTest, RenameRejectsMissingFile) {
 TEST_F(StorageManagerTest, RenameRefusesInProgressRecording) {
   createDummyFile("Live_2026-01-15_20-30-00.mkv", 1024);
   StorageManager mgr(tempDir.path());
-  mgr.setExcludedRecordingPath(tempDir.path() + "/Live_2026-01-15_20-30-00.mkv");
+  mgr.setExcludedRecordingPath(tempDir.path() +
+                               "/Live_2026-01-15_20-30-00.mkv");
 
   EXPECT_TRUE(mgr.renameRecording(
-                      tempDir.path() + "/Live_2026-01-15_20-30-00.mkv", "Other")
+                     tempDir.path() + "/Live_2026-01-15_20-30-00.mkv", "Other")
                   .isEmpty());
   EXPECT_TRUE(QFile::exists(tempDir.path() + "/Live_2026-01-15_20-30-00.mkv"));
 }
@@ -616,9 +661,10 @@ TEST_F(StorageManagerTest, AutoCleanupRemovesSidecarThumbnails) {
   QDir dir(tempDir.path());
   EXPECT_LE(dir.entryList({"*.mkv"}, QDir::Files).size(), 1);
   // At most one thumbnail may survive — the one for the surviving video.
-  EXPECT_LE(
-      QDir(tempDir.path() + "/.thumbnails").entryList({"*.jpg"}, QDir::Files).size(),
-      1);
+  EXPECT_LE(QDir(tempDir.path() + "/.thumbnails")
+                .entryList({"*.jpg"}, QDir::Files)
+                .size(),
+            1);
 }
 
 TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
@@ -665,7 +711,7 @@ TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
 
 TEST_F(StorageManagerTest, BulkDeleteRefusesOutsidePath) {
   // Same sacrificial-sibling-dir guard as DeleteRecordingOutsidePath.
-  QTemporaryDir outsideDir;
+  QTemporaryDir outsideDir(tempDir.path() + "-outside-XXXXXX");
   ASSERT_TRUE(outsideDir.isValid());
   const QString outsidePath = outsideDir.path() + "/outside.mkv";
   {

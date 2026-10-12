@@ -16,8 +16,41 @@
 #include <QRegularExpression>
 #include <QStorageInfo>
 #include <QThreadPool>
+#include <algorithm>
 
 namespace TrophyBackend {
+
+namespace {
+
+// Require both the supplied path and its resolved target to stay under the
+// configured library. The lexical check rejects sibling-prefix paths (for
+// example, /videos-old when the library is /videos); the canonical check
+// also rejects symlinks that escape the library.
+bool isWithinStoragePath(const QString &filePath, const QString &storagePath) {
+  const QFileInfo rootInfo(storagePath);
+  const QString lexicalRoot = QDir::cleanPath(rootInfo.absoluteFilePath());
+  const QString resolvedRoot = rootInfo.canonicalFilePath();
+  const QFileInfo candidateInfo(filePath);
+  const QString candidate = QDir::cleanPath(candidateInfo.absoluteFilePath());
+  const QString resolvedCandidate = candidateInfo.canonicalFilePath();
+  if (lexicalRoot.isEmpty() || resolvedRoot.isEmpty() ||
+      resolvedCandidate.isEmpty())
+    return false;
+
+  auto isChildOf = [](const QString &path, const QString &root) {
+    if (path == root)
+      return true;
+    QString prefix = root;
+    if (!prefix.endsWith(QDir::separator()))
+      prefix += QDir::separator();
+    return path.startsWith(prefix);
+  };
+
+  return candidate != lexicalRoot && isChildOf(candidate, lexicalRoot) &&
+         isChildOf(resolvedCandidate, resolvedRoot);
+}
+
+} // namespace
 
 StorageManager::StorageManager(const QString &storagePath, QObject *parent)
     : QObject(parent), m_storagePath(storagePath) {
@@ -154,23 +187,23 @@ bool StorageManager::isOverLimit() const {
   return m_maxSize > 0 && m_usedSize > m_maxSize;
 }
 
-void StorageManager::notifyLimitReached() {
-  if (m_limitNotified) {
+void StorageManager::notifyLimitReached(bool force) {
+  if (m_limitNotified && !force) {
     return;
   }
   m_limitNotified = true;
   emit storageLimitReached();
 }
 
-void StorageManager::notifyLimitCannotCleanup() {
-  if (m_limitNotified) {
+void StorageManager::notifyLimitCannotCleanup(bool force) {
+  if (m_limitNotified && !force) {
     return;
   }
   m_limitNotified = true;
   emit storageLimitCannotCleanup();
 }
 
-bool StorageManager::enforceStorageLimit(bool allowDelete) {
+bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
   refresh();
 
   if (m_maxSize <= 0) {
@@ -180,7 +213,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
 
   if (!m_autoDeleteOldest && !allowDelete) {
     if (m_usedSize > m_maxSize) {
-      notifyLimitCannotCleanup();
+      notifyLimitCannotCleanup(forceNotify);
       return false;
     }
     return true;
@@ -188,13 +221,15 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
 
   while (m_usedSize > m_maxSize) {
     qDebug() << "Storage limit exceeded:" << formatSize(m_usedSize) << "/"
-            << formatSize(m_maxSize);
+             << formatSize(m_maxSize);
 
     if (!deleteOldestRecording()) {
-      // If we can't delete the oldest, check if it's because it's the current recording
+      // If we can't delete the oldest, check if it's because it's the current
+      // recording
       QStringList recordings = getRecordingsSortedByDate();
-      if (!recordings.isEmpty() && recordings.first() == m_excludedRecordingPath) {
-        notifyLimitCannotCleanup();
+      if (!recordings.isEmpty() &&
+          recordings.first() == m_excludedRecordingPath) {
+        notifyLimitCannotCleanup(forceNotify);
       }
       break;
     }
@@ -206,7 +241,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
   // warning cried "Storage Full" (and logged activity) on every progress
   // tick without deleting anything, since there was nothing to delete.
   if (isOverLimit()) {
-    notifyLimitReached();
+    notifyLimitReached(forceNotify);
   }
 
   return !isOverLimit();
@@ -215,8 +250,8 @@ bool StorageManager::enforceStorageLimit(bool allowDelete) {
 bool StorageManager::deleteRecording(const QString &filePath) {
   QFileInfo info(filePath);
 
-  // Security check: ensure file is within storage path
-  if (!info.absoluteFilePath().startsWith(m_storagePath)) {
+  // Security check: ensure file and any symlink target are within storage.
+  if (!isWithinStoragePath(filePath, m_storagePath)) {
     qWarning() << "Refusing to delete file outside storage path:" << filePath;
     return false;
   }
@@ -265,54 +300,54 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
   // Guarded by QPointer like Recording::loadMetadata: the manager is
   // app-owned, but a late completion must never touch a dead object.
   QPointer<StorageManager> self(this);
-  QThreadPool::globalInstance()->start(
-      [self, filePaths, storagePath, total]() {
-        QStringList deleted;
-        int done = 0;
-        for (const QString &filePath : filePaths) {
-          if (self.isNull()) {
-            return;
-          }
-          const QFileInfo info(filePath);
-          // Same guards as deleteRecording(): stay inside the storage
-          // path, skip missing files.
-          if (!info.absoluteFilePath().startsWith(storagePath)) {
-            qWarning() << "Refusing to delete file outside storage path:"
-                       << filePath;
-          } else if (!info.exists()) {
-            qWarning() << "File does not exist:" << filePath;
-          } else if (QFile::remove(filePath)) {
-            const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
-                                      info.completeBaseName() + ".jpg";
-            if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
-              qWarning() << "Failed to delete thumbnail:" << thumbPath;
-            }
-            deleted.append(filePath);
-          } else {
-            qWarning() << "Failed to delete recording:" << filePath;
-          }
-          ++done;
-          QMetaObject::invokeMethod(
-              self, [self, done, total]() {
-                if (!self.isNull()) {
-                  emit self->bulkDeleteProgress(done, total);
-                }
-              },
-              Qt::QueuedConnection);
+  QThreadPool::globalInstance()->start([self, filePaths, storagePath, total]() {
+    QStringList deleted;
+    int done = 0;
+    for (const QString &filePath : filePaths) {
+      if (self.isNull()) {
+        return;
+      }
+      const QFileInfo info(filePath);
+      // Same guards as deleteRecording(): stay inside the storage
+      // path, skip missing files.
+      if (!isWithinStoragePath(filePath, storagePath)) {
+        qWarning() << "Refusing to delete file outside storage path:"
+                   << filePath;
+      } else if (!info.exists()) {
+        qWarning() << "File does not exist:" << filePath;
+      } else if (QFile::remove(filePath)) {
+        const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
+                                  info.completeBaseName() + ".jpg";
+        if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
+          qWarning() << "Failed to delete thumbnail:" << thumbPath;
         }
-        QMetaObject::invokeMethod(
-            self,
-            [self, deleted, total]() {
-              if (!self.isNull()) {
-                self->finishBulkDelete(deleted, total);
-              }
-            },
-            Qt::QueuedConnection);
-      });
+        deleted.append(filePath);
+      } else {
+        qWarning() << "Failed to delete recording:" << filePath;
+      }
+      ++done;
+      QMetaObject::invokeMethod(
+          self,
+          [self, done, total]() {
+            if (!self.isNull()) {
+              emit self->bulkDeleteProgress(done, total);
+            }
+          },
+          Qt::QueuedConnection);
+    }
+    QMetaObject::invokeMethod(
+        self,
+        [self, deleted, total]() {
+          if (!self.isNull()) {
+            self->finishBulkDelete(deleted, total);
+          }
+        },
+        Qt::QueuedConnection);
+  });
 }
 
 void StorageManager::finishBulkDelete(const QStringList &deletedPaths,
-                                       int totalCount) {
+                                      int totalCount) {
   qDebug() << "Bulk deleted" << deletedPaths.size() << "/" << totalCount
            << "recordings";
   if (!deletedPaths.isEmpty()) {
@@ -361,8 +396,8 @@ QString StorageManager::renameRecording(const QString &filePath,
   QFileInfo info(filePath);
   const QString oldAbsolute = info.absoluteFilePath();
 
-  // Security check: ensure file is within storage path
-  if (!oldAbsolute.startsWith(m_storagePath)) {
+  // Security check: ensure file and any symlink target are within storage.
+  if (!isWithinStoragePath(filePath, m_storagePath)) {
     qWarning() << "Refusing to rename file outside storage path:" << filePath;
     return QString();
   }
@@ -410,8 +445,8 @@ QString StorageManager::renameRecording(const QString &filePath,
 
   const QString suffix = info.suffix();
   QDir dir(info.absolutePath());
-  QString newAbsolute =
-      dir.absoluteFilePath(newBase + (suffix.isEmpty() ? QString() : "." + suffix));
+  QString newAbsolute = dir.absoluteFilePath(
+      newBase + (suffix.isEmpty() ? QString() : "." + suffix));
 
   if (newAbsolute == oldAbsolute) {
     return oldAbsolute; // No-op: title already matches.
@@ -453,7 +488,8 @@ QString StorageManager::renameRecording(const QString &filePath,
   return newAbsolute;
 }
 
-bool StorageManager::exportRecording(const QString &sourcePath, const QString &destDir) const {
+bool StorageManager::exportRecording(const QString &sourcePath,
+                                     const QString &destDir) const {
   QFileInfo sourceInfo(sourcePath);
   if (!sourceInfo.exists()) {
     qWarning() << "Export source does not exist:" << sourcePath;
@@ -469,14 +505,15 @@ bool StorageManager::exportRecording(const QString &sourcePath, const QString &d
   }
 
   QString destPath = dir.filePath(sourceInfo.fileName());
-  
+
   // If file already exists, don't overwrite blindly, maybe add a suffix
   if (QFile::exists(destPath)) {
     QString baseName = sourceInfo.completeBaseName();
     QString ext = sourceInfo.suffix();
     int counter = 1;
     while (QFile::exists(destPath)) {
-      destPath = dir.filePath(QString("%1_%2.%3").arg(baseName).arg(counter).arg(ext));
+      destPath =
+          dir.filePath(QString("%1_%2.%3").arg(baseName).arg(counter).arg(ext));
       counter++;
     }
   }
@@ -536,17 +573,19 @@ qint64 StorageManager::calculateDirectorySize() const {
 }
 
 QStringList StorageManager::getRecordingsSortedByDate() const {
-  QDir dir(m_storagePath);
-  QFileInfoList files = dir.entryInfoList(
-      QStringList() << "*.mkv" << "*.mp4" << "*.webm", QDir::Files,
-      QDir::Time | QDir::Reversed // Oldest first
-  );
-
   QStringList paths;
-  for (const QFileInfo &info : files) {
-    paths.append(info.absoluteFilePath());
+  QDirIterator it(m_storagePath,
+                  QStringList() << "*.mkv" << "*.mp4" << "*.webm", QDir::Files,
+                  QDirIterator::Subdirectories);
+  while (it.hasNext()) {
+    it.next();
+    paths.append(it.fileInfo().absoluteFilePath());
   }
-
+  // calculateDirectorySize() includes media below nested folders, so the
+  // cleanup candidates must cover that same tree.
+  std::sort(paths.begin(), paths.end(), [](const QString &a, const QString &b) {
+    return QFileInfo(a).lastModified() < QFileInfo(b).lastModified();
+  });
   return paths;
 }
 

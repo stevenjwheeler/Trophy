@@ -33,9 +33,26 @@ static auto *env =
 
 class RecordingManagerTest : public ::testing::Test {
 protected:
+  // NOTE: declared first so it outlives everything that reads config paths.
+  QTemporaryDir configHome;
+  QByteArray oldXdgConfigHome;
   QTemporaryDir tempDir;
 
-  void SetUp() override { ASSERT_TRUE(tempDir.isValid()); }
+  void SetUp() override {
+    ASSERT_TRUE(tempDir.isValid());
+    ASSERT_TRUE(configHome.isValid());
+    // Isolate from the user's real ~/.config/trophy config: SettingsManager
+    // saves on destruction, which must never touch the real config dir.
+    oldXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
+  }
+
+  void TearDown() override {
+    if (oldXdgConfigHome.isNull())
+      qunsetenv("XDG_CONFIG_HOME");
+    else
+      qputenv("XDG_CONFIG_HOME", oldXdgConfigHome);
+  }
 
   void createDummyFile(const QString &name, qint64 size) {
     QFile f(tempDir.path() + "/" + name);
@@ -125,4 +142,42 @@ TEST_F(RecordingManagerTest, SourceLabelsAgreeAcrossTitleAndExeForms) {
   // Empty labels never agree (callers guard empties separately).
   EXPECT_FALSE(RecordingManager::sourceLabelsAgree("", "Deadlock"));
   EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Deadlock", ""));
+}
+
+TEST_F(RecordingManagerTest,
+       RepeatStartAttemptsWhileOverLimitNotifyEveryPress) {
+  // Regression: record keybind / manual button while storage is full used
+  // to abort silently after the first episode notice (latched signal, no
+  // recordingError). Every explicit attempt must surface feedback.
+  createDummyFile("old.mkv", 5000);
+  createDummyFile("new.mkv", 5000);
+
+  StorageManager storage(tempDir.path());
+  storage.setMaxSize(6000);
+  storage.setAutoDeleteOldest(false);
+
+  SettingsManager settings;
+  RecordingManager recorder;
+  recorder.setSettingsManager(&settings);
+  recorder.setStorageManager(&storage);
+
+  QSignalSpy startedSpy(&recorder, &RecordingManager::recordingStarted);
+  QSignalSpy errorSpy(&recorder, &RecordingManager::recordingError);
+  QSignalSpy cannotSpy(&storage,
+                       &StorageManager::storageLimitCannotCleanup);
+
+  for (int i = 0; i < 3; ++i) {
+    recorder.startRecording();
+    EXPECT_FALSE(recorder.isRecording());
+  }
+
+  EXPECT_EQ(startedSpy.count(), 0);
+  // The in-app error dialog fires on every press, even with storage
+  // notices toggled off; the notification signal fires on every press
+  // too (forced, bypassing the episode latch).
+  ASSERT_EQ(errorSpy.count(), 3);
+  EXPECT_EQ(cannotSpy.count(), 3);
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(errorSpy.at(i).at(0).toString().contains("Storage full"));
+  }
 }

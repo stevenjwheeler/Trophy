@@ -22,6 +22,7 @@
 #include "audio/AudioMixer.h"
 #include "capture/CaptureFactory.h"
 #include "core/RecordingSession.h"
+#include "core/StorageManager.h"
 #include "encoding/EncoderFactory.h"
 #include "encoding/FFmpegEncoder.h"
 #include "muxing/FFmpegMuxer.h"
@@ -51,6 +52,10 @@ ReplayManager::~ReplayManager() { stopDvr(); }
 
 void ReplayManager::setSettingsManager(SettingsManager *settings) {
   m_settings = settings;
+}
+
+void ReplayManager::setStorageManager(StorageManager *storage) {
+  m_storage = storage;
 }
 
 void ReplayManager::setState(State s) {
@@ -142,6 +147,10 @@ void ReplayManager::startDvr(const QString &gameName) {
 
 void ReplayManager::stopDvr() {
   m_rotationTimer->stop();
+  // A clip worker may still be reading finalized segments. Retire it before
+  // clearing those files or destroying the manager that owns its callback.
+  if (m_saveThread.joinable())
+    m_saveThread.join();
   const QString game = m_gameName;
   const int closedCount = m_segments.size() + (m_openSegmentPath.isEmpty() ? 0 : 1);
   if (m_session) {
@@ -253,10 +262,14 @@ void ReplayManager::onCaptureError(const QString &error) {
 QString ReplayManager::audioSetupKey() const {
   if (!m_settings)
     return {};
+  // Desktop mode always merges, so the separate flag is normalized out:
+  // flipping it must not spuriously rebuild the running sources.
+  const bool effectiveSeparate = m_settings->separateAudioTracks() &&
+                                 m_settings->audioMode() != "desktop";
   return m_settings->audioMode() + "|" + m_settings->gameAudioDevice() +
          "|" + m_settings->microphoneDevice() + "|" +
          m_settings->voiceChatApp().trimmed() + "|" +
-         (m_settings->separateAudioTracks() ? "sep" : "mix");
+         (effectiveSeparate ? "sep" : "mix");
 }
 
 bool ReplayManager::switchSegment() {
@@ -336,8 +349,12 @@ bool ReplayManager::switchSegment() {
 
   auto newSession = std::make_unique<RecordingSession>(
       path, m_capture.get(), newEncoder.get(), newMuxer.get(),
-      m_audioMixer.get(), m_settings->separateAudioTracks(), 192, audioTracks,
-      meta);
+      // Desktop mode always records one merged track (system + mic):
+      // the saved separate flag must not produce multi-stream files.
+      m_audioMixer.get(),
+      m_settings->separateAudioTracks() &&
+          m_settings->audioMode() != "desktop",
+      192, audioTracks, meta);
   connect(newSession.get(), &RecordingSession::errorOccurred, this,
           &ReplayManager::onCaptureError);
   // Wire the session's node retry (the DVR previously never re-checked:
@@ -599,7 +616,8 @@ QString ReplayManager::clipOutputPath() const {
   safe = safe.trimmed().replace(QRegularExpression("^[_-]+|[_-]+$"), "");
   if (safe.isEmpty())
     safe = "Game";
-  const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+  const QString ts =
+      QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
   return QString("%1/%2_%3_Replay.mkv").arg(base, safe, ts);
 }
 
@@ -610,6 +628,19 @@ void ReplayManager::saveReplay() {
   }
   if (m_saving)
     return;
+  // Storage pre-flight: clips must never push usage past the limit.
+  // Check-only (no enforce/auto-delete): a clip refusing is cheaper and
+  // safer than the recording path's cleanup-then-record. The failure
+  // surfaces through the existing replayFailed -> "Couldn't Save Clip"
+  // notice in Application.
+  if (m_storage) {
+    m_storage->refresh();
+    if (m_storage->isOverLimit()) {
+      emit replayFailed("Storage is full. Free space or enable auto-cleanup "
+                        "to save clips.");
+      return;
+    }
+  }
   m_saving = true;
 
   // Gapless switch first: the new segment is already recording before the
@@ -626,6 +657,20 @@ void ReplayManager::saveReplay() {
 
   const double window = std::max(1, m_settings->clipBufferSeconds());
   QList<ReplaySegment> segs = selectForWindow(m_segments, now, window);
+  // Would-exceed guard: the remux stream-copies the selected segments, so
+  // their on-disk total bounds the clip size (segments live in the cache
+  // dir, uncounted in library usage — the clip adds ~that much to it).
+  if (m_storage && m_storage->maxSize() > 0) {
+    qint64 estimate = 0;
+    for (const ReplaySegment &s : segs)
+      estimate += QFileInfo(s.path).size();
+    if (m_storage->usedSize() + estimate > m_storage->maxSize()) {
+      m_saving = false;
+      emit replayFailed("Storage is full. Free space or enable auto-cleanup "
+                        "to save clips.");
+      return;
+    }
+  }
   // Fallback span when the remux can't report one: within the first
   // `window` seconds of buffering there is less than a full window.
   const double fallbackSec =
@@ -640,19 +685,18 @@ void ReplayManager::saveReplay() {
   // file (it would generate a thumbnail for garbage).
   QPointer<ReplayManager> self(this);
   const QString tmpOut = out + ".part";
-  QFile::remove(tmpOut);
-  std::thread([self, segs, window, fallbackSec, out, tmpOut]() {
+  if (m_saveThread.joinable())
+    m_saveThread.join();
+  m_saveThread = std::thread([self, segs, window, fallbackSec, out, tmpOut]() {
     QString err;
     double keptSec = 0.0;
     bool ok = ReplayClipper::saveTail(segs, window, tmpOut, &err, &keptSec);
     // Report what the file actually holds (keyframe overshoot runs up
     // to a GOP over the setting), not the aspirational setting.
     const double actualSec = keptSec > 0 ? keptSec : fallbackSec;
-    if (ok && QFile::exists(out))
-      QFile::remove(out);
     if (ok)
       ok = QFile::rename(tmpOut, out);
-    else
+    if (!ok)
       QFile::remove(tmpOut);
     if (!ok && err.isEmpty())
       err = "Could not save the clip file.";
@@ -672,7 +716,7 @@ void ReplayManager::saveReplay() {
           }
         },
         Qt::QueuedConnection);
-  }).detach();
+  });
 }
 
 } // namespace TrophyBackend

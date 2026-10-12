@@ -335,6 +335,8 @@ void Application::initializeServices() {
   m_autostartManager = std::make_unique<AutostartManager>(this);
   m_replayManager = std::make_unique<ReplayManager>(this);
   m_replayManager->setSettingsManager(m_settingsManager.get());
+  m_replayManager->setStorageManager(m_storageManager.get());
+  m_recordingLibrary->setStorageManager(m_storageManager.get());
   m_shortcutManager = std::make_unique<GlobalShortcutManager>(this);
   m_shortcutManager->setEnabled(m_settingsManager->globalShortcutsEnabled());
   m_controlServer = std::make_unique<ControlServer>(this);
@@ -625,7 +627,9 @@ void Application::connectSignals() {
               m_detectionDebounceTimer->stop();
             }
             m_replayManager->stopDvr();
-            if (m_recordingManager->isRecording() && m_recordingManager->currentGameName() == gameName) {
+            if ((m_recordingManager->isRecording() ||
+                 m_recordingManager->state() == RecordingManager::RecordingState::Initializing) &&
+                m_recordingManager->currentGameName() == gameName) {
               m_recordingManager->stopRecording();
             }
           });
@@ -710,9 +714,20 @@ void Application::connectSignals() {
           m_recordingManager.get(), &RecordingManager::stopRecording);
   connect(m_storageManager.get(), &StorageManager::storageLimitCannotCleanup,
           this, [this]() {
+            // Same conventions as storageLimitReached above: settings-driven
+            // changes that already gave their own feedback stay quiet, and
+            // the notifyStorage toggle gates the popup. Explicit start
+            // aborts still surface via RecordingManager::recordingError
+            // (in-app dialog), so no press is ever fully silent.
+            if (m_suppressNextStorageNotification) {
+              m_suppressNextStorageNotification = false;
+              return;
+            }
+            if (!m_settingsManager->notifyStorage())
+              return;
             m_notificationService->showNotification(
-                "Recording Stopped",
-                "Recording stopped: recording exceeds maximum storage size.",
+                "Storage Full",
+                "Recordings exceed the storage limit. Enable auto-cleanup or delete old recordings manually.",
                 "dialog-warning", 0, 2);
           });
   connect(m_storageManager.get(), &StorageManager::recordingDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
@@ -1176,6 +1191,18 @@ void Application::requestReplay() {
         "Nothing Buffered",
         "Launch a game first — there's nothing buffered yet.",
         "trophy", 3000, 2);
+    return;
+  }
+  // Storage pre-flight (mirrors the in-manager gate in saveReplay):
+  // refuse early with a "Storage Full" notice instead of remuxing a
+  // clip that would push usage over the limit.
+  m_storageManager->refresh();
+  if (m_storageManager->isOverLimit()) {
+    m_notificationService->showNotification(
+        "Storage Full",
+        "Storage is full — free space or enable auto-cleanup to save "
+        "clips.",
+        "dialog-warning", 3000, 2);
     return;
   }
   const int secs = std::max(1, m_settingsManager->clipBufferSeconds());

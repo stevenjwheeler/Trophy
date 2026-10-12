@@ -14,12 +14,14 @@
 #include <QTimer>
 #include <cstdint>
 #include <memory>
+#include <thread>
 
 #include "muxing/ReplayClipper.h"
 
 namespace TrophyBackend {
 
 class SettingsManager;
+class StorageManager;
 class AudioMixer;
 class IVideoCaptureSource;
 class IEncoder;
@@ -53,6 +55,7 @@ public:
   ~ReplayManager() override;
 
   void setSettingsManager(SettingsManager *settings);
+  void setStorageManager(StorageManager *storage);
 
   bool isActive() const { return m_state == State::Running; }
   QString currentGame() const { return m_gameName; }
@@ -121,6 +124,7 @@ private:
   QString m_gameName;
   bool m_paused = false;
   bool m_saving = false;
+  std::thread m_saveThread;
 
  public:
   // Live audio retargeting, mirroring RecordingManager (acts on the open
@@ -148,6 +152,11 @@ private:
   friend class ReplayManagerTest;
 
   SettingsManager *m_settings = nullptr;
+  // Optional storage gate: when set, saveReplay refuses while the
+  // library is over its limit (or when the clip would push it over),
+  // instead of writing past the limit. Never deletes (unlike the
+  // recording path's enforce call) — clips must not eat library files.
+  StorageManager *m_storage = nullptr;
   // Dedicated mixer: sharing RecordingManager's mixer caused teardown
   // races (DVR stop ripped out the recording's just-added sources).
   // PipeWire happily serves both while they briefly overlap.
