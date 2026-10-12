@@ -1,12 +1,13 @@
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
+#include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSignalSpy>
-#include <chrono>
-#include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QThread>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -29,6 +30,44 @@ public:
 
 static auto *env =
     testing::AddGlobalTestEnvironment(new GameDetectionTestEnvironment);
+
+class FakeSteamHome {
+public:
+  FakeSteamHome(uint appId, const QString &name)
+      : m_savedHome(qgetenv("HOME")) {
+    const QString appsDir = m_home.path() + "/.local/share/Steam/steamapps";
+    m_valid = m_home.isValid() && QDir().mkpath(appsDir);
+    if (!m_valid)
+      return;
+    QFile libraries(appsDir + "/libraryfolders.vdf");
+    QFile manifest(appsDir + QString("/appmanifest_%1.acf").arg(appId));
+    m_valid = libraries.open(QIODevice::WriteOnly | QIODevice::Text) &&
+              manifest.open(QIODevice::WriteOnly | QIODevice::Text);
+    if (!m_valid)
+      return;
+    libraries.write("\"libraryfolders\" { }\n");
+    manifest.write(
+        QString("\"AppState\" { \"appid\" \"%1\" \"name\" \"%2\" }\n")
+            .arg(appId)
+            .arg(name)
+            .toUtf8());
+    qputenv("HOME", m_home.path().toUtf8());
+  }
+
+  ~FakeSteamHome() {
+    if (m_savedHome.isNull())
+      qunsetenv("HOME");
+    else
+      qputenv("HOME", m_savedHome);
+  }
+
+  bool isValid() const { return m_valid; }
+
+private:
+  QTemporaryDir m_home;
+  QByteArray m_savedHome;
+  bool m_valid = false;
+};
 
 namespace TrophyBackend {
 
@@ -113,11 +152,11 @@ protected:
     QLocalSocket socket;
     socket.connectToServer("/tmp/trophy-detection.sock");
     if (socket.waitForConnected(1000)) {
-        socket.write(QString("START:%1:%2\n").arg(pid).arg(name).toUtf8());
-        socket.waitForBytesWritten(1000);
-        // We keep the socket alive if we want to simulate a running game
-        // But for a simple test, we can just wait for the service to process it
-        QCoreApplication::processEvents();
+      socket.write(QString("START:%1:%2\n").arg(pid).arg(name).toUtf8());
+      socket.waitForBytesWritten(1000);
+      // We keep the socket alive if we want to simulate a running game
+      // But for a simple test, we can just wait for the service to process it
+      QCoreApplication::processEvents();
     }
   }
 };
@@ -133,13 +172,13 @@ TEST_F(GameDetectionServiceTest, GameDetectionViaSocket) {
 
   socket.write("START:1234:Test Game\n");
   socket.waitForBytesWritten(1000);
-  
+
   // Give the service time to process the message
   int retries = 0;
   while (spy.count() == 0 && retries < 10) {
-      QCoreApplication::processEvents();
-      QThread::msleep(50);
-      retries++;
+    QCoreApplication::processEvents();
+    QThread::msleep(50);
+    retries++;
   }
 
   ASSERT_EQ(spy.count(), 1);
@@ -150,28 +189,28 @@ TEST_F(GameDetectionServiceTest, GameDetectionViaSocket) {
 TEST_F(GameDetectionServiceTest, GameClosedOnDisconnect) {
   service->addToWhitelist("Test Game", "Test Game");
   QSignalSpy spy(service.get(), &GameDetectionService::gameClosed);
-  
+
   {
-      QLocalSocket socket;
-      socket.connectToServer("/tmp/trophy-detection.sock");
-      ASSERT_TRUE(socket.waitForConnected(1000));
-      socket.write("START:1234:Test Game\n");
-      socket.waitForBytesWritten(1000);
-      
-      QCoreApplication::processEvents();
-      QThread::msleep(100);
-      QCoreApplication::processEvents();
-      
-      ASSERT_EQ(service->currentGamePid(), 1234);
-      
-      // Socket goes out of scope and disconnects
+    QLocalSocket socket;
+    socket.connectToServer("/tmp/trophy-detection.sock");
+    ASSERT_TRUE(socket.waitForConnected(1000));
+    socket.write("START:1234:Test Game\n");
+    socket.waitForBytesWritten(1000);
+
+    QCoreApplication::processEvents();
+    QThread::msleep(100);
+    QCoreApplication::processEvents();
+
+    ASSERT_EQ(service->currentGamePid(), 1234);
+
+    // Socket goes out of scope and disconnects
   }
-  
+
   int retries = 0;
   while (spy.count() == 0 && retries < 10) {
-      QCoreApplication::processEvents();
-      QThread::msleep(50);
-      retries++;
+    QCoreApplication::processEvents();
+    QThread::msleep(50);
+    retries++;
   }
 
   EXPECT_EQ(spy.count(), 1);
@@ -309,7 +348,8 @@ TEST_F(GameDetectionServiceTest, FocusedWindowedStaysPending) {
   EXPECT_EQ(service->currentGamePid(), 6301);
 }
 
-TEST_F(GameDetectionServiceTest, UnfocusedFullscreenStaysPending) {  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+TEST_F(GameDetectionServiceTest, UnfocusedFullscreenStaysPending) {
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
 
   GameClient game;
   ASSERT_TRUE(game.connect());
@@ -387,7 +427,6 @@ TEST_F(GameDetectionServiceTest, UnknownGeometryStillNeedsFlag) {
   EXPECT_EQ(spy.count(), 0);
   EXPECT_TRUE(service->currentGameName().isEmpty());
 }
-
 
 // --- Startup reconciliation (already-running games) ---
 
@@ -476,7 +515,6 @@ TEST_F(GameDetectionServiceTest, ReconcileRetriesWhenUnfocused) {
   EXPECT_EQ(service->currentGameName(), "Reconciled Game");
 }
 
-
 TEST_F(GameDetectionServiceTest, SteamAppIdForPidReadsChildEnviron) {
   // NOTE: qputenv cannot change /proc/self/environ (fixed at exec), so
   // spawn a child with the variable instead. waitForStarted fires at
@@ -542,7 +580,6 @@ TEST_F(GameDetectionServiceTest, ReconcileFindsSteamEnvRunningGame) {
   EXPECT_EQ(service->currentGamePid(), pid);
 }
 
-
 TEST_F(GameDetectionServiceTest, SteamAppIdFromAppIdParses) {
   EXPECT_EQ(GameDetectionService::steamAppIdFromAppId("steam_app_1422450"),
             1422450u);
@@ -604,9 +641,81 @@ TEST_F(GameDetectionServiceTest, ReconcileResolvesSteamClassToDisplayName) {
   EXPECT_EQ(service->currentGamePid(), pid);
 }
 
+TEST_F(GameDetectionServiceTest, SocketStartHonorsBlacklistOnRawReporterKey) {
+  constexpr uint appId = 1422451;
+  FakeSteamHome steam(appId, "Display Blocked Game");
+  ASSERT_TRUE(steam.isValid());
+  ASSERT_TRUE(service->addToBlacklist("raw-blocked.exe"));
+
+  GameClient game;
+  ASSERT_TRUE(game.connect());
+  ASSERT_TRUE(game.send(QString("START:7241:raw-blocked.exe:%1\n").arg(appId)));
+  pump(300);
+
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  EXPECT_EQ(service->currentGamePid(), 0);
+}
+
+TEST_F(GameDetectionServiceTest,
+       SocketStartHonorsBlacklistOnResolvedDisplayName) {
+  constexpr uint appId = 1422452;
+  FakeSteamHome steam(appId, "Display Blocked Game");
+  ASSERT_TRUE(steam.isValid());
+  ASSERT_TRUE(service->addToBlacklist("Display Blocked Game"));
+
+  GameClient game;
+  ASSERT_TRUE(game.connect());
+  ASSERT_TRUE(game.send(QString("START:7242:raw-allowed.exe:%1\n").arg(appId)));
+  pump(300);
+
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  EXPECT_EQ(service->currentGamePid(), 0);
+}
+
+TEST_F(GameDetectionServiceTest, ReconcileHonorsBlacklistOnRawWindowKey) {
+  constexpr uint appId = 1422453;
+  FakeSteamHome steam(appId, "Display Allowed Game");
+  ASSERT_TRUE(steam.isValid());
+  ASSERT_TRUE(service->addToWhitelist(QString("steam_app_%1").arg(appId), ""));
+  ASSERT_TRUE(service->addToBlacklist(QString("steam_app_%1").arg(appId)));
+
+  WindowInfo w;
+  w.id = 7243;
+  w.appId = QString("steam_app_%1").arg(appId);
+  w.title = "Display Allowed Game";
+  w.pid = QCoreApplication::applicationPid();
+  w.focused = true;
+  w.fullscreen = true;
+  monitor.ingestSnapshot({w});
+  pump(100);
+
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+}
+
+TEST_F(GameDetectionServiceTest,
+       ReconcileHonorsBlacklistOnResolvedDisplayName) {
+  constexpr uint appId = 1422454;
+  FakeSteamHome steam(appId, "Display Blocked Game");
+  ASSERT_TRUE(steam.isValid());
+  ASSERT_TRUE(service->addToWhitelist(QString("steam_app_%1").arg(appId), ""));
+  ASSERT_TRUE(service->addToBlacklist("Display Blocked Game"));
+
+  WindowInfo w;
+  w.id = 7244;
+  w.appId = QString("steam_app_%1").arg(appId);
+  w.title = "Display Blocked Game";
+  w.pid = QCoreApplication::applicationPid();
+  w.focused = true;
+  w.fullscreen = true;
+  monitor.ingestSnapshot({w});
+  pump(100);
+
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+}
+
 TEST_F(GameDetectionServiceTest, ProcessExistsReflectsLiveness) {
-  EXPECT_TRUE(GameDetectionService::processExists(
-      QCoreApplication::applicationPid()));
+  EXPECT_TRUE(
+      GameDetectionService::processExists(QCoreApplication::applicationPid()));
   EXPECT_FALSE(GameDetectionService::processExists(0));
   EXPECT_FALSE(GameDetectionService::processExists(-7));
 
@@ -638,8 +747,7 @@ TEST_F(GameDetectionServiceTest, LivenessWatchdogClosesDeadGame) {
   ASSERT_TRUE(game.connect());
   QSignalSpy detectedSpy(service.get(), &GameDetectionService::gameDetected);
   QSignalSpy closedSpy(service.get(), &GameDetectionService::gameClosed);
-  ASSERT_TRUE(
-      game.send(QString("START:%1:Liveness Game\n").arg(pid)));
+  ASSERT_TRUE(game.send(QString("START:%1:Liveness Game\n").arg(pid)));
   pump(300);
   ASSERT_EQ(detectedSpy.count(), 1);
   ASSERT_EQ(service->currentGamePid(), pid);
@@ -653,7 +761,6 @@ TEST_F(GameDetectionServiceTest, LivenessWatchdogClosesDeadGame) {
   EXPECT_TRUE(service->currentGameName().isEmpty());
   EXPECT_EQ(service->currentGamePid(), 0);
 }
-
 
 TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   QAbstractItemModel *model = service->gamesModel();
@@ -808,8 +915,7 @@ TEST_F(GameDetectionServiceTest, SteamGameKeyForm) {
     }
   }
   ASSERT_TRUE(row.isValid());
-  EXPECT_EQ(
-      model->data(row, GameListModel::SteamAppIdRole).toUInt(), 1422450u);
+  EXPECT_EQ(model->data(row, GameListModel::SteamAppIdRole).toUInt(), 1422450u);
   EXPECT_EQ(model->data(row, GameListModel::SectionRole).toString(),
             QString("Games"));
   EXPECT_TRUE(service->removeFromWhitelist("steam_app_1422450"));
@@ -1031,7 +1137,6 @@ TEST_F(GameDetectionServiceTest, GameFilterTextFiltersUnifiedList) {
   EXPECT_EQ(model->rowCount(), unfiltered);
 }
 
-
 TEST_F(GameDetectionServiceTest, PageCallsResolveAgainstServiceApi) {
   // The Games page calls gameDetector.<method>(...) from QML, where a
   // renamed C++ method fails silently at click time (no compile error).
@@ -1058,7 +1163,8 @@ TEST_F(GameDetectionServiceTest, PageCallsResolveAgainstServiceApi) {
     }
     EXPECT_TRUE(found) << qPrintable(
         QString("GameListPage calls gameDetector.%1() which no longer exists "
-                "on GameDetectionService").arg(name));
+                "on GameDetectionService")
+            .arg(name));
   }
 }
 

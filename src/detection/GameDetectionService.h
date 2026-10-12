@@ -168,10 +168,12 @@ private:
    * Otherwise the focused + fullscreen window for the PID decides.
    */
   bool isConfidentGame(qint64 pid, const QString &gameName, uint steamAppId);
+  bool isBlacklistedIdentity(const QString &rawKey,
+                             const QString &displayName) const;
   static bool processLooksLikeSteamGame(qint64 pid);
 
   void trackGame(qint64 pid, const QString &gameName,
-                   const QString &rawKey = QString());
+                 const QString &rawKey = QString());
   void recheckCandidates();
   // A veto landing on the live game retires it (dashboard back to IDLE,
   // gameClosed for clean capture teardown). Called by every path that
@@ -194,7 +196,7 @@ private:
   static bool coversOutput(const WindowInfo &w);
 
   void updateCurrentGame(const QString &gameName, qint64 pid,
-                          const QString &rawKey = QString());
+                         const QString &rawKey = QString());
   void addToRecentGames(const QString &gameName, const QString &rawKey);
 
   bool m_running = false;
@@ -221,6 +223,9 @@ private:
   // on STOP/disconnect; re-checked whenever window state changes so a
   // game that starts windowed still detects when it goes fullscreen.
   QMap<qint64, QString> m_pendingCandidates;
+  // Reporter/window identity parallel to m_pendingCandidates. A Steam
+  // resolved display name is not necessarily the key stored by the user.
+  QMap<qint64, QString> m_pendingRawKeys;
 
   WaylandWindowMonitor *m_monitor = nullptr;
   std::unique_ptr<GameWhitelist> m_whitelist;
