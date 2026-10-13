@@ -1,12 +1,16 @@
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QThread>
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <gtest/gtest.h>
 #include <memory>
@@ -63,6 +67,23 @@ public:
 
   bool isValid() const { return m_valid; }
 
+  QString appsDir() const {
+    return m_home.path() + "/.local/share/Steam/steamapps";
+  }
+
+  bool writeManifest(uint appId, const QString &name, const QDateTime &mtime) {
+    QFile manifest(appsDir() + QString("/appmanifest_%1.acf").arg(appId));
+    if (!manifest.open(QIODevice::WriteOnly | QIODevice::Truncate))
+      return false;
+    const QByteArray content =
+        QString("\"AppState\" { \"appid\" \"%1\" \"name\" \"%2\" }\n")
+            .arg(appId)
+            .arg(name)
+            .toUtf8();
+    return manifest.write(content) == content.size() && manifest.flush() &&
+           manifest.setFileTime(mtime, QFileDevice::FileModificationTime);
+  }
+
 private:
   QTemporaryDir m_home;
   QByteArray m_savedHome;
@@ -84,6 +105,14 @@ protected:
 
   void SetUp() override {
     ASSERT_TRUE(configHome.isValid());
+    // The reporter path is frozen, so TMPDIR/XDG isolation cannot move it.
+    // Never let tests send fake START/STOP events into a running Trophy.
+    QLocalSocket existing;
+    existing.connectToServer("/tmp/trophy-detection.sock");
+    if (existing.waitForConnected(100)) {
+      existing.disconnectFromServer();
+      GTEST_SKIP() << "A live listener owns the frozen detection socket";
+    }
     // GameDetectionService persists whitelist/blacklist to
     // XDG_CONFIG_HOME/trophy — keep tests off the user's real config.
     oldXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
@@ -94,6 +123,8 @@ protected:
   }
 
   void TearDown() override {
+    if (!service)
+      return;
     service->stop();
     service.reset();
     if (oldXdgConfigHome.isNull())
@@ -148,6 +179,17 @@ protected:
     return false;
   }
 
+  static bool waitForSteamAppId(qint64 pid, uint appId) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (GameDetectionService::steamAppIdForPid(pid) == appId)
+        return true;
+      QThread::msleep(10);
+    }
+    return false;
+  }
+
   void simulateGameStart(qint64 pid, const QString &name) {
     QLocalSocket socket;
     socket.connectToServer("/tmp/trophy-detection.sock");
@@ -159,6 +201,52 @@ protected:
       QCoreApplication::processEvents();
     }
   }
+
+  // Private access stays in the already-friended fixture, not TEST_F's
+  // generated subclasses. Seed state, then exercise production handlers.
+  void seedTrackedGame(qint64 pid, const QString &name, const QString &key,
+                       bool current = false) {
+    service->m_pidToGameName.insert(pid, name);
+    service->m_pidToRawKey.insert(pid, key);
+    if (current)
+      service->updateCurrentGame(name, pid, key);
+  }
+
+  void seedPendingGame(qint64 pid) {
+    service->m_pendingCandidates.insert(pid, "Pending");
+    service->m_pendingRawKeys.insert(pid, "pending.exe");
+  }
+
+  bool hasPidState(qint64 pid) const {
+    return service->m_pidToGameName.contains(pid) ||
+           service->m_pidToRawKey.contains(pid) ||
+           service->m_pendingCandidates.contains(pid) ||
+           service->m_pendingRawKeys.contains(pid);
+  }
+
+  void livenessTimeout() { service->onLivenessTimeout(); }
+  bool livenessTimerActive() const {
+    return service->m_livenessTimer->isActive();
+  }
+  QString steamName(uint appId) { return service->getSteamAppName(appId); }
+  bool looksLikeSteam(qint64 pid) {
+    return service->processLooksLikeSteamGame(pid);
+  }
+  void ageSteamVerdict(qint64 pid, bool verdict, bool expired) {
+    service->m_steamCheckCache.insert(
+        pid, qMakePair(verdict, service->m_uptimeClock.elapsed() -
+                                  (expired ? service->kCacheTtlMs : 0)));
+  }
+
+  class JoinedChild : public QProcess {
+  public:
+    ~JoinedChild() override {
+      if (state() != QProcess::NotRunning) {
+        kill();
+        waitForFinished(-1);
+      }
+    }
+  };
 };
 
 TEST_F(GameDetectionServiceTest, GameDetectionViaSocket) {
@@ -760,6 +848,160 @@ TEST_F(GameDetectionServiceTest, LivenessWatchdogClosesDeadGame) {
   EXPECT_EQ(closedSpy.count(), 1);
   EXPECT_TRUE(service->currentGameName().isEmpty());
   EXPECT_EQ(service->currentGamePid(), 0);
+}
+
+TEST_F(GameDetectionServiceTest, LivenessFailoverSkipsDeadTrackedPid) {
+  JoinedChild first, second, third;
+  std::array<JoinedChild *, 3> children{&first, &second, &third};
+  for (auto *child : children) {
+    child->start("sleep", {"60"});
+    ASSERT_TRUE(child->waitForStarted(5000));
+  }
+  std::sort(children.begin(), children.end(), [](const auto *a, const auto *b) {
+    return a->processId() < b->processId();
+  });
+  auto &deadCandidate = *children[0];
+  auto &survivor = *children[1];
+  auto &current = *children[2];
+  const qint64 deadPid = deadCandidate.processId();
+  const qint64 livePid = survivor.processId();
+  const qint64 currentPid = current.processId();
+  // Sorting avoids assuming sequential PID allocation: the deliberately
+  // dead map entry sorts before the survivor to catch firstKey() failover.
+
+  seedTrackedGame(deadPid, "Dead Candidate", "dead.exe");
+  seedTrackedGame(livePid, "Surviving Game", "survivor.exe");
+  seedTrackedGame(currentPid, "Closing Game", "closing.exe", true);
+  seedPendingGame(currentPid);
+  QSignalSpy closed(service.get(), &GameDetectionService::gameClosed);
+  QSignalSpy detected(service.get(), &GameDetectionService::gameDetected);
+  // Own the log through connections too, including assertion-failure teardown.
+  auto events = std::make_shared<QStringList>();
+  QObject::connect(
+      service.get(), &GameDetectionService::gameClosed, service.get(),
+      [events](const QString &name) { *events << "closed:" + name; });
+  QObject::connect(service.get(), &GameDetectionService::gameDetected,
+                   service.get(), [events](const QString &name, qint64) {
+                     *events << "detected:" + name;
+                   });
+
+  livenessTimeout(); // The current process is still alive: no transition.
+  EXPECT_EQ(closed.count(), 0);
+  EXPECT_EQ(detected.count(), 0);
+  deadCandidate.kill();
+  ASSERT_TRUE(deadCandidate.waitForFinished(5000));
+  current.kill();
+  ASSERT_TRUE(current.waitForFinished(5000));
+  ASSERT_FALSE(GameDetectionService::processExists(deadPid));
+  ASSERT_FALSE(GameDetectionService::processExists(currentPid));
+  ASSERT_TRUE(GameDetectionService::processExists(livePid));
+
+  livenessTimeout();
+  EXPECT_EQ(service->currentGamePid(), livePid);
+  EXPECT_EQ(service->currentGameName(), "Surviving Game");
+  EXPECT_EQ(service->currentGameKey(), "survivor.exe");
+  EXPECT_FALSE(hasPidState(currentPid));
+  EXPECT_TRUE(livenessTimerActive());
+  ASSERT_EQ(closed.count(), 1);
+  EXPECT_EQ(closed.at(0).at(0).toString(), "Closing Game");
+  ASSERT_EQ(detected.count(), 1);
+  EXPECT_EQ(detected.at(0).at(1).toLongLong(), livePid);
+  EXPECT_EQ(*events,
+            (QStringList{"closed:Closing Game", "detected:Surviving Game"}));
+
+  livenessTimeout(); // Repeated ticks must not re-announce the survivor.
+  EXPECT_EQ(closed.count(), 1);
+  EXPECT_EQ(detected.count(), 1);
+  survivor.kill();
+  ASSERT_TRUE(survivor.waitForFinished(5000));
+  livenessTimeout();
+  EXPECT_EQ(service->currentGamePid(), 0);
+  EXPECT_TRUE(service->currentGameKey().isEmpty());
+  EXPECT_FALSE(hasPidState(deadPid));
+  EXPECT_FALSE(hasPidState(livePid));
+  EXPECT_FALSE(livenessTimerActive());
+  EXPECT_EQ(closed.count(), 2);
+  EXPECT_EQ(detected.count(), 1);
+}
+
+TEST_F(GameDetectionServiceTest, SteamNameCacheInvalidatesOnManifestMtime) {
+  constexpr uint appId = 987650;
+  FakeSteamHome steam(appId, "Original Name");
+  ASSERT_TRUE(steam.isValid());
+  const QDateTime before = QDateTime::fromMSecsSinceEpoch(1700000000000LL);
+  ASSERT_TRUE(steam.writeManifest(appId, "Original Name", before));
+  const QString libraries = steam.appsDir() + "/libraryfolders.vdf";
+  const QDateTime libraryMtime = QFileInfo(libraries).lastModified();
+  EXPECT_EQ(steamName(appId), "Original Name");
+  EXPECT_EQ(steamName(appId), "Original Name");
+
+  ASSERT_TRUE(steam.writeManifest(appId, "Updated Name", before.addSecs(10)));
+  ASSERT_EQ(QFileInfo(libraries).lastModified(), libraryMtime);
+  EXPECT_EQ(steamName(appId), "Updated Name");
+  ASSERT_TRUE(QFile::remove(steam.appsDir() +
+                           QString("/appmanifest_%1.acf").arg(appId)));
+  EXPECT_TRUE(steamName(appId).isEmpty());
+  // A miss must not be cached: installation does not have to touch the VDF.
+  ASSERT_TRUE(steam.writeManifest(appId, "Installed Again", before.addSecs(20)));
+  EXPECT_EQ(steamName(appId), "Installed Again");
+}
+
+TEST_F(GameDetectionServiceTest, SteamNameCacheInvalidatesOnLibraryMtime) {
+  constexpr uint appId = 987651;
+  FakeSteamHome steam(appId, "Original Library");
+  ASSERT_TRUE(steam.isValid());
+  const QDateTime manifestMtime = QDateTime::fromMSecsSinceEpoch(1700000000000LL);
+  ASSERT_TRUE(steam.writeManifest(appId, "Original Library", manifestMtime));
+  EXPECT_EQ(steamName(appId), "Original Library");
+  // Hold the manifest mtime unchanged, isolating the library-key invalidation.
+  ASSERT_TRUE(steam.writeManifest(appId, "Updated Library", manifestMtime));
+  EXPECT_EQ(steamName(appId), "Original Library");
+  QFile libraries(steam.appsDir() + "/libraryfolders.vdf");
+  const QDateTime previousMtime = QFileInfo(libraries).lastModified();
+  ASSERT_TRUE(libraries.open(QIODevice::ReadWrite));
+  ASSERT_TRUE(libraries.setFileTime(previousMtime.addSecs(10),
+                                   QFileDevice::FileModificationTime));
+  libraries.close();
+  EXPECT_EQ(steamName(appId), "Updated Library");
+}
+
+TEST_F(GameDetectionServiceTest, SteamVerdictNegativeCacheExpiresAtTtl) {
+  JoinedChild child;
+  auto environment = QProcessEnvironment::systemEnvironment();
+  environment.insert("SteamAppId", "987652");
+  child.setProcessEnvironment(environment);
+  child.start("sleep", {"60"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_TRUE(waitForSteamAppId(pid, 987652u));
+  ASSERT_EQ(GameDetectionService::steamAppIdForPid(pid), 987652u);
+  // Inject only cache age/verdict, never the lookup result or clock itself.
+  ageSteamVerdict(pid, false, false);
+  EXPECT_FALSE(looksLikeSteam(pid));
+  ageSteamVerdict(pid, false, true);
+  EXPECT_TRUE(looksLikeSteam(pid));
+  EXPECT_TRUE(looksLikeSteam(pid));
+}
+
+TEST_F(GameDetectionServiceTest, SteamVerdictPositiveCacheExpiresAtTtl) {
+  JoinedChild child;
+  auto environment = QProcessEnvironment::systemEnvironment();
+  environment.insert("SteamAppId", "987653");
+  child.setProcessEnvironment(environment);
+  child.start("sleep", {"60"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_TRUE(waitForSteamAppId(pid, 987653u));
+  ASSERT_EQ(GameDetectionService::steamAppIdForPid(pid), 987653u);
+  EXPECT_TRUE(looksLikeSteam(pid));
+  child.kill();
+  ASSERT_TRUE(child.waitForFinished(5000));
+  ASSERT_FALSE(GameDetectionService::processExists(pid));
+  ageSteamVerdict(pid, true, false);
+  EXPECT_TRUE(looksLikeSteam(pid)); // Fresh positive intentionally stays cached.
+  ageSteamVerdict(pid, true, true);
+  EXPECT_FALSE(looksLikeSteam(pid));
+  EXPECT_FALSE(looksLikeSteam(pid));
 }
 
 TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {

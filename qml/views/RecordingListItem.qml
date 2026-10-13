@@ -33,7 +33,7 @@ ItemDelegate {
 
     width: ListView.view ? ListView.view.width : 0
     height: 70
-    onClicked: window.openPlayer(root.recording.filePath)
+    onClicked: { if (root.recording) window.openPlayer(root.recording.filePath) }
 
     background: Rectangle {
         color: root.hovered ? Theme.cardHoverColor : Theme.cardColor
@@ -109,7 +109,7 @@ ItemDelegate {
                 ToolTip.text: qsTr("Play")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: window.openPlayer(root.recording.filePath)
+                onClicked: { if (root.recording) window.openPlayer(root.recording.filePath) }
 
                 background: Rectangle {
                     radius: 16
@@ -130,7 +130,7 @@ ItemDelegate {
                 ToolTip.text: qsTr("Show in folder")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: window.openFolder(root.recording.directory)
+                onClicked: { if (root.recording) window.openFolder(root.recording.directory) }
 
                 background: Rectangle {
                     radius: 16
@@ -151,7 +151,7 @@ ItemDelegate {
                 ToolTip.text: qsTr("Rename")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: window.requestRename(root.recording.filePath, root.recording.gameName)
+                onClicked: { if (root.recording) window.requestRename(root.recording.filePath, root.recording.gameName) }
 
                 background: Rectangle {
                     radius: 16
@@ -172,7 +172,7 @@ ItemDelegate {
                 ToolTip.text: qsTr("Delete")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: window.confirmDelete(root.recording.filePath, root.recording.fileName)
+                onClicked: { if (root.recording) window.confirmDelete(root.recording.filePath, root.recording.fileName) }
 
                 background: Rectangle {
                     radius: 16

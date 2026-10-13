@@ -38,7 +38,7 @@ public:
   /** True when the destination manifest exists and points at a real lib. */
   static bool isRegistered();
 
-  /** Write a correct destination manifest. */
+  /** Opt-in: persist bundle-owned helpers and refresh the manifest atomically. */
   static bool ensureRegistered();
 
   /** Remove our destination manifest (opt-out). */

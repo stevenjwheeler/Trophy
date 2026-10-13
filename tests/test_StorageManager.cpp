@@ -86,6 +86,44 @@ protected:
 
   void SetUp() override { ASSERT_TRUE(tempDir.isValid()); }
 
+  void observeRefreshes(StorageManager &mgr, int &count) {
+    mgr.m_refreshObserverForTest = [&count]() { ++count; };
+  }
+
+  void deliverDirectoryBurst(StorageManager &mgr) {
+    // Exercise the real watcher connection without relying on filesystem
+    // event delivery or entering the event loop.
+    for (int i = 0; i < 50; ++i) {
+      ASSERT_TRUE(QMetaObject::invokeMethod(
+          &mgr.m_watcher, "directoryChanged", Qt::DirectConnection,
+          Q_ARG(QString, tempDir.path())));
+    }
+  }
+
+  bool debounceActive(const StorageManager &mgr) {
+    return mgr.m_debounceTimer.isActive();
+  }
+
+  void expireDebounce(StorageManager &mgr) {
+    ASSERT_TRUE(mgr.m_debounceTimer.isActive());
+    ASSERT_TRUE(mgr.m_debounceTimer.isSingleShot());
+    EXPECT_EQ(mgr.m_debounceTimer.interval(), 500);
+    // Qt stops a single-shot before emitting timeout. Reproduce that
+    // ordering and invoke the existing production timeout connection.
+    mgr.m_debounceTimer.stop();
+    ASSERT_TRUE(QMetaObject::invokeMethod(
+        &mgr.m_debounceTimer, "timeout", Qt::DirectConnection));
+  }
+
+  void beginBulkSuppression(StorageManager &mgr) {
+    // Model an in-flight worker without racing an actual background unlink.
+    ++mgr.m_bulkDeletesActive;
+  }
+
+  void finishBulkSuppression(StorageManager &mgr) {
+    mgr.finishBulkDelete({}, 0);
+  }
+
   // Create a dummy video file in the temp directory
   void createDummyFile(const QString &name, qint64 size) {
     QFile f(tempDir.path() + "/" + name);
@@ -182,6 +220,115 @@ TEST_F(StorageManagerTest, RefreshCalculatesSize) {
 
   // Only .mkv and .mp4 should be counted
   EXPECT_EQ(mgr.usedSize(), 8000);
+}
+
+TEST_F(StorageManagerTest, DirectoryEventBurstExpiryRefreshesOnce) {
+  StorageManager mgr(tempDir.path());
+  int refreshes = 0;
+  observeRefreshes(mgr, refreshes);
+  createDummyFile("imported.mkv", 4096);
+  QSignalSpy changed(&mgr, &StorageManager::usedSizeChanged);
+
+  deliverDirectoryBurst(mgr);
+  EXPECT_TRUE(debounceActive(mgr));
+  EXPECT_EQ(refreshes, 0);
+  EXPECT_EQ(mgr.usedSize(), 0);
+  EXPECT_EQ(changed.count(), 0);
+
+  expireDebounce(mgr);
+  EXPECT_FALSE(debounceActive(mgr));
+  EXPECT_EQ(refreshes, 1);
+  EXPECT_EQ(mgr.usedSize(), 4096);
+  EXPECT_EQ(changed.count(), 1);
+
+  // A second burst with unchanged size still has exactly one real scan;
+  // usedSizeChanged alone would conceal accidental repeated refreshes.
+  deliverDirectoryBurst(mgr);
+  EXPECT_EQ(refreshes, 1);
+  expireDebounce(mgr);
+  EXPECT_EQ(refreshes, 2);
+  EXPECT_EQ(changed.count(), 1);
+}
+
+TEST_F(StorageManagerTest, DirectoryEventBurstExpiryCleansUpInOnePass) {
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(1024);
+  mgr.setAutoDeleteOldest(true);
+  int refreshes = 0;
+  observeRefreshes(mgr, refreshes);
+  // Keep a survivor so final usage differs from the initially empty library.
+  createDummyFile("keeper.mkv", 512);
+  mgr.setExcludedRecordingPath(tempDir.path() + "/keeper.mkv");
+  for (int i = 0; i < 10; ++i) {
+    createDummyFile(QString("imported_%1.mkv").arg(i), 4096);
+  }
+  QSignalSpy changed(&mgr, &StorageManager::usedSizeChanged);
+  QSignalSpy deleted(&mgr, &StorageManager::recordingDeleted);
+
+  deliverDirectoryBurst(mgr);
+
+  EXPECT_TRUE(debounceActive(mgr));
+  EXPECT_EQ(refreshes, 0);
+  EXPECT_EQ(mgr.usedSize(), 0);
+  EXPECT_EQ(changed.count(), 0);
+  EXPECT_EQ(deleted.count(), 0);
+
+  expireDebounce(mgr);
+  EXPECT_FALSE(debounceActive(mgr));
+  // One entry scan and one settle scan, not one refresh per deletion.
+  EXPECT_EQ(refreshes, 2);
+  EXPECT_EQ(changed.count(), 2);
+  EXPECT_EQ(deleted.count(), 10);
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FALSE(QFile::exists(
+        tempDir.path() + QString("/imported_%1.mkv").arg(i)));
+  }
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/keeper.mkv"));
+  EXPECT_EQ(mgr.usedSize(), 512);
+}
+
+TEST_F(StorageManagerTest, BulkDeleteSuppressesWatcherBurstAndPendingExpiry) {
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(1024);
+  mgr.setAutoDeleteOldest(true);
+  int refreshes = 0;
+  observeRefreshes(mgr, refreshes);
+  createDummyFile("unselected.mkv", 4096);
+  QSignalSpy deleted(&mgr, &StorageManager::recordingDeleted);
+  QSignalSpy finished(&mgr, &StorageManager::bulkDeleteFinished);
+
+  beginBulkSuppression(mgr);
+  deliverDirectoryBurst(mgr);
+  EXPECT_FALSE(debounceActive(mgr));
+  EXPECT_EQ(refreshes, 0);
+  finishBulkSuppression(mgr);
+  EXPECT_EQ(refreshes, 1);
+  EXPECT_EQ(finished.count(), 1);
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/unselected.mkv"));
+  EXPECT_EQ(deleted.count(), 0);
+
+  // A timer armed before the bulk delete must also honor suppression.
+  deliverDirectoryBurst(mgr);
+  ASSERT_TRUE(debounceActive(mgr));
+  beginBulkSuppression(mgr);
+  deliverDirectoryBurst(mgr);
+  expireDebounce(mgr);
+  EXPECT_FALSE(debounceActive(mgr));
+  EXPECT_EQ(refreshes, 1);
+  EXPECT_EQ(deleted.count(), 0);
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/unselected.mkv"));
+  finishBulkSuppression(mgr);
+  EXPECT_EQ(refreshes, 2);
+  EXPECT_EQ(finished.count(), 2);
+  EXPECT_EQ(mgr.usedSize(), 4096);
+
+  // Completion restores normal watcher enforcement, not permanent suppression.
+  deliverDirectoryBurst(mgr);
+  expireDebounce(mgr);
+  EXPECT_EQ(refreshes, 4);
+  EXPECT_EQ(deleted.count(), 1);
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/unselected.mkv"));
+  EXPECT_EQ(mgr.usedSize(), 0);
 }
 
 TEST_F(StorageManagerTest, SetStoragePathChanges) {

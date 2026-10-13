@@ -131,16 +131,16 @@ Page {
                     text: root.updateChecking ? qsTr("Checking…") : root.updateStatus
                     color: root.updateNewer ? Theme.primaryColor : Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
-                    font.underline: verdictHover.containsMouse && root.updateNewer
+                    font.underline: verdictHover.hovered && root.updateNewer
                     horizontalAlignment: Text.AlignHCenter
 
-                    MouseArea {
+                    HoverHandler {
                         id: verdictHover
-                        anchors.fill: parent
-                        hoverEnabled: true
                         cursorShape: root.updateNewer ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    }
+                    TapHandler {
                         enabled: root.updateNewer && root.updateReleaseUrl !== ""
-                        onClicked: Qt.openUrlExternally(root.updateReleaseUrl)
+                        onTapped: Qt.openUrlExternally(root.updateReleaseUrl)
                     }
                 }
 
@@ -152,18 +152,18 @@ Page {
                     Layout.alignment: Qt.AlignHCenter
                     visible: !root.updateChecking && root.updateStatus === ""
                     text: qsTr("Check for updates")
-                    color: checkUpdatesHover.containsMouse ? Theme.primaryColor : Theme.textSecondaryColor
+                    color: checkUpdatesHover.hovered ? Theme.primaryColor : Theme.textSecondaryColor
                     font.pixelSize: Theme.fontSizeSmall
-                    font.underline: checkUpdatesHover.containsMouse
+                    font.underline: checkUpdatesHover.hovered
                     horizontalAlignment: Text.AlignHCenter
 
-                    MouseArea {
+                    HoverHandler {
                         id: checkUpdatesHover
-                        anchors.fill: parent
-                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                    }
+                    TapHandler {
                         enabled: typeof updateChecker !== "undefined"
-                        onClicked: {
+                        onTapped: {
                             root.updateChecking = true
                             updateChecker.checkNow()
                         }

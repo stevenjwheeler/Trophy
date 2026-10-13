@@ -14,6 +14,7 @@
 #include <QImage>
 #include <QMetaObject>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QThreadPool>
 
 extern "C" {
@@ -33,23 +34,25 @@ constexpr int kThumbWidth = 160;
 constexpr int kJpegQuality = 80;
 constexpr int kMaxThumbs = 64;
 
-QString thumbPathFor(const QString &filePath, int index) {
+QString thumbPathFor(const QString &filePath, int count, int index) {
   const QFileInfo info(filePath);
   return info.absolutePath() + "/.thumbnails/" + info.completeBaseName() +
-         QString(".strip-%1.jpg").arg(index);
+         QString(".strip-%1-%2.jpg").arg(count).arg(index);
 }
 
 // Cached strip is valid when every thumb exists and the first
 // is at least as new as the video (same mtime rule the
-// library uses for sidecars implicitly).
+// library uses for sidecars implicitly). Only the count-keyed
+// names are checked, so legacy count-less files are a miss.
 bool stripCacheValid(const QString &filePath, int count) {
   const QFileInfo videoInfo(filePath);
   if (!videoInfo.exists() || count <= 0)
     return false;
   const QDateTime videoMtime = videoInfo.lastModified();
   for (int i = 0; i < count; ++i) {
-    const QFileInfo thumb(thumbPathFor(filePath, i));
-    if (!thumb.exists() || thumb.lastModified() < videoMtime)
+    const QFileInfo thumb(thumbPathFor(filePath, count, i));
+    if (!thumb.isFile() || thumb.size() <= 0 ||
+        thumb.lastModified() < videoMtime)
       return false;
   }
   return true;
@@ -58,8 +61,29 @@ bool stripCacheValid(const QString &filePath, int count) {
 QStringList stripPaths(const QString &filePath, int count) {
   QStringList paths;
   for (int i = 0; i < count; ++i)
-    paths.append(thumbPathFor(filePath, i));
+    paths.append(thumbPathFor(filePath, count, i));
   return paths;
+}
+
+// Deletes legacy count-less `<base>.strip-<i>.jpg` sidecars superseded by
+// the count-keyed layout. Scoped strictly to this video's own strip files
+// inside its .thumbnails dir — user video files are never touched, and
+// other counts' caches are kept (only the single-number legacy form
+// matches; `.strip-<count>-<i>.jpg` cannot match the anchored pattern).
+void removeLegacyStrips(const QString &filePath) {
+  const QFileInfo info(filePath);
+  QDir dir(info.absolutePath() + "/.thumbnails");
+  if (!dir.exists())
+    return;
+  const QString base = info.completeBaseName();
+  const QRegularExpression legacy("^" + QRegularExpression::escape(base) +
+                                  "\\.strip-\\d+\\.jpg$");
+  const QStringList candidates =
+      dir.entryList({base + ".strip-*.jpg"}, QDir::Files);
+  for (const QString &name : candidates) {
+    if (legacy.match(name).hasMatch())
+      QFile::remove(dir.absoluteFilePath(name));
+  }
 }
 
 // Grab one frame near `timestampUs` (backward seek lands on a
@@ -75,32 +99,50 @@ QImage grabFrame(AVFormatContext *ctx, AVCodecContext *dec,
   AVFrame *frame = av_frame_alloc();
   QImage out;
   if (pkt && frame) {
-    while (av_read_frame(ctx, pkt) >= 0) {
-      bool done = false;
-      if (pkt->stream_index == videoStreamIdx &&
-          avcodec_send_packet(dec, pkt) >= 0 &&
-          avcodec_receive_frame(dec, frame) >= 0) {
-        const int w = kThumbWidth;
-        const int h = qMax(1, (dec->height * w) / qMax(1, dec->width));
-        QImage rgb(w, h, QImage::Format_RGB888);
-        uint8_t *dst[4] = {rgb.bits(), nullptr, nullptr, nullptr};
-        int linesize[4] = {rgb.bytesPerLine(), 0, 0, 0};
-        SwsContext *sws =
-            sws_getContext(dec->width, dec->height, dec->pix_fmt, w, h,
-                           AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr, nullptr,
-                           nullptr);
-        if (sws) {
-          sws_scale(sws, frame->data, frame->linesize, 0, dec->height, dst,
-                    linesize);
-          sws_freeContext(sws);
-          out = rgb.copy();
-        }
-        done = true;
+    auto receive = [&]() {
+      if (avcodec_receive_frame(dec, frame) < 0)
+        return false;
+      // Decoded dimensions/format can differ from the codec context.
+      // Bound the small timeline image even for extreme portrait media.
+      if (frame->width <= 0 || frame->height <= 0 ||
+          av_image_check_size(frame->width, frame->height, 0, nullptr) < 0)
+        return true;
+      const int w = kThumbWidth;
+      const int h = static_cast<int>(qBound<qint64>(
+          qint64(1), (qint64(frame->height) * w) / frame->width, qint64(2048)));
+      QImage rgb(w, h, QImage::Format_RGB888);
+      if (rgb.isNull())
+        return true;
+      uint8_t *dst[4] = {rgb.bits(), nullptr, nullptr, nullptr};
+      int linesize[4] = {static_cast<int>(rgb.bytesPerLine()), 0, 0, 0};
+      SwsContext *sws =
+          sws_getContext(frame->width, frame->height,
+                         static_cast<AVPixelFormat>(frame->format), w, h,
+                         AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr, nullptr,
+                         nullptr);
+      if (sws) {
+        if (sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
+                      dst, linesize) == h)
+          out = rgb;
+        sws_freeContext(sws);
       }
+      return true;
+    };
+    int readResult = 0;
+    bool done = false;
+    while ((readResult = av_read_frame(ctx, pkt)) >= 0) {
+      if (pkt->stream_index == videoStreamIdx &&
+          avcodec_send_packet(dec, pkt) >= 0)
+        done = receive();
       av_packet_unref(pkt);
       if (done)
         break;
     }
+    // Tiny B-delay files may not yield a frame until clean demux EOF.
+    // Read errors must not be turned into successful drained thumbnails.
+    if (!done && readResult == AVERROR_EOF &&
+        avcodec_send_packet(dec, nullptr) >= 0)
+      receive();
   }
   av_packet_free(&pkt);
   av_frame_free(&frame);
@@ -112,9 +154,17 @@ QImage grabFrame(AVFormatContext *ctx, AVCodecContext *dec,
 FilmstripCache::FilmstripCache(QObject *parent) : QObject(parent) {}
 
 void FilmstripCache::requestThumbs(const QString &filePath, int count) {
+  // Same QPointer discipline as WaveformCache: app-owned, but
+  // a late queued emit must never touch a dead object.
+  QPointer<FilmstripCache> self(this);
   if (filePath.isEmpty() || count <= 0) {
     QMetaObject::invokeMethod(
-        this, [this, filePath]() { emit filmstripReady(filePath, {}); },
+        this,
+        [self, filePath]() {
+          if (self.isNull())
+            return;
+          emit self->filmstripReady(filePath, {});
+        },
         Qt::QueuedConnection);
     return;
   }
@@ -123,18 +173,21 @@ void FilmstripCache::requestThumbs(const QString &filePath, int count) {
   if (stripCacheValid(filePath, count)) {
     const QStringList paths = stripPaths(filePath, count);
     QMetaObject::invokeMethod(
-        this, [this, filePath, paths]() { emit filmstripReady(filePath, paths); },
+        this,
+        [self, filePath, paths]() {
+          if (self.isNull())
+            return;
+          emit self->filmstripReady(filePath, paths);
+        },
         Qt::QueuedConnection);
     return;
   }
 
-  if (m_pending.contains(filePath))
+  const auto key = qMakePair(filePath, count);
+  if (m_pending.contains(key))
     return;
-  m_pending.insert(filePath);
+  m_pending.insert(key);
 
-  // Same QPointer discipline as WaveformCache: app-owned, but
-  // a late worker must never touch a dead object.
-  QPointer<FilmstripCache> self(this);
   QThreadPool::globalInstance()->start([self, filePath, count]() {
     if (self.isNull())
       return;
@@ -180,14 +233,24 @@ void FilmstripCache::requestThumbs(const QString &filePath, int count) {
                 ((int64_t)(2 * i + 1) * durationUs) / (2 * count);
             const QImage img =
                 grabFrame(ctx, dec, videoStreamIdx, ts);
-            const QString outPath = thumbPathFor(filePath, i);
-            if (img.isNull() || !img.save(outPath, "JPEG", kJpegQuality)) {
+            const QString outPath = thumbPathFor(filePath, count, i);
+            if (img.isNull()) {
+              allOk = false;
+              break;
+            }
+            if (!img.save(outPath, "JPEG", kJpegQuality)) {
+              // A native short write can leave a nonempty truncated JPEG.
+              // Never let the next request mistake it for a valid sidecar.
+              QFile::remove(outPath);
               allOk = false;
               break;
             }
           }
-          if (allOk)
+          if (allOk) {
+            // A fresh valid strip supersedes any legacy count-less files.
+            removeLegacyStrips(filePath);
             paths = stripPaths(filePath, count);
+          }
         }
       }
       avcodec_free_context(&dec);
@@ -196,10 +259,10 @@ void FilmstripCache::requestThumbs(const QString &filePath, int count) {
 
     QMetaObject::invokeMethod(
         self,
-        [self, filePath, paths]() {
+        [self, filePath, count, paths]() {
           if (self.isNull())
             return;
-          self->m_pending.remove(filePath);
+          self->m_pending.remove(qMakePair(filePath, count));
           emit self->filmstripReady(filePath, paths);
         },
         Qt::QueuedConnection);

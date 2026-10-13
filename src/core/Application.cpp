@@ -39,11 +39,16 @@
 #include "UpdateChecker.h"
 
 #include <QDateTime>
+#include <QDBusServiceWatcher>
+#include <QDBusConnection>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QLoggingCategory>
+#include <QMetaObject>
+#include <QPointer>
 #include <QProcess>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -51,6 +56,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
+#include <QtConcurrent/QtConcurrent>
 #include <algorithm>
 #include <cmath>
 
@@ -66,7 +72,17 @@ namespace TrophyBackend {
 Application::Application(int &argc, char **argv)
     : QApplication(argc, argv) {}
 
-Application::~Application() = default;
+Application::~Application() {
+  // Retiring pipelines retain raw mixer/settings/storage pointers. Settle
+  // managers before those dependencies (member order would destroy them first).
+  if (m_gameDetector) disconnect(m_gameDetector.get(), nullptr, this, nullptr);
+  if (m_recordingManager) disconnect(m_recordingManager.get(), nullptr, this, nullptr);
+  if (m_replayManager) disconnect(m_replayManager.get(), nullptr, this, nullptr);
+  m_engine.reset();
+  m_controlServer.reset();
+  m_recordingManager.reset();
+  m_replayManager.reset();
+}
 
 bool Application::initialize() {
   // 1. Force Qt to enable debug logging for our categories
@@ -173,6 +189,10 @@ bool Application::initialize() {
     removeVulkanLayerRegistration();
     m_vulkanLayerRegistered = false;
   }
+  // A portable bundle's old mount path may have vanished. Refresh only a
+  // previously opted-in GL enrollment; default-off installs remain untouched.
+  if (!GlShimEnrollment::refreshEnrolledBundle())
+    qCWarning(appLog) << "Could not refresh the opted-in GL shim enrollment";
   emit detectionStatusChanged();
   registerQmlTypes();
 
@@ -249,12 +269,14 @@ bool Application::initialize() {
     return false;
   }
 
-  if (CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::Wayland) {
-    if (!CaptureFactory::isPipeWireAvailable()) {
-      qCCritical(appLog) << "PipeWire or ScreenCast portal not found!";
-      emit fatalError("PipeWire or ScreenCast portal not found. Screen capture is unavailable.");
-      return false;
-    }
+  if (isWayland()) {
+    // Capability discovery must not introspect a hung portal on the GUI
+    // thread. The library remains usable when capture is unavailable.
+    auto *portal = new QDBusServiceWatcher("org.freedesktop.portal.Desktop",
+        QDBusConnection::sessionBus(), QDBusServiceWatcher::WatchForOwnerChange, this);
+    connect(portal, &QDBusServiceWatcher::serviceOwnerChanged, this,
+            [this] { queryCaptureAvailability(); });
+    queryCaptureAvailability();
   }
 
   m_gameDetector->start();
@@ -314,6 +336,20 @@ void Application::initializeServices() {
   m_recordingManager = std::make_unique<RecordingManager>(this);
   
   m_recordingManager->setSettingsManager(m_settingsManager.get());
+  // Hardware discovery can wait on a driver. The dashboard reads cached
+  // text while this plain-data worker warms the shared encoder catalogue.
+  auto *encoderProbe = new QFutureWatcher<QString>(m_recordingManager.get());
+  QPointer<RecordingManager> encoderTarget(m_recordingManager.get());
+  connect(encoderProbe, &QFutureWatcher<QString>::finished, m_recordingManager.get(),
+          [encoderProbe, encoderTarget] {
+    const QString name = encoderProbe->result();
+    encoderProbe->deleteLater();
+    if (encoderTarget) encoderTarget->setDetectedEncoderName(name);
+  });
+  encoderProbe->setFuture(QtConcurrent::run([] {
+    const auto encoders = EncoderFactory::detectAvailableEncoders();
+    return encoders.empty() ? QStringLiteral("Software") : encoders.front().description;
+  }));
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
   m_recordingManager->setWindowService(m_windowService.get());
@@ -422,12 +458,13 @@ void Application::exposeServicesToQml() {
 
 void Application::connectSignals() {
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
+  connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {
             m_recordingLibrary->setActiveRecordingPath(filePath);
             // The background replay loop pauses while recording.
             m_replayManager->setPaused(true);
           });
-  connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this, [this](const QString &filePath, qint64, qint64) {
+  connect(m_recordingManager.get(), &RecordingManager::recordingFinished, this, [this]() {
             m_recordingLibrary->setActiveRecordingPath("");
             m_recordingLibrary->refresh();
             // Resume the replay loop if the game is still running.
@@ -533,36 +570,54 @@ void Application::connectSignals() {
       m_audioWaitTimer->stop();
       return;
     }
+    // A slow PipeWire query never stacks and never blocks the GUI: skip
+    // ticks while a probe is in flight (skipped ticks don't count toward
+    // the timeout — only resolved polls do).
+    if (m_audioProbeInflight)
+      return;
     const QString game = m_pendingAudioGame;
     const bool isRecord = m_pendingAudioIsRecord;
     qint64 pid = 0;
     if (m_gameDetector && m_gameDetector->currentGameName() == game)
       pid = m_gameDetector->currentGamePid();
-    ++m_audioWaitTicks;
-    if (gameAudioNodePresent(game, pid)) {
-      if (++m_audioWaitHits >= 2) {
-        qCDebug(appLog) << "Game audio settled for" << game << "- starting";
-        m_pendingAudioGame.clear();
-        m_audioWaitTimer->stop();
-        if (isRecord)
-          m_recordingManager->startRecording(game);
-        else
-          m_replayManager->startDvr(game);
-        return;
-      }
-    } else {
-      m_audioWaitHits = 0;
-    }
-    if (m_audioWaitTicks >= kAudioWaitMaxTicks) {
-      qCDebug(appLog) << "Game audio never appeared for" << game
-                      << "- starting anyway (monitor fallback)";
-      m_pendingAudioGame.clear();
-      m_audioWaitTimer->stop();
-      if (isRecord)
-        m_recordingManager->startRecording(game);
-      else
-        m_replayManager->startDvr(game);
-    }
+    probeGameAudioAsync(game, pid, m_audioWaitGeneration,
+                        [this, game, isRecord](bool present) {
+                          // Superseded (game closed / re-armed): the
+                          // generation check already passed, so also match
+                          // the pending identity before touching counters.
+                          if (m_pendingAudioGame != game)
+                            return;
+                          ++m_audioWaitTicks;
+                          if (present) {
+                            if (++m_audioWaitHits >= 2) {
+                              qCDebug(appLog)
+                                  << "Game audio settled for" << game
+                                  << "- starting";
+                              m_pendingAudioGame.clear();
+                              ++m_audioWaitGeneration;
+                              m_audioWaitTimer->stop();
+                              if (isRecord)
+                                m_recordingManager->startRecording(game);
+                              else
+                                m_replayManager->startDvr(game);
+                              return;
+                            }
+                          } else {
+                            m_audioWaitHits = 0;
+                          }
+                          if (m_audioWaitTicks >= kAudioWaitMaxTicks) {
+                            qCDebug(appLog)
+                                << "Game audio never appeared for" << game
+                                << "- starting anyway (monitor fallback)";
+                            m_pendingAudioGame.clear();
+                            ++m_audioWaitGeneration;
+                            m_audioWaitTimer->stop();
+                            if (isRecord)
+                              m_recordingManager->startRecording(game);
+                            else
+                              m_replayManager->startDvr(game);
+                          }
+                        });
   });
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game) {
             // Stale token: delete it so the next attempt can't reuse it,
@@ -621,6 +676,7 @@ void Application::connectSignals() {
             }
             if (m_pendingAudioGame == gameName) {
               m_pendingAudioGame.clear();
+              ++m_audioWaitGeneration;
               m_audioWaitTimer->stop();
             }
             if (m_pendingAutoRecordGame.isEmpty() && m_pendingDvrGame.isEmpty()) {
@@ -982,25 +1038,80 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
   qint64 pid = 0;
   if (m_gameDetector && m_gameDetector->currentGameName() == game)
     pid = m_gameDetector->currentGamePid();
-  if (gameAudioNodePresent(game, pid)) {
-    qCDebug(appLog) << "Game audio present for" << game
-                    << "- starting capture immediately";
-    if (isRecord)
-      m_recordingManager->startRecording(game);
-    else
-      m_replayManager->startDvr(game);
-    return;
-  }
-  // Node not there yet (launching game): wait for it to appear and look
-  // stable across two polls; the timeout starts anyway with today's
-  // monitor-fallback behavior so a silent game never blocks capture.
-  qCDebug(appLog) << "Deferring capture for" << game
-                  << "until its audio node settles";
+  // The first presence check is async too (same multi-second PipeWire
+  // cost as the polls): start now on delivery, else enter the wait loop.
+  // Pending is armed up-front so a game-close in between supersedes us.
   m_pendingAudioGame = game;
   m_pendingAudioIsRecord = isRecord;
   m_audioWaitHits = 0;
   m_audioWaitTicks = 0;
-  m_audioWaitTimer->start();
+  const quint64 generation = ++m_audioWaitGeneration;
+  probeGameAudioAsync(game, pid, generation, [this, game, isRecord](bool present) {
+    if (m_pendingAudioGame != game)
+      return; // superseded (game closed / re-armed)
+    if (present) {
+      qCDebug(appLog) << "Game audio present for" << game
+                      << "- starting capture immediately";
+      m_pendingAudioGame.clear();
+      ++m_audioWaitGeneration;
+      if (isRecord)
+        m_recordingManager->startRecording(game);
+      else
+        m_replayManager->startDvr(game);
+      return;
+    }
+    // Node not there yet (launching game): wait for it to appear and look
+    // stable across two polls; the timeout starts anyway with today's
+    // monitor-fallback behavior so a silent game never blocks capture.
+    qCDebug(appLog) << "Deferring capture for" << game
+                    << "until its audio node settles";
+    m_audioWaitTimer->start();
+  });
+}
+
+void Application::probeGameAudioAsync(
+    const QString &game, qint64 pid, quint64 generation,
+    const std::function<void(bool)> &onResult) {
+  QPointer<Application> self(this);
+  const quint64 ticket = claimAudioProbe();
+  (void)QtConcurrent::run([self, game, pid, ticket, generation, onResult]() {
+    // Static pure lookup: no Application state, worker-safe.
+    const bool present = gameAudioNodePresent(game, pid);
+    if (self.isNull())
+      return;
+    QMetaObject::invokeMethod(
+        self,
+        [self, ticket, generation, onResult, present]() {
+          if (self.isNull())
+            return;
+          self->applyGameAudioProbeResult(ticket, generation, present, onResult);
+        },
+        Qt::QueuedConnection);
+  });
+}
+
+quint64 Application::claimAudioProbe() {
+  // Zero denotes no owner, including after a completion has been consumed.
+  m_audioProbeTicket = ++m_nextAudioProbeTicket;
+  if (m_audioProbeTicket == 0)
+    m_audioProbeTicket = ++m_nextAudioProbeTicket;
+  m_audioProbeInflight = true;
+  return m_audioProbeTicket;
+}
+
+void Application::applyGameAudioProbeResult(
+    quint64 ticket, quint64 generation, bool present,
+    const std::function<void(bool)> &onResult) {
+  // Generations control result validity, not ownership of the in-flight
+  // claim: a stale sole owner must release it, but an older completion
+  // must never release a replacement worker's claim.
+  if (ticket == 0 || ticket != m_audioProbeTicket)
+    return;
+  m_audioProbeTicket = 0;
+  m_audioProbeInflight = false;
+  if (generation != m_audioWaitGeneration)
+    return;
+  onResult(present);
 }
 
 void Application::authorizeGame(const QString &game) {
@@ -1057,6 +1168,45 @@ void Application::startWhenWindowReady(const QString &game, bool isRecord) {
   m_windowWaitTimer->start();
 }
 bool Application::isWayland() const { return CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::Wayland; }
+
+bool Application::canStartRecording() const {
+  return m_captureAvailable && m_recordingManager &&
+         m_recordingManager->state() == RecordingManager::RecordingState::Idle;
+}
+
+QString Application::recordingPhase() const {
+  if (!m_recordingManager)
+    return QStringLiteral("idle");
+  switch (m_recordingManager->state()) {
+  case RecordingManager::RecordingState::Initializing: return QStringLiteral("initializing");
+  case RecordingManager::RecordingState::Recording: return QStringLiteral("recording");
+  case RecordingManager::RecordingState::Stopping: return QStringLiteral("stopping");
+  case RecordingManager::RecordingState::Error: return QStringLiteral("error");
+  default: return QStringLiteral("idle");
+  }
+}
+
+void Application::queryCaptureAvailability() {
+  const quint64 generation = ++m_captureAvailabilityGeneration;
+  m_captureAvailable = false;
+  m_captureAvailabilityPending = true;
+  emit captureAvailabilityChanged();
+  emit recordingAvailabilityChanged();
+  CaptureFactory::requestPipeWireAvailability(this, [this, generation](bool available) {
+    applyCaptureAvailability(generation, available);
+  });
+}
+
+void Application::applyCaptureAvailability(quint64 generation, bool available) {
+  if (generation != m_captureAvailabilityGeneration)
+    return;
+  m_captureAvailable = available;
+  m_captureAvailabilityPending = false;
+  emit captureAvailabilityChanged();
+  emit recordingAvailabilityChanged();
+  if (!available)
+    qCWarning(appLog) << "ScreenCast portal unavailable; capture requests will report errors";
+}
 
 bool Application::isEncoderAvailable(const QString &name) const {
   if (name == "auto" || name == "x264") return true;
@@ -1218,26 +1368,26 @@ void Application::setTrackMuted(int trackIndex, bool muted) {
   // traces dashboard mute clicks end to end.
   qCInfo(appLog) << "Track" << trackIndex << (muted ? "muted" : "unmuted");
   if (m_audioMixer)
-    m_audioMixer->setTrackMuted(trackIndex, muted);
+    m_audioMixer->setSemanticTrackMuted(trackIndex, muted);
   if (m_replayManager)
-    m_replayManager->setTrackMuted(trackIndex, muted);
+    m_replayManager->setSemanticTrackMuted(trackIndex, muted);
 }
 
 bool Application::isTrackMuted(int trackIndex) const {
   if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
-    return m_audioMixer->isTrackMuted(trackIndex);
+    return m_audioMixer->isSemanticTrackMuted(trackIndex);
   if (m_replayManager && m_replayManager->isActive())
-    return m_replayManager->isTrackMuted(trackIndex);
+    return m_replayManager->isSemanticTrackMuted(trackIndex);
   if (m_audioMixer)
-    return m_audioMixer->isTrackMuted(trackIndex);
+    return m_audioMixer->isSemanticTrackMuted(trackIndex);
   return false;
 }
 
 float Application::trackLevel(int trackIndex) const {
   if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
-    return m_audioMixer->getTrackLevel(trackIndex);
+    return m_audioMixer->semanticTrackLevel(trackIndex);
   if (m_replayManager && m_replayManager->isActive())
-    return m_replayManager->trackLevel(trackIndex);
+    return m_replayManager->semanticTrackLevel(trackIndex);
   return 0.0f;
 }
 
@@ -1266,10 +1416,18 @@ void Application::syncAutostartFile() {
     return;
   }
   const bool want = m_settingsManager->startOnLogin();
-  if (want == m_autostartManager->isEnabled()) {
+  if (!want && !m_autostartManager->isEnabled()) {
     return;
   }
-  if (!m_autostartManager->setEnabled(want, QCoreApplication::applicationFilePath())) {
+  QString flatpakId = QString::fromUtf8(qgetenv("FLATPAK_ID"));
+  if (flatpakId.isEmpty() && QFile::exists(QStringLiteral("/.flatpak-info"))) {
+    flatpakId = QStringLiteral("io.github.stevenjwheeler.Trophy");
+  }
+  // Refresh managed entries too: older packaged versions stored a transient
+  // AppImage mount path or the sandbox-only /app/bin executable.
+  if (!m_autostartManager->setEnabled(
+          want, QCoreApplication::applicationFilePath(),
+          QString::fromUtf8(qgetenv("APPIMAGE")), flatpakId)) {
     qCWarning(appLog) << "Failed to sync autostart entry";
   }
 }

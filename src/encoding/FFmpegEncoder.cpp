@@ -384,6 +384,9 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   m_frameCount = 0;
   m_firstTimestamp = -1; 
   m_initialized = true;
+  // A transient first-probe failure must not permanently disable the
+  // EGL/CUDA import for the process: re-probe on every initialize().
+  m_cudaImport.reset();
   m_zeroCopyFrames = 0;
   m_eglImportFrames = 0;
   m_fallbackFrames = 0;
@@ -412,7 +415,7 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
 
   if (isHardwareEncoder()) {
     m_codecCtx->pix_fmt = m_codecName.contains("nvenc") ? AV_PIX_FMT_CUDA : AV_PIX_FMT_VAAPI;
-    if (!initializeHardwareContext()) return false;
+    if (!initializeHardwareContext()) { cleanup(); return false; }
   } else {
     m_codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
   }
@@ -431,7 +434,8 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   int ret = avcodec_open2(m_codecCtx, codec, &opts);
   av_dict_free(&opts);
 
-  return ret >= 0;
+  if (ret < 0) { cleanup(); return false; }
+  return true;
 }
 
 bool FFmpegEncoder::initializeHardwareContext() {
@@ -519,6 +523,18 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
                 av_free(d);
             }, nullptr, 0);
 
+        if (!drm_frame->buf[0]) {
+            // Buffer allocation failed: release the descriptor (including
+            // the dup'd fd the free callback would have owned) and fall
+            // through to the CPU path below.
+            if (desc->objects[0].fd >= 0)
+                close(desc->objects[0].fd);
+            av_free(desc);
+            av_frame_free(&drm_frame);
+            drm_frame = nullptr;
+        }
+
+        if (drm_frame) {
         tempHwFrame = av_frame_alloc();
         tempHwFrame->format = m_codecCtx->pix_fmt;
         tempHwFrame->hw_frames_ctx = av_buffer_ref(m_codecCtx->hw_frames_ctx);
@@ -549,6 +565,7 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
             av_frame_free(&tempHwFrame);
             tempHwFrame = nullptr;
         }
+        } // if (drm_frame): null buf falls through to the CPU path below
     }
   } 
   

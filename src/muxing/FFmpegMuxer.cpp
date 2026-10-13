@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QMap>
+#include <algorithm>
 #include <limits>
 
 extern "C" {
@@ -25,10 +26,14 @@ FFmpegMuxer::FFmpegMuxer(QObject *parent)
     : IMuxer(parent), 
       m_formatCtx(nullptr), 
       m_headerWritten(false),
-      m_globalOffset(-1) {}
+      m_globalOffset(-1), m_closeOutput(&avio_closep) {}
 
 bool FFmpegMuxer::initialize(const QString &outputPath) {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
+    // Re-init must not leak the previous context or carry a stale
+    // global offset: reset first (lock-free variant — the mutex is
+    // already held, so cleanup() would deadlock).
+    cleanup_internal();
     m_outputPath = outputPath;
 
     QString ext = QFileInfo(outputPath).suffix().toLower();
@@ -54,7 +59,7 @@ bool FFmpegMuxer::initialize(const QString &outputPath) {
 
 int FFmpegMuxer::addStream(const StreamInfo &info) {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (!m_formatCtx) return -1;
+    if (!m_formatCtx || m_headerWritten) return -1;
 
     AVStream *stream = avformat_new_stream(m_formatCtx, nullptr);
     if (!stream) return -1;
@@ -147,7 +152,8 @@ bool FFmpegMuxer::setMetadata(const QMap<QString, QString> &metadata) {
 
 bool FFmpegMuxer::writeHeader() {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (!m_formatCtx) return false;
+    if (!m_formatCtx || m_headerWritten || m_finalized || m_formatCtx->pb)
+        return false;
 
     if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE)) {
         if (avio_open(&m_formatCtx->pb, m_outputPath.toUtf8().constData(), AVIO_FLAG_WRITE) < 0)
@@ -166,8 +172,11 @@ bool FFmpegMuxer::writeHeader() {
 
     int ret = avformat_write_header(m_formatCtx, &opts);
     av_dict_free(&opts);
+    if (m_formatCtx->pb)
+        m_bytesWritten.store(std::max<int64_t>(0, avio_tell(m_formatCtx->pb)),
+                             std::memory_order_relaxed);
 
-    if (ret < 0) return false;
+    if (ret < 0 || (m_formatCtx->pb && m_formatCtx->pb->error < 0)) return false;
 
     m_headerWritten = true;
     return true;
@@ -205,7 +214,7 @@ bool FFmpegMuxer::updateStreamExtraData(int streamIndex, const std::vector<uint8
 
 bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (!m_formatCtx || !m_headerWritten) return false;
+    if (!m_formatCtx || !m_headerWritten || m_finalized) return false;
     if (packet.streamIndex < 0 ||
         packet.streamIndex >= static_cast<int>(m_streams.size()) ||
         packet.data.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -237,16 +246,20 @@ bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
     av_packet_rescale_ts(avPacket, {1, 1000}, stream->time_base);
     
     int ret = av_interleaved_write_frame(m_formatCtx, avPacket);
+    if (m_formatCtx->pb)
+        m_bytesWritten.store(std::max<int64_t>(0, avio_tell(m_formatCtx->pb)),
+                             std::memory_order_relaxed);
     av_packet_free(&avPacket);
 
-    return ret >= 0;
+    return ret >= 0 && (!m_formatCtx->pb || m_formatCtx->pb->error >= 0);
 }
 
 bool FFmpegMuxer::finalize() {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
+    if (m_finalized) return m_finalizeSuccess;
     if (!m_formatCtx) return false;
     
-    bool success = true;
+    bool success = false;
     if (m_headerWritten) {
         // Write the trailer (this updates the file size on disk)
         success = (av_write_trailer(m_formatCtx) >= 0);
@@ -254,9 +267,23 @@ bool FFmpegMuxer::finalize() {
         // Force a flush to the IO context so avio_tell is accurate
         if (m_formatCtx->pb) {
             avio_flush(m_formatCtx->pb);
+            success = success && m_formatCtx->pb->error >= 0;
         }
     }
-    
+
+    if (m_formatCtx->pb) {
+        m_bytesWritten.store(std::max<int64_t>(0, avio_tell(m_formatCtx->pb)),
+                             std::memory_order_relaxed);
+        if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE)) {
+            // A close-only error must be reported before callers announce
+            // success, not lost later in the destructor.
+            const int closed = m_closeOutput(&m_formatCtx->pb);
+            success = success && closed >= 0;
+        }
+    }
+
+    m_finalized = true;
+    m_finalizeSuccess = success;
     return success;
 }
 
@@ -267,11 +294,7 @@ FFmpegMuxer::~FFmpegMuxer() {
 }
 
 int64_t FFmpegMuxer::bytesWritten() const {
-    std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (m_formatCtx && m_formatCtx->pb) {
-        return avio_tell(m_formatCtx->pb);
-    }
-    return 0;
+    return m_bytesWritten.load(std::memory_order_relaxed);
 }
 
 QString FFmpegMuxer::formatName() const {
@@ -285,14 +308,17 @@ QString FFmpegMuxer::formatName() const {
 void FFmpegMuxer::cleanup_internal() {
     if (m_formatCtx) {
         if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE) && m_formatCtx->pb) {
-            avio_closep(&m_formatCtx->pb);
+            m_closeOutput(&m_formatCtx->pb);
         }
         avformat_free_context(m_formatCtx);
         m_formatCtx = nullptr;
     }
     m_streams.clear();
     m_headerWritten = false;
+    m_finalized = false;
+    m_finalizeSuccess = false;
     m_globalOffset = -1;
+    m_bytesWritten.store(0, std::memory_order_relaxed);
 }
 
 void FFmpegMuxer::cleanup() {

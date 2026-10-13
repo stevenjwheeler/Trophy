@@ -11,6 +11,7 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
 #include <cmath>
 
@@ -22,6 +23,9 @@ extern "C" {
 }
 
 namespace TrophyBackend {
+
+thread_local const ReplayClipperInternal::Operations *ReplayClipper::s_operations =
+    nullptr;
 
 namespace {
 
@@ -37,12 +41,17 @@ inline InputContext wrapInput(AVFormatContext *ctx) {
 
 struct OutputCloser {
   AVFormatContext *ctx = nullptr;
+  QString incompletePath;
+  bool complete = false;
+  const ReplayClipperInternal::Operations &ops;
   ~OutputCloser() {
     if (!ctx)
       return;
-    if (!(ctx->oformat->flags & AVFMT_NOFILE))
-      avio_closep(&ctx->pb);
+    if (!(ctx->oformat->flags & AVFMT_NOFILE) && ctx->pb)
+      ops.closeOutput(&ctx->pb);
     avformat_free_context(ctx);
+    if (!complete && !incompletePath.isEmpty())
+      QFile::remove(incompletePath);
   }
 };
 
@@ -52,6 +61,12 @@ inline double pktPtsSec(const AVPacket *pkt, const AVRational &tb) {
     return -1.0;
   return pkt->pts * av_q2d(tb);
 }
+
+// Cut matching tolerance: keyTimes are built with double timestamp
+// math while the copy pass compares integer-microsecond values, so
+// ~1ns of rounding can skip the cut keyframe (clip starts at the
+// next GOP). A few microseconds of slack absorbs it.
+constexpr double kCutEpsilonSec = 5e-6;
 
 // One input file plus its start offset in seconds relative to the first
 // input. Layout contract (matches our muxer): stream 0 is video, the rest
@@ -63,15 +78,15 @@ struct CutInput {
   double offset = 0.0;
 };
 
-AVFormatContext *openCutInput(const CutInput &in, QString *errMsg) {
+AVFormatContext *openCutInput(const CutInput &in, QString *errMsg,
+                              const ReplayClipperInternal::Operations &ops) {
   AVFormatContext *ctx = nullptr;
-  if (avformat_open_input(&ctx, in.path.toUtf8().constData(), nullptr,
-                          nullptr) < 0) {
+  if (ops.openInput(&ctx, in.path.toUtf8().constData(), nullptr, nullptr) < 0) {
     if (errMsg)
       *errMsg = QString("cannot open input %1").arg(in.path);
     return nullptr;
   }
-  if (avformat_find_stream_info(ctx, nullptr) < 0) {
+  if (ops.probeInput(ctx, nullptr) < 0) {
     avformat_close_input(&ctx);
     if (errMsg)
       *errMsg = QString("cannot probe input %1").arg(in.path);
@@ -83,10 +98,11 @@ AVFormatContext *openCutInput(const CutInput &in, QString *errMsg) {
 // All inputs must share the first input's stream layout. Handles close
 // immediately via shared ownership.
 bool validateLayout(const QList<CutInput> &inputs, unsigned *nbStreams,
-                    QString *errMsg) {
+                    QString *errMsg,
+                    const ReplayClipperInternal::Operations &ops) {
   QList<InputContext> probes;
   for (const CutInput &in : inputs) {
-    AVFormatContext *ctx = openCutInput(in, errMsg);
+    AVFormatContext *ctx = openCutInput(in, errMsg, ops);
     if (!ctx)
       return false;
     probes.push_back(wrapInput(ctx));
@@ -108,6 +124,23 @@ bool validateLayout(const QList<CutInput> &inputs, unsigned *nbStreams,
         *errMsg = QStringLiteral("input stream layout mismatch");
       return false;
     }
+    // Equal counts with different codecs (or mismatched audio/video
+    // parameters) produce corrupt clips — compare per-stream.
+    for (unsigned s = 0; s < first->nb_streams; ++s) {
+      const AVCodecParameters *a = first->streams[s]->codecpar;
+      const AVCodecParameters *b = p.get()->streams[s]->codecpar;
+      bool mismatch = (a->codec_type != b->codec_type) ||
+                      (a->codec_id != b->codec_id);
+      if (!mismatch && a->codec_type == AVMEDIA_TYPE_AUDIO)
+        mismatch = (a->sample_rate != b->sample_rate);
+      if (!mismatch && a->codec_type == AVMEDIA_TYPE_VIDEO)
+        mismatch = (a->width != b->width) || (a->height != b->height);
+      if (mismatch) {
+        if (errMsg)
+          *errMsg = QStringLiteral("input stream layout mismatch");
+        return false;
+      }
+    }
   }
   *nbStreams = first->nb_streams;
   return true;
@@ -117,23 +150,24 @@ bool validateLayout(const QList<CutInput> &inputs, unsigned *nbStreams,
 // keyframe time (valid DTS only — file-head packets often lack one and a
 // DTS-less start breaks the mux clock). Each pass opens its own handles.
 bool scanKeys(const QList<CutInput> &inputs, QVector<double> *keyTimes,
-              QVector<double> *keyDts, double *globalEnd, QString *errMsg) {
+              QVector<double> *keyDts, double *globalEnd, QString *errMsg,
+              const ReplayClipperInternal::Operations &ops) {
   double end = -1.0;
   QVector<double> keys;
   QVector<double> dts;
   for (const CutInput &in : inputs) {
-    AVFormatContext *ctx = openCutInput(in, errMsg);
+    AVFormatContext *ctx = openCutInput(in, errMsg, ops);
     if (!ctx)
       return false;
     InputContext holder = wrapInput(ctx);
-    AVPacket *pkt = av_packet_alloc();
+    AVPacket *pkt = ops.packetAlloc();
     if (!pkt) {
       if (errMsg)
         *errMsg = QStringLiteral("cannot allocate scan packet");
       return false;
     }
     int readResult = 0;
-    while ((readResult = av_read_frame(ctx, pkt)) >= 0) {
+    while ((readResult = ops.readFrame(ctx, pkt)) >= 0) {
       if (pkt->stream_index == 0) {
         const double t = in.offset + pktPtsSec(pkt, ctx->streams[0]->time_base);
         if (t > end)
@@ -196,7 +230,8 @@ double pickCutKey(const QVector<double> &keyTimes, double cutSec) {
 bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
               double timelineOriginSec, double endSec,
               const QString &outputPath, QString *error,
-              double *keptSeconds, double cutSecForLog) {
+               double *keptSeconds, double cutSecForLog,
+               const ReplayClipperInternal::Operations &ops) {
   auto fail = [&](const QString &msg) {
     qWarning() << "ReplayClipper:" << msg;
     if (error)
@@ -206,15 +241,15 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
 
   // Create the output with copied stream layouts.
   AVFormatContext *outCtx = nullptr;
-  if (avformat_alloc_output_context2(&outCtx, nullptr, "matroska", nullptr) <
+  if (ops.allocOutput(&outCtx, nullptr, "matroska", nullptr) <
           0 ||
       !outCtx) {
     return fail("cannot create matroska context");
   }
-  OutputCloser outHolder{outCtx};
+  OutputCloser outHolder{outCtx, {}, false, ops};
   {
     QString msg;
-    AVFormatContext *firstCtx = openCutInput(inputs.front(), &msg);
+    AVFormatContext *firstCtx = openCutInput(inputs.front(), &msg, ops);
     if (!firstCtx)
       return fail(msg);
     InputContext firstHolder = wrapInput(firstCtx);
@@ -224,39 +259,44 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
     // save moment (not the source's start), its kind and the recorder
     // version — the kind/date/time tags survive renames, unlike the
     // _Replay filename suffix and timestamp.
-    av_dict_copy(&outCtx->metadata, firstCtx->metadata, 0);
+    if (ops.copyMetadata(&outCtx->metadata, firstCtx->metadata, 0) < 0)
+      return fail("cannot copy container metadata");
     const QDateTime nowLocal = QDateTime::currentDateTime();
-    av_dict_set(&outCtx->metadata, "trophy-kind", "clip", 0);
-    av_dict_set(&outCtx->metadata, "trophy-version",
-                trophyVersion().toUtf8().constData(), 0);
-    av_dict_set(&outCtx->metadata, "trophy-date",
-                trophyDateString(nowLocal).toUtf8().constData(), 0);
-    av_dict_set(&outCtx->metadata, "trophy-time",
-                trophyTimeString(nowLocal).toUtf8().constData(), 0);
-    av_dict_set(&outCtx->metadata, "creation_time",
-                QDateTime::currentDateTimeUtc()
-                    .toString(Qt::ISODate)
-                    .toUtf8()
-                    .constData(),
-                0);
+    if (ops.setMetadata(&outCtx->metadata, "trophy-kind", "clip", 0) < 0 ||
+        ops.setMetadata(&outCtx->metadata, "trophy-version",
+                        trophyVersion().toUtf8().constData(), 0) < 0 ||
+        ops.setMetadata(&outCtx->metadata, "trophy-date",
+                        trophyDateString(nowLocal).toUtf8().constData(), 0) < 0 ||
+        ops.setMetadata(&outCtx->metadata, "trophy-time",
+                        trophyTimeString(nowLocal).toUtf8().constData(), 0) < 0 ||
+        ops.setMetadata(&outCtx->metadata, "creation_time",
+                        QDateTime::currentDateTimeUtc()
+                            .toString(Qt::ISODate)
+                            .toUtf8()
+                            .constData(),
+                        0) < 0)
+      return fail("cannot stamp clip metadata");
     for (unsigned s = 0; s < nbStreams; ++s) {
       AVStream *inStream = firstCtx->streams[s];
-      AVStream *outStream = avformat_new_stream(outCtx, nullptr);
+      AVStream *outStream = ops.newStream(outCtx, nullptr);
       if (!outStream)
         return fail("cannot create output stream");
-      if (avcodec_parameters_copy(outStream->codecpar, inStream->codecpar) < 0)
+      if (ops.copyParameters(outStream->codecpar, inStream->codecpar) < 0)
         return fail("cannot copy codec parameters");
       outStream->codecpar->codec_tag = 0;
       outStream->time_base = inStream->time_base;
     }
   }
   if (!(outCtx->oformat->flags & AVFMT_NOFILE)) {
-    if (avio_open(&outCtx->pb, outputPath.toUtf8().constData(),
+    if (ops.openOutput(&outCtx->pb, outputPath.toUtf8().constData(),
                   AVIO_FLAG_WRITE) < 0) {
       return fail(QString("cannot open output %1").arg(outputPath));
     }
+    // Callers pass a .part path and publish only after success. Close the
+    // AVIO handle before removing an output abandoned by any later failure.
+    outHolder.incompletePath = outputPath;
   }
-  if (avformat_write_header(outCtx, nullptr) < 0)
+  if (ops.writeHeader(outCtx, nullptr) < 0)
     return fail("cannot write header");
 
   const bool hasEnd = endSec < std::numeric_limits<double>::infinity();
@@ -270,17 +310,17 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
 
   for (const CutInput &in : inputs) {
     QString msg;
-    AVFormatContext *ctx = openCutInput(in, &msg);
+    AVFormatContext *ctx = openCutInput(in, &msg, ops);
     if (!ctx)
       return fail(msg);
     InputContext holder = wrapInput(ctx);
     const int64_t offsetUs =
         static_cast<int64_t>(in.offset * AV_TIME_BASE + 0.5);
-    AVPacket *pkt = av_packet_alloc();
+    AVPacket *pkt = ops.packetAlloc();
     if (!pkt)
       return fail("cannot allocate input packet");
     int readResult = 0;
-    while ((readResult = av_read_frame(ctx, pkt)) >= 0) {
+    while ((readResult = ops.readFrame(ctx, pkt)) >= 0) {
       const int si = pkt->stream_index;
       const AVRational inTb = ctx->streams[si]->time_base;
       const AVRational outTb = outCtx->streams[si]->time_base;
@@ -291,27 +331,32 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
       const int64_t ptsUs = av_rescale_q(pkt->pts, inTb, AV_TIME_BASE_Q);
       const int64_t dtsUs = av_rescale_q(pkt->dts, inTb, AV_TIME_BASE_Q);
       const double t = (ptsUs + offsetUs) / double(AV_TIME_BASE);
+      // The end bound applies even to the very first retained keyframe.
+      // A forward fallback beyond a short range must not produce a
+      // successful zero-length clip containing an out-of-range frame.
+      if (hasEnd && t > endSec) {
+        av_packet_unref(pkt);
+        continue;
+      }
       if (si == 0) {
-        // cutKey was collected with the identical timestamp math, so the
-        // cut keyframe matches exactly (no epsilon needed).
+        // cutKey was collected with equivalent timestamp math; the
+        // integer-microsecond rounding on `t` can still miss by ~1ns,
+        // so a microsecond epsilon keeps the cut keyframe.
         if (!cutFound) {
           if ((pkt->flags & AV_PKT_FLAG_KEY) && pkt->dts != AV_NOPTS_VALUE &&
-              t >= cutKey)
+              t + kCutEpsilonSec >= cutKey)
             cutFound = true;
           else {
             av_packet_unref(pkt);
             continue;
           }
-        } else if (hasEnd && t > endSec) {
-          av_packet_unref(pkt);
-          continue;
         }
-      } else if (!cutFound || t < cutKey || (hasEnd && t > endSec)) {
+      } else if (!cutFound || t + kCutEpsilonSec < cutKey) {
         av_packet_unref(pkt);
         continue;
       }
-      AVPacket *opkt = av_packet_alloc();
-      if (!opkt || av_packet_ref(opkt, pkt) < 0) {
+      AVPacket *opkt = ops.packetAlloc();
+      if (!opkt || ops.packetRef(opkt, pkt) < 0) {
         av_packet_free(&opkt);
         av_packet_unref(pkt);
         av_packet_free(&pkt);
@@ -319,26 +364,25 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
       }
       const int64_t packetDtsUs = dtsUs + offsetUs;
       const int64_t dd = packetDtsUs - timelineOriginUs;
-      const AVRational litSrc{1, 1000000};
-      const AVRational litDst{1, 1000};
       opkt->pts =
           av_rescale_q(ptsUs + offsetUs - timelineOriginUs, AV_TIME_BASE_Q, outTb);
-      opkt->dts = av_rescale_q(dd, litSrc, litDst);
+      opkt->dts = av_rescale_q(dd, AV_TIME_BASE_Q, outTb);
       opkt->duration = av_rescale_q(pkt->duration, inTb, outTb);
       opkt->stream_index = si;
-      // NOTE: opkt is owned by the muxer after a successful write —
-      // never touch its fields past this point. Cache what we need.
+      // The muxer consumes the packet's references, not the allocated
+      // AVPacket shell. Cache fields before writing and free the shell
+      // afterwards even when the muxer has blanked it.
       const int64_t outDts = opkt->dts;
       if (outDts <= maxDtsOut[si]) {
         // Overlap duplicate from segment rotation: already written.
         av_packet_free(&opkt);
-      } else if (av_interleaved_write_frame(outCtx, opkt) < 0) {
+      } else if (ops.writeFrame(outCtx, opkt) < 0) {
         av_packet_free(&opkt);
         av_packet_unref(pkt);
         av_packet_free(&pkt);
         return fail("mux error");
       } else {
-        // av_interleaved_write_frame takes ownership on success.
+        av_packet_free(&opkt);
         maxDtsOut[si] = outDts;
         ++keptPackets;
         ++keptPerStream[si];
@@ -358,23 +402,34 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
   if (keptPackets == 0)
     return fail("window matched no packets");
 
+  if (ops.writeTrailer(outCtx) < 0)
+    return fail("cannot write trailer");
+  if (outCtx->pb) {
+    ops.flush(outCtx->pb);
+    // Buffered I/O can fail only during flush even after a successful
+    // trailer. avio_flush returns void; consult the sticky AVIO error.
+    if (outCtx->pb->error < 0)
+      return fail("cannot flush output");
+    if (!(outCtx->oformat->flags & AVFMT_NOFILE) &&
+        ops.closeOutput(&outCtx->pb) < 0)
+      return fail("cannot close output");
+  }
+  outHolder.complete = true;
+  // Publish success-only results after buffered output has closed successfully.
   if (keptSeconds)
     *keptSeconds = (firstVideoT >= 0 && lastVideoT >= firstVideoT)
                        ? lastVideoT - firstVideoT
                        : 0.0;
-
-  if (av_write_trailer(outCtx) < 0)
-    return fail("cannot write trailer");
-  if (outCtx->pb)
-    avio_flush(outCtx->pb);
   return true;
 }
 
 } // namespace
 
 bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
-                             double windowSeconds, const QString &outputPath,
-                             QString *error, double *keptSeconds) {
+                              double windowSeconds, const QString &outputPath,
+                              QString *error, double *keptSeconds) {
+  const ReplayClipperInternal::Operations defaults;
+  const auto &ops = s_operations ? *s_operations : defaults;
   auto fail = [&](const QString &msg) {
     qWarning() << "ReplayClipper:" << msg;
     if (error)
@@ -396,7 +451,7 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   unsigned nbStreams = 0;
   {
     QString msg;
-    if (!validateLayout(inputs, &nbStreams, &msg))
+    if (!validateLayout(inputs, &nbStreams, &msg, ops))
       return fail(msg);
   }
 
@@ -405,7 +460,7 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   double globalEnd = -1.0;
   {
     QString msg;
-    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg))
+    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg, ops))
       return fail(msg);
   }
   if (globalEnd < 0)
@@ -419,12 +474,14 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   return writeCut(inputs, nbStreams, cutKey,
                   dtsForKey(keyTimes, keyDts, cutKey),
                   std::numeric_limits<double>::infinity(), outputPath, error,
-                  keptSeconds, cutSec);
+                   keptSeconds, cutSec, ops);
 }
 
 bool ReplayClipper::saveRange(const QString &sourcePath, double startSeconds,
-                              double endSeconds, const QString &outputPath,
-                              QString *error, double *keptSeconds) {
+                               double endSeconds, const QString &outputPath,
+                               QString *error, double *keptSeconds) {
+  const ReplayClipperInternal::Operations defaults;
+  const auto &ops = s_operations ? *s_operations : defaults;
   auto fail = [&](const QString &msg) {
     qWarning() << "ReplayClipper:" << msg;
     if (error)
@@ -448,7 +505,7 @@ bool ReplayClipper::saveRange(const QString &sourcePath, double startSeconds,
   unsigned nbStreams = 0;
   {
     QString msg;
-    if (!validateLayout(inputs, &nbStreams, &msg))
+    if (!validateLayout(inputs, &nbStreams, &msg, ops))
       return fail(msg);
   }
 
@@ -457,7 +514,7 @@ bool ReplayClipper::saveRange(const QString &sourcePath, double startSeconds,
   double globalEnd = -1.0;
   {
     QString msg;
-    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg))
+    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg, ops))
       return fail(msg);
   }
   if (globalEnd < 0)
@@ -469,7 +526,7 @@ bool ReplayClipper::saveRange(const QString &sourcePath, double startSeconds,
 
   return writeCut(inputs, nbStreams, cutKey,
                   dtsForKey(keyTimes, keyDts, cutKey), endSeconds, outputPath,
-                  error, keptSeconds, startSeconds);
+                   error, keptSeconds, startSeconds, ops);
 }
 
 } // namespace TrophyBackend

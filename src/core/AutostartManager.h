@@ -16,8 +16,9 @@ namespace TrophyBackend {
  * @brief Manages the XDG autostart entry (~/.config/autostart/trophy.desktop).
  *
  * Only files carrying our marker comment are claimed: isEnabled() ignores
- * foreign entries and disable() never deletes them. configHomeOverride
- * exists for hermetic unit tests (defaults to the real config location).
+ * foreign entries and setEnabled() never overwrites or deletes them.
+ * configHomeOverride exists for hermetic unit tests (defaults to the real
+ * config location).
  */
 class AutostartManager : public QObject {
   Q_OBJECT
@@ -29,7 +30,14 @@ public:
 
   QString filePath() const;
   bool isEnabled() const;
-  bool setEnabled(bool enabled, const QString &execPath);
+  // Pure Desktop Entry Exec resolver; explicit inputs keep packaging tests
+  // independent of the environment the test runner was launched in.
+  static QString launchCommand(const QString &execPath,
+                               const QString &appImagePath = QString(),
+                               const QString &flatpakId = QString());
+  bool setEnabled(bool enabled, const QString &execPath,
+                  const QString &appImagePath = QString(),
+                  const QString &flatpakId = QString());
 
 private:
   QString m_configHomeOverride;

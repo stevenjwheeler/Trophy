@@ -49,7 +49,7 @@ void SwayBackend::collectWindows(const QJsonObject &node,
   // Recurse through both tiled and floating children regardless.
   if (node.contains("pid")) {
     WindowInfo w;
-    w.id = (quint64)node.value("id").toDouble();
+    w.id = node.value("id").toVariant().toULongLong();
     w.appId = node.value("app_id").toString();
     if (w.appId.isEmpty()) {
       // XWayland fallback: window class from window_properties.
@@ -61,7 +61,7 @@ void SwayBackend::collectWindows(const QJsonObject &node,
       const QJsonObject props = node.value("window_properties").toObject();
       w.title = props.value("title").toString();
     }
-    w.pid = (qint64)node.value("pid").toDouble();
+    w.pid = node.value("pid").toVariant().toLongLong();
     w.fullscreen = node.value("fullscreen_mode").toInt(0) != 0;
     w.focused = node.value("focused").toBool();
     const QJsonObject rect = node.value("rect").toObject();
@@ -108,6 +108,34 @@ QList<WindowInfo> SwayBackend::windows() const {
   return m_windows;
 }
 
+QString SwayBackend::signatureFor(const QList<WindowInfo> &windows) {
+  // Same shape as the GNOME signature (identity + focus/fullscreen +
+  // geometry) so coverage-only changes still emit.
+  QString sig;
+  sig.reserve(windows.size() * 64);
+  for (const WindowInfo &w : windows) {
+    sig += QString::number(w.id);
+    sig += '|';
+    sig += w.appId;
+    sig += '|';
+    sig += w.title;
+    sig += '|';
+    sig += QString::number(w.pid);
+    sig += w.fullscreen ? "|F" : "|f";
+    sig += w.focused ? "|A|" : "|a|";
+    sig += '|';
+    sig += QString::number(w.width);
+    sig += 'x';
+    sig += QString::number(w.height);
+    sig += '@';
+    sig += QString::number(w.outputWidth);
+    sig += 'x';
+    sig += QString::number(w.outputHeight);
+    sig += ';';
+  }
+  return sig;
+}
+
 void SwayBackend::refresh() {
   const QString exe = QStandardPaths::findExecutable("swaymsg");
   if (exe.isEmpty())
@@ -123,11 +151,20 @@ void SwayBackend::refresh() {
 
   const QList<WindowInfo> parsed =
       parseTree(proc.readAllStandardOutput());
+  // Skip the emit (and the QML refresh churn behind it) when nothing
+  // changed between 1s ticks.
+  const QString sig = signatureFor(parsed);
   {
     QMutexLocker lg(&m_mutex);
+    // A successful poll means the backend is alive even when the
+    // snapshot is unchanged (and empty-first snapshots must not read
+    // inactive): mark active before the dedup early-return.
+    m_active = true;
+    if (sig == m_lastSignature)
+      return;
+    m_lastSignature = sig;
     m_windows = parsed;
   }
-  m_active = true;
   emit windowsUpdated();
 }
 

@@ -14,8 +14,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QSaveFile>
 
 #include "detection/ShippedLibDirs.h"
+#include "detection/PersistentReporterLib.h"
 
 namespace TrophyBackend {
 
@@ -86,16 +88,21 @@ bool VulkanLayer::writeManifest(const QString &srcJsonPath,
     return false;
 
   QJsonObject root = doc.object();
+  const QString durableLib =
+      PersistentReporterLib::install(libraryPath, "libtrophy_layer");
+  if (durableLib.isEmpty())
+    return false;
   QJsonObject layer = root.value("layer").toObject();
-  layer["library_path"] = libraryPath;
+  layer["library_path"] = durableLib;
   root["layer"] = layer;
 
-  QDir().mkpath(QFileInfo(destPath).absolutePath());
-  QFile dst(destPath);
-  if (!dst.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+  if (!QDir().mkpath(QFileInfo(destPath).absolutePath()))
     return false;
-  dst.write(QJsonDocument(root).toJson());
-  return true;
+  QSaveFile dst(destPath);
+  if (!dst.open(QIODevice::WriteOnly | QIODevice::Text))
+    return false;
+  const QByteArray json = QJsonDocument(root).toJson();
+  return dst.write(json) == json.size() && dst.commit();
 }
 
 bool VulkanLayer::isRegistered() {
@@ -113,16 +120,36 @@ bool VulkanLayer::isRegistered() {
 }
 
 bool VulkanLayer::ensureRegistered() {
-  if (isRegistered())
-    return true; // already correct: no rewrite, no loader churn
   const QString src = sourceManifestPath();
-  const QString lib = libraryPathForSource(src);
+  const QString shippedLib = libraryPathForSource(src);
+  const QString lib = shippedLib.isEmpty()
+                          ? QString()
+                          : PersistentReporterLib::install(shippedLib,
+                                                           "libtrophy_layer");
   if (src.isEmpty() || lib.isEmpty()) {
     qWarning() << "Vulkan layer: shipped manifest/library not found";
     return false;
   }
-  if (!writeManifest(src, lib, destManifestPath())) {
-    qWarning() << "Vulkan layer: cannot write" << destManifestPath();
+  // Existence alone is not enough: after an update the installed lib path
+  // may have moved while the old manifest still points at a present-but-old
+  // copy. Compare the stored path and rewrite on mismatch.
+  const QString dest = destManifestPath();
+  QFile cur(dest);
+  if (cur.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(cur.readAll(), &err);
+    if (err.error == QJsonParseError::NoError && doc.isObject()) {
+      const QString stored = doc.object()
+                                 .value("layer")
+                                 .toObject()
+                                 .value("library_path")
+                                 .toString();
+      if (stored == lib && QFile::exists(lib))
+        return true; // already correct: no rewrite, no loader churn
+    }
+  }
+  if (!writeManifest(src, lib, dest)) {
+    qWarning() << "Vulkan layer: cannot write" << dest;
     return false;
   }
   qInfo() << "Vulkan detection layer registered:" << lib;

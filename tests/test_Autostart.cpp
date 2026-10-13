@@ -85,3 +85,89 @@ TEST_F(AutostartTest, ReEnableRefreshesExecPath) {
                   .contains("Exec=/new/path/trophy --minimized"));
   EXPECT_TRUE(mgr.isEnabled());
 }
+
+TEST_F(AutostartTest, ExecPathWithSpacesIsDoubleQuoted) {
+  // Desktop Entry spec: single quotes are literal, so a path with spaces
+  // must be wrapped in double quotes (with \, ", `, $ escaped).
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.setEnabled(true, "/home/user/My Games/trophy"));
+
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
+  EXPECT_TRUE(QString::fromUtf8(f.readAll())
+                  .contains("Exec=\"/home/user/My Games/trophy\" --minimized"));
+}
+
+TEST_F(AutostartTest, NativeLauncherUsesExecutablePath) {
+  EXPECT_EQ(AutostartManager::launchCommand("/usr/bin/trophy"),
+            QStringLiteral("/usr/bin/trophy --minimized"));
+}
+
+TEST_F(AutostartTest, AppImageLauncherUsesPersistentImagePath) {
+  EXPECT_EQ(AutostartManager::launchCommand(
+                "/tmp/.mount_Trophy/usr/bin/trophy",
+                "/home/user/My Games/Trophy.AppImage"),
+            QStringLiteral("\"/home/user/My Games/Trophy.AppImage\" --minimized"));
+}
+
+TEST_F(AutostartTest, FlatpakLauncherUsesHostCommandAndTakesPrecedence) {
+  EXPECT_EQ(AutostartManager::launchCommand(
+                "/app/bin/trophy", "/ignored/Trophy.AppImage",
+                "io.github.stevenjwheeler.Trophy"),
+            QStringLiteral(
+                "flatpak run io.github.stevenjwheeler.Trophy --minimized"));
+}
+
+TEST_F(AutostartTest, ExecEscapesFieldCodesAndBothQuotingLayers) {
+  EXPECT_EQ(AutostartManager::launchCommand(
+                "/unused", QString::fromUtf8(R"(/home/user/My "$`\100%.AppImage)")),
+            QString::fromUtf8(
+                R"("/home/user/My \\"\\$\\`\\\\100%%.AppImage" --minimized)"));
+  EXPECT_EQ(AutostartManager::launchCommand("/home/user/100%/trophy"),
+            QStringLiteral("/home/user/100%%/trophy --minimized"));
+}
+
+TEST_F(AutostartTest, AppImageEntryRefreshesOldMountedPath) {
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.setEnabled(true, "/tmp/.mount_old/usr/bin/trophy"));
+  ASSERT_TRUE(mgr.setEnabled(true, "/tmp/.mount_new/usr/bin/trophy",
+                             "/home/user/Trophy.AppImage"));
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
+  const QString content = QString::fromUtf8(f.readAll());
+  EXPECT_TRUE(content.contains("Exec=/home/user/Trophy.AppImage --minimized\n"));
+  EXPECT_FALSE(content.contains(".mount_"));
+  EXPECT_TRUE(mgr.isEnabled());
+}
+
+TEST_F(AutostartTest, FlatpakEntryRefreshesOldSandboxPath) {
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.setEnabled(true, "/app/bin/trophy"));
+  ASSERT_TRUE(mgr.setEnabled(true, "/app/bin/trophy", QString(),
+                             "io.github.stevenjwheeler.Trophy"));
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
+  const QString content = QString::fromUtf8(f.readAll());
+  EXPECT_TRUE(content.contains(
+      "Exec=flatpak run io.github.stevenjwheeler.Trophy --minimized\n"));
+  EXPECT_FALSE(content.contains("/app/bin"));
+  EXPECT_TRUE(mgr.setEnabled(false, "/app/bin/trophy", QString(),
+                              "io.github.stevenjwheeler.Trophy"));
+  EXPECT_FALSE(QFile::exists(mgr.filePath()));
+}
+
+TEST_F(AutostartTest, EnableLeavesForeignEntryAlone) {
+  AutostartManager mgr(tempDir.path());
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(mgr.filePath()).absolutePath()));
+  const QByteArray original = "[Desktop Entry]\nName=UserCustom\nExec=custom\n";
+  QFile f(mgr.filePath());
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  ASSERT_EQ(f.write(original), original.size());
+  f.close();
+
+  EXPECT_FALSE(mgr.setEnabled(true, "/app/bin/trophy", QString(),
+                              "io.github.stevenjwheeler.Trophy"));
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+  EXPECT_EQ(f.readAll(), original);
+  EXPECT_FALSE(mgr.isEnabled());
+}

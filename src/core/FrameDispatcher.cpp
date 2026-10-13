@@ -18,9 +18,16 @@ void FrameDispatcher::unregisterSink(std::shared_ptr<IFrameSink> sink) {
 }
 
 void FrameDispatcher::dispatch(const FrameDescriptor &frame) {
-  std::lock_guard<std::mutex> lg(m_lock);
-  for (size_t i = 0; i < m_sinks.size(); ++i) {
-    auto &sink = m_sinks[i];
+  // Snapshot the sinks under lock, then dispatch without holding it:
+  // tryEnqueue is arbitrary sink code (a future blocking sink would stall
+  // capture, and register/unregister from a callback would self-deadlock).
+  std::vector<std::shared_ptr<IFrameSink>> sinks;
+  {
+    std::lock_guard<std::mutex> lg(m_lock);
+    sinks = m_sinks;
+  }
+  for (size_t i = 0; i < sinks.size(); ++i) {
+    auto &sink = sinks[i];
     // Duplicate fd per sink to give ownership to the sink (cheap dup syscall)
     int dupfd = -1;
     if (frame.fd != -1) {

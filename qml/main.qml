@@ -59,6 +59,8 @@ ApplicationWindow {
     }
 
     function shiftSelectRange(currentIndex) {
+        if (currentIndex < 0)
+            return;
         if (lastSelectedIndex === -1 || !recordingLibrary) {
             // First selection in this sequence - just toggle normally
             if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
@@ -633,26 +635,6 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+Q"
         onActivated: window.close()
-    }
-
-    Shortcut {
-        sequence: "F9"
-        onActivated: {
-            if (window.recordingManager) {
-                if (window.recordingManager.isRecording)
-                    window.recordingManager.stopRecording();
-                else if (window.gameDetector && window.gameDetector.currentGameName !== "")
-                    window.recordingManager.startRecording(window.gameDetector.currentGameName);
-            }
-        }
-    }
-
-    Shortcut {
-        sequence: "F10"
-        onActivated: {
-            if (window.app)
-                window.app.requestReplay();
-        }
     }
 
     TrophyDialog {

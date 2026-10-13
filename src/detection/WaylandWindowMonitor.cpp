@@ -14,9 +14,28 @@
 #include <QDebug>
 #include <QMutexLocker>
 #include <QProcessEnvironment>
+#include <QSet>
 #include <future>
 
 namespace TrophyBackend {
+
+namespace {
+
+// FNV-1a 64-bit over the key's UTF-8 bytes. Deterministic across
+// processes and restarts (unlike qHash(QString), which is per-process
+// seeded), so a key-derived synthetic id is stable for the window's
+// lifetime and beyond.
+quint64 stableKeyHash(const QString &key) {
+  quint64 h = 14695981039346656037ULL;
+  const QByteArray bytes = key.toUtf8();
+  for (char b : bytes) {
+    h ^= quint64(quint8(b));
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+} // namespace
 
 WaylandWindowMonitor::WaylandWindowMonitor(QObject *parent) : QObject(parent) {
   // Detect eagerly so UI (wizard, settings) can name the compositor even
@@ -28,7 +47,15 @@ WaylandWindowMonitor::WaylandWindowMonitor(QObject *parent) : QObject(parent) {
           &WaylandWindowMonitor::checkFocusedApp);
 }
 
-WaylandWindowMonitor::~WaylandWindowMonitor() { stopMonitoring(); }
+WaylandWindowMonitor::~WaylandWindowMonitor() {
+  stopMonitoring();
+  // Shutdown, unlike a settings toggle, settles all owned work before
+  // releasing backend objects or input files.
+  for (auto &retired : m_retired)
+    if (retired.poll.valid()) retired.poll.wait();
+  for (auto &removal : m_removals) removal.wait();
+  m_retired.clear();
+}
 
 void WaylandWindowMonitor::startMonitoring() {
   if (m_monitoring) {
@@ -36,6 +63,7 @@ void WaylandWindowMonitor::startMonitoring() {
   }
 
   m_compositor = detectCompositor();
+  ++m_generation;
   qDebug() << "Wayland compositor detected:" << m_compositor;
 
   setupCompositorTracking();
@@ -57,32 +85,30 @@ void WaylandWindowMonitor::stopMonitoring() {
   }
 
   m_monitoring = false;
-  m_pollTimer->stop();
-  // Polling runs off the GUI thread because the compositor CLI/D-Bus calls
-  // have bounded but potentially multi-second timeouts. Join before deleting
-  // backend objects that the worker may still be using.
+  ++m_generation;
+  std::shared_ptr<QObject> polling;
+  if (m_gnome) polling = m_gnome;
+  if (m_hyprland) polling = m_hyprland;
+  if (m_sway) polling = m_sway;
+  auto retire = [this](auto &backend) {
+    if (!backend) return;
+    disconnect(backend.get(), nullptr, this, nullptr);
+    backend->stop();
+    m_retired.push_back({backend, {}});
+    backend.reset();
+  };
+  retire(m_kwin);
+  retire(m_gnome);
+  retire(m_hyprland);
+  retire(m_sway);
   if (m_pollFuture.valid())
-    m_pollFuture.wait();
-  if (m_kwin) {
-    m_kwin->stop();
-    m_kwin->deleteLater();
-    m_kwin = nullptr;
-  }
-  if (m_gnome) {
-    m_gnome->stop();
-    m_gnome->deleteLater();
-    m_gnome = nullptr;
-  }
-  if (m_hyprland) {
-    m_hyprland->stop();
-    m_hyprland->deleteLater();
-    m_hyprland = nullptr;
-  }
-  if (m_sway) {
-    m_sway->stop();
-    m_sway->deleteLater();
-    m_sway = nullptr;
-  }
+    m_retired.push_back({std::move(polling), std::move(m_pollFuture)});
+  // Retired workers must not leave a frozen, apparently visible window in
+  // the picker or restore-token startup gate while tracking is disabled.
+  ingestSnapshot({});
+  collectRetired();
+  // Keep the housekeeping timer alive while retired operations settle.
+  m_pollTimer->start();
 
   qInfo() << "Wayland window monitoring stopped";
 }
@@ -120,14 +146,52 @@ bool WaylandWindowMonitor::kwinActive() const {
 
 void WaylandWindowMonitor::uninstallBackend() {
   stopMonitoring();
-  KWinBackend::removeInstalledScript();
+  m_removals.push_back(KWinBackend::removeInstalledScriptAsync());
+  m_pollTimer->start();
   // Same staleness reason as in startMonitoring: refresh status bindings.
   emit windowsChanged();
 }
 
 void WaylandWindowMonitor::ingestSnapshot(const QList<WindowInfo> &windows) {
+  // The KWin script reports client.windowId, which is 0 for every Wayland
+  // window, so without remapping all KWin rows share id 0 and any
+  // id-based lookup matches the first row. Remap chain per row:
+  //   real nonzero id -> kept as-is;
+  //   zero id + stable string key (KWin internalId) -> deterministic id
+  //     derived from the key, so the row tracks across snapshots even
+  //     when the backend reorders them (and across restarts);
+  //   zero id + no key -> kSyntheticIdBase + snapshot position (old
+  //     behavior; stable only while the order holds).
+  // Real nonzero ids from any backend are never rewritten.
+  QList<WindowInfo> normalized = windows;
+  QSet<quint64> used;
+  for (const WindowInfo &w : normalized) {
+    if (w.id != 0)
+      used.insert(w.id);
+  }
+  for (qsizetype i = 0; i < normalized.size(); ++i) {
+    if (normalized[i].id != 0 || normalized[i].key.isEmpty())
+      continue;
+    quint64 fresh = kSyntheticIdBase |
+                    (stableKeyHash(normalized[i].key) & 0x7FFFFFFFULL);
+    // Assign keyed ids first so a positional fallback can never steal a
+    // keyed id when the snapshot order changes.
+    while (used.contains(fresh))
+      fresh = kSyntheticIdBase | ((fresh + 1) & 0x7FFFFFFFULL);
+    normalized[i].id = fresh;
+    used.insert(fresh);
+  }
+  for (qsizetype i = 0; i < normalized.size(); ++i) {
+    if (normalized[i].id != 0)
+      continue;
+    quint64 fresh = kSyntheticIdBase + quint64(i);
+    while (used.contains(fresh))
+      ++fresh;
+    normalized[i].id = fresh;
+    used.insert(fresh);
+  }
   QString newFocus;
-  for (const WindowInfo &w : windows) {
+  for (const WindowInfo &w : normalized) {
     if (w.focused && !w.appId.isEmpty()) {
       newFocus = w.appId;
       break;
@@ -135,7 +199,7 @@ void WaylandWindowMonitor::ingestSnapshot(const QList<WindowInfo> &windows) {
   }
   // Fall back to the focused window's title when the class is hidden.
   if (newFocus.isEmpty()) {
-    for (const WindowInfo &w : windows) {
+    for (const WindowInfo &w : normalized) {
       if (w.focused && !w.title.isEmpty()) {
         newFocus = w.title;
         break;
@@ -146,7 +210,7 @@ void WaylandWindowMonitor::ingestSnapshot(const QList<WindowInfo> &windows) {
   bool focusChanged = false;
   {
     QMutexLocker lg(&m_mutex);
-    m_windows = windows;
+    m_windows = normalized;
     if (newFocus != m_focusedAppId) {
       m_focusedAppId = newFocus;
       focusChanged = true;
@@ -158,10 +222,13 @@ void WaylandWindowMonitor::ingestSnapshot(const QList<WindowInfo> &windows) {
 }
 
 void WaylandWindowMonitor::checkFocusedApp() {
+  collectRetired();
   // Watchdog tick. The KWin backend is event-driven (the script pushes on
   // window changes); CLI polling backends refresh here.
   if (!m_monitoring)
     return;
+  if (!m_gnome && !m_hyprland && !m_sway && !m_pollOverride)
+    return; // KWin is push-only; housekeeping needs no polling worker.
   if (m_pollFuture.valid()) {
     if (m_pollFuture.wait_for(std::chrono::seconds(0)) !=
         std::future_status::ready)
@@ -173,62 +240,82 @@ void WaylandWindowMonitor::checkFocusedApp() {
     }
   }
   try {
-    m_pollFuture = std::async(std::launch::async, [this]() {
-      if (m_gnome)
-        m_gnome->refresh();
-      if (m_hyprland)
-        m_hyprland->refresh();
-      if (m_sway)
-        m_sway->refresh();
+    m_pollFuture = std::async(std::launch::async,
+        [gnome = m_gnome, hyprland = m_hyprland, sway = m_sway,
+         override = m_pollOverride]() {
+      if (override) { override(); return; }
+      if (gnome) gnome->refresh();
+      if (hyprland) hyprland->refresh();
+      if (sway) sway->refresh();
     });
   } catch (const std::exception &e) {
     qWarning() << "Unable to start compositor poll:" << e.what();
   }
 }
 
+void WaylandWindowMonitor::collectRetired() {
+  std::erase_if(m_retired, [](const Retired &retired) {
+    if (retired.poll.valid() && retired.poll.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+      return false;
+    const auto kwin = std::dynamic_pointer_cast<KWinBackend>(retired.backend);
+    return !kwin || !kwin->hasPendingWork();
+  });
+  const auto before = m_removals.size();
+  std::erase_if(m_removals, [](const auto &future) {
+    return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  });
+  if (before != m_removals.size()) emit windowsChanged();
+  if (!m_monitoring && m_retired.empty() && m_removals.empty()) m_pollTimer->stop();
+}
+
 void WaylandWindowMonitor::onBackendWindowsUpdated() {
+  if (!m_monitoring) return;
   QObject *src = sender();
-  if (m_kwin && src == m_kwin)
+  if (m_kwin && src == m_kwin.get())
     ingestSnapshot(m_kwin->windows());
-  else if (m_gnome && src == m_gnome)
+  else if (m_gnome && src == m_gnome.get())
     ingestSnapshot(m_gnome->windows());
-  else if (m_hyprland && src == m_hyprland)
+  else if (m_hyprland && src == m_hyprland.get())
     ingestSnapshot(m_hyprland->windows());
-  else if (m_sway && src == m_sway)
+  else if (m_sway && src == m_sway.get())
     ingestSnapshot(m_sway->windows());
 }
 
 void WaylandWindowMonitor::setupCompositorTracking() {
   if (m_compositor.contains("kwin", Qt::CaseInsensitive)) {
     if (!m_kwin) {
-      m_kwin = new KWinBackend(this);
-      connect(m_kwin, &KWinBackend::windowsUpdated, this,
-              &WaylandWindowMonitor::onBackendWindowsUpdated);
+      m_kwin = std::make_shared<KWinBackend>();
+      const auto generation = m_generation;
+      connect(m_kwin.get(), &KWinBackend::windowsUpdated, this,
+              [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
     if (!m_kwin->start())
       qWarning() << "KWin backend failed to start; window data unavailable";
   } else if (m_compositor.contains("gnome", Qt::CaseInsensitive) ||
              m_compositor.contains("mutter", Qt::CaseInsensitive)) {
     if (!m_gnome) {
-      m_gnome = new GnomeBackend(this);
-      connect(m_gnome, &GnomeBackend::windowsUpdated, this,
-              &WaylandWindowMonitor::onBackendWindowsUpdated);
+      m_gnome = std::make_shared<GnomeBackend>();
+      const auto generation = m_generation;
+      connect(m_gnome.get(), &GnomeBackend::windowsUpdated, this,
+              [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
     if (!m_gnome->start())
       qWarning() << "GNOME backend failed to start; window data unavailable";
   } else if (m_compositor.contains("hyprland", Qt::CaseInsensitive)) {
     if (!m_hyprland) {
-      m_hyprland = new HyprlandBackend(this);
-      connect(m_hyprland, &HyprlandBackend::windowsUpdated, this,
-              &WaylandWindowMonitor::onBackendWindowsUpdated);
+      m_hyprland = std::make_shared<HyprlandBackend>();
+      const auto generation = m_generation;
+      connect(m_hyprland.get(), &HyprlandBackend::windowsUpdated, this,
+              [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
     if (!m_hyprland->start())
       qWarning() << "Hyprland backend failed to start; window data unavailable";
   } else if (m_compositor.contains("sway", Qt::CaseInsensitive)) {
     if (!m_sway) {
-      m_sway = new SwayBackend(this);
-      connect(m_sway, &SwayBackend::windowsUpdated, this,
-              &WaylandWindowMonitor::onBackendWindowsUpdated);
+      m_sway = std::make_shared<SwayBackend>();
+      const auto generation = m_generation;
+      connect(m_sway.get(), &SwayBackend::windowsUpdated, this,
+              [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
     if (!m_sway->start())
       qWarning() << "Sway backend failed to start; window data unavailable";

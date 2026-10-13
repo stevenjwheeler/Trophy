@@ -1,7 +1,8 @@
 /*
  * Trophy - Unit Tests
  * GlobalShortcutManager: catalogue, routing and bound-map logic.
- * No portal needed (D-Bus calls are only made on requestShortcuts).
+ * Fake request/session state exercises real response handlers without
+ * requesting or configuring shortcuts on the user's live portal.
  */
 
 #include <QCoreApplication>
@@ -28,11 +29,61 @@ public:
 static auto *env =
     testing::AddGlobalTestEnvironment(new GlobalShortcutTestEnvironment);
 
-class GlobalShortcutTest : public ::testing::Test {};
+class GlobalShortcutTest : public ::testing::Test {
+protected:
+  static void injectRequest(GlobalShortcutManager &mgr,
+                            const QString &session = {}) {
+    mgr.m_sessionHandle = session;
+    mgr.m_pendingRequestPath = "/org/freedesktop/portal/desktop/request/trophy_test/1";
+    mgr.m_requestInFlight = true;
+    mgr.m_bindingRequest = !session.isEmpty();
+    mgr.m_requestTimeout.start();
+  }
 
-TEST_F(GlobalShortcutTest, EnsureSetupWithoutPortalIsSafeNoOp) {
-  GlobalShortcutManager mgr; // no portal here: neither path can act
+  static void expireRequest(GlobalShortcutManager &mgr) {
+    mgr.onRequestTimeout();
+  }
+
+  static void bindResponse(GlobalShortcutManager &mgr, unsigned int response,
+                           const QVariantMap &results = {}) {
+    mgr.onBindResponse(response, results);
+  }
+
+  static QString session(const GlobalShortcutManager &mgr) {
+    return mgr.m_sessionHandle;
+  }
+
+  static QString pendingRequest(const GlobalShortcutManager &mgr) {
+    return mgr.m_pendingRequestPath;
+  }
+
+  static bool timerActive(const GlobalShortcutManager &mgr) {
+    return mgr.m_requestTimeout.isActive();
+  }
+
+  // Mirrors requestShortcuts' early-return gates without issuing a live
+  // CreateSession call (which could open a system hotkey dialog).
+  static bool readyForFreshRequest(const GlobalShortcutManager &mgr) {
+    return !mgr.m_bound && !mgr.m_requestInFlight && mgr.m_pendingRequestPath.isEmpty() &&
+           mgr.m_sessionHandle.isEmpty();
+  }
+
+  static void setAvailable(GlobalShortcutManager &mgr, bool available) {
+    mgr.setAvailable(available);
+  }
+
+  static bool cachedAvailability(const GlobalShortcutManager &mgr) {
+    return mgr.m_available;
+  }
+};
+
+TEST_F(GlobalShortcutTest, EnsureSetupDuringPendingRequestIsSafeNoOp) {
+  GlobalShortcutManager mgr;
+  injectRequest(mgr);
+  const QString pending = pendingRequest(mgr);
   mgr.ensureSetup();
+  EXPECT_EQ(pendingRequest(mgr), pending);
+  EXPECT_TRUE(timerActive(mgr));
   EXPECT_FALSE(mgr.isBound());
 }
 
@@ -154,11 +205,107 @@ TEST_F(GlobalShortcutTest, RemapWhileBoundStillNotifiesUi) {
   EXPECT_EQ(spy.count(), 3);
 }
 
-TEST_F(GlobalShortcutTest, RequestWithoutPortalIsSafeNoOp) {
+TEST_F(GlobalShortcutTest, RequestDuringPendingRequestIsSafeNoOp) {
   GlobalShortcutManager mgr;
-  // Must never crash or emit, portal or not.
+  injectRequest(mgr);
+  const QString pending = pendingRequest(mgr);
+  // Both entry points hit the pending-request gate before any portal call.
   mgr.requestShortcuts();
-  mgr.reconfigureShortcuts(); // no session: falls back to bind attempt
+  mgr.reconfigureShortcuts();
+  EXPECT_EQ(pendingRequest(mgr), pending);
   EXPECT_TRUE(mgr.boundShortcuts().isEmpty());
   EXPECT_FALSE(mgr.isBound());
+}
+
+TEST_F(GlobalShortcutTest, TimeoutClearsCreateAndBindRequestsForFreshRetry) {
+  for (const QString &handle : {QString(), QString("/trophy_test/session")}) {
+    SCOPED_TRACE(handle.toStdString());
+    GlobalShortcutManager mgr;
+    QSignalSpy boundSpy(&mgr, &GlobalShortcutManager::boundChanged);
+    QSignalSpy availabilitySpy(&mgr, &GlobalShortcutManager::availabilityChanged);
+    injectRequest(mgr, handle);
+    ASSERT_FALSE(readyForFreshRequest(mgr));
+    ASSERT_TRUE(timerActive(mgr));
+
+    expireRequest(mgr);
+    EXPECT_TRUE(pendingRequest(mgr).isEmpty());
+    EXPECT_TRUE(session(mgr).isEmpty());
+    EXPECT_FALSE(timerActive(mgr));
+    EXPECT_TRUE(readyForFreshRequest(mgr));
+    EXPECT_EQ(boundSpy.count(), 0);
+    EXPECT_EQ(availabilitySpy.count(), 0);
+
+    // A duplicate timeout must be harmless after the request is retired.
+    expireRequest(mgr);
+    EXPECT_TRUE(readyForFreshRequest(mgr));
+    EXPECT_EQ(boundSpy.count(), 0);
+    EXPECT_EQ(availabilitySpy.count(), 0);
+  }
+}
+
+TEST_F(GlobalShortcutTest, CancelledOrFailedBindClearsSessionForFreshRetry) {
+  for (unsigned int response : {1u, 2u}) {
+    SCOPED_TRACE(response);
+    GlobalShortcutManager mgr;
+    QSignalSpy toggleSpy(&mgr, &GlobalShortcutManager::toggleRecordingRequested);
+    QSignalSpy boundSpy(&mgr, &GlobalShortcutManager::boundChanged);
+    const QString oldSession = "/trophy_test/session";
+    injectRequest(mgr, oldSession);
+
+    bindResponse(mgr, response);
+    EXPECT_TRUE(pendingRequest(mgr).isEmpty());
+    EXPECT_TRUE(session(mgr).isEmpty());
+    EXPECT_FALSE(timerActive(mgr));
+    EXPECT_TRUE(readyForFreshRequest(mgr));
+    EXPECT_EQ(boundSpy.count(), 0);
+    mgr.handleActivated(QDBusObjectPath(oldSession), "toggle-recording");
+    EXPECT_EQ(toggleSpy.count(), 0);
+  }
+}
+
+TEST_F(GlobalShortcutTest, AvailabilityNotifiesExactlyOncePerFlip) {
+  GlobalShortcutManager mgr;
+  // Normalize before installing the spy: independent of the live portal.
+  setAvailable(mgr, false);
+  QSignalSpy spy(&mgr, &GlobalShortcutManager::availabilityChanged);
+  setAvailable(mgr, false);
+  EXPECT_EQ(spy.count(), 0);
+  setAvailable(mgr, true);
+  EXPECT_TRUE(cachedAvailability(mgr));
+  EXPECT_EQ(spy.count(), 1);
+  setAvailable(mgr, true);
+  EXPECT_EQ(spy.count(), 1);
+  setAvailable(mgr, false);
+  EXPECT_FALSE(cachedAvailability(mgr));
+  EXPECT_EQ(spy.count(), 2);
+  setAvailable(mgr, false);
+  EXPECT_EQ(spy.count(), 2);
+}
+
+TEST_F(GlobalShortcutTest, EmptyBindResponseSafelyClearsOldBindingsOnce) {
+  GlobalShortcutManager mgr;
+  PortalShortcut shortcut;
+  shortcut.id = "toggle-recording";
+  shortcut.options["trigger_description"] = "F8";
+  mgr.applyBoundShortcuts({shortcut});
+  ASSERT_TRUE(mgr.isBound());
+  QSignalSpy spy(&mgr, &GlobalShortcutManager::boundChanged);
+  const QString handle = "/trophy_test/session";
+  injectRequest(mgr, handle);
+
+  bindResponse(mgr, 0); // successful response missing the shortcuts field
+  EXPECT_FALSE(mgr.isBound());
+  EXPECT_TRUE(mgr.boundShortcuts().isEmpty());
+  EXPECT_TRUE(pendingRequest(mgr).isEmpty());
+  EXPECT_FALSE(timerActive(mgr));
+  EXPECT_TRUE(session(mgr).isEmpty()); // unusable bind permits a full retry
+  EXPECT_TRUE(readyForFreshRequest(mgr));
+  EXPECT_EQ(spy.count(), 1);
+
+  injectRequest(mgr, handle);
+  bindResponse(mgr, 0, {{"shortcuts", QString("malformed")}});
+  EXPECT_FALSE(mgr.isBound());
+  EXPECT_TRUE(mgr.boundShortcuts().isEmpty());
+  EXPECT_FALSE(timerActive(mgr));
+  EXPECT_EQ(spy.count(), 1);
 }

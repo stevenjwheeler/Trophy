@@ -9,6 +9,7 @@
 
 #include "IEncoder.h"
 #include <QString>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -53,10 +54,10 @@ public:
 
   // Zero-copy telemetry: input frames encoded via the DMA-BUF hwmap path
   // vs. the CPU fallback, and inputs that produced no frame at all.
-  int64_t zeroCopyFrames() const { return m_zeroCopyFrames; }
-  int64_t eglImportFrames() const { return m_eglImportFrames; }
-  int64_t fallbackFrames() const { return m_fallbackFrames; }
-  int64_t droppedFrames() const { return m_droppedFrames; }
+  int64_t zeroCopyFrames() const { return m_zeroCopyFrames.load(); }
+  int64_t eglImportFrames() const { return m_eglImportFrames.load(); }
+  int64_t fallbackFrames() const { return m_fallbackFrames.load(); }
+  int64_t droppedFrames() const { return m_droppedFrames.load(); }
 
 private:
   bool initializeCodec(const EncoderConfig &config);
@@ -85,11 +86,14 @@ private:
   int64_t m_firstTimestamp = -1;
   bool m_initialized = false;
 
-  // Step-1 observability: zero-copy vs. fallback accounting.
-  int64_t m_zeroCopyFrames = 0;
-  int64_t m_eglImportFrames = 0;
-  int64_t m_fallbackFrames = 0;
-  int64_t m_droppedFrames = 0;
+  // Step-1 observability: zero-copy vs. fallback accounting. Written
+  // on the encode thread, read via GUI getters: atomics, no lock needed.
+  // (FFmpegEncoder.cpp uses only m_x = 0 / m_x++ / reads / sums, all of
+  // which work on atomics via store/fetch-add/load-conversion.)
+  std::atomic<int64_t> m_zeroCopyFrames{0};
+  std::atomic<int64_t> m_eglImportFrames{0};
+  std::atomic<int64_t> m_fallbackFrames{0};
+  std::atomic<int64_t> m_droppedFrames{0};
   bool m_lastMapSucceeded = true; // suppress transition spam; first failure logs
   bool m_lastImportSucceeded = true;
   bool m_summaryLogged = false;

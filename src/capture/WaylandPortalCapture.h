@@ -8,6 +8,8 @@
 #pragma once
 
 #include "IVideoCaptureSource.h"
+#include <QDBusContext>
+#include <QTimer>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -17,6 +19,8 @@
 #include <spa/param/video/format-utils.h>
 #include <vector>
 
+class QDBusPendingCallWatcher;
+
 namespace TrophyBackend {
 
 /**
@@ -25,7 +29,7 @@ namespace TrophyBackend {
  * Uses the portal API to request screen sharing permission and
  * PipeWire to receive the video stream.
  */
-class WaylandPortalCapture : public IVideoCaptureSource {
+class WaylandPortalCapture : public IVideoCaptureSource, protected QDBusContext {
   Q_OBJECT
 
 public:
@@ -36,6 +40,8 @@ public:
   void setFrameCallback(FrameCallback callback) override;
   bool startCapture() override;
   void stopCapture() override;
+  void prepareStopCapture() override;
+  void finishStopCapture() override;
   bool isCapturing() const override;
   CaptureCapabilities capabilities() const override;
   QSize nativeResolution() const override;
@@ -54,8 +60,21 @@ private slots:
   void onSessionCreated(unsigned int response, const QVariantMap &results);
   void onSourcesSelected(unsigned int response, const QVariantMap &results);
   void onStartResponse(unsigned int response, const QVariantMap &results);
+  // Async portal method replies (GUI thread). Each validates the
+  // request-handle reply and subscribes to the portal Request Response
+  // signal, which arrives in the onSessionCreated/onSourcesSelected/
+  // onStartResponse slot above. Late replies after watchdog/stop are
+  // ignored via m_starting.
+  void onCreateSessionCallFinished(QDBusPendingCallWatcher *watcher,
+                                   quint64 generation);
+  void onSelectSourcesCallFinished(QDBusPendingCallWatcher *watcher,
+                                   quint64 generation);
+  void onStartCallFinished(QDBusPendingCallWatcher *watcher,
+                           quint64 generation);
+  void onStartWatchdogTimeout();
 
 private:
+  friend class WaylandPortalCaptureTest;
   // Issue SelectSources on the current session. Extracted so a stale
   // restore token can retry without it in the same session.
   void requestSelectSources();
@@ -66,6 +85,8 @@ private:
   void closePortalSession();
   bool startPipeWireStream(uint32_t nodeId);
   void stopPipeWireStream();
+  void postNativeReady(quint64 generation);
+  void postNativeError(const QString &error, quint64 generation);
 
   static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error);
   static void on_stream_param_changed(void *data, unsigned int id, const struct spa_pod *param);
@@ -96,7 +117,19 @@ private:
   std::mutex m_callbackMutex;
   CaptureConfig m_config;
   std::atomic<bool> m_capturing{false};
-  QSize m_resolution;
+  // prepare never waits on a callback/native lock. finish owns native teardown;
+  // its final store re-enables owner-thread initialize/start after full drain.
+  std::atomic_bool m_retiring{false};
+  std::mutex m_retirementMutex;
+  std::atomic_bool m_nativeEventsEnabled{false};
+  std::atomic<quint64> m_nativeGeneration{0};
+  // Private daemon-free teardown seam, configured only before retirement.
+  std::function<void()> m_nativeStopOverride;
+  // Published on the PipeWire stream thread (format negotiation), read on
+  // the GUI thread by nativeResolution() and on the stream thread per
+  // frame: separate atomics, no lock needed.
+  std::atomic<int> m_resolutionWidth{0};
+  std::atomic<int> m_resolutionHeight{0};
   int m_pipewireNodeId = -1;
   QString m_sourceLabel;
   uint32_t m_sourcePid = 0;
@@ -112,12 +145,39 @@ private:
   bool m_buffersResultLogged = false;
   // Step-1 observability: per-buffer-type frame accounting for the
   // zero-copy vs. shared-memory paths. -1 = unknown, 0 = shm, 1 = DMA-BUF.
-  uint64_t m_dmaBufFrames = 0;
-  uint64_t m_shmFrames = 0;
-  uint64_t m_droppedBuffers = 0;
-  int m_lastBufferType = -1;
+  // Written on the PipeWire stream thread, read on the GUI thread in
+  // stopPipeWireStream(): atomics, no lock needed.
+  std::atomic<uint64_t> m_dmaBufFrames{0};
+  std::atomic<uint64_t> m_shmFrames{0};
+  std::atomic<uint64_t> m_droppedBuffers{0};
+  std::atomic<int> m_lastBufferType{-1};
   bool m_multiPlaneWarned = false;
   bool m_gpuOnlyWarned = false;
+  // Format-negotiation dedup: ready() fires only on first negotiate or an
+  // actual format change; a mid-stream renegotiation of the same format is
+  // ignored so downstream encoder init is not re-fired. Touched only on
+  // the PipeWire stream thread.
+  bool m_formatReadyEmitted = false;
+  uint32_t m_lastFormatVideo = 0;
+  int m_lastFormatWidth = 0;
+  int m_lastFormatHeight = 0;
+  uint64_t m_lastFormatModifier = 0;
+  // Start-up re-entry guard + watchdog: a concurrent start is rejected
+  // while one portal round-trip is in flight; the single-shot watchdog
+  // emits captureError if no terminal signal arrives in time. GUI thread
+  // only. Method watchers capture their attempt generation, while response
+  // slots verify the D-Bus request path. Comparing two mutable members
+  // would let an old reply through after retry re-armed m_starting.
+  bool m_starting = false;
+  quint64 m_startGeneration = 0;
+  quint64 m_attemptGeneration = 0;
+  QTimer m_startWatchdog;
+  void clearStartGuard();
+  // Applies async PipeWire metadata enrichment (identity correction) back
+  // on the GUI thread. Portal-provided labels are already usable
+  // synchronously; this only refines them.
+  void applySourceMetadata(const QString &name, uint32_t pid, bool found,
+                           quint64 generation);
 };
 
 } // namespace TrophyBackend

@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMetaObject>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
@@ -46,9 +47,26 @@ ReplayManager::ReplayManager(QObject *parent) : QObject(parent) {
   connect(m_rotationTimer, &QTimer::timeout, this,
           &ReplayManager::rotateSegment);
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
+  m_lookupTimer = new QTimer(this);
+  m_lookupTimer->setInterval(10);
+  connect(m_lookupTimer, &QTimer::timeout, this, &ReplayManager::pollLookupWorker);
+  m_retirementTimer = new QTimer(this);
+  m_retirementTimer->setInterval(10);
+  connect(m_retirementTimer, &QTimer::timeout, this, &ReplayManager::pollRetirements);
 }
 
-ReplayManager::~ReplayManager() { stopDvr(); }
+ReplayManager::~ReplayManager() {
+  m_shuttingDown = true;
+  m_pendingGameName.clear();
+  stopDvr();
+  for (auto &retired : m_retiringSegments)
+    retired->session->stop();
+  if (m_captureStopWorker.valid()) m_captureStopWorker.get();
+  if (m_saveThread.joinable()) m_saveThread.join();
+  if (m_audioMixer) m_audioMixer->stopAll();
+  pollRetirements();
+  if (m_lookupWorker.valid()) m_lookupWorker.get();
+}
 
 void ReplayManager::setSettingsManager(SettingsManager *settings) {
   m_settings = settings;
@@ -61,7 +79,7 @@ void ReplayManager::setStorageManager(StorageManager *storage) {
 void ReplayManager::setState(State s) {
   if (m_state != s) {
     m_state = s;
-    emit replayStateChanged();
+    if (!m_shuttingDown) emit replayStateChanged();
   }
 }
 
@@ -129,16 +147,25 @@ void ReplayManager::startDvr(const QString &gameName) {
   if (m_paused)
     return;
   if (m_state != State::Idle) {
+    if (m_state == State::Stopping) {
+      m_pendingGameName = gameName;
+      return;
+    }
     if (m_gameName == gameName)
       return; // already buffering this game
     stopDvr();
+    if (m_state == State::Idle) startDvr(gameName);
+    else m_pendingGameName = gameName;
+    return;
   }
   m_gameName = gameName;
+  ++m_captureGeneration;
+  m_captureReadyForPipeline = false;
   m_segments.clear();
   m_segmentIndex = 0;
   m_dvrClock.start();
   if (!beginCapture()) {
-    m_gameName.clear();
+    stopDvr();
     return;
   }
   setState(State::StartingCapture);
@@ -146,22 +173,46 @@ void ReplayManager::startDvr(const QString &gameName) {
 }
 
 void ReplayManager::stopDvr() {
+  m_pendingGameName.clear(); // Explicit stop supersedes any deferred restart.
+  if (m_state == State::Stopping)
+    return;
+  ++m_captureGeneration;
   m_rotationTimer->stop();
+  m_captureReadyForPipeline = false;
   // A clip worker may still be reading finalized segments. Retire it before
   // clearing those files or destroying the manager that owns its callback.
-  if (m_saveThread.joinable())
-    m_saveThread.join();
+  m_saveWaitingForRetirement = false;
+  setState(State::Stopping);
+  if (m_session) {
+    auto retired = std::make_unique<RetiringSegment>();
+    retired->session = std::move(m_session);
+    retired->encoder = std::move(m_encoder);
+    retired->muxer = std::move(m_muxer);
+    retired->segment = {m_openSegmentPath, m_openSegmentStart,
+                       std::max(0.0, elapsedSec() - m_openSegmentStart)};
+    retired->session->requestStop();
+    m_retiringSegments.push_back(std::move(retired));
+    m_openSegmentPath.clear();
+  } else if (m_capture) {
+    m_capture->prepareStopCapture();
+    m_captureStopWorker = std::async(std::launch::async,
+        [capture = m_capture.get()] { capture->finishStopCapture(); });
+  }
+  if (m_audioMixer) m_audioMixer->stopSourcesAsync();
+  m_audioSetupKey.clear();
+  // Drop the node-lookup cache and orphan any refresh worker in flight
+  // (its delivery checks the generation and discards itself).
+  m_lookupCacheValid = false;
+  ++m_lookupGeneration;
+  m_retirementTimer->start();
+  pollRetirements();
+}
+
+void ReplayManager::completeDvrStop() {
   const QString game = m_gameName;
   const int closedCount = m_segments.size() + (m_openSegmentPath.isEmpty() ? 0 : 1);
-  if (m_session) {
-    m_session->stop();
-    m_session.reset();
-  }
-  if (m_audioMixer) {
-    for (int i = 0; i < AudioMixer::kTrackCount; ++i)
-      m_audioMixer->removeSource(i);
-  }
-  m_audioSetupKey.clear();
+  m_saveInputPaths.clear();
+  m_saving = false;
   m_muxer.reset();
   m_encoder.reset();
   m_capture.reset();
@@ -178,7 +229,10 @@ void ReplayManager::stopDvr() {
   setState(State::Idle);
   if (!game.isEmpty())
     qInfo() << "Instant replay DVR stopped for" << game << "("
-            << closedCount << "cached segment(s) cleared)";
+             << closedCount << "cached segment(s) cleared)";
+  const QString pending = std::exchange(m_pendingGameName, {});
+  if (!m_shuttingDown && m_state == State::Idle && !pending.isEmpty())
+    startDvr(pending);
 }
 
 void ReplayManager::setPaused(bool paused) {
@@ -197,31 +251,12 @@ void ReplayManager::clearSegments() {
 }
 
 bool ReplayManager::beginCapture() {
-  m_capture = CaptureFactory::createBestSource();
+  m_capture = m_captureFactory ? m_captureFactory() : CaptureFactory::createBestSource();
   if (!m_capture) {
     qWarning() << "Replay DVR: no capture source";
     return false;
   }
-  connect(m_capture.get(), &IVideoCaptureSource::ready, this,
-          &ReplayManager::onCaptureReady, Qt::QueuedConnection);
-  connect(m_capture.get(), &IVideoCaptureSource::captureError, this,
-          &ReplayManager::onCaptureError, Qt::QueuedConnection);
-  connect(m_capture.get(), &IVideoCaptureSource::restoreTokenUpdated, this,
-          [this](const QString &token) {
-            if (m_settings && !m_gameName.isEmpty()) {
-              qDebug() << "DVR: saving Wayland restore token for game:"
-                       << m_gameName << "(fp:" << token.left(4) << ")";
-              m_settings->setRestoreToken(m_gameName, token);
-            }
-          });
-  connect(m_capture.get(), &IVideoCaptureSource::restoreTokenStale, this,
-          [this](const QString &oldToken) {
-            Q_UNUSED(oldToken)
-            qWarning() << "DVR: saved restore token rejected for" << m_gameName
-                       << "- re-authorizing";
-            stopDvr();
-            emit restoreAuthNeeded(m_gameName);
-          });
+  connectCaptureSignals();
 
   CaptureConfig cfg;
   cfg.targetFps = m_settings->fps();
@@ -237,10 +272,56 @@ bool ReplayManager::beginCapture() {
   return m_capture->startCapture();
 }
 
+void ReplayManager::connectCaptureSignals() {
+  const QPointer<IVideoCaptureSource> owner(m_capture.get());
+  const uint64_t generation = m_captureGeneration;
+  connect(m_capture.get(), &IVideoCaptureSource::ready, this,
+          [this, owner, generation] {
+            if (generation == m_captureGeneration && owner && owner == m_capture.get())
+              onCaptureReady();
+          }, Qt::QueuedConnection);
+  connect(m_capture.get(), &IVideoCaptureSource::captureError, this,
+          [this, owner, generation](const QString &error) {
+            if (generation == m_captureGeneration && owner && owner == m_capture.get())
+              onCaptureError(error);
+          }, Qt::QueuedConnection);
+  connect(m_capture.get(), &IVideoCaptureSource::restoreTokenUpdated, this,
+          [this, owner, generation](const QString &token) {
+            if (generation == m_captureGeneration && owner && owner == m_capture.get() && m_settings &&
+                !m_gameName.isEmpty()) {
+              qDebug() << "DVR: saving Wayland restore token for game:"
+                       << m_gameName << "(fp:" << token.left(4) << ")";
+              m_settings->setRestoreToken(m_gameName, token);
+            }
+          });
+  connect(m_capture.get(), &IVideoCaptureSource::restoreTokenStale, this,
+          [this, owner, generation](const QString &token) {
+            if (generation == m_captureGeneration && owner && owner == m_capture.get())
+              onRestoreTokenStale(token);
+          }, Qt::QueuedConnection);
+
+}
+
+void ReplayManager::onRestoreTokenStale(const QString &oldToken) {
+  Q_UNUSED(oldToken)
+  // Copy before stopDvr(): it clears m_gameName, and the re-auth prompt
+  // needs the identity (RecordingManager follows the same pattern).
+  const QString game = m_gameName;
+  qWarning() << "DVR: saved restore token rejected for" << game
+             << "- re-authorizing";
+  stopDvr();
+  emit restoreAuthNeeded(game);
+}
+
 void ReplayManager::onCaptureReady() {
   if (m_state != State::StartingCapture)
     return;
-  if (!switchSegment()) {
+  m_captureReadyForPipeline = true;
+  if (!m_lookupCacheValid || m_lookupAudioKey != audioSetupKey()) {
+    refreshLookupCacheAsync();
+    return;
+  }
+  if (!(m_segmentBuilder ? m_segmentBuilder() : switchSegment())) {
     qWarning() << "Replay DVR: segment failed to start";
     stopDvr();
     emit replayFailed("Clips could not start buffering.");
@@ -333,7 +414,7 @@ bool ReplayManager::switchSegment() {
   const bool rebuildSources = !m_session || key != m_audioSetupKey;
   if (rebuildSources && m_audioMixer) {
     for (int i = 0; i < AudioMixer::kTrackCount; ++i)
-      m_audioMixer->removeSource(i);
+      m_audioMixer->removeSourceAsync(i);
   }
   int audioTracks = 0;
   QStringList gameHints;
@@ -356,7 +437,13 @@ bool ReplayManager::switchSegment() {
           m_settings->audioMode() != "desktop",
       192, audioTracks, meta);
   connect(newSession.get(), &RecordingSession::errorOccurred, this,
-          &ReplayManager::onCaptureError);
+          [this, owner = QPointer<RecordingSession>(newSession.get())]
+          (const QString &error) {
+            // Start failures are handled by switchSegment's caller. A late
+            // error from a retired leg must not tear down its successor.
+            if (owner && owner == m_session.get())
+              onCaptureError(error);
+          }, Qt::QueuedConnection);
   // Wire the session's node retry (the DVR previously never re-checked:
   // voice joining mid-game and stream churn never healed until rotation).
   newSession->setGameAudioHints(gamePid, gameHints);
@@ -367,7 +454,11 @@ bool ReplayManager::switchSegment() {
     newSession->markSourceConnected(0);
   if (voiceFound && voiceTrack >= 0)
     newSession->markSourceConnected(voiceTrack);
+  if (!rebuildSources && m_session)
+    newSession->inheritAudioRouting(*m_session);
   // No dispatcher: segments ARE the buffer.
+  if (m_session)
+    m_session->retireAudioLookups();
   if (!newSession->start()) {
     QFile::remove(path);
     return false;
@@ -378,19 +469,173 @@ bool ReplayManager::switchSegment() {
   // stop: it drains its queues, flushes its encoders and finalizes its
   // file, but leaves capture, mixer sources and callbacks live.
   const double switchSec = elapsedSec();
-  if (m_session) {
-    m_session->stop(true, true);
-    m_session.reset();
-    m_segments.push_back({m_openSegmentPath, m_openSegmentStart,
-                          std::max(0.0, switchSec - m_openSegmentStart)});
-    m_openSegmentPath.clear();
-  }
+  const bool retired = retireOpenSegment(switchSec);
   m_encoder = std::move(newEncoder);
   m_muxer = std::move(newMuxer);
   m_session = std::move(newSession);
   m_openSegmentStart = switchSec;
   m_openSegmentPath = path;
+  // Publish the successor even on failure: the caller's stopDvr() must
+  // drain the leg that now owns capture/mixer routing before destroying it.
+  return retired;
+}
+
+bool ReplayManager::retireOpenSegment(double switchSec) {
+  if (!m_session)
+    return true;
+  auto retired = std::make_unique<RetiringSegment>();
+  retired->session = std::move(m_session);
+  retired->encoder = std::move(m_encoder);
+  retired->muxer = std::move(m_muxer);
+  retired->segment = {m_openSegmentPath, m_openSegmentStart,
+                     std::max(0.0, switchSec - m_openSegmentStart)};
+  retired->session->requestStop(true, true);
+  m_retiringSegments.push_back(std::move(retired));
+  m_retirementTimer->start();
+  m_openSegmentPath.clear();
   return true;
+}
+
+void ReplayManager::pollRetirements() {
+  if (m_saveThread.joinable() && m_saveDone &&
+      m_saveDone->load(std::memory_order_acquire)) {
+    m_saveThread.join();
+    m_saveInputPaths.clear();
+    m_saving = false;
+    auto result = std::move(m_saveResult);
+    if (result && !m_shuttingDown) {
+      if (result->ok) emit replaySaved(result->path, result->seconds);
+      else emit replayFailed(result->error.isEmpty() ? "Could not save replay." : result->error);
+    }
+  }
+  bool failed = false;
+  for (auto it = m_retiringSegments.begin(); it != m_retiringSegments.end();) {
+    auto &retired = **it;
+    if (retired.session->stopPending()) { ++it; continue; }
+    const bool succeeded = retired.session->outputSucceeded();
+    if (succeeded && m_state != State::Stopping) {
+      m_segments.push_back(retired.segment);
+      std::sort(m_segments.begin(), m_segments.end(), [](const auto &a, const auto &b) {
+        return a.startSec < b.startSec;
+      });
+    } else {
+      QFile::remove(retired.segment.path);
+      if (!succeeded && m_state == State::Running) failed = true;
+    }
+    it = m_retiringSegments.erase(it); // QObject destruction stays on owner.
+  }
+  if (failed) {
+    stopDvr();
+    emit replayFailed("Clips stopped: recording pipeline or output failed.");
+    return;
+  }
+  if (m_state == State::Stopping) {
+    if (!m_retiringSegments.empty()) return;
+    if (m_captureStopWorker.valid()) {
+      if (m_captureStopWorker.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        return;
+      m_captureStopWorker.get();
+    }
+    for (int track = 0; track < AudioMixer::kTrackCount; ++track)
+      if (m_audioMixer->sourceOperationPending(track)) return;
+    if (m_saveThread.joinable()) {
+      if (m_saveDone && !m_saveDone->load(std::memory_order_acquire)) return;
+      m_saveThread.join();
+    }
+    m_retirementTimer->stop();
+    completeDvrStop();
+    return;
+  }
+  if (m_saveWaitingForRetirement) {
+    const bool selectedPending = std::any_of(
+        m_retiringSegments.begin(), m_retiringSegments.end(), [&](const auto &retired) {
+      return m_saveInputPaths.contains(retired->segment.path);
+    });
+    if (!selectedPending) {
+      m_saveWaitingForRetirement = false;
+      beginReplayRemux(m_saveRequestNow);
+    }
+  }
+  if (m_retiringSegments.empty() && !m_saveThread.joinable() &&
+      !m_saveWaitingForRetirement)
+    m_retirementTimer->stop();
+}
+
+ReplayManager::DvrNodeLookup
+ReplayManager::lookupDvrNodes(uint32_t gamePid, const QStringList &gameHints,
+                              const QString &voiceApp) {
+  DvrNodeLookup out;
+  if (gamePid != 0) {
+    out.gameNodeId = PipeWireAudioSource::findNodeByPid(
+        gamePid, &out.gameNodeName, &out.gameNodeSerial);
+  }
+  for (const QString &hint : gameHints) {
+    if (out.gameNodeId != 0xFFFFFFFFu || hint.isEmpty())
+      break;
+    out.gameNodeId = PipeWireAudioSource::findNodeByProcessName(
+        hint, &out.gameNodeName, &out.gameNodeSerial);
+  }
+  out.gameFound = (out.gameNodeId != 0xFFFFFFFFu);
+  if (!voiceApp.isEmpty()) {
+    out.voiceNodeId = PipeWireAudioSource::findNodeByProcessName(
+        voiceApp, &out.voiceNodeName, &out.voiceNodeSerial);
+    out.voiceFound = (out.voiceNodeId != 0xFFFFFFFFu);
+  }
+  return out;
+}
+
+void ReplayManager::refreshLookupCacheAsync() {
+  if (m_lookupWorker.valid() || !m_settings)
+    return;
+  // Snapshot inputs on the GUI thread; the worker runs pure lookups only.
+  const uint32_t pid = m_capture ? m_capture->sourcePid() : 0;
+  QStringList hints;
+  if (m_capture) {
+    const QString hint = m_capture->sourceProcessName();
+    if (!hint.isEmpty())
+      hints << hint;
+  }
+  if (!m_gameName.isEmpty() && !hints.contains(m_gameName, Qt::CaseInsensitive))
+    hints << m_gameName;
+  const QString vcApp = m_settings->voiceChatApp().trimmed();
+  const quint64 generation = ++m_lookupGeneration;
+  m_lookupInflight = true;
+  m_workerLookupGeneration = generation;
+  m_workerAudioKey = audioSetupKey();
+  m_workerLookupCapture = m_capture.get();
+  const bool desktop = m_settings->audioMode() == "desktop";
+  m_lookupWorker = std::async(std::launch::async,
+      [lookup = m_nodeLookup, pid, hints, vcApp, desktop] {
+    return desktop ? DvrNodeLookup{} : lookup(pid, hints, vcApp);
+  });
+  m_lookupTimer->start();
+}
+
+void ReplayManager::pollLookupWorker() {
+  if (!m_lookupWorker.valid()) { m_lookupTimer->stop(); return; }
+  if (m_lookupWorker.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    return;
+  const auto result = m_lookupWorker.get();
+  m_lookupTimer->stop();
+  m_lookupInflight = false;
+  if (m_workerAudioKey == audioSetupKey() && m_workerLookupCapture == m_capture.get()) {
+    applyLookupCacheResult(m_workerLookupGeneration, result);
+    if (m_workerLookupGeneration == m_lookupGeneration)
+      m_lookupAudioKey = m_workerAudioKey;
+  }
+  if (m_state == State::StartingCapture && m_captureReadyForPipeline)
+    onCaptureReady();
+}
+
+void ReplayManager::applyLookupCacheResult(quint64 generation,
+                                          const DvrNodeLookup &fresh) {
+  m_lookupInflight = false;
+  // Drop stale results: a newer refresh, a stopDvr (which bumps the
+  // generation), or a fresh synchronous lookup superseded us.
+  if (generation != m_lookupGeneration)
+    return;
+  m_lookupCache = fresh;
+  m_lookupCacheValid = true;
 }
 
 void ReplayManager::setupAudioSources(int &trackCount,
@@ -398,6 +643,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
                                        uint32_t &gamePid, bool &gameFound,
                                        int &voiceTrack, bool &voiceFound,
                                        int &micTrack, bool createSources) {
+  const int retainedMicTrack = micTrack;
   trackCount = 0;
   gameHints.clear();
   gamePid = 0;
@@ -416,14 +662,14 @@ void ReplayManager::setupAudioSources(int &trackCount,
     if (createSources) {
       const QString dev = m_settings->gameAudioDevice();
       auto desktopSrc = PipeWireAudioSource::createMonitorSource(
-          dev == "default" ? QString() : dev);
+          dev == "default" ? QString() : dev, true);
       desktopSrc->setStreamName(QStringLiteral("trophy-desktop"));
-      m_audioMixer->addSource(std::move(desktopSrc), 0);
+      m_audioMixer->addSourceAsync(std::move(desktopSrc), 0);
       const QString micDev = m_settings->microphoneDevice();
       auto desktopMicSrc = PipeWireAudioSource::createInputSource(
-          micDev == "default" ? QString() : micDev);
+          micDev == "default" ? QString() : micDev, true);
       desktopMicSrc->setStreamName(QStringLiteral("trophy-mic"));
-      m_audioMixer->addSource(std::move(desktopMicSrc), 1);
+      m_audioMixer->addSourceAsync(std::move(desktopMicSrc), 1);
     }
     trackCount = 2;
     micTrack = 1;
@@ -441,57 +687,65 @@ void ReplayManager::setupAudioSources(int &trackCount,
   if (!m_gameName.isEmpty() &&
       !gameHints.contains(m_gameName, Qt::CaseInsensitive))
     gameHints << m_gameName;
+  const QString vcApp = m_settings->voiceChatApp().trimmed();
+  if (!createSources && m_session) {
+    // Availability is not slot identity. A merged voice source may have joined
+    // slot 2 after the mic was installed in slot 1; recomputing from the cache
+    // would swap them (or drop voice from the mix when its node disappears).
+    const auto routing = m_session->audioRoutingState();
+    trackCount = routing.activeTrackCount;
+    voiceTrack = routing.voiceTrack;
+    micTrack = retainedMicTrack;
+    gameFound = routing.connected[0] && !routing.gameIsFallback;
+    voiceFound = voiceTrack >= 0 && voiceTrack < AudioMixer::kTrackCount &&
+                 routing.connected[voiceTrack];
+    return;
+  }
+  // Startup waits for an owned immutable lookup. A settings-driven rebuild
+  // uses matching cached results or fallback routing plus a background refresh;
+  // no registry walk runs from this owner-thread source publication path.
+  const bool useCache = m_lookupCacheValid && m_lookupAudioKey == audioSetupKey();
+  const DvrNodeLookup lookup =
+      useCache ? m_lookupCache : DvrNodeLookup{};
+  if (!useCache) {
+    refreshLookupCacheAsync();
+  }
   int nextContiguous = 0;
   {
     const int gameTrack = isSeparate ? 0 : nextContiguous++;
-    uint32_t nodeId = 0xFFFFFFFFu;
-    QString nodeName, nodeSerial;
-    if (gamePid != 0) {
-      nodeId =
-          PipeWireAudioSource::findNodeByPid(gamePid, &nodeName, &nodeSerial);
-    }
-    for (const QString &hint : gameHints) {
-      if (nodeId != 0xFFFFFFFFu || hint.isEmpty())
-        break;
-      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
-                                                          &nodeSerial);
-    }
+    const uint32_t nodeId = lookup.gameNodeId;
     if (nodeId == 0xFFFFFFFFu) {
       if (createSources) {
-        auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString());
+        auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString(), true);
         fallbackSrc->setStreamName(QStringLiteral("trophy-game"));
-        m_audioMixer->addSource(std::move(fallbackSrc), gameTrack);
+        m_audioMixer->addSourceAsync(std::move(fallbackSrc), gameTrack);
       }
     } else {
       if (createSources) {
         auto gameSrc = PipeWireAudioSource::createApplicationSource(
-            nodeId, nodeName, nodeSerial);
+            nodeId, lookup.gameNodeName, lookup.gameNodeSerial);
         gameSrc->setStreamName(QStringLiteral("trophy-game"));
-        m_audioMixer->addSource(std::move(gameSrc), gameTrack);
+        m_audioMixer->addSourceAsync(std::move(gameSrc), gameTrack);
       }
       gameFound = true;
     }
     trackCount++;
   }
-  const QString vcApp = m_settings->voiceChatApp().trimmed();
   if (!vcApp.isEmpty()) {
-    QString vcName, vcSerial;
-    const uint32_t vcNode = PipeWireAudioSource::findNodeByProcessName(
-        vcApp, &vcName, &vcSerial);
-    if (vcNode != 0xFFFFFFFFu) {
+    if (lookup.voiceNodeId != 0xFFFFFFFFu) {
       voiceTrack = isSeparate ? 1 : nextContiguous++;
       if (createSources) {
         auto voiceSrc = PipeWireAudioSource::createApplicationSource(
-            vcNode, vcName, vcSerial);
+            lookup.voiceNodeId, lookup.voiceNodeName,
+            lookup.voiceNodeSerial);
         voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
-        m_audioMixer->addSource(std::move(voiceSrc), voiceTrack);
+        m_audioMixer->addSourceAsync(std::move(voiceSrc), voiceTrack);
       }
       trackCount++;
       voiceFound = true;
     } else if (isSeparate) {
-      // Reserve the slot so the session retry has somewhere to bind when
-      // the stream appears. Merged mode can't reserve (empty slot stalls
-      // the mix gate).
+      // Separate mode reserves the named slot. Merged mode adopts a free
+      // slot only when voice appears, preserving its current mic assignment.
       voiceTrack = 1;
     }
   }
@@ -499,10 +753,10 @@ void ReplayManager::setupAudioSources(int &trackCount,
     auto micSrc = PipeWireAudioSource::createInputSource(
         m_settings->microphoneDevice() == "default"
             ? QString()
-            : m_settings->microphoneDevice());
+            : m_settings->microphoneDevice(), true);
     micSrc->setStreamName(QStringLiteral("trophy-mic"));
     const int micSlot = isSeparate ? 2 : nextContiguous++;
-    m_audioMixer->addSource(std::move(micSrc), micSlot);
+    m_audioMixer->addSourceAsync(std::move(micSrc), micSlot);
     micTrack = micSlot;
   } else {
     micTrack = isSeparate ? 2 : nextContiguous++;
@@ -514,26 +768,28 @@ void ReplayManager::setupAudioSources(int &trackCount,
 }
 
 void ReplayManager::applyMicrophoneDevice() {
+  if (m_state != State::Running) return;
   if (!m_session || !m_audioMixer || !m_settings || m_micTrack < 0)
     return;
   const QString dev = m_settings->microphoneDevice();
   auto src = PipeWireAudioSource::createInputSource(
-      dev == "default" ? QString() : dev);
+      dev == "default" ? QString() : dev, true);
   src->setStreamName(QStringLiteral("trophy-mic"));
-  m_audioMixer->addSource(std::move(src), m_micTrack);
+  m_audioMixer->addSourceAsync(std::move(src), m_micTrack);
   qDebug() << "DVR live-applied microphone device:" << dev;
 }
 
 void ReplayManager::applyGameAudioDevice() {
+  if (m_state != State::Running) return;
   if (!m_session || !m_audioMixer || !m_settings)
     return;
   if (m_settings->audioMode() != "desktop")
     return;
   const QString dev = m_settings->gameAudioDevice();
   auto src = PipeWireAudioSource::createMonitorSource(
-      dev == "default" ? QString() : dev);
+      dev == "default" ? QString() : dev, true);
   src->setStreamName(QStringLiteral("trophy-desktop"));
-  m_audioMixer->addSource(std::move(src), 0);
+  m_audioMixer->addSourceAsync(std::move(src), 0);
   qDebug() << "DVR live-applied system audio device:" << dev;
 }
 
@@ -554,14 +810,32 @@ float ReplayManager::trackLevel(int trackIndex) const {
   return 0.0f;
 }
 
-void ReplayManager::applyVoiceChatApp() {  if (!m_session || !m_audioMixer || !m_settings)
+void ReplayManager::setSemanticTrackMuted(int role, bool muted) {
+  if (m_audioMixer) m_audioMixer->setSemanticTrackMuted(role, muted);
+}
+
+bool ReplayManager::isSemanticTrackMuted(int role) const {
+  return m_audioMixer && m_audioMixer->isSemanticTrackMuted(role);
+}
+
+float ReplayManager::semanticTrackLevel(int role) const {
+  return m_state == State::Running && m_audioMixer
+             ? m_audioMixer->semanticTrackLevel(role) : 0.0f;
+}
+
+void ReplayManager::applyVoiceChatApp() {
+  if (m_state != State::Running) return;
+  if (!m_session || !m_audioMixer || !m_settings)
     return;
+  // The session can adopt voice after initial setup; the manager's original
+  // slot is then stale until rotation. Live changes must target the actual leg.
+  m_voiceTrack = m_session->audioRoutingState().voiceTrack;
   const QString app = m_settings->voiceChatApp().trimmed();
   m_session->setVoiceChatApp(app);
   const bool isSeparate = m_settings->separateAudioTracks();
   if (app.isEmpty()) {
     if (m_voiceTrack >= 0) {
-      m_audioMixer->removeSource(m_voiceTrack);
+      m_audioMixer->removeSourceAsync(m_voiceTrack);
       m_session->forgetTrack(m_voiceTrack);
     }
     qDebug() << "DVR voice chat disabled mid-segment";
@@ -572,7 +846,7 @@ void ReplayManager::applyVoiceChatApp() {  if (!m_session || !m_audioMixer || !m
     m_session->setVoiceTrack(1);
   }
   if (m_voiceTrack >= 0) {
-    m_audioMixer->removeSource(m_voiceTrack);
+    m_audioMixer->removeSourceAsync(m_voiceTrack);
     m_session->forgetTrack(m_voiceTrack);
   }
   qDebug() << "DVR live-applied voice chat app:" << app;
@@ -585,7 +859,7 @@ void ReplayManager::rotateSegment() {
   if (!switchSegment()) {
     qWarning() << "Replay DVR: rotation failed";
     stopDvr();
-    emit replayFailed("Clips stopped: encoder error.");
+    emit replayFailed("Clips stopped: recording pipeline or output failed.");
     return;
   }
   pruneOldSegments(now);
@@ -595,7 +869,11 @@ void ReplayManager::pruneOldSegments(double now) {
   if (!m_settings)
     return;
   const double window = std::max(1, m_settings->clipBufferSeconds());
-  const QStringList dead = pruneList(m_segments, now, window);
+  QStringList dead = pruneList(m_segments, now, window);
+  // Rotation may overlap an arbitrarily slow remux. Keep every selected
+  // input until its worker settles, not merely until it opens the file.
+  for (const QString &input : m_saveInputPaths)
+    dead.removeAll(input);
   for (const QString &p : dead)
     QFile::remove(p);
   if (dead.isEmpty())
@@ -651,12 +929,35 @@ void ReplayManager::saveReplay() {
   if (!switchSegment()) {
     m_saving = false;
     stopDvr();
-    emit replayFailed("Clips stopped: encoder error.");
+    emit replayFailed("Clips stopped: recording pipeline or output failed.");
     return;
   }
 
-  const double window = std::max(1, m_settings->clipBufferSeconds());
+  m_saveRequestNow = now;
+  m_saveRequestWindow = std::max(1, m_settings->clipBufferSeconds());
+  m_saveRequestOutput = clipOutputPath();
+  m_saveInputPaths.clear();
+  for (const auto &segment : selectForWindow(m_segments, now, m_saveRequestWindow))
+    m_saveInputPaths << segment.path;
+  for (const auto &retired : m_retiringSegments)
+    if (retired->segment.endSec() > now - m_saveRequestWindow)
+      m_saveInputPaths << retired->segment.path;
+  m_saveWaitingForRetirement = true;
+  m_retirementTimer->start();
+  pollRetirements();
+}
+
+void ReplayManager::beginReplayRemux(double now) {
+  if (m_state != State::Running || !m_settings) {
+    m_saving = false;
+    m_saveInputPaths.clear();
+    return;
+  }
+  const double window = m_saveRequestWindow;
   QList<ReplaySegment> segs = selectForWindow(m_segments, now, window);
+  segs.erase(std::remove_if(segs.begin(), segs.end(), [&](const auto &segment) {
+    return !m_saveInputPaths.contains(segment.path);
+  }), segs.end()); // A later rotation must not move this request's clip tail.
   // Would-exceed guard: the remux stream-copies the selected segments, so
   // their on-disk total bounds the clip size (segments live in the cache
   // dir, uncounted in library usage — the clip adds ~that much to it).
@@ -666,6 +967,7 @@ void ReplayManager::saveReplay() {
       estimate += QFileInfo(s.path).size();
     if (m_storage->usedSize() + estimate > m_storage->maxSize()) {
       m_saving = false;
+      m_saveInputPaths.clear();
       emit replayFailed("Storage is full. Free space or enable auto-cleanup "
                         "to save clips.");
       return;
@@ -677,17 +979,26 @@ void ReplayManager::saveReplay() {
       segs.isEmpty()
           ? window
           : std::min(window, std::max(0.0, now - segs.front().startOffsetSec));
-  const QString out = clipOutputPath();
+  const QString out = m_saveRequestOutput;
 
   // Remux off the UI thread; completion hops back via queued invoke.
   // The clip is written to a .part file and atomically renamed: the
   // library watches this directory and must never see a half-written
   // file (it would generate a thumbnail for garbage).
-  QPointer<ReplayManager> self(this);
   const QString tmpOut = out + ".part";
   if (m_saveThread.joinable())
-    m_saveThread.join();
-  m_saveThread = std::thread([self, segs, window, fallbackSec, out, tmpOut]() {
+    return; // Never reuse a previous worker's input reservation.
+  m_saveInputPaths.clear();
+  for (const ReplaySegment &segment : segs)
+    m_saveInputPaths.push_back(segment.path);
+  m_saveDone = std::make_shared<std::atomic<bool>>(false);
+  m_saveResult = std::make_shared<ReplaySaveResult>();
+  m_saveThread = std::thread([segs, window, fallbackSec, out, tmpOut,
+                              done = m_saveDone, result = m_saveResult]() {
+    struct Completion {
+      std::shared_ptr<std::atomic<bool>> done;
+      ~Completion() { done->store(true, std::memory_order_release); }
+    } completion{done};
     QString err;
     double keptSec = 0.0;
     bool ok = ReplayClipper::saveTail(segs, window, tmpOut, &err, &keptSec);
@@ -700,23 +1011,12 @@ void ReplayManager::saveReplay() {
       QFile::remove(tmpOut);
     if (!ok && err.isEmpty())
       err = "Could not save the clip file.";
-    if (!self)
-      return;
-    QMetaObject::invokeMethod(
-        self, [self, ok, out, err, actualSec]() {
-          if (!self)
-            return;
-          self->m_saving = false;
-          // Buffering never paused (gapless switch above); just publish.
-          if (ok) {
-            emit self->replaySaved(out, actualSec);
-          } else {
-            emit self->replayFailed(err.isEmpty() ? "Could not save replay."
-                                                  : err);
-          }
-        },
-        Qt::QueuedConnection);
+    result->ok = ok;
+    result->path = out;
+    result->error = err;
+    result->seconds = actualSec;
   });
+  m_retirementTimer->start();
 }
 
 } // namespace TrophyBackend

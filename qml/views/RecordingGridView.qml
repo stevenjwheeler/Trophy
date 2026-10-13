@@ -73,7 +73,10 @@ GridView {
         RecordingCard {
             anchors.fill: parent
             recording: parent.recData
-            cardIndex: parent.recIdx
+            // Delegate index includes the live sentinel while recording
+            // (scrollToRecording adds the same offset in reverse): subtract
+            // it so shift-select ranges index into recordingLibrary.
+            cardIndex: parent.isLive ? -1 : parent.recIdx - ((typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0)
             onPlay: {
                 if (recording) {
                     window.openPlayer(recording.filePath);

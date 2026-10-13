@@ -131,6 +131,34 @@ QList<WindowInfo> HyprlandBackend::windows() const {
   return m_windows;
 }
 
+QString HyprlandBackend::signatureFor(const QList<WindowInfo> &windows) {
+  // Same shape as the GNOME signature (identity + focus/fullscreen +
+  // geometry) so coverage-only changes still emit.
+  QString sig;
+  sig.reserve(windows.size() * 64);
+  for (const WindowInfo &w : windows) {
+    sig += QString::number(w.id);
+    sig += '|';
+    sig += w.appId;
+    sig += '|';
+    sig += w.title;
+    sig += '|';
+    sig += QString::number(w.pid);
+    sig += w.fullscreen ? "|F" : "|f";
+    sig += w.focused ? "|A|" : "|a|";
+    sig += '|';
+    sig += QString::number(w.width);
+    sig += 'x';
+    sig += QString::number(w.height);
+    sig += '@';
+    sig += QString::number(w.outputWidth);
+    sig += 'x';
+    sig += QString::number(w.outputHeight);
+    sig += ';';
+  }
+  return sig;
+}
+
 void HyprlandBackend::refresh() {
   const QString clients = runHyprctl({"clients", "-j"});
   if (clients.isEmpty())
@@ -150,11 +178,20 @@ void HyprlandBackend::refresh() {
   const QList<WindowInfo> parsed =
       parseClients(clients.toUtf8(), activeAddress,
                    runHyprctl({"monitors", "-j"}).toUtf8());
+  // Skip the emit (and the QML refresh churn behind it) when nothing
+  // changed between 1s ticks.
+  const QString sig = signatureFor(parsed);
   {
     QMutexLocker lg(&m_mutex);
+    // A successful poll means the backend is alive even when the
+    // snapshot is unchanged (and empty-first snapshots must not read
+    // inactive): mark active before the dedup early-return.
+    m_active = true;
+    if (sig == m_lastSignature)
+      return;
+    m_lastSignature = sig;
     m_windows = parsed;
   }
-  m_active = true;
   emit windowsUpdated();
 }
 

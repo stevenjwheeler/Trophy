@@ -259,6 +259,92 @@ TEST_F(RecordingLibraryTest, RefreshPicksUpNewFiles) {
   EXPECT_EQ(addedSpy.count(), 1);
 }
 
+TEST_F(RecordingLibraryTest, ScanBatchesAdditionsAndRemovalsIntoOneModelChange) {
+  const QString removedA = createFile("RemovedA.mkv");
+  const QString removedB = createFile("RemovedB.mp4");
+  const QString keep = createFile("Keep.webm");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 3);
+
+  ASSERT_TRUE(QFile::remove(removedA));
+  ASSERT_TRUE(QFile::remove(removedB));
+  const QString addedA = createFile("AddedA.mkv");
+  const QString addedB = createFile("AddedB.mp4");
+  const QString addedC = createFile("AddedC.webm");
+  QSignalSpy changed(&lib, &RecordingLibrary::recordingsChanged);
+  QSignalSpy added(&lib, &RecordingLibrary::recordingAdded);
+  QSignalSpy removed(&lib, &RecordingLibrary::recordingRemoved);
+
+  // No event-loop pumping: measure this synchronous scan, not later
+  // metadata/thumbnail deliveries or platform watcher event counts.
+  lib.refresh();
+
+  EXPECT_EQ(changed.count(), 1);
+  EXPECT_EQ(added.count(), 3);
+  EXPECT_EQ(removed.count(), 2);
+  EXPECT_EQ(lib.count(), 4);
+  for (const QString &path : {keep, addedA, addedB, addedC})
+    EXPECT_NE(lib.getRecording(path), nullptr);
+  EXPECT_EQ(lib.getRecording(removedA), nullptr);
+  EXPECT_EQ(lib.getRecording(removedB), nullptr);
+
+  changed.clear();
+  added.clear();
+  removed.clear();
+  lib.refresh();
+  EXPECT_EQ(changed.count(), 1); // No-op refresh also settles once.
+  EXPECT_EQ(added.count(), 0);
+  EXPECT_EQ(removed.count(), 0);
+}
+
+TEST_F(RecordingLibraryTest, DeleteWatcherEchoDoesNotSettleModelAgain) {
+  const QString doomed = createFile("Doomed.mkv");
+  const QString keep = createFile("Keep.mkv");
+  RecordingLibrary lib(tempDir.path());
+  lib.deleteRecording(doomed);
+  ASSERT_EQ(lib.count(), 1);
+  QSignalSpy changed(&lib, &RecordingLibrary::recordingsChanged);
+
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &lib, "onDirectoryChanged", Qt::DirectConnection,
+      Q_ARG(QString, tempDir.path())));
+
+  EXPECT_EQ(changed.count(), 0);
+  EXPECT_NE(lib.getRecording(keep), nullptr);
+}
+
+TEST_F(RecordingLibraryTest, DeleteSuppressionStillRefreshesUnrelatedChanges) {
+  const QString selfDeleted = createFile("SelfDeleted.mkv");
+  const QString externallyDeleted = createFile("ExternallyDeleted.mkv");
+  const QString keep = createFile("Keep.mkv");
+  RecordingLibrary lib(tempDir.path());
+
+  lib.deleteRecording(selfDeleted);
+  ASSERT_EQ(lib.count(), 2);
+  ASSERT_TRUE(QFile::remove(externallyDeleted));
+  const QString unrelated = createFile("Unrelated.mp4");
+  QSignalSpy changed(&lib, &RecordingLibrary::recordingsChanged);
+  QSignalSpy added(&lib, &RecordingLibrary::recordingAdded);
+  QSignalSpy removed(&lib, &RecordingLibrary::recordingRemoved);
+
+  // Deliver the same-directory burst directly while the self-delete
+  // suppression is still armed. Unrelated additions AND removals must
+  // survive; a global skip-next-event flag would lose both.
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &lib, "onDirectoryChanged", Qt::DirectConnection,
+      Q_ARG(QString, tempDir.path())));
+
+  EXPECT_EQ(changed.count(), 1);
+  ASSERT_EQ(added.count(), 1);
+  ASSERT_EQ(removed.count(), 1);
+  EXPECT_EQ(removed.first().first().toString(), externallyDeleted);
+  EXPECT_EQ(lib.count(), 2);
+  EXPECT_NE(lib.getRecording(unrelated), nullptr);
+  EXPECT_NE(lib.getRecording(keep), nullptr);
+  EXPECT_EQ(lib.getRecording(selfDeleted), nullptr);
+  EXPECT_EQ(lib.getRecording(externallyDeleted), nullptr);
+}
+
 TEST_F(RecordingLibraryTest, RefreshAfterFilesystemRenameShowsNewName) {
   createFile("Old_Game_2026-01-15_20-30-00.mkv");
   RecordingLibrary lib(tempDir.path());
@@ -333,7 +419,7 @@ TEST_F(RecordingLibraryTest, RemoveRecordingsBatchSettlesOnce) {
   EXPECT_EQ(singleSpy.count(), 0);
   ASSERT_EQ(batchSpy.count(), 1);
   EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({a, b}));
-  EXPECT_GE(changedSpy.count(), 1);
+  EXPECT_EQ(changedSpy.count(), 1);
 }
 
 TEST_F(RecordingLibraryTest, RemoveRecordingsIgnoresUntrackedPaths) {

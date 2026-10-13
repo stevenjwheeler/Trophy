@@ -20,9 +20,28 @@ Page {
     property string fileTitle: ""
     property string fileDate: ""
 
-    // Audio stream count for the open file (0 = none/unknown).
-    // Assigned on open; lanes rebuild from it.
+    // Audio stream count (-1 = unavailable or pending, 0 = no audio).
+    // Delivered asynchronously; lanes rebuild only for the current open.
     property int trackCount: 0
+    property int audioProbeId: 0
+    property bool audioProbePending: false
+    // audioTrackCount returns -1 when the file can't be opened (unknown,
+    // not empty). Lane math/models clamp to >= 0; the label below
+    // distinguishes "unavailable" from a definitive "no audio".
+    readonly property int audioLanes: Math.max(0, trackCount)
+
+    Connections {
+        target: typeof waveformCache !== "undefined" ? waveformCache : null
+        function onAudioTrackCountReady(path, requestId, count) {
+            if (requestId !== playerPage.audioProbeId || path !== playerPage.filePath)
+                return
+            playerPage.audioProbePending = false
+            playerPage.trackCount = count
+            // Expanding from the video-only pending state must fit every
+            // newly discovered lane, without undoing a user's larger card.
+            playerPage.tracksHeight = Math.max(playerPage.tracksHeight, playerPage.minTracksHeight)
+        }
+    }
 
     // True per-track mute: one audio-only pipeline per stream
     // (the video output stays silent), all driven in lockstep.
@@ -156,8 +175,8 @@ Page {
     readonly property real minTracksHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + trackCount) * (minLaneHeight + Theme.spacingSmall)
-        + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
+        + (1 + audioLanes) * (minLaneHeight + Theme.spacingSmall)
+        + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     // Lane height while the card fits its content;
     // compressing the card shrinks every lane down
@@ -170,7 +189,7 @@ Page {
             return fullLaneHeight
         var interior = tracksHeight - Theme.spacingMedium * 2
         return Math.max(minLaneHeight, Math.min(fullLaneHeight,
-            (interior - zoomRow.implicitHeight) / (1 + trackCount) - Theme.spacingSmall))
+            (interior - zoomRow.implicitHeight) / (1 + audioLanes) - Theme.spacingSmall))
     }
 
     // Uncompressed content height, derived from the
@@ -183,8 +202,8 @@ Page {
     readonly property real tracksNaturalHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + trackCount) * (fullLaneHeight + Theme.spacingSmall)
-        + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
+        + (1 + audioLanes) * (fullLaneHeight + Theme.spacingSmall)
+        + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     function setTracksHeight(height) {
         var floor = Math.min(minTracksHeight, tracksNaturalHeight)
@@ -219,8 +238,11 @@ Page {
         filePath = path || ""
         fileTitle = title || ""
         fileDate = dateStr || ""
-        trackCount = (filePath !== "" && typeof waveformCache !== "undefined")
-            ? waveformCache.audioTrackCount(filePath) : 0
+        audioProbeId++
+        trackCount = -1
+        audioProbePending = filePath !== "" && typeof waveformCache !== "undefined" && waveformCache !== null
+        if (audioProbePending)
+            waveformCache.requestAudioTrackCount(filePath, audioProbeId)
         // Start with the tracks at their smallest: the
         // video gets the room, and the card expands on
         // drag (or double-click for full height).
@@ -237,6 +259,8 @@ Page {
         fileTitle = ""
         fileDate = ""
         trackCount = 0
+        audioProbeId++
+        audioProbePending = false
         mutedTracks = []
         clipMode = false
         clearClipRange()
@@ -524,15 +548,22 @@ Page {
         // creation: setting it with no open source is ignored.
         Instantiator {
             id: audioPipelines
-            model: playerPage.trackCount
+            model: playerPage.audioLanes
 
             MediaPlayer {
                 source: playerPage.filePath !== "" ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
                 autoPlay: false
                 playbackRate: playerPage.playbackRate
                 onMediaStatusChanged: {
-                    if (mediaStatus === MediaPlayer.LoadedMedia)
+                    if (mediaStatus === MediaPlayer.LoadedMedia) {
                         activeAudioTrack = index
+                        // Track discovery now runs asynchronously: a new
+                        // audio pipeline can load after video has started.
+                        // Join its current position/state, not time zero.
+                        position = playerPage.playPosition
+                        if (player.playing)
+                            play()
+                    }
                 }
                 audioOutput: AudioOutput {
                     volume: playerPage.masterVolume
@@ -798,14 +829,14 @@ Page {
                 }
 
                 Repeater {
-                    model: playerPage.trackCount
+                    model: playerPage.audioLanes
 
                     WaveLane {
                         Layout.fillWidth: true
                         laneHeight: playerPage.laneHeight
                         filePath: playerPage.filePath
                         trackIndex: index
-                        trackTotal: playerPage.trackCount
+                        trackTotal: playerPage.audioLanes
                         laneMuted: playerPage.mutedTracks.indexOf(index) !== -1
                         playPosition: playerPage.playPosition
                         playDuration: playerPage.playDuration
@@ -834,10 +865,10 @@ Page {
 
                 Label {
                     id: noAudioLabel
-                    text: qsTr("No audio tracks in this file.")
+                    text: playerPage.audioProbePending ? qsTr("Reading audio tracks…") : playerPage.trackCount < 0 ? qsTr("Audio tracks unavailable.") : qsTr("No audio tracks in this file.")
                     color: Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
-                    visible: playerPage.trackCount === 0
+                    visible: playerPage.trackCount <= 0
                 }
             }
         }

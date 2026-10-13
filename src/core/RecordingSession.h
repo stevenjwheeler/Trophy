@@ -59,27 +59,56 @@ public:
   // callback and the mixer callback/sources, so this session only drains
   // its queues, flushes its encoders and finalizes its file.
   void stop(bool keepCaptureSource = false, bool handoffRouting = false);
+  // Owner-thread routing/timer retirement, followed by owned native drain,
+  // encoding-thread join, flush and finalize. Owners retain all dependencies
+  // until stopFinished. Direct stop() remains a synchronous lifetime barrier.
+  void requestStop(bool keepCaptureSource = false, bool handoffRouting = false);
+  bool stopPending() const { return m_stopWorker.valid(); }
+  void retireAudioLookups();
 
   bool isRunning() const { return m_running; }
+  // Packet callbacks only latch failure; owners inspect after stop() has
+  // drained all producers. No reentrant teardown signal is emitted.
+  bool outputFailed() const { return m_outputFailed.load(); }
+  bool outputSucceeded() const {
+    return m_outputFinalized.load() && !m_outputFailed.load();
+  }
 
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
+
+  // Owner-thread snapshots only: preserve the actual slot identities and
+  // bindings over a DVR handoff, including voice adopted after initial setup.
+  struct AudioRoutingState {
+    int activeTrackCount;
+    int voiceTrack;
+    bool gameIsFallback;
+    std::array<bool, AudioMixer::kTrackCount> connected;
+    std::array<QString, AudioMixer::kTrackCount> boundSerial;
+  };
+  AudioRoutingState audioRoutingState() const;
+  void inheritAudioRouting(const RecordingSession &previous);
 
   // Audio identities to watch for (called by RecordingManager/ReplayManager
   // during setup). Game takes a PID plus a list of name hints (window
   // process, portal app-id, detector display name — Proton nodes expose
   // only the exe basename, e.g. "deadlock.exe", with no PID/binary).
   void setGameApps(const QString &processName) {
+    ++m_audioLookupGeneration;
     m_gamePid = 0;
     m_gameHints = processName.isEmpty() ? QStringList() : QStringList(processName);
   }
   void setGameAudioHints(uint32_t pid, const QStringList &hints) {
+    ++m_audioLookupGeneration;
     m_gamePid = pid;
     m_gameHints = hints;
   }
-  void setVoiceChatApp(const QString &appName) { m_voiceChatApp = appName; }
+  void setVoiceChatApp(const QString &appName) {
+    ++m_audioLookupGeneration;
+    m_voiceChatApp = appName;
+  }
   // Mixer track reserved for voice (-1 when merged mode left it unslotted;
-  // the retry then skips voice instead of clobbering the mic's slot).
+  // the retry adopts the next free slot instead of clobbering the mic).
   void setVoiceTrack(int track) { m_voiceTrack = track; }
   // Track 0 is on monitor fallback (full mix), not the real app node — the
   // retry keeps hunting instead of treating it as connected.
@@ -96,6 +125,7 @@ public:
   // Forget a track's bind (used when the user retargets mid-session: the
   // old source is removed and the retry hunts the new identity).
   void forgetTrack(int trackIndex) {
+    ++m_audioLookupGeneration;
     if (trackIndex >= 0 && trackIndex < kAudioTrackCount) {
       m_sourceConnected[trackIndex] = false;
       m_boundSerial[trackIndex].clear();
@@ -104,17 +134,53 @@ public:
 
 signals:
   void errorOccurred(const QString &error);
-  void frameEncoded(qint64 frameNumber);
+  void stopFinished();
 
 private:
+  friend class RecordingSessionTestPeer;
   void encodingLoop();
+  bool retireStopRouting(bool keepCaptureSource, bool handoffRouting);
+  void finishStopNative();
+  void pollStopWorker();
+  std::future<void> m_stopWorker;
+  QTimer *m_stopTimer = nullptr;
+  bool m_asyncHandoff = false;
+  bool m_finishCaptureStop = false;
+  bool writeOutputPacket(const EncodedPacket &packet);
+  // Caller holds m_mergeMutex; silence fills missing slots after bounded grace.
+  void drainMergedAudio(int channels, bool flushTail = false);
+  void noteCapturedVideo(const VideoFrame &frame);
+  bool advanceMergedClock(bool finalDrain = false);
+  bool drainClockedMergedAudio(int channels, bool finalDrain);
+  void appendClockedMergedAudio(int track, const float *samples, int frames,
+                               int channels, int64_t arrivalUs);
+  void applyMergedOffset();
+  int64_t mergedVideoTargetFrames() const;
+  int64_t mergedTimelineFrames(int64_t us) const;
+  int64_t nowUs() const { return m_clockNowUs(); }
+  std::function<int64_t()> m_clockNowUs = [] { return steadyNowMs() * 1000LL; };
   void checkForNewAudioNodes();
+  void deliverAudioLookups();
+  using AudioNodeResult = AudioMixer::NodeLookupResult;
+  using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &)>;
+  static AudioNodeResult lookupAudioNode(uint32_t pid, const QStringList &hints);
+  AudioNodeLookup m_audioNodeLookup = lookupAudioNode;
+  struct AudioLookupOperation {
+    std::future<AudioNodeResult> worker;
+    uint64_t generation = 0;
+    bool game = false;
+  };
+  std::array<AudioLookupOperation, AudioMixer::kTrackCount> m_audioLookups;
+  uint64_t m_audioLookupGeneration = 0;
+  QTimer *m_audioLookupTimer = nullptr;
   // Reconcile one app-capture track against the live registry: bind on
   // appearance, hot-swap when the stream generation changes, forget when
   // the node vanishes. isFallback (game track only) tracks monitor-fallback
   // state; it never counts as bound.
   void reconcileAppTrack(int track, uint32_t pid, const QStringList &hints,
                          bool *isFallback);
+  void applyAppTrackNode(int track, uint32_t nodeId, const QString &nodeName,
+                        const QString &nodeSerial, bool *isFallback);
 
   // Track index to muxer stream index: audio stream N = track N + 1
   static constexpr int kAudioTrackCount = 3;
@@ -137,15 +203,41 @@ private:
   // Merged audio track support
   bool m_separateAudioTracks = true;
   int m_audioBitrate = 192;
-  int m_activeTrackCount = 0;
+  // Written under m_mergeMutex (voice slot adoption) but read lock-free
+  // on the audio callback thread — atomic so the callback never races
+  // the GUI-thread retry path.
+  std::atomic<int> m_activeTrackCount{0};
   std::unique_ptr<AudioEncoder> m_mergedEncoder;
   QMap<QString, QString> m_metadata;
   // Per-track accumulation buffers (merged mode) — different PipeWire sources
   // deliver different frame sizes, so each track accumulates independently.
   std::array<std::vector<float>, kAudioTrackCount> m_trackAccumulators;
   std::mutex m_mergeMutex;
+  int64_t m_firstMergedInputWallUs = -1; // Guarded by m_mergeMutex.
+  int64_t m_lastMergedInputWallUs = -1;
+  std::atomic<int64_t> m_observedMergedInputWallUs{-1};
+  int64_t m_mergedOffsetFrames = 0;
+  int64_t m_mergedSubmittedFrames = 0;
+  bool m_mergedClocked = false;
+  // After >100ms without input, the owned encoding worker drives a continuous
+  // merged timeline. Video timestamps anchor missing-input silence; observed
+  // wall-clock input ends allow healthy audio to continue across video stalls.
+  // Short cadence is trusted within 100ms, but timestampless late/backlogged
+  // PCM outside the emitted cursor/8192-frame window is deliberately dropped.
+  int64_t m_clockInputTargetFrames = 0;
+  std::array<int64_t, kAudioTrackCount> m_clockBufferStartFrames{};
+  std::array<int64_t, kAudioTrackCount> m_clockTrackNextFrames{};
+  std::array<int64_t, kAudioTrackCount> m_clockTrackArrivalUs{};
+  static constexpr int kMergedClockBlocksPerTick = 8;
+  static constexpr int kMergedClockBufferedFrames = 8192;
+  static constexpr int64_t kMergedClockGraceUs = 100000;
+  std::atomic<int64_t> m_firstCapturedVideoTimestampUs{-1};
+  std::atomic<int64_t> m_capturedVideoTimelineUs{-1};
+  int64_t m_videoFrameDurationUs = 0; // Immutable after start, before worker creation.
 
   std::atomic<bool> m_running{false};
+  std::atomic<bool> m_outputFailed{false};
+  std::atomic<bool> m_outputFinalized{false};
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};
   // A/V origin alignment: audio and video pipelines start at different
@@ -155,10 +247,13 @@ private:
   // a one-time encoder start offset. First-wins latches (atomics: video
   // and audio run on different threads).
   std::atomic<int64_t> m_videoStartWallUs{-1};
-  std::array<bool, kAudioTrackCount> m_trackOffsetApplied{};
-  bool m_mergedOffsetApplied = false;
+  // First-wins origin latches. Written on the audio callback thread AND
+  // the GUI-thread retry path (reconcileAppTrack resets a rebound track),
+  // so plain bools raced — atomics.
+  std::array<std::atomic<bool>, kAudioTrackCount> m_trackOffsetApplied{};
+  std::atomic<bool> m_mergedOffsetApplied{false};
   static constexpr int64_t kVideoWaitTimeoutMs = 10000;
-  static int64_t steadyNowUs();
+  static int64_t steadyNowMs();
 
   std::thread m_encodingThread;
   std::shared_ptr<TrophyBackend::FrameDispatcher> m_frameDispatcher;

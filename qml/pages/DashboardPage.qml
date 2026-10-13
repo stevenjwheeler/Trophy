@@ -256,7 +256,10 @@ Page {
                                 }
                             }
                             Label {
-                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING") : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
+                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
+                                      : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
+                                      : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
+                                      : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
                                 font.pixelSize: 10; font.weight: Font.Black
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                             }
@@ -273,6 +276,8 @@ Page {
 
                     Button {
                         id: recordBtn
+                        enabled: (recordingManager && recordingManager.isRecording)
+                                 || (app && app.canStartRecording)
                         Layout.preferredWidth: 44; Layout.preferredHeight: 44
                         icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
                         icon.width: 24; icon.height: 24
@@ -380,7 +385,7 @@ Page {
                             spacing: 2
                             Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
                             Label {
-                                text: settingsManager.resolution === "auto" ? qsTr("Auto (%1x%2)").arg(settingsManager.autoResolutionWidth).arg(settingsManager.autoResolutionHeight) : settingsManager.resolution
+                                text: (settingsManager ? settingsManager.resolution : "") === "auto" ? qsTr("Auto (%1x%2)").arg(settingsManager.autoResolutionWidth).arg(settingsManager.autoResolutionHeight) : (settingsManager ? settingsManager.resolution : "")
                                 font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
                             }
                         }
@@ -403,7 +408,7 @@ Page {
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 24
                                     label: audioMixer ? audioMixer.trackName(index) : ""
-                                    onMutedChanged: if (app) app.setTrackMuted(index, muted)
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(index, muted) }
                                 }
                             }
                         }
@@ -611,7 +616,7 @@ Page {
 
     Connections {
         target: recordingLibrary
-        function onCountChanged() { activityModel.updateActivity() }
+        function onRecordingsChanged() { activityModel.updateActivity() }
         function onRecordingRemoved(filePath) {
             root.pushActivityEvent("deleted", "orange", qsTr("Deleted: %1").arg(root.activityGameName(filePath)), qsTr("Removed from library"))
         }
@@ -621,7 +626,7 @@ Page {
             }
         }
     }
-    Connections { target: recordingManager; function onIsRecordingChanged() { activityModel.updateActivity() } }
+    Connections { target: recordingManager; function onStateChanged() { activityModel.updateActivity() } }
     Connections {
         target: activityFeed
         function onEventsChanged() { activityModel.updateActivity() }

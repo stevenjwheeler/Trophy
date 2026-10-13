@@ -18,8 +18,12 @@ Trophy is a modern, performant game session recording and clipping application f
 
 The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS, Fedora, and Ubuntu) is to download the prebuilt AppImage.
 
-1. **Download:** Grab the latest `Trophy-x86_64.AppImage` from the [Releases Page](https://github.com/your-username/trophy/releases/latest).
+1. **Download:** Grab the latest `Trophy-<version>-x86_64.AppImage` from the [Releases Page](https://github.com/stevenjwheeler/Trophy/releases/latest).
 2. **Make it executable:** `chmod +x Trophy-*.AppImage`
+
+The Flatpak manifest is **experimental**, not a feature-equivalent release.
+Host game detection and login autostart are not yet supported in that sandbox;
+see [packaging status](packaging/README.md).
 
 ## Features
 

@@ -28,7 +28,9 @@
     </screenshots>
 
     <releases>
-        <release version="0.1.0" date="2026-10-01"/>
+        <!-- Keep in sync with the latest release tag (CI stamps binaries
+             from tags; this file is manual). -->
+        <release version="0.9.3" date="2026-10-12"/>
     </releases>
 
     <content_rating type="oars-1.1"/>

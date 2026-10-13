@@ -109,6 +109,7 @@ jobs:
             libpipewire-0.3-dev
             libspa-0.2-dev
             libdrm-dev
+            libgbm-dev
             libavcodec-dev
             libavformat-dev
             libavutil-dev
@@ -117,7 +118,9 @@ jobs:
             libva-dev
             libva-drm2
             libgtest-dev
-          version: 1.4
+            desktop-file-utils
+            appstream
+          version: 1.5
           
       - name: Restore ccache
         # Purpose-built action instead of raw actions/cache: stable key
@@ -152,7 +155,7 @@ jobs:
           # newer; CMakeLists floor is Qt 6.5). Bump deliberately, not
           # float: a silent major here once broke linuxdeploy bundling.
           version: '6.12.0'
-          modules: 'qtmultimedia'
+          modules: 'qtmultimedia qtwaylandcompositor'
           cache: 'true'
 
       - name: Configure & Build
@@ -167,8 +170,21 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
+      - name: Validate package metadata
+        run: |
+          desktop-file-validate packaging/trophy.desktop
+          appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
+
       - name: Run Unit Tests
-        run: cd build && ctest --output-on-failure
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/trophy-test-config
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/trophy-test-runtime
+          TMPDIR: ${{ runner.temp }}/trophy-test-tmp
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          cd build && ctest --output-on-failure --timeout 300
 
       - name: Generate AppImage
         shell: bash
@@ -208,41 +224,44 @@ jobs:
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
           export QML_SOURCES_PATHS=$PWD/build/qml
-          export EXTRA_QT_MODULES="quickcontrols2;multimedia"
+          export EXTRA_QT_MODULES="quickcontrols2;multimedia;waylandcompositor"
+          # Qt 6 releases ship either libqwayland.so or the older split
+          # plugins. Never rely on host plugins for a Wayland-only package.
+          QT_PLUGINS=$("$QMAKE" -query QT_INSTALL_PLUGINS)
+          WAYLAND_PLUGINS=("$QT_PLUGINS"/platforms/libqwayland*.so)
+          if [[ ! -f "${WAYLAND_PLUGINS[0]}" ]]; then
+            echo "ERROR: Qt Wayland platform plugins are missing"
+            exit 1
+          fi
+          EXTRA_PLATFORM_PLUGINS="libqoffscreen.so"
+          for plugin in "${WAYLAND_PLUGINS[@]}"; do
+            EXTRA_PLATFORM_PLUGINS+=";$(basename "$plugin")"
+          done
+          export EXTRA_PLATFORM_PLUGINS
           
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" \
             --library "$TROPHY_LIB" \
             --desktop-file packaging/trophy.desktop \
-            --icon-file resources/icons/trophy.svg \
-            --plugin qt \
-            --output appimage
+             --icon-file resources/icons/trophy.svg \
+             --plugin qt
+
+          # A root-level executable symlink can resolve Qt/loader paths from
+          # the wrong directory. Keep a real launcher and smoke-test it.
+          rm AppDir/AppRun
+          install -m755 packaging/AppRun AppDir/AppRun
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
 
           # 6. SMOKE TEST
           echo "Running smoke test..."
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
           chmod +x "$GENERATED_FILE"
           
-          # Setup minimal environment
-          export XDG_RUNTIME_DIR=/tmp/runtime-ci
-          mkdir -p $XDG_RUNTIME_DIR
-          
-          # Use offscreen to bypass the "No X11 support" check
-          QT_QPA_PLATFORM=offscreen ./"$GENERATED_FILE" & 
-          
-          APP_PID=$!
-          sleep 5
-          if ps -p $APP_PID > /dev/null; then
-             echo "App launched successfully (Headless mode)!"
-             # Guarded reaps: the app may exit on its own between the
-             # ps check and the kill, which must not fail the step.
-             kill $APP_PID || true
-             wait $APP_PID 2>/dev/null || true
-          else
-             echo "App crashed! Check if Wayland-only checks are blocking CI."
-             exit 1
-          fi
+          # Private HOME/XDG/bus, readiness marker and QML-error checks;
+          # surviving for five seconds alone did not prove a working GUI.
+          python3 packaging/smoke_appimage.py "$GENERATED_FILE" \
+            --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
 
           # 7. Consistent artifact name (linuxdeploy usually honors
           # LINUXDEPLOY_OUTPUT_VERSION already — only rename when the
@@ -252,6 +271,17 @@ jobs:
           if [[ "$GENERATED_FILE" != "$TARGET" ]]; then
             mv "$GENERATED_FILE" "$TARGET"
           fi
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/trophy-appimage-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Generate Checksum
         run: |

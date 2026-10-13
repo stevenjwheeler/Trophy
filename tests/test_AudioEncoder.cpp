@@ -147,6 +147,33 @@ TEST(AudioEncoderTest, StartOffsetShiftsFirstTimestampOnce) {
   EXPECT_LE(pkt.pts, 100);
 }
 
+TEST(AudioEncoderTest, ReinitializeClearsStartOffsetAndBufferedSamples) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
+    GTEST_SKIP() << "FFmpeg AAC encoder unavailable";
+
+  AudioEncoder enc;
+  AudioEncoderConfig cfg;
+  cfg.sampleRate = 48000;
+  cfg.channels = 2;
+  cfg.bitrate = 128;
+  cfg.codec = "aac";
+  ASSERT_TRUE(enc.initialize(cfg));
+  enc.setStartOffsetSamples(48000); // one second
+  std::vector<float> buf(1024 * 2, 0.0f);
+  EncodedPacket pkt;
+  // Leave the old codec with buffered input and a one-shot offset.
+  enc.encodeAudio(buf.data(), 1024, pkt);
+
+  ASSERT_TRUE(enc.initialize(cfg));
+  bool produced = false;
+  for (int i = 0; i < 8 && !produced; ++i)
+    produced = enc.encodeAudio(buf.data(), 1024, pkt);
+  ASSERT_TRUE(produced);
+  // Fresh session should start at its own origin (AAC may prime one
+  // negative frame), not inherit the prior session's +1000ms offset.
+  EXPECT_LT(pkt.pts, 100);
+}
+
 TEST(AudioEncoderTest, NanInputDoesNotCrash) {
   if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
     GTEST_SKIP() << "FFmpeg AAC encoder unavailable";

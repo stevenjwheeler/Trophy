@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStorageInfo>
 #include <QThreadPool>
 #include <algorithm>
@@ -63,6 +64,17 @@ StorageManager::StorageManager(const QString &storagePath, QObject *parent)
   // Watch for changes
   connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this,
           &StorageManager::onDirectoryChanged);
+
+  // Filesystem events arrive per file (a bulk import is a storm of
+  // them); coalesce each burst into one enforceStorageLimit pass.
+  m_debounceTimer.setSingleShot(true);
+  m_debounceTimer.setInterval(500);
+  connect(&m_debounceTimer, &QTimer::timeout, this, [this]() {
+    if (m_bulkDeletesActive > 0) {
+      return;
+    }
+    enforceStorageLimit();
+  });
 
   if (dir.exists()) {
     m_watcher.addPath(m_storagePath);
@@ -133,6 +145,9 @@ qint64 StorageManager::driveCapacityBytes() const {
 }
 
 void StorageManager::refresh() {
+  if (m_refreshObserverForTest) {
+    m_refreshObserverForTest();
+  }
   qint64 newSize = calculateDirectorySize();
   if (m_usedSize != newSize) {
     m_usedSize = newSize;
@@ -219,35 +234,91 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
     return true;
   }
 
-  while (m_usedSize > m_maxSize) {
-    qDebug() << "Storage limit exceeded:" << formatSize(m_usedSize) << "/"
-             << formatSize(m_maxSize);
+  if (m_usedSize <= m_maxSize) {
+    return true;
+  }
 
-    if (!deleteOldestRecording()) {
-      // If we can't delete the oldest, check if it's because it's the current
-      // recording
-      QStringList recordings = getRecordingsSortedByDate();
-      if (!recordings.isEmpty() &&
-          recordings.first() == m_excludedRecordingPath) {
-        notifyLimitCannotCleanup(forceNotify);
-      }
+  // Snapshot the library once and delete oldest-first from it: the old
+  // loop re-ran getRecordingsSortedByDate() + refresh() (each a full
+  // recursive walk) per deleted file. Deletion order and in-progress
+  // exclusion match deleteOldestRecording(); only the file being deleted
+  // is re-statted, guarding against a vanish/change since the snapshot.
+  const std::vector<SnapshotEntry> snapshot = snapshotRecordings();
+  const QString excludedCanonical =
+      m_excludedRecordingPath.isEmpty()
+          ? QString()
+          : QFileInfo(m_excludedRecordingPath).canonicalFilePath();
+  auto isExcluded = [&excludedCanonical](const QString &path) {
+    return !excludedCanonical.isEmpty() &&
+           QFileInfo(path).canonicalFilePath() == excludedCanonical;
+  };
+
+  qint64 runningSize = m_usedSize;
+  QSet<QString> deletedPaths;
+  bool deleteFailed = false;
+  for (const SnapshotEntry &entry : snapshot) {
+    if (runningSize <= m_maxSize) {
       break;
     }
+    if (isExcluded(entry.path)) {
+      qDebug() << "Not deleting current recording:" << entry.path;
+      continue;
+    }
+    const QFileInfo fresh(entry.path);
+    if (!fresh.exists()) {
+      continue;
+    }
+    qDebug() << "Storage limit exceeded:" << formatSize(runningSize) << "/"
+             << formatSize(m_maxSize);
+    qDebug() << "Auto-deleting oldest recording:" << entry.path;
+    if (!deleteRecordingNoRefresh(entry.path)) {
+      deleteFailed = true;
+      break;
+    }
+    deletedPaths.insert(entry.path);
+    runningSize -= fresh.size();
+  }
 
+  // One settle walk for the whole pass instead of one per deleted file.
+  // Skipped when nothing was deleted: m_usedSize is already current from
+  // the entry refresh.
+  if (!deletedPaths.isEmpty()) {
     refresh();
   }
 
-  // Only genuinely over-limit states notify now: the old >90% early
-  // warning cried "Storage Full" (and logged activity) on every progress
-  // tick without deleting anything, since there was nothing to delete.
   if (isOverLimit()) {
-    notifyLimitReached(forceNotify);
+    // Mirror the old deleteOldestRecording-failure branch: when nothing
+    // deletable remains (only the excluded in-progress recording is left
+    // standing) report cannot-cleanup rather than the generic reached.
+    bool onlyExcludedRemain = !deleteFailed && !snapshot.empty();
+    for (const SnapshotEntry &entry : snapshot) {
+      if (deletedPaths.contains(entry.path)) {
+        continue;
+      }
+      if (!isExcluded(entry.path)) {
+        onlyExcludedRemain = false;
+        break;
+      }
+    }
+    if (onlyExcludedRemain) {
+      notifyLimitCannotCleanup(forceNotify);
+    } else {
+      notifyLimitReached(forceNotify);
+    }
   }
 
   return !isOverLimit();
 }
 
 bool StorageManager::deleteRecording(const QString &filePath) {
+  if (!deleteRecordingNoRefresh(filePath)) {
+    return false;
+  }
+  refresh();
+  return true;
+}
+
+bool StorageManager::deleteRecordingNoRefresh(const QString &filePath) {
   QFileInfo info(filePath);
 
   // Security check: ensure file and any symlink target are within storage.
@@ -274,12 +345,31 @@ bool StorageManager::deleteRecording(const QString &filePath) {
       qWarning() << "Failed to delete thumbnail:" << thumbPath;
     }
     emit recordingDeleted(filePath);
-    refresh();
     return true;
   }
 
   qWarning() << "Failed to delete recording:" << filePath << file.errorString();
   return false;
+}
+
+std::vector<StorageManager::SnapshotEntry>
+StorageManager::snapshotRecordings() const {
+  std::vector<SnapshotEntry> snapshot;
+  QDirIterator it(m_storagePath,
+                   QStringList() << "*.mkv" << "*.mp4" << "*.webm", QDir::Files,
+                   QDirIterator::Subdirectories);
+  while (it.hasNext()) {
+    it.next();
+    const QFileInfo info = it.fileInfo();
+    snapshot.push_back(
+        {info.absoluteFilePath(), info.lastModified(), info.size()});
+  }
+  // Same oldest-first order as getRecordingsSortedByDate().
+  std::sort(snapshot.begin(), snapshot.end(),
+            [](const SnapshotEntry &a, const SnapshotEntry &b) {
+              return a.mtime < b.mtime;
+            });
+  return snapshot;
 }
 
 void StorageManager::deleteRecordings(const QStringList &filePaths) {
@@ -305,6 +395,12 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
     int done = 0;
     for (const QString &filePath : filePaths) {
       if (self.isNull()) {
+        // Manager destroyed mid-run: only possible at app teardown
+        // (app-owned, never deleted otherwise). No terminal can be
+        // delivered from a dead object, and none needs to be — the
+        // library's bulk suppression dies with the process. (A queued
+        // invokeMethod on a null receiver would be dropped by Qt
+        // without running, so attempting one here would be a no-op.)
         return;
       }
       const QFileInfo info(filePath);
@@ -554,7 +650,10 @@ void StorageManager::onDirectoryChanged(const QString &path) {
     // completion settles with a single refresh instead.
     return;
   }
-  enforceStorageLimit();
+  // Debounce: restart the single-shot so a burst (a 50-file import fires
+  // per file) settles into one enforceStorageLimit pass ~500ms after the
+  // last event instead of one full rescan per file.
+  m_debounceTimer.start();
 }
 
 qint64 StorageManager::calculateDirectorySize() const {

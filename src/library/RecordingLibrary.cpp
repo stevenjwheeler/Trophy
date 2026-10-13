@@ -116,8 +116,11 @@ void RecordingLibrary::setSortOrder(int order) {
 }
 
 void RecordingLibrary::refresh() {
+  // Batched so a scan settles the model with a single recordingsChanged
+  // and at most one custom-titles write instead of one per file.
+  beginBatch();
   scanDirectory();
-  updateFilteredRecordings();
+  endBatch();
 }
 
 Recording *RecordingLibrary::get(int index) const {
@@ -145,12 +148,13 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
     qWarning() << "Refusing to delete recording outside library:" << filePath;
     return;
   }
-  m_ignoreNextChange = true;
+  const QString absolute = QFileInfo(filePath).absoluteFilePath();
+  m_suppressedPaths.insert(absolute);
   QFile file(filePath);
   if (file.remove()) {
     removeRecording(filePath);
   } else {
-    m_ignoreNextChange = false;
+    m_suppressedPaths.remove(absolute);
     qWarning() << "Failed to delete recording:" << filePath
                << file.errorString();
   }
@@ -325,11 +329,69 @@ void RecordingLibrary::onDirectoryChanged(const QString &path) {
     // per-file watcher refreshes here would just be churn.
     return;
   }
-  if (m_ignoreNextChange) {
-    m_ignoreNextChange = false;
-    return;
+  if (!m_suppressedPaths.isEmpty()) {
+    // The library itself just touched the suppressed paths
+    // (deleteRecording removes the model entry synchronously, so the
+    // follow-up watcher event is usually a no-op echo). The watcher only
+    // names the directory, so diff the listing: swallow the event only
+    // when nothing BUT self-touched paths changed. An unrelated file
+    // added/removed in the same burst still refreshes.
+    QSet<QString> current;
+    const QFileInfoList files =
+        QDir(m_libraryPath)
+            .entryInfoList({"*.mkv", "*.mp4", "*.webm"}, QDir::Files);
+    for (const QFileInfo &info : files) {
+      current.insert(info.absoluteFilePath());
+    }
+    current.remove(m_activeRecordingPath);
+    QSet<QString> known;
+    for (const auto &rec : m_recordings) {
+      if (rec) {
+        known.insert(rec->filePath());
+      }
+    }
+    QSet<QString> diff = current - known;
+    diff.unite(known - current);
+    bool onlySelf = true;
+    for (const QString &changed : diff) {
+      if (!m_suppressedPaths.contains(changed)) {
+        onlySelf = false;
+        break;
+      }
+    }
+    // Suppressions for paths that now agree with the model are spent.
+    QStringList spent;
+    for (const QString &suppressed : m_suppressedPaths) {
+      if (!diff.contains(suppressed)) {
+        spent.append(suppressed);
+      }
+    }
+    for (const QString &suppressed : spent) {
+      m_suppressedPaths.remove(suppressed);
+    }
+    if (onlySelf) {
+      return;
+    }
   }
   refresh();
+}
+
+void RecordingLibrary::beginBatch() { ++m_batchDepth; }
+
+void RecordingLibrary::endBatch() {
+  if (m_batchDepth <= 0) {
+    return;
+  }
+  if (--m_batchDepth > 0) {
+    return;
+  }
+  if (m_titlesDirty) {
+    m_titlesDirty = false;
+    saveCustomTitles();
+  }
+  // Single settle + emit for the whole batch, preserving refresh()'s
+  // trailing-emit contract (even a no-op scan notifies once).
+  updateFilteredRecordings();
 }
 
 void RecordingLibrary::onThumbnailReady(const QString &videoPath,
@@ -584,6 +646,12 @@ void RecordingLibrary::updateFilteredRecordings() {
     break;
   }
 
+  if (m_batchDepth > 0) {
+    // Inside a scan/refresh batch: the list above is settled (callers
+    // emitting per-file signals still see a current model), but the
+    // broadcast waits for endBatch so a 100-file scan costs one rebuild.
+    return;
+  }
   emit recordingsChanged();
 }
 
@@ -616,6 +684,12 @@ void RecordingLibrary::loadCustomTitles() {
 }
 
 void RecordingLibrary::saveCustomTitles() const {
+  if (m_batchDepth > 0) {
+    // Inside a scan/refresh batch: coalesce per-remove writes into the
+    // single write endBatch performs.
+    m_titlesDirty = true;
+    return;
+  }
   if (m_libraryPath.isEmpty()) {
     return;
   }

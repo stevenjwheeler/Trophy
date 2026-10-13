@@ -118,9 +118,22 @@ public:
 private:
   bool m_enabled = true;
   uint m_lastNotificationId = 0;
+  quint64 m_notificationGeneration = 0;
+  uint m_replaceTargetId = 0;
+  // Action/withdraw ownership is separate from dedup: stacked notices
+  // may update dedup without taking the replace slot.
   QString m_lastTitle;
-  QString m_lastBody;
+  QString m_dedupTitle;
+  QString m_dedupBody;
   qint64 m_lastSentMs = -1;
+  // Title recorded by closeAuthorizePrompt when the Notify reply hasn't
+  // arrived yet (id still 0): the reply callback withdraws that popup
+  // instead of publishing it. Scoped to m_notificationGeneration; a retry
+  // for the same game cannot inherit the old request's withdrawal.
+  QString m_pendingWithdrawTitle;
+  quint64 beginReplacingNotification(const QString &title);
+  bool adoptNotificationReply(quint64 generation, uint id);
+  bool mayWithdrawNotification(quint64 generation, uint id) const;
   // Shared Notify body. replacePrevious=false sends replaces_id 0 (a
   // separate popup) and leaves m_lastNotificationId alone; the transient
   // self-dismiss is per-notice, since withdrawing an already-replaced id

@@ -11,10 +11,16 @@
 #include <QDBusInterface>
 #include <QDir>
 #include <QJsonDocument>
+#include <QSet>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QThread>
+#include <future>
+#include <atomic>
 
 #include "core/WindowService.h"
 #include "detection/GnomeBackend.h"
@@ -42,6 +48,133 @@ public:
 
 static auto *env =
     testing::AddGlobalTestEnvironment(new WindowMonitorTestEnvironment);
+
+namespace TrophyBackend {
+class WindowMonitorWorkerTest : public ::testing::Test {
+protected:
+  static void arm(WaylandWindowMonitor &monitor, std::function<void()> worker) {
+    monitor.m_monitoring = true;
+    ++monitor.m_generation;
+    monitor.m_pollOverride = std::move(worker);
+    monitor.checkFocusedApp();
+  }
+  static void collect(WaylandWindowMonitor &monitor) { monitor.collectRetired(); }
+  static bool retired(WaylandWindowMonitor &monitor) { return !monitor.m_retired.empty(); }
+  static std::shared_ptr<HyprlandBackend> attach(WaylandWindowMonitor &monitor) {
+    monitor.m_hyprland = std::make_shared<HyprlandBackend>();
+    const auto generation = monitor.m_generation;
+    QObject::connect(monitor.m_hyprland.get(), &HyprlandBackend::windowsUpdated,
+        &monitor, [&monitor, generation] {
+          if (monitor.m_generation == generation) monitor.onBackendWindowsUpdated();
+        }, Qt::QueuedConnection);
+    return monitor.m_hyprland;
+  }
+};
+
+TEST_F(WindowMonitorWorkerTest, GatedStopRestartKeepsGuiResponsiveAndRejectsOldDelivery) {
+  WaylandWindowMonitor monitor;
+  std::promise<void> entered, release;
+  auto gate = release.get_future().share();
+  std::atomic_bool finished{false};
+  arm(monitor, [&] { entered.set_value(); gate.wait(); finished = true; });
+  ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  auto backend = attach(monitor);
+  monitor.ingestSnapshot(KWinBackend::parseSnapshot(
+      R"([{"id":6,"appId":"old","focused":true}])"));
+  ASSERT_EQ(monitor.focusedAppId(), "old");
+  std::weak_ptr<HyprlandBackend> lifetime = backend;
+  emit backend->windowsUpdated(); // queued against the OLD generation
+  monitor.stopMonitoring();
+  backend.reset();
+  EXPECT_TRUE(monitor.windows().isEmpty());
+  EXPECT_TRUE(monitor.focusedAppId().isEmpty());
+  EXPECT_FALSE(finished.load());
+  EXPECT_FALSE(lifetime.expired());
+  EXPECT_TRUE(retired(monitor));
+  // Fresh generation can progress even though the retired poll is gated.
+  arm(monitor, [] {});
+  auto wins = KWinBackend::parseSnapshot(R"([{"id":7,"appId":"fresh","focused":true}])");
+  monitor.ingestSnapshot(wins);
+  int heartbeat = 0;
+  QTimer::singleShot(0, &monitor, [&] { ++heartbeat; });
+  QCoreApplication::processEvents();
+  EXPECT_EQ(heartbeat, 1);
+  EXPECT_EQ(monitor.windows().size(), wins.size());
+  release.set_value();
+  monitor.stopMonitoring();
+  QElapsedTimer timeout;
+  timeout.start();
+  while (retired(monitor) && timeout.elapsed() < 2000) {
+    collect(monitor);
+    QThread::yieldCurrentThread();
+  }
+  EXPECT_FALSE(retired(monitor));
+  EXPECT_TRUE(lifetime.expired());
+}
+
+class KWinWorkerTest : public ::testing::Test {
+protected:
+  static void setup(KWinBackend &backend) { backend.m_active = true; backend.queueSetup(); }
+  static void mock(std::function<bool(const QString &, const QStringList &, QString *)> tool) {
+    KWinBackend::s_toolOverride = std::move(tool);
+    KWinBackend::s_restartOverride = [] {};
+  }
+  static void reset() { KWinBackend::s_toolOverride = {}; KWinBackend::s_restartOverride = {}; }
+  static std::shared_future<void> fence() { return KWinBackend::enqueueOperation([] {}); }
+};
+
+TEST_F(KWinWorkerTest, SetupThenOffSettlesInOrderWithoutGuiWait) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const auto oldData = qgetenv("XDG_DATA_HOME");
+  const auto oldSource = qgetenv("TROPHY_KWIN_SCRIPT_DIR");
+  const auto oldPath = qgetenv("PATH");
+  qputenv("XDG_DATA_HOME", (temp.path() + "/data").toUtf8());
+  qputenv("TROPHY_KWIN_SCRIPT_DIR", (temp.path() + "/source").toUtf8());
+  qputenv("PATH", "");
+  QDir().mkpath(temp.path() + "/source/contents/code");
+  for (const auto &relative : {QString("metadata.json"), QString("contents/code/main.js")}) {
+    QFile file(temp.path() + "/source/" + relative);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    file.write("mock");
+  }
+  std::promise<void> entered, release;
+  auto gate = release.get_future().share();
+  std::atomic_bool gated{false};
+  QStringList writes;
+  mock([&](const QString &tool, const QStringList &args, QString *) {
+    if (tool == "kreadconfig6" && !gated.exchange(true)) {
+      entered.set_value(); gate.wait();
+    }
+    if (tool.startsWith("kwriteconfig")) { writes.append(args.last()); return true; }
+    return false;
+  });
+  {
+    KWinBackend backend;
+    setup(backend);
+    EXPECT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    backend.stop();
+    WaylandWindowMonitor monitor;
+    monitor.uninstallBackend();
+    auto removal = fence();
+    EXPECT_TRUE(backend.hasPendingWork());
+    EXPECT_NE(removal.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    int heartbeat = 0;
+    QTimer::singleShot(0, &backend, [&] { ++heartbeat; });
+    QCoreApplication::processEvents();
+    EXPECT_EQ(heartbeat, 1);
+    release.set_value();
+    removal.wait();
+    EXPECT_EQ(writes, (QStringList{"true", "false"}));
+    EXPECT_FALSE(KWinBackend::isScriptInstalled());
+    EXPECT_FALSE(KWinBackend::isScriptEnabled());
+  }
+  reset();
+  qputenv("XDG_DATA_HOME", oldData);
+  qputenv("TROPHY_KWIN_SCRIPT_DIR", oldSource);
+  qputenv("PATH", oldPath);
+}
+} // namespace TrophyBackend
 
 static const char *kSnapshot = R"([
   {"id": 101, "appId": "steam_app_730", "title": "Counter-Strike 2",
@@ -94,6 +227,48 @@ TEST(KWinBackendParseTest, FullyEmptyEntriesSkipped) {
   EXPECT_EQ(wins[0].id, 9u);
 }
 
+TEST(KWinBackendParseTest, NewScriptFieldsAreAdditive) {
+  // The rewritten trophy-monitor script emits extra keys (stable string
+  // key, resourceName, desktopFileName, minimized). Older parsing must
+  // keep reading the known fields and ignore the rest.
+  const QList<WindowInfo> wins = KWinBackend::parseSnapshot(
+      R"([{"id": 0, "key": "window/abc-123", "appId": "deadlock",
+           "resourceName": "deadlock", "desktopFileName": "steam_app_1422450",
+           "title": "Deadlock", "pid": 4242, "fullscreen": true,
+           "focused": true, "minimized": false,
+           "x": 0, "y": 0, "width": 1920, "height": 1080,
+           "outputWidth": 1920, "outputHeight": 1080}])");
+  ASSERT_EQ(wins.size(), 1);
+  EXPECT_EQ(wins[0].appId, "deadlock");
+  EXPECT_EQ(wins[0].title, "Deadlock");
+  EXPECT_EQ(wins[0].pid, 4242);
+  EXPECT_TRUE(wins[0].fullscreen);
+  EXPECT_TRUE(wins[0].focused);
+  EXPECT_EQ(wins[0].width, 1920);
+  EXPECT_EQ(wins[0].outputWidth, 1920);
+}
+
+TEST(KWinBackendParseTest, OversizedSnapshotDroppedWithoutParse) {
+  // ReportWindows bounds what is parsed so a runaway snapshot cannot
+  // balloon the GUI thread (~1 MiB cap). Oversized input leaves the
+  // previous snapshot untouched and emits nothing.
+  KWinBackend backend;
+  QSignalSpy spy(&backend, &KWinBackend::windowsUpdated);
+  const QString huge(1024 * 1024 + 64, QChar('x'));
+  backend.ReportWindows(huge);
+  EXPECT_TRUE(backend.windows().isEmpty());
+  EXPECT_EQ(spy.count(), 0);
+}
+
+TEST(KWinBackendParseTest, StringKeyParsedForIdentityChain) {
+  // The script's stable key must survive parsing so the monitor can
+  // derive deterministic ids from it (see WindowMonitorTest below).
+  const QList<WindowInfo> wins = KWinBackend::parseSnapshot(
+      R"([{"id": 0, "key": "window/abc-123", "title": "Game"}])");
+  ASSERT_EQ(wins.size(), 1);
+  EXPECT_EQ(wins[0].key, "window/abc-123");
+}
+
 // --- WaylandWindowMonitor ---
 
 class WindowMonitorTest : public ::testing::Test {
@@ -111,6 +286,50 @@ TEST_F(WindowMonitorTest, IngestResolvesFocusedApp) {
   EXPECT_EQ(monitor.windows().size(), 2);
   EXPECT_EQ(focusSpy.count(), 1);
   EXPECT_EQ(windowsSpy.count(), 1);
+}
+
+TEST_F(WindowMonitorTest, KeyedZeroIdsAreStableAcrossReorder) {
+  // Regression for id-0 matching the first row: zero-id rows WITH a
+  // stable key get deterministic ids that survive a backend reorder,
+  // while keyless rows keep the positional fallback. All stored ids
+  // stay distinct and nonzero.
+  const auto ingest = [this](const char *json) {
+    monitor.ingestSnapshot(KWinBackend::parseSnapshot(json));
+    return monitor.windows();
+  };
+  QList<WindowInfo> first = ingest(R"([
+    {"id": 0, "key": "window/aaa", "title": "Game"},
+    {"id": 0, "key": "window/bbb", "title": "Chat"},
+    {"id": 0, "title": "NoKey"}])");
+  ASSERT_EQ(first.size(), 3);
+  QSet<quint64> ids;
+  for (const WindowInfo &w : first) {
+    EXPECT_NE(w.id, 0u);
+    EXPECT_FALSE(ids.contains(w.id));
+    ids.insert(w.id);
+  }
+  quint64 gameId = 0, chatId = 0;
+  for (const WindowInfo &w : first) {
+    if (w.title == "Game")
+      gameId = w.id;
+    if (w.title == "Chat")
+      chatId = w.id;
+  }
+  ASSERT_NE(gameId, 0u);
+  ASSERT_NE(chatId, 0u);
+
+  // Same windows, reversed order: keyed ids must not move.
+  QList<WindowInfo> second = ingest(R"([
+    {"id": 0, "title": "NoKey"},
+    {"id": 0, "key": "window/bbb", "title": "Chat"},
+    {"id": 0, "key": "window/aaa", "title": "Game"}])");
+  ASSERT_EQ(second.size(), 3);
+  for (const WindowInfo &w : second) {
+    if (w.title == "Game")
+      EXPECT_EQ(w.id, gameId);
+    if (w.title == "Chat")
+      EXPECT_EQ(w.id, chatId);
+  }
 }
 
 TEST_F(WindowMonitorTest, FocusChangeEmitsOncePerChange) {
@@ -342,7 +561,28 @@ TEST(GnomeBackendParseTest, SignatureStableAndSensitive) {
   ASSERT_FALSE(changed.isEmpty());
   changed[0].focused = !changed[0].focused;
   EXPECT_NE(GnomeBackend::signatureFor(a), GnomeBackend::signatureFor(changed));
+  changed = a;
+  changed[0].width += 100;
+  EXPECT_NE(GnomeBackend::signatureFor(a), GnomeBackend::signatureFor(changed))
+      << "borderless coverage must refresh on resize";
   EXPECT_TRUE(GnomeBackend::signatureFor({}).isEmpty());
+}
+
+TEST(WindowInfoTest, StringEncodedIdsAndPidsAreParsed) {
+  const auto w = WindowInfo::fromJson(QJsonObject{
+      {"id", QStringLiteral("9007199254740993")},
+      {"pid", QStringLiteral("4242")},
+      {"appId", QStringLiteral("steam_app_1")}});
+  EXPECT_EQ(w.id, 9007199254740993ULL);
+  EXPECT_EQ(w.pid, 4242);
+}
+
+TEST(WindowInfoTest, MinimizedStateIsPreserved) {
+  const auto windows = KWinBackend::parseSnapshot(
+      R"([{"title":"Game","pid":4242,"fullscreen":true,"minimized":true}])");
+  ASSERT_EQ(windows.size(), 1);
+  EXPECT_TRUE(windows.first().minimized);
+  EXPECT_FALSE(WindowInfo::fromJson(QJsonObject{}).minimized);
 }
 
 TEST(GnomeBackendParseTest, RefreshWithoutShellIsSilentNoOp) {
@@ -568,6 +808,10 @@ protected:
   void SetUp() override {
     ASSERT_TRUE(dataHome.isValid());
     ASSERT_TRUE(packageDir.isValid());
+    // The enable cache is static: reset per test so a future test that
+    // runs the setup worker can't flip EnabledFalseWithoutKwinTools
+    // order-dependently. Unknown (-1) reads as disabled.
+    KWinBackend::s_enabledCache.store(-1, std::memory_order_release);
 
     // Build a minimal fake script package.
     QDir().mkpath(packageDir.path() + "/contents/code");

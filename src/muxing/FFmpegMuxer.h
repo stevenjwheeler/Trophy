@@ -9,11 +9,14 @@
 
 #include "IMuxer.h"
 #include <QMap>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
 struct AVFormatContext;
 struct AVStream;
+struct AVIOContext;
+class MuxerTest;
 
 namespace TrophyBackend {
 
@@ -38,6 +41,7 @@ public:
   QString formatName() const override;
 
 private:
+  friend class ::MuxerTest;
   void cleanup();
   void cleanup_internal(); // Added this declaration
 
@@ -46,7 +50,13 @@ private:
   std::vector<AVStream *> m_streams;
   
   bool m_headerWritten = false;
+  bool m_finalized = false;
+  bool m_finalizeSuccess = false;
   int64_t m_globalOffset = -1;
+  // GUI telemetry must not acquire the I/O mutex held by writes/finalization.
+  std::atomic<int64_t> m_bytesWritten{0};
+  // Private I/O fault seam; production always uses avio_closep.
+  int (*m_closeOutput)(AVIOContext **);
   
   mutable std::mutex m_muxerMutex; 
 };

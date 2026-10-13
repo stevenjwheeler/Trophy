@@ -8,7 +8,6 @@
 #include "GnomeBackend.h"
 
 #include <QDBusConnection>
-#include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDebug>
 #include <QJsonArray>
@@ -90,13 +89,20 @@ QList<WindowInfo> GnomeBackend::parseEvalResult(const QString &result) {
     return out;
 
   // GNOME may return the string with surrounding quotes when the script
-  // result passes through an extra stringification layer. QJsonDocument
-  // cannot hold a bare string, so unwrap it manually.
+  // result passes through an extra stringification layer. The outer value
+  // is JSON, so parse it as a JSON string (handles all escapes: \", \\,
+  // \n, \uXXXX — a hand-rolled unescape gets the order wrong and misses
+  // the latter two).
   QString json = trimmed;
-  if (json.size() >= 2 && json.startsWith('"') && json.endsWith('"')) {
-    json = json.mid(1, json.size() - 2);
-    json.replace("\\\"", "\"");
-    json.replace("\\\\", "\\");
+  if (json.startsWith('"')) {
+    // QJsonDocument only holds arrays/objects, so parse the outer
+    // string layer via a single-element wrapper.
+    QJsonParseError strErr;
+    const QJsonDocument strDoc =
+        QJsonDocument::fromJson(("[" + json + "]").toUtf8(), &strErr);
+    if (strErr.error == QJsonParseError::NoError && strDoc.isArray() &&
+        !strDoc.array().isEmpty() && strDoc.array().first().isString())
+      json = strDoc.array().first().toString();
   }
 
   QJsonParseError err;
@@ -133,24 +139,27 @@ QString GnomeBackend::signatureFor(const QList<WindowInfo> &windows) {
     sig += QString::number(w.pid);
     sig += w.fullscreen ? "|F" : "|f";
     sig += w.focused ? "|A|" : "|a|";
+    // Geometry matters too: a borderless game growing to >=90% output
+    // coverage (no focus/fullscreen change) must still emit so pending
+    // candidates confirm via the coverage rule.
+    sig += '|';
+    sig += QString::number(w.width);
+    sig += 'x';
+    sig += QString::number(w.height);
+    sig += '@';
+    sig += QString::number(w.outputWidth);
+    sig += 'x';
+    sig += QString::number(w.outputHeight);
     sig += ';';
   }
   return sig;
 }
 
 void GnomeBackend::refresh() {
-  QDBusInterface shell(kService, kPath, kInterface,
-                       QDBusConnection::sessionBus());
-  if (!shell.isValid()) {
-    if (!m_probed)
-      qWarning() << "GNOME backend: org.gnome.Shell not reachable";
-    m_probed = true;
-    return;
-  }
-  shell.setTimeout(2000);
-
   // Eval(script) -> (bool success, QString result).
-  const QDBusMessage reply = shell.call("Eval", snapshotScript());
+  auto request = QDBusMessage::createMethodCall(kService, kPath, kInterface, "Eval");
+  request.setArguments({snapshotScript()});
+  const QDBusMessage reply = QDBusConnection::sessionBus().call(request, QDBus::Block, 2000);
   m_probed = true;
   if (reply.type() == QDBusMessage::ErrorMessage)
     return;
@@ -167,12 +176,15 @@ void GnomeBackend::refresh() {
   const QString sig = signatureFor(parsed);
   {
     QMutexLocker lg(&m_mutex);
+    // A successful poll means the backend is alive even when the
+    // snapshot is unchanged (and empty-first snapshots must not read
+    // inactive): mark active before the dedup early-return.
+    m_active = true;
     if (sig == m_lastSignature)
       return;
     m_lastSignature = sig;
     m_windows = parsed;
   }
-  m_active = true;
   emit windowsUpdated();
 }
 

@@ -149,6 +149,11 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
 
   m_sampleCount = 0;
   m_requiredFrameSize = m_codecCtx->frame_size > 0 ? m_codecCtx->frame_size : 1024;
+  // A reused encoder must not inherit the prior session's origin shift or
+  // buffered tail: both would bake a permanent skew into the new stream.
+  m_startOffset = 0;
+  m_offsetApplied = false;
+  m_accumBuffer.clear();
   m_initialized = true;
 
   qDebug() << "Audio encoder initialized:" << config.codec << config.sampleRate
@@ -357,9 +362,9 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
 bool AudioEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {
   output.data.resize(packet->size);
   memcpy(output.data.data(), packet->data, packet->size);
-  output.pts = packet->pts;
-  output.dts = packet->dts;
-  output.duration = packet->duration;
+  output.pts = av_rescale_q(packet->pts, m_codecCtx->time_base, {1, 1000});
+  output.dts = (packet->dts == AV_NOPTS_VALUE) ? output.pts : av_rescale_q(packet->dts, m_codecCtx->time_base, {1, 1000});
+  output.duration = av_rescale_q(packet->duration, m_codecCtx->time_base, {1, 1000});
   output.isKeyframe = true; // Audio frames are always keyframes
   output.streamIndex = 1;   // Audio stream
 
@@ -390,6 +395,11 @@ void AudioEncoder::cleanup() {
   if (m_codecCtx) {
     avcodec_free_context(&m_codecCtx);
   }
+  // Drop any prior session's origin shift and buffered tail so a reused
+  // encoder starts time at zero (see initialize()).
+  m_startOffset = 0;
+  m_offsetApplied = false;
+  m_accumBuffer.clear();
   m_initialized = false;
 }
 

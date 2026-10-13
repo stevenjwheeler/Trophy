@@ -53,6 +53,9 @@ public:
                                         const QString &activeAddress,
                                         const QByteArray &monitorsJson = {});
 
+  /** Stable content signature used to skip unchanged snapshots. */
+  static QString signatureFor(const QList<WindowInfo> &windows);
+
 signals:
   void windowsUpdated();
 
@@ -61,6 +64,7 @@ private:
 
   mutable QMutex m_mutex;
   QList<WindowInfo> m_windows;
+  QString m_lastSignature; // content hash of the last emitted snapshot
   std::atomic_bool m_active{false};
 };
 

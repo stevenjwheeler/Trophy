@@ -11,6 +11,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
+#include <future>
 #include <mutex>
 #include <thread>
 
@@ -143,6 +146,85 @@ TEST(FrameDispatcherTest, NoSinksDoesNotCrash) {
   const int fd = f.fd;
   EXPECT_NO_THROW(dispatcher.dispatch(f));
   EXPECT_TRUE(fdIsOpen(fd)); // caller retains ownership
+}
+
+TEST(FrameDispatcherTest, ConcurrentMutationKeepsInFlightSnapshotAlive) {
+  struct Gate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    std::atomic<bool> timedOut{false};
+    std::atomic<int> calls{0};
+    std::atomic<int> destructions{0};
+  };
+  class BlockingSink : public IFrameSink {
+  public:
+    explicit BlockingSink(std::shared_ptr<Gate> gate) : gate(std::move(gate)) {}
+    ~BlockingSink() override { ++gate->destructions; }
+    bool tryEnqueue(FrameDescriptor &&frame) override {
+      EXPECT_TRUE(fdIsOpen(frame.fd));
+      ++gate->calls;
+      std::unique_lock<std::mutex> lock(gate->mutex);
+      gate->entered = true;
+      gate->cv.notify_all();
+      gate->timedOut = !gate->cv.wait_for(lock, std::chrono::seconds(5),
+                                         [&] { return gate->released; });
+      return true;
+    }
+    std::shared_ptr<Gate> gate;
+  };
+
+  FrameDispatcher dispatcher;
+  auto gate = std::make_shared<Gate>();
+  auto retired = std::make_shared<BlockingSink>(gate);
+  auto survivor = std::make_shared<CountingSink>();
+  auto successor = std::make_shared<CountingSink>();
+  dispatcher.registerSink(retired);
+  dispatcher.registerSink(survivor);
+  FrameDescriptor first = makeFrame(101);
+  std::thread producer([&] { dispatcher.dispatch(first); });
+  bool entered;
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    entered = gate->cv.wait_for(lock, std::chrono::seconds(2),
+                                [&] { return gate->entered; });
+  }
+  EXPECT_TRUE(entered);
+  std::promise<void> mutatedPromise;
+  auto mutated = mutatedPromise.get_future();
+  std::thread mutator([&] {
+    dispatcher.unregisterSink(retired);
+    retired.reset(); // Only the dispatch snapshot now owns this sink.
+    dispatcher.registerSink(successor);
+    mutatedPromise.set_value();
+  });
+  const bool mutatedWhileBlocked =
+      mutated.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  EXPECT_TRUE(mutatedWhileBlocked)
+      << "Sink callbacks must run outside the registry mutex";
+  if (entered && mutatedWhileBlocked) {
+    EXPECT_EQ(gate->destructions.load(), 0);
+  }
+  {
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->released = true;
+  }
+  gate->cv.notify_all();
+  producer.join();
+  mutator.join();
+
+  EXPECT_FALSE(gate->timedOut.load());
+  EXPECT_EQ(gate->calls.load(), 1);
+  EXPECT_EQ(gate->destructions.load(), 1);
+  EXPECT_EQ(survivor->ptsValues, (std::vector<uint64_t>{101}));
+  EXPECT_TRUE(successor->ptsValues.empty()); // Not in the first snapshot.
+  FrameDescriptor second = makeFrame(202);
+  dispatcher.dispatch(second);
+  EXPECT_EQ(survivor->ptsValues, (std::vector<uint64_t>{101, 202}));
+  EXPECT_EQ(successor->ptsValues, (std::vector<uint64_t>{202}));
+  EXPECT_TRUE(fdIsOpen(first.fd));
+  EXPECT_TRUE(fdIsOpen(second.fd));
 }
 
 // --- CircularFrameBuffer ---

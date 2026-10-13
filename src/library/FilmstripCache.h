@@ -9,6 +9,7 @@
 
 #include <QMap>
 #include <QObject>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -22,9 +23,11 @@ namespace TrophyBackend {
  * positions, like ThumbnailGenerator) for the video lane's
  * filmstrip. Work runs on the global thread pool; results
  * arrive via filmstripReady. Thumbs live next to the
- * thumbnails (`.thumbnails/<base>.strip-<i>.jpg`) and are
+ * thumbnails (`.thumbnails/<base>.strip-<count>-<i>.jpg`) and are
  * reused while newer than the video itself, so reopening a
- * file is instant.
+ * file is instant. The count is part of the cache key: old
+ * count-less `strip-<i>.jpg` files are treated as a miss, and swept
+ * away when a fresh strip for the file is written.
  */
 class FilmstripCache : public QObject {
   Q_OBJECT
@@ -43,7 +46,9 @@ signals:
                       const QStringList &thumbPaths);
 
 private:
-  QSet<QString> m_pending;
+  // In-flight (file, count) requests: the strip layout depends on
+  // the count, so different counts for one file run independently.
+  QSet<QPair<QString, int>> m_pending;
 };
 
 } // namespace TrophyBackend

@@ -17,6 +17,8 @@
 #include <QThreadPool>
 #include <QtEndian>
 #include <cmath>
+#include <memory>
+#include <vector>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -36,6 +38,7 @@ constexpr int kPeakRate = 8000;
 // Max-abs is accumulated per block, then reduced to buckets —
 // no reliance on container duration (which can be NOPTS).
 constexpr int kBlockSamples = 256;
+constexpr int kMaxTracks = 32; // same bound as the sidecar schema
 constexpr quint32 kCacheMagic = 0x54504b31; // "TPK1"
 constexpr quint32 kCacheVersion = 1;
 
@@ -45,160 +48,238 @@ QString peaksPathFor(const QString &filePath) {
          ".peaks";
 }
 
-// Index of the nth audio stream, or -1.
-int findAudioStream(AVFormatContext *ctx, int audioIndex) {
-  int seen = 0;
-  for (unsigned int i = 0; i < ctx->nb_streams; ++i) {
-    if (ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-      if (seen == audioIndex)
-        return static_cast<int>(i);
-      ++seen;
-    }
-  }
-  return -1;
-}
-
-// Decode one audio stream of an OPEN container to normalized
-// per-bucket peaks. Rewinds to the head first (callers share
-// one open across tracks). Empty on any failure.
-QVector<float> decodeTrackPeaks(AVFormatContext *ctx, int audioIndex) {
-  QVector<float> peaks;
-  const int streamIdx = findAudioStream(ctx, audioIndex);
-  if (streamIdx < 0) {
-    return peaks;
-  }
-
-  const AVCodecParameters *par = ctx->streams[streamIdx]->codecpar;
-  const AVCodec *codec = avcodec_find_decoder(par->codec_id);
-  if (!codec) {
-    return peaks;
-  }
-
-  AVCodecContext *dec = avcodec_alloc_context3(codec);
-  if (!dec || avcodec_parameters_to_context(dec, par) < 0 ||
-      avcodec_open2(dec, codec, nullptr) < 0) {
-    avcodec_free_context(&dec);
-    return peaks;
-  }
-
-  // Rewind: a shared container sits wherever the previous
-  // track's pass left it.
-  if (av_seek_frame(ctx, -1, 0, AVSEEK_FLAG_BACKWARD) < 0) {
-    avcodec_free_context(&dec);
-    return peaks;
-  }
-
+// One state per audio stream; no retained packets or full-rate sample history.
+// Blocks cost one float per 256 output samples (125 bytes/second/track).
+struct TrackDecoder {
+  AVCodecContext *dec = nullptr;
+  AVFrame *frame = nullptr;
   SwrContext *swr = nullptr;
-  AVChannelLayout outLayout;
-  av_channel_layout_default(&outLayout, 1);
-  if (swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_FLT, kPeakRate,
-                           &dec->ch_layout, dec->sample_fmt, dec->sample_rate,
-                           0, nullptr) != 0 ||
-      swr_init(swr) != 0) {
-    swr_free(&swr);
-    av_channel_layout_uninit(&outLayout);
-    avcodec_free_context(&dec);
-    return peaks;
-  }
-
+  uint8_t *out = nullptr;
+  int capacity = 0;
+  bool ok = false;
   QVector<float> blocks;
-  blocks.reserve(4096);
   float blockMax = 0.0f;
   int blockFill = 0;
-  auto pushSample = [&](float s) {
-    const float a = std::fabs(s);
-    if (a > blockMax)
-      blockMax = a;
-    if (++blockFill >= kBlockSamples) {
-      blocks.append(blockMax);
-      blockMax = 0.0f;
-      blockFill = 0;
-    }
-  };
+  qint64 samples = 0;
+  qint64 drainSamples = 0;
+  // Explicit limits bound malformed frames, resampler buffering and history.
+  static constexpr int kMaxFrameSamples = 1 << 20;
+  static constexpr qint64 kMaxSamples = qint64(kPeakRate) * 60 * 60 * 24;
 
-  AVPacket *pkt = av_packet_alloc();
-  AVFrame *frame = av_frame_alloc();
-  // Output buffer sized for the worst case below (a full input
-  // frame resampled down still fits with room to spare); the
-  // same capacity is passed as swr's output budget — never an
-  // unbounded count against a fixed buffer.
-  constexpr int kOutCapacity = 4096;
-  uint8_t *outBuf = nullptr;
-  int outLinesize = 0;
-  if (av_samples_alloc(&outBuf, &outLinesize, 1, kOutCapacity,
-                       AV_SAMPLE_FMT_FLT, 0) < 0) {
-    outBuf = nullptr;
+  explicit TrackDecoder(const AVCodecParameters *par) {
+    const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+    if (!codec)
+      return;
+    dec = avcodec_alloc_context3(codec);
+    frame = av_frame_alloc();
+    if (!dec || !frame || avcodec_parameters_to_context(dec, par) < 0 ||
+        avcodec_open2(dec, codec, nullptr) < 0 || dec->sample_rate <= 0 ||
+        dec->ch_layout.nb_channels <= 0)
+      return;
+    AVChannelLayout mono;
+    av_channel_layout_default(&mono, 1);
+    const int result = swr_alloc_set_opts2(
+        &swr, &mono, AV_SAMPLE_FMT_FLT, kPeakRate, &dec->ch_layout,
+        dec->sample_fmt, dec->sample_rate, 0, nullptr);
+    av_channel_layout_uninit(&mono);
+    ok = result >= 0 && swr && swr_init(swr) >= 0;
   }
 
-  bool ok = pkt && frame && outBuf;
-  auto convert = [&](const uint8_t **data, int nbSamples) {
-    const int got = swr_convert(swr, &outBuf, kOutCapacity, data, nbSamples);
-    if (got < 0) {
+  ~TrackDecoder() {
+    av_freep(&out);
+    swr_free(&swr);
+    av_frame_free(&frame);
+    avcodec_free_context(&dec);
+  }
+
+  int convert(const uint8_t **data, int count) {
+    const int wanted = swr_get_out_samples(swr, count);
+    if (wanted < 0 || wanted > kMaxFrameSamples) {
       ok = false;
       return 0;
     }
-    const float *samples = reinterpret_cast<const float *>(outBuf);
-    for (int i = 0; i < got; ++i)
-      pushSample(samples[i]);
+    // Allocate a checked output budget sufficient for this frame. Unlike
+    // fixed-small output with arbitrarily large input, this cannot accumulate
+    // an unbounded full-rate backlog inside SWR.
+    const int budget = qMax(4096, wanted);
+    if (budget > capacity) {
+      av_freep(&out);
+      int linesize = 0;
+      if (av_samples_alloc(&out, &linesize, 1, budget, AV_SAMPLE_FMT_FLT, 0) < 0) {
+        ok = false;
+        return 0;
+      }
+      capacity = budget;
+    }
+    const int got = swr_convert(swr, &out, capacity, data, count);
+    if (got < 0 || samples + got > kMaxSamples) {
+      ok = false;
+      return 0;
+    }
+    samples += got;
+    if (!data)
+      drainSamples += got;
+    const float *values = reinterpret_cast<const float *>(out);
+    for (int i = 0; i < got; ++i) {
+      if (!std::isfinite(values[i])) {
+        ok = false;
+        return 0;
+      }
+      blockMax = qMax(blockMax, std::fabs(values[i]));
+      if (++blockFill == kBlockSamples) {
+        blocks.append(blockMax);
+        blockMax = 0.0f;
+        blockFill = 0;
+      }
+    }
     return got;
-  };
-  while (ok && av_read_frame(ctx, pkt) >= 0) {
-    if (pkt->stream_index != streamIdx) {
-      av_packet_unref(pkt);
-      continue;
-    }
-    if (avcodec_send_packet(dec, pkt) < 0) {
-      av_packet_unref(pkt);
-      continue;
-    }
-    av_packet_unref(pkt);
-    while (ok && avcodec_receive_frame(dec, frame) == 0)
-      convert((const uint8_t **)frame->data, frame->nb_samples);
   }
-  // Drain the decoder, then flush the resampler: it buffers
-  // input (resampling delay), so frames alone don't guarantee
-  // output — a 1s file ends before swr emits anything.
-  if (ok) {
-    avcodec_send_packet(dec, nullptr);
-    while (ok && avcodec_receive_frame(dec, frame) == 0)
-      convert((const uint8_t **)frame->data, frame->nb_samples);
+
+  int receive() {
+    int result = AVERROR(EAGAIN);
+    while (ok && (result = avcodec_receive_frame(dec, frame)) == 0) {
+      if (frame->nb_samples <= 0 || frame->nb_samples > kMaxFrameSamples ||
+          !frame->extended_data || frame->sample_rate != dec->sample_rate ||
+          frame->format != dec->sample_fmt ||
+          av_channel_layout_compare(&frame->ch_layout, &dec->ch_layout) != 0) {
+        ok = false;
+      } else {
+        const int planes = av_sample_fmt_is_planar(dec->sample_fmt)
+                               ? dec->ch_layout.nb_channels : 1;
+        for (int i = 0; i < planes; ++i)
+          if (!frame->extended_data[i])
+            ok = false;
+        if (ok)
+          convert(const_cast<const uint8_t **>(frame->extended_data),
+                  frame->nb_samples);
+      }
+      av_frame_unref(frame);
+    }
+    if (result != AVERROR(EAGAIN) && result != AVERROR_EOF && result < 0)
+      ok = false;
+    return result;
+  }
+
+  void send(const AVPacket *packet) {
+    if (!ok)
+      return;
+    int result = avcodec_send_packet(dec, packet);
+    if (result == AVERROR(EAGAIN)) {
+      receive();
+      if (ok)
+        result = avcodec_send_packet(dec, packet);
+    }
+    if (result < 0) {
+      ok = false;
+      return;
+    }
+    const int received = receive();
+    // A successful NULL send must drain through decoder EOF, not merely
+    // EAGAIN. Never flush SWR or publish final peaks on a demux read error.
+    if (!packet && received != AVERROR_EOF)
+      ok = false;
+  }
+
+  QVector<float> finish() {
+    if (!ok)
+      return {};
     while (ok && convert(nullptr, 0) > 0) {
     }
-  }
-  if (blockFill > 0)
-    blocks.append(blockMax);
-
-  av_freep(&outBuf);
-  av_packet_free(&pkt);
-  av_frame_free(&frame);
-  swr_free(&swr);
-  av_channel_layout_uninit(&outLayout);
-  avcodec_free_context(&dec);
-
-  if (blocks.isEmpty())
-    return peaks;
-
-  // Reduce blocks to fixed buckets, then normalize.
-  peaks.resize(WaveformCache::kBuckets);
-  float globalMax = 0.0f;
-  for (int b = 0; b < WaveformCache::kBuckets; ++b) {
-    const int from = (b * blocks.size()) / WaveformCache::kBuckets;
-    const int to =
-        ((b + 1) * blocks.size()) / WaveformCache::kBuckets;
-    float m = 0.0f;
-    for (int i = from; i < to; ++i) {
-      if (blocks[i] > m)
-        m = blocks[i];
+    if (!ok)
+      return {};
+    if (blockFill)
+      blocks.append(blockMax);
+    if (blocks.isEmpty())
+      return {};
+    QVector<float> peaks(WaveformCache::kBuckets);
+    float globalMax = 0.0f;
+    for (int b = 0; b < peaks.size(); ++b) {
+      const qsizetype from = (qint64(b) * blocks.size()) / peaks.size();
+      const qsizetype to = (qint64(b + 1) * blocks.size()) / peaks.size();
+      float maximum = 0.0f;
+      for (qsizetype i = from; i < to; ++i)
+        maximum = qMax(maximum, blocks[i]);
+      peaks[b] = maximum;
+      globalMax = qMax(globalMax, maximum);
     }
-    peaks[b] = m;
-    if (m > globalMax)
-      globalMax = m;
+    if (globalMax > 0.0f)
+      for (float &peak : peaks)
+        peak /= globalMax;
+    return peaks;
   }
-  if (globalMax > 0.0f) {
-    for (float &p : peaks)
-      p /= globalMax;
+};
+
+template <typename Stats>
+QVector<QVector<float>> decodeAllPeaks(
+    AVFormatContext *ctx, Stats &stats,
+    const std::function<int(int, qint64)> &readOverride) {
+  std::vector<std::unique_ptr<TrackDecoder>> states;
+  QVector<int> streamToTrack(ctx->nb_streams, -1);
+  int count = 0;
+  for (unsigned int i = 0; i < ctx->nb_streams; ++i)
+    if (ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+      ++count;
+  // Reject excessive stream fanout before allocating decoder/SWR state.
+  // Requests are still settled empty by the owning job.
+  if (count > kMaxTracks) {
+    stats.tracks = count;
+    return {};
   }
-  return peaks;
+  for (unsigned int i = 0; i < ctx->nb_streams; ++i) {
+    if (ctx->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
+      continue;
+    streamToTrack[i] = static_cast<int>(states.size());
+    states.push_back(std::make_unique<TrackDecoder>(ctx->streams[i]->codecpar));
+  }
+  stats.tracks = static_cast<int>(states.size());
+  QVector<QVector<float>> tracks(stats.tracks);
+  AVPacket *packet = av_packet_alloc();
+  if (!packet || states.empty()) {
+    av_packet_free(&packet);
+    return tracks;
+  }
+  ++stats.passes;
+  int result;
+  for (;;) {
+    result = av_read_frame(ctx, packet);
+    ++stats.reads;
+    if (readOverride)
+      result = readOverride(result, stats.reads);
+    if (result < 0)
+      break;
+    ++stats.packets;
+    if (packet->stream_index < 0 || packet->stream_index >= streamToTrack.size()) {
+      result = AVERROR_INVALIDDATA;
+      break;
+    }
+    const int track = streamToTrack[packet->stream_index];
+    if (track >= 0)
+      states[track]->send(packet);
+    av_packet_unref(packet);
+  }
+  av_packet_free(&packet);
+  stats.cleanEof = result == AVERROR_EOF;
+  for (int t = 0; t < stats.tracks; ++t) {
+    auto &state = *states[t];
+    if (stats.cleanEof && state.ok) {
+      ++stats.decoderDrains;
+      state.send(nullptr);
+      if (state.ok) {
+        ++stats.resamplerDrains;
+        tracks[t] = state.finish();
+      }
+    }
+    stats.samples += state.samples;
+    stats.drainSamples += state.drainSamples;
+    stats.blocks += state.blocks.size();
+    stats.blockCapacity += state.blocks.capacity();
+    stats.outputCapacity += state.capacity;
+    stats.maxOutputCapacity = qMax(stats.maxOutputCapacity, qint64(state.capacity));
+    // Release each track's history and native state as it settles, rather
+    // than holding all histories beside all 8000-bucket output vectors.
+    states[t].reset();
+  }
+  return tracks;
 }
 
 struct CachedPeaks {
@@ -231,8 +312,12 @@ CachedPeaks readCache(const QString &filePath, int bucketsWanted) {
   out.tracks.resize(trackCount);
   for (int t = 0; t < trackCount; ++t) {
     out.tracks[t].resize(bucketsWanted);
-    for (int b = 0; b < bucketsWanted; ++b)
+    for (int b = 0; b < bucketsWanted; ++b) {
       in >> out.tracks[t][b];
+      const float peak = out.tracks[t][b];
+      if (!std::isfinite(peak) || peak < 0.0f || peak > 1.0f)
+        return CachedPeaks{};
+    }
   }
   if (in.status() != QDataStream::Ok)
     return CachedPeaks{};
@@ -242,6 +327,13 @@ CachedPeaks readCache(const QString &filePath, int bucketsWanted) {
 
 void writeCache(const QString &filePath,
                 const QVector<QVector<float>> &tracks) {
+  // A short write declares full buckets in the header but stores
+  // fewer floats, permanently invalidating the cache (every open
+  // re-decodes). Empty/failed tracks must never be cached.
+  for (const auto &track : tracks) {
+    if (track.isEmpty())
+      return;
+  }
   const QFileInfo info(filePath);
   QDir dir(info.absolutePath() + "/.thumbnails");
   if (!dir.exists() && !dir.mkpath("."))
@@ -278,7 +370,10 @@ int WaveformCache::audioTrackCount(const QString &filePath) {
   AVFormatContext *ctx = nullptr;
   if (avformat_open_input(&ctx, filePath.toUtf8().constData(), nullptr,
                           nullptr) < 0) {
-    return 0;
+    // Unknown, not empty: the caller shows a neutral "unavailable" state
+    // instead of asserting the file has no audio (which would be a lie
+    // for a missing/unreadable file).
+    return -1;
   }
   int count = 0;
   for (unsigned int i = 0; i < ctx->nb_streams; ++i) {
@@ -289,18 +384,52 @@ int WaveformCache::audioTrackCount(const QString &filePath) {
   return count;
 }
 
+void WaveformCache::requestAudioTrackCount(const QString &filePath,
+                                           int requestId) {
+  QPointer<WaveformCache> self(this);
+  QThreadPool::globalInstance()->start([self, filePath, requestId]() {
+    // The probe touches only its own container, never QObject state.
+    const int count = audioTrackCount(filePath);
+    if (!self)
+      return;
+    QMetaObject::invokeMethod(self, [self, filePath, requestId, count]() {
+      if (self)
+        emit self->audioTrackCountReady(filePath, requestId, count);
+    }, Qt::QueuedConnection);
+  });
+}
+
 void WaveformCache::requestPeaks(const QString &filePath, int track) {
   if (filePath.isEmpty() || track < 0)
     return;
+
+  if (const auto it = m_delivering.constFind(filePath);
+      it != m_delivering.cend()) {
+    const QVariantList peaks = track < it->size() ? toVariant((*it)[track])
+                                                : QVariantList{};
+    QPointer<WaveformCache> self(this);
+    QMetaObject::invokeMethod(this, [self, filePath, track, peaks]() {
+      if (self)
+        emit self->peaksReady(filePath, track, peaks);
+    }, Qt::QueuedConnection);
+    return;
+  }
 
   if (const CachedPeaks cached = readCache(filePath, kBuckets);
       cached.valid) {
     QVariantList peaks;
     if (track < cached.tracks.size())
       peaks = toVariant(cached.tracks[track]);
+    // QPointer discipline: a late queued emit must never touch a
+    // dead object (matches the worker paths below).
+    QPointer<WaveformCache> self(this);
     QMetaObject::invokeMethod(
         this,
-        [this, filePath, track, peaks]() { emit peaksReady(filePath, track, peaks); },
+        [self, filePath, track, peaks]() {
+          if (self.isNull())
+            return;
+          emit self->peaksReady(filePath, track, peaks);
+        },
         Qt::QueuedConnection);
     return;
   }
@@ -312,89 +441,50 @@ void WaveformCache::requestPeaks(const QString &filePath, int track) {
   }
   m_pending[filePath] = QSet<int>{track};
 
-  // Same QPointer discipline as Recording::loadMetadata: the
-  // cache object is app-owned, but a late worker must never
-  // touch a dead object. One open, sequential per-track
-  // decodes (a single pass over the bytes instead of one open
-  // + full decode per track), emitting each track as it
-  // completes so the first lane paints ~3x sooner on
-  // multi-track files.
+  // The job owns its container and all decoder states. No worker accesses
+  // QObject members; queued delivery is guarded independently of its lifetime.
+  // One forward demux pass feeds every track. Final normalization requires
+  // all of that track's samples, so no final lane is emitted before clean EOF.
   QPointer<WaveformCache> self(this);
-  QThreadPool::globalInstance()->start([self, filePath]() {
+  const auto observer = m_decodeObserver;
+  const auto readOverride = m_readResultOverride;
+  QThreadPool::globalInstance()->start([self, filePath, observer, readOverride]() {
     if (self.isNull())
       return;
-    auto emitTrack = [self, filePath](int track,
-                                      const QVector<float> &peaks) {
-      QMetaObject::invokeMethod(
-          self,
-          [self, filePath, track, peaks]() {
-            if (self.isNull())
-              return;
-            // Retire the track: this emit satisfies its
-            // request, so the late-joiner pass below must
-            // not re-deliver it (double emit).
-            auto it = self->m_pending.find(filePath);
-            if (it == self->m_pending.end() ||
-                !it->contains(track))
-              return;
-            it->remove(track);
-            if (it->isEmpty())
-              self->m_pending.erase(it);
-            emit self->peaksReady(filePath, track, toVariant(peaks));
-          },
-          Qt::QueuedConnection);
-    };
-
     AVFormatContext *ctx = nullptr;
-    if (avformat_open_input(&ctx, filePath.toUtf8().constData(), nullptr,
-                            nullptr) < 0) {
-      // Unreadable: still settle every owed track (empty) so
-      // QML never waits forever.
-      QMetaObject::invokeMethod(
-          self,
-          [self, filePath]() {
-            if (self.isNull())
-              return;
-            const QSet<int> owed = self->m_pending.take(filePath);
-            for (int t : owed)
-              emit self->peaksReady(filePath, t, QVariantList{});
-          },
-          Qt::QueuedConnection);
-      return;
-    }
-
-    int count = 0;
-    for (unsigned int i = 0; i < ctx->nb_streams; ++i) {
-      if (ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
-        ++count;
-    }
+    DecodeStats stats;
     QVector<QVector<float>> tracks;
-    tracks.resize(count);
-    for (int t = 0; t < count; ++t) {
-      tracks[t] = decodeTrackPeaks(ctx, t);
-      emitTrack(t, tracks[t]);
+    if (avformat_open_input(&ctx, filePath.toUtf8().constData(), nullptr,
+                            nullptr) >= 0) {
+      tracks = decodeAllPeaks(ctx, stats, readOverride);
+      if (!tracks.isEmpty())
+        writeCache(filePath, tracks);
     }
-    if (!tracks.isEmpty())
-      writeCache(filePath, tracks);
     avformat_close_input(&ctx);
+    if (observer)
+      observer(stats);
 
-    // Late joiners: tracks requested mid-flight that the loop
-    // already passed are served from the just-written cache.
+    // Late joiners use the already-decoded data, even when native sidecar
+    // writes failed. This also avoids rereading every track on the GUI
+    // thread just to settle an in-flight request.
     QMetaObject::invokeMethod(
         self,
-        [self, filePath]() {
+        [self, filePath, tracks]() {
           if (self.isNull())
             return;
           const QSet<int> owed = self->m_pending.take(filePath);
           if (owed.isEmpty())
             return;
-          const CachedPeaks cached = readCache(filePath, kBuckets);
+          self->m_delivering.insert(filePath, tracks);
           for (int t : owed) {
             QVariantList peaks;
-            if (cached.valid && t >= 0 && t < cached.tracks.size())
-              peaks = toVariant(cached.tracks[t]);
+            if (t >= 0 && t < tracks.size())
+              peaks = toVariant(tracks[t]);
             emit self->peaksReady(filePath, t, peaks);
+            if (self.isNull())
+              return;
           }
+          self->m_delivering.remove(filePath);
         },
         Qt::QueuedConnection);
   });

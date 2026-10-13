@@ -592,11 +592,12 @@ Page {
                                             color: isChecked ? "white" : Theme.textSecondaryColor
                                         }
 
-                                        MouseArea {
-                                            anchors.fill: parent
+                                        HoverHandler {
                                             cursorShape: Qt.PointingHandCursor
+                                        }
+                                        TapHandler {
                                             enabled: !(recordingManager && recordingManager.isRecording)
-                                            onClicked: {
+                                            onTapped: {
                                                 if (settingsManager)
                                                     settingsManager.fps = modelData;
                                             }
@@ -1776,11 +1777,12 @@ Page {
             }
         }
 
-        MouseArea {
-            anchors.fill: parent
-            enabled: cardEnabled
+        HoverHandler {
             cursorShape: Qt.PointingHandCursor
-            onClicked: chosen()
+        }
+        TapHandler {
+            enabled: cardEnabled
+            onTapped: chosen()
         }
     }
 

@@ -7,10 +7,16 @@
 
 #pragma once
 
+#include <QDateTime>
 #include <QFileSystemWatcher>
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
+#include <functional>
+#include <vector>
+
+class StorageManagerTest;
 
 namespace TrophyBackend {
 
@@ -110,9 +116,26 @@ private slots:
   void onDirectoryChanged(const QString &path);
 
 private:
+  friend class ::StorageManagerTest;
+  // Test-only observation of real refresh passes, including unchanged-size
+  // scans which cannot be counted through usedSizeChanged.
+  std::function<void()> m_refreshObserverForTest;
   qint64 calculateDirectorySize() const;
   QStringList getRecordingsSortedByDate() const;
   bool deleteOldestRecording();
+  // Single-walk snapshot for enforceStorageLimit: one recursive walk per
+  // pass instead of one per deleted file. Sorted oldest-first, matching
+  // getRecordingsSortedByDate() order.
+  struct SnapshotEntry {
+    QString path;
+    QDateTime mtime;
+    qint64 size = 0;
+  };
+  std::vector<SnapshotEntry> snapshotRecordings() const;
+  // Same checks/thumb cleanup/recordingDeleted emit as deleteRecording(),
+  // but without the trailing refresh() so enforceStorageLimit can settle
+  // once after deleting many files.
+  bool deleteRecordingNoRefresh(const QString &filePath);
   // GUI-thread completion for deleteRecordings(): batch signal, single
   // refresh, progress close-out.
   void finishBulkDelete(const QStringList &deletedPaths, int totalCount);
@@ -136,6 +159,9 @@ private:
   // completion settles with a single refresh instead.
   int m_bulkDeletesActive = 0;
   QFileSystemWatcher m_watcher;
+  // Coalesces filesystem-event bursts (a 50-file import fires per file)
+  // into a single enforceStorageLimit pass (see onDirectoryChanged).
+  QTimer m_debounceTimer;
 };
 
 } // namespace TrophyBackend

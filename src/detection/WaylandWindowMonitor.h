@@ -16,6 +16,8 @@
 #include <QTimer>
 #include <chrono>
 #include <future>
+#include <memory>
+#include <vector>
 
 namespace TrophyBackend {
 
@@ -73,8 +75,30 @@ public:
   /**
    * @brief Feed a compositor snapshot (D-Bus entry point for backends).
    * Public so tests can drive the monitor without a compositor.
+   *
+   * Entries whose compositor id is 0 (the KWin script reports
+   * client.windowId, which is 0 for every Wayland window) are remapped so
+   * every stored row has a distinct id and WindowService lookups resolve
+   * the correct row instead of always matching the first one. Remap
+   * chain: real nonzero id kept; zero id + stable string key (KWin
+   * internalId) -> deterministic key-derived id (tracks across snapshots
+   * and restarts); zero id + no key -> kSyntheticIdBase + position (stable
+   * only while the backend's order holds). Real nonzero compositor ids
+   * (GNOME/Hyprland/Sway) pass through untouched. No stored row keeps id
+   * 0 afterwards. Consumers must still resolve ids promptly (the
+   * WindowService snapshot cache covers the list-then-lookup gap).
    */
   void ingestSnapshot(const QList<WindowInfo> &windows);
+
+  /**
+   * @brief Base for synthetic window ids assigned at ingest time.
+   *
+   * 0x80000000 is far above the small ids GNOME (stable sequence) and
+   * Sway (container ids) hand out, and far below Hyprland's 48-bit
+   * window addresses, so remapped KWin rows cannot collide with real
+   * compositor ids in practice. No stored row keeps id 0 afterwards.
+   */
+  static constexpr quint64 kSyntheticIdBase = 0x80000000ULL;
 
 signals:
   void focusedAppChanged(const QString &appId);
@@ -85,7 +109,17 @@ private slots:
   void onBackendWindowsUpdated();
 
 private:
+  friend class WindowMonitorWorkerTest;
   void setupCompositorTracking();
+  void collectRetired();
+  struct Retired {
+    std::shared_ptr<QObject> backend;
+    std::future<void> poll;
+  };
+  std::vector<Retired> m_retired;
+  std::vector<std::shared_future<void>> m_removals;
+  quint64 m_generation = 0;
+  std::function<void()> m_pollOverride; // private deterministic worker seam
 
   QTimer *m_pollTimer = nullptr;
   QString m_focusedAppId;
@@ -93,10 +127,10 @@ private:
   mutable QMutex m_mutex;
   bool m_monitoring = false;
   QString m_compositor;
-  KWinBackend *m_kwin = nullptr;
-  GnomeBackend *m_gnome = nullptr;
-  HyprlandBackend *m_hyprland = nullptr;
-  SwayBackend *m_sway = nullptr;
+  std::shared_ptr<KWinBackend> m_kwin;
+  std::shared_ptr<GnomeBackend> m_gnome;
+  std::shared_ptr<HyprlandBackend> m_hyprland;
+  std::shared_ptr<SwayBackend> m_sway;
   std::future<void> m_pollFuture;
 };
 
