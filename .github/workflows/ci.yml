@@ -20,9 +20,9 @@ permissions:
 
 jobs:
   # A push carrying both a branch ref and a v* tag on the same commit
-  # would build twice (once per ref). Main releases keep the tag run
-  # (branch build skipped); any other branch keeps the branch run and
-  # the tag run is dropped, so non-main tags never cut a release.
+  # would build twice (once per ref). The tag run covers a tagged main
+  # commit (branch build skipped); any other branch keeps the branch run
+  # and the tag run is dropped, so tags only ever build once.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -75,9 +75,16 @@ jobs:
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
           elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "main" ]]; then
-            # Main is the release line: stamp the tag only, never a
-            # commit id. Falls back to 0.0.0 when no tag is reachable.
-            VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+            # Main is the release line: stamp the tag itself, leading v
+            # included (e.g. v0.9.4), never a commit id. Falls back to
+            # v0.0.0 when no tag is reachable.
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "dev" ]]; then
+            # Dev line: base tag plus -dev- and the commit
+            # (e.g. v0.9.4-dev-f1f465b). Releases are cut manually;
+            # CI only names the artifacts.
+            BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            VERSION="${BASE}-dev-${SHA}"
           else
             BRANCH=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}
             SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^A-Za-z0-9.-]/-/g')
@@ -295,31 +302,9 @@ jobs:
           path: |
             Trophy-*-x86_64.AppImage
             SHA256SUMS
-          # Releases embed the files, so per-run artifacts are short-lived.
+          # Artifacts are short-lived (14 days); release attachments
+          # are uploaded manually.
           retention-days: 14
-          
-  create-release:
-    needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with:
-          pattern: Trophy-AppImage-*-x86_64
-          merge-multiple: true
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            Trophy-*-x86_64.AppImage
-            SHA256SUMS
-          generate_release_notes: true
-          # Never publish an empty release if the artifact is missing.
-          fail_on_unmatched_files: true
 
   comment-pr:
     needs: build-and-test
