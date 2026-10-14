@@ -182,6 +182,28 @@ jobs:
           desktop-file-validate packaging/trophy.desktop
           appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
 
+      - name: Start headless PipeWire for audio-device tests
+        # Player probe tests instantiate real QML AudioOutput items, whose
+        # constructor enumerates audio devices inside QtMultimedia. On a
+        # runner with PipeWire libraries but no daemon that enumeration
+        # segfaults (QPlatformAudioDevices::create), so provide a bare
+        # headless daemon in the same runtime dir the tests use. An empty
+        # registry enumerates fine; nothing here plays or captures audio.
+        run: |
+          mkdir -p "${{ runner.temp }}/trophy-test-runtime"
+          chmod 700 "${{ runner.temp }}/trophy-test-runtime"
+          export XDG_RUNTIME_DIR="${{ runner.temp }}/trophy-test-runtime"
+          if command -v pipewire >/dev/null; then
+            nohup pipewire >"$RUNNER_TEMP/pipewire.log" 2>&1 &
+            for i in $(seq 1 50); do
+              [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break
+              sleep 0.2
+            done
+            ls -l "$XDG_RUNTIME_DIR" || true
+          else
+            echo "pipewire daemon not installed; audio-device tests may fail"
+          fi
+
       - name: Run Unit Tests
         env:
           XDG_CONFIG_HOME: ${{ runner.temp }}/trophy-test-config
