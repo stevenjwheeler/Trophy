@@ -95,45 +95,45 @@ jobs:
           echo "Building Trophy version: $VERSION"
 
       - name: Install System Dependencies
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          # Headless audio daemon for device-enumerating tests: without
-          # it, QAudioOutput construction segfaults inside QtMultimedia
-          # (a bare daemon is enough; nothing plays audio).
-          packages: |
-            build-essential
-            cmake
-            ninja-build
-            ccache
-            libfuse2t64
-            wget
-            libgl1-mesa-dev
-            libx11-dev
-            libxext-dev
-            libxkbcommon-dev
-            libwayland-dev
-            libxcb-shm0-dev
-            libxcb-cursor0
-            libxkbcommon-x11-0
-            libvulkan-dev
-            libpipewire-0.3-dev
-            libspa-0.2-dev
-            pipewire
-            libdrm-dev
-            libgbm-dev
-            libavcodec-dev
-            libavformat-dev
-            libavutil-dev
-            libswscale-dev
-            libswresample-dev
-            libva-dev
-            libva-drm2
-            libgtest-dev
-            desktop-file-utils
-            appstream
-          # Bumped to invalidate a poisoned cache entry saved by a
-          # mirror-flaked run (partial debs kept restoring).
-          version: 1.6
+        # Plain apt-get, deliberately NOT cached: the previous
+        # cache-apt-pkgs-action setup kept failing in two ways.
+        # First it swallowed apt errors (a mirror 404 on transitive
+        # libsoup3 debs left libvulkan-dev uninstalled while the step
+        # still reported success, so the build died later with
+        # "Could NOT find Vulkan"). Then it saved that partial
+        # state, so every later run restored the poisoned cache
+        # (see the 1.6 version-bump commit). Direct apt fails fast
+        # on error and retries the update/install cycle, so a
+        # flaked mirror recovers instead of poisoning later runs.
+        # Headless audio daemon for device-enumerating tests: without
+        # it, QAudioOutput construction segfaults inside QtMultimedia
+        # (a bare daemon is enough; nothing plays audio).
+        run: |
+          set -e
+          PACKAGES="build-essential cmake ninja-build ccache libfuse2t64 wget \
+            libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev \
+            libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 \
+            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
+            libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libswresample-dev libva-dev \
+            libva-drm2 libgtest-dev desktop-file-utils appstream"
+          for attempt in 1 2 3; do
+            echo "apt attempt $attempt/3..."
+            if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
+              break
+            fi
+            echo "apt attempt $attempt failed, retrying..."
+            sleep 10
+            if [[ $attempt == "3" ]]; then
+              echo "Final retry with --fix-missing..."
+              sudo apt-get update
+              sudo apt-get install -y --fix-missing $PACKAGES
+            fi
+          done
+          # Fail fast with a clear message instead of a cryptic
+          # "Could NOT find Vulkan" at configure time.
+          test -f /usr/include/vulkan/vulkan.h || { echo "ERROR: libvulkan-dev missing after apt install"; exit 1; }
+          pkg-config --exists libpipewire-0.3 || { echo "ERROR: libpipewire-0.3-dev missing after apt install"; exit 1; }
           
       - name: Restore ccache
         # Purpose-built action instead of raw actions/cache: stable key
@@ -219,6 +219,12 @@ jobs:
           XDG_RUNTIME_DIR: ${{ runner.temp }}/trophy-test-runtime
           TMPDIR: ${{ runner.temp }}/trophy-test-tmp
           QT_QPA_PLATFORM: offscreen
+          # Force ALSA for audio-device enumeration: with PipeWire
+          # libraries but no daemon, QtMultimedia's PipeWire backend
+          # segfaults inside QPlatformAudioDevices::create. No test
+          # plays audio, so the backend only needs to enumerate
+          # cleanly (empty is fine).
+          QT_AUDIO_BACKEND: alsa
         run: |
           mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
           chmod 700 "$XDG_RUNTIME_DIR"
