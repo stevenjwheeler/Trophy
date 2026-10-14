@@ -115,6 +115,10 @@ jobs:
             libvulkan-dev
             libpipewire-0.3-dev
             libspa-0.2-dev
+            # Headless audio daemon for device-enumerating tests (a bare
+            # daemon is enough; nothing plays audio). Without it,
+            # QAudioOutput construction segfaults inside QtMultimedia.
+            pipewire
             libdrm-dev
             libgbm-dev
             libavcodec-dev
