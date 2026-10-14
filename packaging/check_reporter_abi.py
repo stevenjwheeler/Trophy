@@ -19,7 +19,7 @@ class CheckError(Exception):
 
 def run_tool(argv):
     # File-backed output avoids unbounded subprocess.PIPE allocation.
-    with tempfile.TemporaryFile(dir="/tmp/opencode") as output:
+    with tempfile.TemporaryFile() as output:
         try:
             env = {k: v for k, v in os.environ.items()
                    if k not in ("LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH")}

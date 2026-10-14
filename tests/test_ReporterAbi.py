@@ -113,7 +113,7 @@ class ReporterAbiTest(unittest.TestCase):
                          "static-check-fail")
 
     def test_sysroot_search_bound(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "lib").mkdir()
             with patch.object(abi.os, "walk", return_value=[(str(root / "lib"), [], ["x"] * 20001)]):
@@ -129,12 +129,12 @@ class ReporterAbiTest(unittest.TestCase):
                 abi.run_tool(["readelf"])
 
     def test_empty_sysroot_no_host_fallback(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(abi.CheckError):
                 abi.sysroot_providers(Path(directory))
 
     def test_absolute_sysroot_symlink_maps_inside_root(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "usr/lib").mkdir(parents=True)
             (root / "usr/lib/libfixture.so.1.0").write_bytes(b"fixture")
@@ -143,7 +143,7 @@ class ReporterAbiTest(unittest.TestCase):
                              [root / "usr/lib/libfixture.so.1.0"])
 
     def test_sysroot_escape_and_symlink_loop(self):
-        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as directory:
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "lib").mkdir()
             link = root / "lib/libfixture.so.1"
