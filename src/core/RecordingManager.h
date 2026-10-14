@@ -9,9 +9,15 @@
 
 #include <QElapsedTimer>
 #include <QObject>
+#include <QPointer>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
+#include <functional>
+#include <future>
 #include <memory>
+
+class RecordingManagerTest;
 
 namespace TrophyBackend {
 
@@ -48,7 +54,7 @@ class RecordingManager : public QObject {
       QString currentFilePath READ currentFilePath NOTIFY recordingStarted)
   Q_PROPERTY(QString activeEncoderName READ activeEncoderName NOTIFY
                  activeEncoderNameChanged)
-  Q_PROPERTY(QString detectedEncoderName READ detectedEncoderName CONSTANT)
+  Q_PROPERTY(QString detectedEncoderName READ detectedEncoderName NOTIFY detectedEncoderNameChanged)
 
 public:
   enum class RecordingState {
@@ -79,6 +85,8 @@ public:
   QString currentFilePath() const { return m_currentFilePath; }
   QString activeEncoderName() const;
   QString detectedEncoderName() const;
+  // Application's asynchronous availability result supplies this label.
+  void setDetectedEncoderName(const QString &name);
 
   // Recording control
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
@@ -106,6 +114,9 @@ signals:
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);
+  // Terminal cleanup for every active recording, including failed output.
+  // recordingStopped below is the successful-save notification only.
+  void recordingFinished();
   void recordingStopped(const QString &filePath, qint64 durationMs,
                         qint64 sizeBytes);
   void recordingError(const QString &error);
@@ -116,23 +127,63 @@ signals:
   void restoreAuthNeeded(const QString &gameName);
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
+  void detectedEncoderNameChanged();
 
 private slots:
   void onEncodingError(const QString &error);
   void updateProgress();
   void finishPipelineAndStart();
+  void pollOperations();
 
 private:
+  friend class ::RecordingManagerTest;
+
+  // Private injection seam for lifecycle tests; normal starts use CaptureFactory.
+  std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
+  std::function<bool()> m_pipelineBuilder;
+
   void setState(RecordingState newState);
   bool buildPipeline();
-  void teardownPipeline();
+  bool teardownPipeline();
   QString generateOutputPath() const;
+  struct AudioPreparation {
+    QString mode, gameDevice, micDevice, voiceApp;
+    bool separate = true;
+    uint32_t pid = 0;
+    QStringList hints;
+    uint32_t gameNode = 0xffffffffu, voiceNode = 0xffffffffu;
+    QString gameNodeName, gameSerial, voiceNodeName, voiceSerial;
+  };
+  AudioPreparation snapshotAudioPreparation() const;
+  static AudioPreparation lookupAudioPreparation(AudioPreparation input);
+  void beginAudioPreparation();
+  void completePipelineAndStart();
+  void finishStoppedRecording();
+  std::future<bool> m_stopFinalizationWorker;
+  qint64 m_stopDurationMs = 0;
+  qint64 m_stopSizeBytes = 0;
+  QString m_activeEncoderName;
+  QString m_detectedEncoderName = QStringLiteral("Checking…");
+  bool m_stopFinalizationSucceeded = true;
+  bool m_cancelInitializing = false;
+  QString m_pendingRestoreAuthorization;
+  std::function<AudioPreparation(AudioPreparation)> m_audioPreparationLookup =
+      lookupAudioPreparation;
+  AudioPreparation m_preparedAudio;
+  std::future<AudioPreparation> m_audioPreparationWorker;
+  uint64_t m_pipelineGeneration = 0, m_audioPreparationGeneration = 0;
+  bool m_audioPreparationRequested = false;
+  bool m_captureReadyForPipeline = false;
+  QPointer<IVideoCaptureSource> m_audioPreparationCapture;
+  QTimer *m_operationTimer = nullptr;
 
   RecordingState m_state = RecordingState::Idle;
   QString m_currentGameName;
   QString m_currentFilePath;
   unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;
+  bool m_recordingFailed = false;
+  bool m_shuttingDown = false;
 
   // Dependencies (not owned)
   SettingsManager *m_settings = nullptr;

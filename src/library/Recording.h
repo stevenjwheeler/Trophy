@@ -8,6 +8,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QFuture>
 #include <QObject>
 #include <QString>
 
@@ -41,6 +42,17 @@ class Recording : public QObject {
   // Recorder version that wrote the file (trophy-version tag; empty on
   // older files that predate the tag).
   Q_PROPERTY(QString trophyVersion READ trophyVersion NOTIFY metadataChanged)
+  // Stream layout from the same probe pass: codec descriptor names
+  // ("h264", "aac", ...), measured video frame rate, audio stream
+  // count. Empty/zero until the probe lands (or on probe failure).
+  Q_PROPERTY(QString videoCodec READ videoCodec NOTIFY metadataChanged)
+  Q_PROPERTY(double fps READ fps NOTIFY metadataChanged)
+  Q_PROPERTY(int audioTrackCount READ audioTrackCount NOTIFY metadataChanged)
+  Q_PROPERTY(QString audioCodec READ audioCodec NOTIFY metadataChanged)
+  // Which encoder wrote the pixels, display-ready ("NVENC").
+  // Stamped as trophy-encoder at record time; empty on older files
+  // that predate the tag (the dialog then shows codec only).
+  Q_PROPERTY(QString encoderName READ encoderName NOTIFY metadataChanged)
 
 public:
   explicit Recording(const QString &filePath, QObject *parent = nullptr);
@@ -58,6 +70,15 @@ public:
   int height() const { return m_height; }
   bool isClip() const { return m_isClip; }
   QString trophyVersion() const { return m_trophyVersion; }
+  QString videoCodec() const { return m_videoCodec; }
+  double fps() const { return m_fps; }
+  int audioTrackCount() const { return m_audioTrackCount; }
+  QString audioCodec() const { return m_audioCodec; }
+  QString encoderName() const { return m_encoderName; }
+  // Canonical trophy-encoder tag ("nvenc_h264", "x264", ...) to the
+  // display string the file-info dialog shows. Unknown tags pass
+  // through raw rather than hiding behind "Unknown".
+  static QString encoderDisplayName(const QString &tag);
 
   void setThumbnailPath(const QString &path);
 
@@ -69,9 +90,7 @@ public:
    * overwrite the new filename-derived game name with the stale tag.
    * Must be called before loadMetadata().
    */
-  void setPreferFileNameTitle(bool prefer) {
-    m_preferFileNameTitle = prefer;
-  }
+  void setPreferFileNameTitle(bool prefer) { m_preferFileNameTitle = prefer; }
 
   /**
    * @brief Load metadata from the video file
@@ -83,8 +102,24 @@ signals:
   void metadataChanged();
 
 private:
+  struct ProbeResult {
+    QString gameName;
+    QDateTime date;
+    qint64 duration = 0;
+    int width = 0;
+    int height = 0;
+    bool isClip = false;
+    QString trophyVersion;
+    QString videoCodec;
+    double fps = 0;
+    int audioTrackCount = 0;
+    QString audioCodec;
+    QString encoderName;
+  };
   void parseFileNameForGameName();
-  void probeVideoFile();
+  static ProbeResult probeVideoFile(const QString &filePath, ProbeResult result,
+                                    bool preferFileNameTitle);
+  void applyProbeResult(const ProbeResult &result);
 
   QString m_filePath;
   QString m_fileName;
@@ -99,6 +134,13 @@ private:
   bool m_preferFileNameTitle = false;
   bool m_isClip = false;
   QString m_trophyVersion;
+  QString m_videoCodec;
+  double m_fps = 0;
+  int m_audioTrackCount = 0;
+  QString m_audioCodec;
+  QString m_encoderName;
+  QFuture<void> m_probeFuture;
+  quint64 m_probeGeneration = 0;
 };
 
 } // namespace TrophyBackend

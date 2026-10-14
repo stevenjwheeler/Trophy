@@ -495,11 +495,11 @@ Page {
                         }
                     }
 
-                    MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
+                    HoverHandler {
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
+                    }
+                    TapHandler {
+                        onTapped: {
                             if (modelData.blocked)
                                 duoSwitch.blockSelected()
                             else

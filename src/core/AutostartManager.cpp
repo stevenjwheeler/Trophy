@@ -17,6 +17,42 @@ namespace TrophyBackend {
 namespace {
 const char *kDesktopFileName = "trophy.desktop";
 const char *kMarker = "# Managed by Trophy - safe to delete to disable autostart";
+
+// Desktop Entry Exec quoting: a path with spaces (or other
+// shell-special characters) is wrapped in double quotes, escaping
+// backslash/double-quote/backtick/dollar. Single quotes are literal
+// under the Desktop Entry spec, so they don't quote. Plain paths need
+// only literal-percent escaping.
+QString quoteExecPath(const QString &path) {
+  bool needsQuote = false;
+  for (const QChar c : path) {
+    if (c.isSpace() || c == QLatin1Char('"') || c == QLatin1Char('\\') ||
+        c == QLatin1Char('\'') || c == QLatin1Char('$') ||
+        c == QLatin1Char('`') || c == QLatin1Char(';') ||
+        c == QLatin1Char('&') || c == QLatin1Char('|') ||
+        c == QLatin1Char('<') || c == QLatin1Char('>') ||
+        c == QLatin1Char('(') || c == QLatin1Char(')') ||
+        c == QLatin1Char('#') || c == QLatin1Char('!') ||
+        c == QLatin1Char('*') || c == QLatin1Char('?') ||
+        c == QLatin1Char('~')) {
+      needsQuote = true;
+      break;
+    }
+  }
+  QString quoted = path;
+  // A literal percent must not be interpreted as an Exec field code.
+  quoted.replace(QStringLiteral("%"), QStringLiteral("%%"));
+  if (!needsQuote) {
+    return quoted;
+  }
+  quoted.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+  quoted.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+  quoted.replace(QStringLiteral("`"), QStringLiteral("\\`"));
+  quoted.replace(QStringLiteral("$"), QStringLiteral("\\$"));
+  // Desktop Entry value escaping is decoded before Exec argument quoting.
+  quoted.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+  return QStringLiteral("\"") + quoted + QStringLiteral("\"");
+}
 } // namespace
 
 AutostartManager::AutostartManager(QObject *parent)
@@ -43,7 +79,20 @@ bool AutostartManager::isEnabled() const {
   return in.readAll().contains(QString::fromLatin1(kMarker));
 }
 
-bool AutostartManager::setEnabled(bool enabled, const QString &execPath) {
+QString AutostartManager::launchCommand(const QString &execPath,
+                                       const QString &appImagePath,
+                                       const QString &flatpakId) {
+  if (!flatpakId.isEmpty()) {
+    return QStringLiteral("flatpak run ") + quoteExecPath(flatpakId) +
+           QStringLiteral(" --minimized");
+  }
+  return quoteExecPath(appImagePath.isEmpty() ? execPath : appImagePath) +
+         QStringLiteral(" --minimized");
+}
+
+bool AutostartManager::setEnabled(bool enabled, const QString &execPath,
+                                 const QString &appImagePath,
+                                 const QString &flatpakId) {
   const QString path = filePath();
   if (!enabled) {
     // Only remove entries we own; leave foreign ones alone.
@@ -51,6 +100,11 @@ bool AutostartManager::setEnabled(bool enabled, const QString &execPath) {
       return true; // nothing of ours to remove
     }
     return QFile::remove(path);
+  }
+
+  // Enabling must not replace a user-maintained entry either.
+  if (QFile::exists(path) && !isEnabled()) {
+    return false;
   }
 
   QDir().mkpath(QFileInfo(path).absolutePath());
@@ -65,10 +119,10 @@ bool AutostartManager::setEnabled(bool enabled, const QString &execPath) {
       << "Version=1.0\n"
       << "Name=Trophy\n"
       << "Comment=Game recording and clipping\n"
-      << "Exec=" << execPath << " --minimized\n"
+      << "Exec=" << launchCommand(execPath, appImagePath, flatpakId) << "\n"
       << "Icon=trophy\n"
       << "Terminal=false\n"
-      << "Categories=AudioVideo;Recorder;\n"
+      << "Categories=AudioVideo;Game;\n"
       << "X-GNOME-Autostart-enabled=true\n";
   return true;
 }

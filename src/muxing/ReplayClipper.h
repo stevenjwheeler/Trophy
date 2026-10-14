@@ -10,7 +10,35 @@
 #include <QList>
 #include <QString>
 
+extern "C" {
+#include <libavformat/avformat.h>
+}
+
 namespace TrophyBackend {
+
+namespace ReplayClipperInternal {
+// Production defaults are actual FFmpeg functions. Overrides are private,
+// thread-local and scoped by the test friend (never runtime environment flags).
+struct Operations {
+  decltype(&avformat_open_input) openInput = &avformat_open_input;
+  decltype(&avformat_find_stream_info) probeInput = &avformat_find_stream_info;
+  decltype(&avio_open) openOutput = &avio_open;
+  decltype(&av_read_frame) readFrame = &av_read_frame;
+  decltype(&av_packet_alloc) packetAlloc = &av_packet_alloc;
+  decltype(&av_packet_ref) packetRef = &av_packet_ref;
+  decltype(&avformat_alloc_output_context2) allocOutput =
+      &avformat_alloc_output_context2;
+  decltype(&avformat_new_stream) newStream = &avformat_new_stream;
+  decltype(&avcodec_parameters_copy) copyParameters = &avcodec_parameters_copy;
+  decltype(&av_dict_copy) copyMetadata = &av_dict_copy;
+  decltype(&av_dict_set) setMetadata = &av_dict_set;
+  decltype(&avformat_write_header) writeHeader = &avformat_write_header;
+  decltype(&av_interleaved_write_frame) writeFrame = &av_interleaved_write_frame;
+  decltype(&av_write_trailer) writeTrailer = &av_write_trailer;
+  decltype(&avio_flush) flush = &avio_flush;
+  decltype(&avio_closep) closeOutput = &avio_closep;
+};
+} // namespace ReplayClipperInternal
 
 /**
  * @brief A DVR segment: a self-contained recording file plus its start
@@ -34,6 +62,9 @@ struct ReplaySegment {
  * segments) are dropped.
  */
 class ReplayClipper {
+  friend struct ReplayClipperTestAccess;
+  static thread_local const ReplayClipperInternal::Operations *s_operations;
+
 public:
   static bool saveTail(const QList<ReplaySegment> &segments,
                        double windowSeconds, const QString &outputPath,

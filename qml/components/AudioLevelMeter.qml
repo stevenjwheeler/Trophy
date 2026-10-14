@@ -19,6 +19,13 @@ Item {
     // Dashboard card uses the horizontal icon+bar rows; default is the
     // vertical bar. Only one layout is visible at a time.
     property bool horizontal: false
+    // Polling/render-state updates are not user mute commands.
+    signal muteToggled(bool muted)
+
+    function toggleMute() {
+        muted = !muted
+        muteToggled(muted)
+    }
 
     function getIcon() {
         var labelLower = label.toLowerCase();
@@ -104,7 +111,7 @@ Item {
             Layout.alignment: Qt.AlignHCenter
             implicitWidth: iconLabel.implicitWidth + 4
             implicitHeight: iconLabel.implicitHeight + 4
-            onClicked: root.muted = !root.muted
+            onClicked: root.toggleMute()
 
             contentItem: Label {
                 id: iconLabel
@@ -146,7 +153,7 @@ Item {
             Layout.alignment: Qt.AlignVCenter
             implicitWidth: iconLabelH.implicitWidth + 4
             implicitHeight: iconLabelH.implicitHeight + 4
-            onClicked: root.muted = !root.muted
+            onClicked: root.toggleMute()
 
             contentItem: Label {
                 id: iconLabelH

@@ -8,6 +8,7 @@
 #include "RecordingLibrary.h"
 #include "Recording.h"
 #include "ThumbnailGenerator.h"
+#include "core/StorageManager.h"
 #include "muxing/ReplayClipper.h"
 
 #include <QDateTime>
@@ -22,6 +23,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QUuid>
 #include <algorithm>
 #include <thread>
 
@@ -30,6 +32,27 @@ namespace TrophyBackend {
 namespace {
 constexpr char kCustomTitlesFile[] = ".trophy-titles.json";
 constexpr char kCustomTitlesKey[] = "preferFileNameTitle";
+
+bool isInsideLibrary(const QString &filePath, const QString &libraryPath) {
+  const QFileInfo rootInfo(libraryPath);
+  const QString lexicalRoot = QDir::cleanPath(rootInfo.absoluteFilePath());
+  const QString resolvedRoot = rootInfo.canonicalFilePath();
+  const QFileInfo candidateInfo(filePath);
+  const QString candidate = QDir::cleanPath(candidateInfo.absoluteFilePath());
+  const QString resolvedCandidate = candidateInfo.canonicalFilePath();
+  if (lexicalRoot.isEmpty() || resolvedRoot.isEmpty() ||
+      resolvedCandidate.isEmpty() || candidate == lexicalRoot)
+    return false;
+
+  auto isChildOf = [](const QString &path, const QString &root) {
+    QString prefix = root;
+    if (!prefix.endsWith(QDir::separator()))
+      prefix += QDir::separator();
+    return path.startsWith(prefix);
+  };
+  return isChildOf(candidate, lexicalRoot) &&
+         isChildOf(resolvedCandidate, resolvedRoot);
+}
 } // namespace
 
 RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
@@ -49,7 +72,13 @@ RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
   refresh();
 }
 
-RecordingLibrary::~RecordingLibrary() = default;
+RecordingLibrary::~RecordingLibrary() {
+  // The worker may still be returning after it queues its completion event.
+  // Keep its captures alive until it has exited; a detached worker can race
+  // QObject teardown (and process shutdown) even after clipSaved is emitted.
+  if (m_clipThread.joinable())
+    m_clipThread.join();
+}
 
 QList<Recording *> RecordingLibrary::recordings() const {
   return m_filteredRecordings;
@@ -87,8 +116,11 @@ void RecordingLibrary::setSortOrder(int order) {
 }
 
 void RecordingLibrary::refresh() {
+  // Batched so a scan settles the model with a single recordingsChanged
+  // and at most one custom-titles write instead of one per file.
+  beginBatch();
   scanDirectory();
-  updateFilteredRecordings();
+  endBatch();
 }
 
 Recording *RecordingLibrary::get(int index) const {
@@ -107,13 +139,22 @@ Recording *RecordingLibrary::getRecording(const QString &filePath) const {
   return nullptr;
 }
 
+QUrl RecordingLibrary::localFileUrl(const QString &filePath) const {
+  return QUrl::fromLocalFile(filePath);
+}
+
 void RecordingLibrary::deleteRecording(const QString &filePath) {
-  m_ignoreNextChange = true;
+  if (!isInsideLibrary(filePath, m_libraryPath)) {
+    qWarning() << "Refusing to delete recording outside library:" << filePath;
+    return;
+  }
+  const QString absolute = QFileInfo(filePath).absoluteFilePath();
+  m_suppressedPaths.insert(absolute);
   QFile file(filePath);
   if (file.remove()) {
     removeRecording(filePath);
   } else {
-    m_ignoreNextChange = false;
+    m_suppressedPaths.remove(absolute);
     qWarning() << "Failed to delete recording:" << filePath
                << file.errorString();
   }
@@ -125,8 +166,7 @@ void RecordingLibrary::setActiveRecordingPath(const QString &path) {
 }
 
 void RecordingLibrary::saveClipRange(const QString &sourcePath,
-                                     double startSeconds,
-                                     double endSeconds) {
+                                     double startSeconds, double endSeconds) {
   auto fail = [&](const QString &reason) {
     qWarning() << "RecordingLibrary::saveClipRange:" << reason;
     emit clipSaveFailed(reason);
@@ -147,6 +187,37 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
     fail(tr("No library folder configured."));
     return;
   }
+  // Storage pre-flight (same policy as ReplayManager::saveReplay):
+  // refuse while over the limit, or when the new clip would push usage
+  // over it. Check-only — clips never trigger auto-delete of library
+  // files. The source file itself is already counted in usage; the clip
+  // adds ~its range share on top (full size when the probed duration is
+  // unknown, an upper bound that errs on the side of refusing).
+  if (m_storage) {
+    m_storage->refresh();
+    if (m_storage->isOverLimit()) {
+      fail(tr("Storage is full. Free space or enable auto-cleanup to save "
+              "clips."));
+      return;
+    }
+    if (m_storage->maxSize() > 0) {
+      const qint64 sourceSize = QFileInfo(sourcePath).size();
+      qint64 estimate = sourceSize;
+      if (Recording *rec = getRecording(sourcePath)) {
+        const qint64 dur = rec->duration();
+        if (dur > 0) {
+          estimate = static_cast<qint64>(sourceSize *
+                                         (endSeconds - startSeconds) / dur);
+          estimate = std::max<qint64>(1, std::min(estimate, sourceSize));
+        }
+      }
+      if (m_storage->usedSize() + estimate > m_storage->maxSize()) {
+        fail(tr("Not enough storage for this clip. Free space or enable "
+                "auto-cleanup to save clips."));
+        return;
+      }
+    }
+  }
   // File under the source's game name so the clip badges like a DVR one.
   // Recording::gameName is the clean name ("Deadlock", never "Deadlock
   // Clip"); untracked files fall back to the filename stem.
@@ -161,8 +232,10 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
   safe = safe.trimmed().replace(QRegularExpression("^[_-]+|[_-]+$"), "");
   if (safe.isEmpty())
     safe = "Game";
-  const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
-  const QString out = QString("%1/%2_%3_Replay.mkv").arg(m_libraryPath, safe, ts);
+  const QString ts =
+      QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+  const QString baseOut =
+      QString("%1/%2_%3_Replay.mkv").arg(m_libraryPath, safe, ts);
 
   // Remux off the UI thread; completion hops back via queued invoke. The
   // clip is written to a .part file and atomically renamed: the library
@@ -170,47 +243,72 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
   // would generate a thumbnail for garbage).
   m_clipSaving = true;
   emit clipSavingChanged();
+  // A prior worker may have queued completion immediately before it exited.
+  // Reap it before reusing the single worker slot.
+  if (m_clipThread.joinable())
+    m_clipThread.join();
   QPointer<RecordingLibrary> self(this);
-  const QString tmpOut = out + ".part";
-  QFile::remove(tmpOut);
-  std::thread([self, sourcePath, startSeconds, endSeconds, game, out,
-               tmpOut]() {
-    QString err;
-    double keptSec = 0.0;
-    bool ok = ReplayClipper::saveRange(sourcePath, startSeconds, endSeconds,
-                                       tmpOut, &err, &keptSec);
-    const double actualSec = keptSec > 0 ? keptSec : (endSeconds - startSeconds);
-    if (ok && QFile::exists(out))
-      QFile::remove(out);
-    if (ok)
-      ok = QFile::rename(tmpOut, out);
-    else
-      QFile::remove(tmpOut);
-    if (!ok && err.isEmpty())
-      err = "Could not save the clip file.";
-    if (!self)
-      return;
-    QMetaObject::invokeMethod(
-        self,
-        [self, ok, out, game, err, actualSec]() {
-          if (!self)
-            return;
-          self->m_clipSaving = false;
-          emit self->clipSavingChanged();
-          if (ok) {
-            emit self->clipSaved(out, game, actualSec);
-          } else {
-            emit self->clipSaveFailed(err.isEmpty()
-                                          ? self->tr("Could not save the clip.")
-                                          : err);
+  const QString tmpOut = baseOut + "." +
+                         QUuid::createUuid().toString(QUuid::WithoutBraces) +
+                         ".part";
+  m_clipThread = std::thread(
+      [self, sourcePath, startSeconds, endSeconds, game, baseOut, tmpOut]() {
+        QString err;
+        double keptSec = 0.0;
+        bool ok = ReplayClipper::saveRange(sourcePath, startSeconds, endSeconds,
+                                           tmpOut, &err, &keptSec);
+        const double actualSec =
+            keptSec > 0 ? keptSec : (endSeconds - startSeconds);
+        QString out = baseOut;
+        if (ok) {
+          // rename() refuses an existing destination. Retry with a numeric
+          // suffix so same-second saves (or another Trophy process) never
+          // overwrite or spuriously fail on a name collision.
+          const QFileInfo baseInfo(baseOut);
+          const QString stem = baseInfo.completeBaseName();
+          const QString suffix = baseInfo.suffix();
+          for (int n = 0; n < 10000; ++n) {
+            out = n == 0 ? baseOut
+                         : baseInfo.absolutePath() + "/" + stem + "_" +
+                               QString::number(n) + "." + suffix;
+            if (QFile::rename(tmpOut, out))
+              break;
+            if (QFile::exists(out))
+              continue;
+            ok = false;
+            break;
           }
-        },
-        Qt::QueuedConnection);
-  }).detach();
+          if (ok && QFile::exists(tmpOut))
+            ok = false;
+        }
+        if (!ok)
+          QFile::remove(tmpOut);
+        if (!ok && err.isEmpty())
+          err = "Could not save the clip file.";
+        if (!ok)
+          out.clear();
+        if (!self)
+          return;
+        QMetaObject::invokeMethod(
+            self,
+            [self, ok, out, game, err, actualSec]() {
+              if (!self)
+                return;
+              self->m_clipSaving = false;
+              emit self->clipSavingChanged();
+              if (ok) {
+                emit self->clipSaved(out, game, actualSec);
+              } else {
+                emit self->clipSaveFailed(
+                    err.isEmpty() ? self->tr("Could not save the clip.") : err);
+              }
+            },
+            Qt::QueuedConnection);
+      });
 }
 
 void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
-                                           const QString &newPath) {
+                                          const QString &newPath) {
   // Every in-app rename makes the new filename authoritative: the file
   // still carries the pre-rename container title tag.
   m_fileNameTitlePreferred.remove(QFileInfo(oldPath).fileName());
@@ -231,11 +329,69 @@ void RecordingLibrary::onDirectoryChanged(const QString &path) {
     // per-file watcher refreshes here would just be churn.
     return;
   }
-  if (m_ignoreNextChange) {
-    m_ignoreNextChange = false;
-    return;
+  if (!m_suppressedPaths.isEmpty()) {
+    // The library itself just touched the suppressed paths
+    // (deleteRecording removes the model entry synchronously, so the
+    // follow-up watcher event is usually a no-op echo). The watcher only
+    // names the directory, so diff the listing: swallow the event only
+    // when nothing BUT self-touched paths changed. An unrelated file
+    // added/removed in the same burst still refreshes.
+    QSet<QString> current;
+    const QFileInfoList files =
+        QDir(m_libraryPath)
+            .entryInfoList({"*.mkv", "*.mp4", "*.webm"}, QDir::Files);
+    for (const QFileInfo &info : files) {
+      current.insert(info.absoluteFilePath());
+    }
+    current.remove(m_activeRecordingPath);
+    QSet<QString> known;
+    for (const auto &rec : m_recordings) {
+      if (rec) {
+        known.insert(rec->filePath());
+      }
+    }
+    QSet<QString> diff = current - known;
+    diff.unite(known - current);
+    bool onlySelf = true;
+    for (const QString &changed : diff) {
+      if (!m_suppressedPaths.contains(changed)) {
+        onlySelf = false;
+        break;
+      }
+    }
+    // Suppressions for paths that now agree with the model are spent.
+    QStringList spent;
+    for (const QString &suppressed : m_suppressedPaths) {
+      if (!diff.contains(suppressed)) {
+        spent.append(suppressed);
+      }
+    }
+    for (const QString &suppressed : spent) {
+      m_suppressedPaths.remove(suppressed);
+    }
+    if (onlySelf) {
+      return;
+    }
   }
   refresh();
+}
+
+void RecordingLibrary::beginBatch() { ++m_batchDepth; }
+
+void RecordingLibrary::endBatch() {
+  if (m_batchDepth <= 0) {
+    return;
+  }
+  if (--m_batchDepth > 0) {
+    return;
+  }
+  if (m_titlesDirty) {
+    m_titlesDirty = false;
+    saveCustomTitles();
+  }
+  // Single settle + emit for the whole batch, preserving refresh()'s
+  // trailing-emit contract (even a no-op scan notifies once).
+  updateFilteredRecordings();
 }
 
 void RecordingLibrary::onThumbnailReady(const QString &videoPath,
@@ -490,6 +646,12 @@ void RecordingLibrary::updateFilteredRecordings() {
     break;
   }
 
+  if (m_batchDepth > 0) {
+    // Inside a scan/refresh batch: the list above is settled (callers
+    // emitting per-file signals still see a current model), but the
+    // broadcast waits for endBatch so a 100-file scan costs one rebuild.
+    return;
+  }
   emit recordingsChanged();
 }
 
@@ -513,8 +675,7 @@ void RecordingLibrary::loadCustomTitles() {
     qWarning() << "Ignoring malformed custom titles:" << file.fileName();
     return;
   }
-  const QJsonArray names =
-      doc.object().value(kCustomTitlesKey).toArray();
+  const QJsonArray names = doc.object().value(kCustomTitlesKey).toArray();
   for (const QJsonValue &v : names) {
     if (v.isString() && !v.toString().isEmpty()) {
       m_fileNameTitlePreferred.insert(v.toString());
@@ -523,6 +684,12 @@ void RecordingLibrary::loadCustomTitles() {
 }
 
 void RecordingLibrary::saveCustomTitles() const {
+  if (m_batchDepth > 0) {
+    // Inside a scan/refresh batch: coalesce per-remove writes into the
+    // single write endBatch performs.
+    m_titlesDirty = true;
+    return;
+  }
   if (m_libraryPath.isEmpty()) {
     return;
   }

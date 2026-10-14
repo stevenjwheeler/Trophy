@@ -12,35 +12,79 @@
 #include "core/ControlServer.h"
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QFile>
 #include <QIcon>
 #include <QLockFile>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <csignal>
+#include <unistd.h>
 
 namespace {
+// Self-pipe for termination signals: a handler runs in async-signal
+// context where QCoreApplication::quit() is unsafe, so it only
+// writes a byte; the GUI thread quits from the event loop via the
+// QSocketNotifier below.
+int g_signalPipe[2] = {-1, -1};
+
 void signalHandler(int signal) {
-  if (signal == SIGINT || signal == SIGTERM) {
-    QCoreApplication::quit();
+  if ((signal == SIGINT || signal == SIGTERM) && g_signalPipe[1] != -1) {
+    const char b = 1;
+    (void)::write(g_signalPipe[1], &b, sizeof(b));
   }
 }
 } // namespace
 
 int main(int argc, char *argv[]) {
-  // Handle termination signals gracefully
-  std::signal(SIGINT, signalHandler);
-  std::signal(SIGTERM, signalHandler);
-
-  // Set application metadata BEFORE creating the application object
+  // Set application metadata BEFORE creating the application object.
+  // The version here is overwritten by Application's ctor (same APP_VERSION
+  // logic); this pre-QApplication value only feeds early arg-parser output.
+#ifdef APP_VERSION
+#define TROPHY_MAIN_STRINGIFY(x) #x
+#define TROPHY_MAIN_TOSTRING(x) TROPHY_MAIN_STRINGIFY(x)
+  QCoreApplication::setApplicationVersion(
+      QString::fromUtf8(TROPHY_MAIN_TOSTRING(APP_VERSION)).replace("\"", ""));
+#else
+  QCoreApplication::setApplicationVersion("0.0.0-unknown");
+#endif
   QCoreApplication::setOrganizationName("Trophy");
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
-  QCoreApplication::setApplicationVersion("0.1.0");
-  QApplication::setDesktopFileName("trophy");
+  // In a Flatpak sandbox the desktop file is renamed to the app id, and
+  // notifications/tray/portal associations key on the desktop id: resolve
+  // it at runtime instead of hardcoding "trophy".
+  {
+    const QString flatpakId =
+        QString::fromUtf8(qgetenv("FLATPAK_ID"));
+    if (!flatpakId.isEmpty() || QFile::exists(QStringLiteral("/.flatpak-info")))
+      QApplication::setDesktopFileName(
+          !flatpakId.isEmpty() ? flatpakId
+                               : QStringLiteral("io.github.stevenjwheeler.Trophy"));
+    else
+      QApplication::setDesktopFileName(QStringLiteral("trophy"));
+  }
 
   // Create application
   TrophyBackend::Application app(argc, argv);
+
+  // Handle termination signals gracefully via a self-pipe: the
+  // handler only writes a byte (async-signal-safe) and the GUI
+  // thread quits from the event loop.
+  if (::pipe(g_signalPipe) == 0) {
+    auto *signalNotifier = new QSocketNotifier(
+        g_signalPipe[0], QSocketNotifier::Read, &app);
+    // String-based connect: QSocketNotifier::activated carries a private
+    // QPrivateSignal parameter, so its address cannot be taken here; moc
+    // generates a default-arg form that makes the QSocketDescriptor-only
+    // signature connectable. Draining the pipe is unnecessary — quit()
+    // ends the event loop and the process exits with it.
+    QObject::connect(signalNotifier, SIGNAL(activated(QSocketDescriptor)),
+                     &app, SLOT(quit()));
+  }
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, signalHandler);
 
   QCommandLineParser parser;
   parser.setApplicationDescription("Trophy - Game recording and clipping");

@@ -12,6 +12,7 @@
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <atomic>
 
 namespace TrophyBackend {
 
@@ -34,8 +35,8 @@ public:
   ~SwayBackend() override = default;
 
   bool start();
-  void stop() { m_active = false; }
-  bool isActive() const { return m_active; }
+  void stop() { m_active.store(false); }
+  bool isActive() const { return m_active.load(); }
 
   /** One poll round-trip; called by the monitor's 1s watchdog tick. */
   void refresh();
@@ -44,6 +45,9 @@ public:
 
   /** Parse `swaymsg -t get_tree` output into window infos. */
   static QList<WindowInfo> parseTree(const QByteArray &json);
+
+  /** Stable content signature used to skip unchanged snapshots. */
+  static QString signatureFor(const QList<WindowInfo> &windows);
 
 signals:
   void windowsUpdated();
@@ -54,7 +58,8 @@ private:
 
   mutable QMutex m_mutex;
   QList<WindowInfo> m_windows;
-  bool m_active = false;
+  QString m_lastSignature; // content hash of the last emitted snapshot
+  std::atomic_bool m_active{false};
 };
 
 } // namespace TrophyBackend

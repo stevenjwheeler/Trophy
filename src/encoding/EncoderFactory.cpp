@@ -10,6 +10,7 @@
 
 #include <QDebug>
 #include <algorithm>
+#include <mutex>
 #include <qdebug.h>
 
 extern "C" {
@@ -21,6 +22,8 @@ namespace TrophyBackend {
 
 std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
   static std::vector<EncoderInfo> s_cache;
+  static std::mutex s_cacheMutex;
+  std::lock_guard<std::mutex> lock(s_cacheMutex);
   if (!s_cache.empty())
     return s_cache;
 
@@ -136,7 +139,11 @@ std::unique_ptr<IEncoder> EncoderFactory::create(const QString &name) {
     return create(IEncoder::EncoderType::Software_x264);
   }
 
-  qWarning() << "Unknown encoder:" << name;
+  // Both production callers (RecordingManager::buildPipeline,
+  // ReplayManager::switchSegment) are nullptr-safe, but the unknown-name
+  // fallback is covered by test (UnknownNameFallsBackInsteadOfNull), so
+  // keep the best-available fallback and warn loudly instead of nullptr.
+  qWarning() << "Unknown encoder:" << name << "- falling back to best available";
   return createBest(true);
 }
 

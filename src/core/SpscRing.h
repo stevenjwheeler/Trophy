@@ -31,6 +31,8 @@ public:
     return true;
   }
 
+  // Call only when stopped, with no concurrent push/pop in flight.
+  // (Kept deliberately for future reuse; not currently called.)
   void reset() {
     m_head.store(0);
     m_tail.store(0);

@@ -10,16 +10,23 @@
 #include <QElapsedTimer>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QStringList>
 #include <QTimer>
 #include <cstdint>
+#include <future>
+#include <functional>
+#include <atomic>
+#include <vector>
 #include <memory>
+#include <thread>
 
 #include "muxing/ReplayClipper.h"
 
 namespace TrophyBackend {
 
 class SettingsManager;
+class StorageManager;
 class AudioMixer;
 class IVideoCaptureSource;
 class IEncoder;
@@ -53,6 +60,7 @@ public:
   ~ReplayManager() override;
 
   void setSettingsManager(SettingsManager *settings);
+  void setStorageManager(StorageManager *storage);
 
   bool isActive() const { return m_state == State::Running; }
   QString currentGame() const { return m_gameName; }
@@ -89,19 +97,47 @@ signals:
 private slots:
   void onCaptureReady();
   void onCaptureError(const QString &error);
+  void onRestoreTokenStale(const QString &oldToken);
   void rotateSegment();
 
 private:
-  enum class State { Idle, StartingCapture, Running };
+  enum class State { Idle, StartingCapture, Running, Stopping };
 
   void setState(State s);
   bool beginCapture();
+  void connectCaptureSignals();
   // Gapless segment switch (rotation and clip saves): builds and starts
   // the successor session while the current one keeps recording, then
   // retires the old leg with a handoff stop. The old break-before-make
   // order dropped ~300ms of A/V on every switch (visible as a freeze in
   // any clip spanning the seam).
   bool switchSegment();
+  bool retireOpenSegment(double switchSec);
+  void pollRetirements();
+  void completeDvrStop();
+  void beginReplayRemux(double now);
+  struct RetiringSegment {
+    std::unique_ptr<RecordingSession> session;
+    std::unique_ptr<IEncoder> encoder;
+    std::unique_ptr<IMuxer> muxer;
+    Segment segment;
+  };
+  std::vector<std::unique_ptr<RetiringSegment>> m_retiringSegments;
+  QTimer *m_retirementTimer = nullptr;
+  std::future<void> m_captureStopWorker;
+  QString m_pendingGameName;
+  bool m_shuttingDown = false;
+  bool m_saveWaitingForRetirement = false;
+  double m_saveRequestNow = 0.0;
+  double m_saveRequestWindow = 0.0;
+  QString m_saveRequestOutput;
+  std::shared_ptr<std::atomic<bool>> m_saveDone;
+  struct ReplaySaveResult {
+    bool ok = false;
+    QString path, error;
+    double seconds = 0.0;
+  };
+  std::shared_ptr<ReplaySaveResult> m_saveResult;
   QString audioSetupKey() const;
   void pruneOldSegments(double now);
   void clearSegments();
@@ -116,11 +152,44 @@ private:
                            uint32_t &gamePid, bool &gameFound, int &voiceTrack,
                            bool &voiceFound, int &micTrack,
                            bool createSources);
+  // Pure PipeWire node lookup (no mixer/QObject state): PID first, then
+   // name hints, then voice app. Worker-safe; all registry access runs in
+   // an owned background preparation/cache operation.
+  struct DvrNodeLookup {
+    uint32_t gameNodeId = 0xFFFFFFFFu;
+    QString gameNodeName;
+    QString gameNodeSerial;
+    bool gameFound = false;
+    uint32_t voiceNodeId = 0xFFFFFFFFu;
+    QString voiceNodeName;
+    QString voiceNodeSerial;
+    bool voiceFound = false;
+  };
+  static DvrNodeLookup lookupDvrNodes(uint32_t gamePid,
+                                      const QStringList &gameHints,
+                                      const QString &voiceApp);
+  // Snapshot current inputs and refresh m_lookupCache on a worker for the
+  // NEXT rotation. Never applies results to the live session (it runs its
+  // own reconcile); stale deliveries are dropped by generation.
+  void refreshLookupCacheAsync();
+  void applyLookupCacheResult(quint64 generation, const DvrNodeLookup &fresh);
+  void pollLookupWorker();
+  std::future<DvrNodeLookup> m_lookupWorker;
+  quint64 m_workerLookupGeneration = 0;
+  QString m_workerAudioKey, m_lookupAudioKey;
+  QPointer<IVideoCaptureSource> m_workerLookupCapture;
+  QTimer *m_lookupTimer = nullptr;
+  std::function<DvrNodeLookup(uint32_t, const QStringList &, const QString &)>
+      m_nodeLookup = lookupDvrNodes;
+  std::function<bool()> m_segmentBuilder;
+  std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
 
   State m_state = State::Idle;
   QString m_gameName;
   bool m_paused = false;
   bool m_saving = false;
+  std::thread m_saveThread;
+  QStringList m_saveInputPaths;
 
  public:
   // Live audio retargeting, mirroring RecordingManager (acts on the open
@@ -134,6 +203,9 @@ private:
   void setTrackMuted(int trackIndex, bool muted);
   bool isTrackMuted(int trackIndex) const;
   float trackLevel(int trackIndex) const;
+  void setSemanticTrackMuted(int role, bool muted);
+  bool isSemanticTrackMuted(int role) const;
+  float semanticTrackLevel(int role) const;
 
  private:
   // Mixer slots assigned per segment (needed to retarget mid-segment).
@@ -143,11 +215,25 @@ private:
   // key matches, segment switches keep the running PipeWire streams and
   // only rotate encoders (gapless); a mismatch rebuilds sources.
   QString m_audioSetupKey;
+   // Last node-lookup results. Retained-source rotations now take routing
+    // directly from the current session (the cache cannot describe late-adopted
+    // slots); startup awaits owned background preparation before publishing.
+  DvrNodeLookup m_lookupCache;
+  bool m_lookupCacheValid = false;
+  quint64 m_lookupGeneration = 0;
+  bool m_lookupInflight = false;
+  bool m_captureReadyForPipeline = false;
+  uint64_t m_captureGeneration = 0;
 
   // Test seam (same pattern as GameDetectionServiceTest).
   friend class ReplayManagerTest;
 
   SettingsManager *m_settings = nullptr;
+  // Optional storage gate: when set, saveReplay refuses while the
+  // library is over its limit (or when the clip would push it over),
+  // instead of writing past the limit. Never deletes (unlike the
+  // recording path's enforce call) — clips must not eat library files.
+  StorageManager *m_storage = nullptr;
   // Dedicated mixer: sharing RecordingManager's mixer caused teardown
   // races (DVR stop ripped out the recording's just-added sources).
   // PipeWire happily serves both while they briefly overlap.

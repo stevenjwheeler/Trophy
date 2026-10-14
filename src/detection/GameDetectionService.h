@@ -8,6 +8,8 @@
 #pragma once
 
 #include <QAbstractItemModel>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QMap>
@@ -168,10 +170,12 @@ private:
    * Otherwise the focused + fullscreen window for the PID decides.
    */
   bool isConfidentGame(qint64 pid, const QString &gameName, uint steamAppId);
-  static bool processLooksLikeSteamGame(qint64 pid);
+  bool isBlacklistedIdentity(const QString &rawKey,
+                             const QString &displayName) const;
+  bool processLooksLikeSteamGame(qint64 pid);
 
   void trackGame(qint64 pid, const QString &gameName,
-                   const QString &rawKey = QString());
+                 const QString &rawKey = QString());
   void recheckCandidates();
   // A veto landing on the live game retires it (dashboard back to IDLE,
   // gameClosed for clean capture teardown). Called by every path that
@@ -194,7 +198,23 @@ private:
   static bool coversOutput(const WindowInfo &w);
 
   void updateCurrentGame(const QString &gameName, qint64 pid,
-                          const QString &rawKey = QString());
+                         const QString &rawKey = QString());
+  /**
+   * @brief Lowest still-running tracked PID (failover promotion target).
+   *
+   * QMap keys sort ascending, so the first live entry is the oldest game
+   * process. Each candidate costs one kill(pid, 0) probe — the same
+   * targeted check as the liveness watchdog, not a scan. Returns 0 when
+   * no tracked process is still alive.
+   */
+  qint64 lowestLiveTrackedPid() const;
+  /**
+   * @brief Failover after the tracked PID went away (STOP / disconnect /
+   * liveness). Promotes the lowest still-running tracked PID; when none
+   * is alive, drops the proven-dead entries (so a later START for the
+   * same name detects fresh) and goes idle.
+   */
+  void promoteNextTrackedGame();
   void addToRecentGames(const QString &gameName, const QString &rawKey);
 
   bool m_running = false;
@@ -221,6 +241,28 @@ private:
   // on STOP/disconnect; re-checked whenever window state changes so a
   // game that starts windowed still detects when it goes fullscreen.
   QMap<qint64, QString> m_pendingCandidates;
+  // Reporter/window identity parallel to m_pendingCandidates. A Steam
+  // resolved display name is not necessarily the key stored by the user.
+  QMap<qint64, QString> m_pendingRawKeys;
+  // Steam manifest name cache: appId -> display name. Validity is keyed
+  // on the steamapps library path + libraryfolders.vdf mtime and the
+  // matched manifest mtime, so library/name changes refresh automatically.
+  // Only positive hits are cached: a missing manifest may appear later
+  // without the vdf mtime changing (old-format vdfs).
+  struct SteamNameCacheEntry {
+    QString name;
+    QString manifestPath;
+    QDateTime modified;
+  };
+  QMap<uint, SteamNameCacheEntry> m_steamNameCache;
+  QString m_steamLibCacheKey;
+  // Per-PID looks-like-Steam verdicts (see processLooksLikeSteamGame):
+  // pid -> (result, monotonic ms at check). Member-scoped so instances
+  // (and tests) never share verdicts.
+  QMap<qint64, QPair<bool, qint64>> m_steamCheckCache;
+  static constexpr qint64 kCacheTtlMs = 5000;
+  static constexpr int kCacheCap = 256;
+  QElapsedTimer m_uptimeClock;
 
   WaylandWindowMonitor *m_monitor = nullptr;
   std::unique_ptr<GameWhitelist> m_whitelist;

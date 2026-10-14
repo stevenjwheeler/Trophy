@@ -8,7 +8,9 @@
 #include "NotificationService.h"
 
 #include <QDBusConnection>
-#include <QDBusInterface>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDBusReply>
 #include <QDateTime>
 #include <QDir>
@@ -63,28 +65,38 @@ NotificationService::notificationHints(int urgency, bool authorizeAction) {
 }
 
 void NotificationService::closeLastNotification() {
-  if (m_lastNotificationId == 0)
+  if (m_lastNotificationId == 0) {
+    m_pendingWithdrawTitle = m_lastTitle;
     return;
+  }
   closeNotificationById(m_lastNotificationId);
   m_lastNotificationId = 0;
 }
 
 void NotificationService::closeAuthorizePrompt(const QString &game) {
-  if (m_lastNotificationId == 0 || game.isEmpty())
+  if (game.isEmpty())
     return;
   if (m_lastTitle != QStringLiteral("New Game: ") + game)
     return;
+  if (m_lastNotificationId == 0) {
+    // The Notify reply hasn't arrived yet (async): the id is still
+    // unknown, so record the title and let the reply callback withdraw
+    // the popup the moment it publishes. Without this, a game closing
+    // in the reply round-trip leaves a dead-name prompt behind.
+    m_pendingWithdrawTitle = m_lastTitle;
+    return;
+  }
   closeNotificationById(m_lastNotificationId);
   m_lastNotificationId = 0;
 }
 
 void NotificationService::closeNotificationById(uint id) {
-  QDBusInterface notify(
+  auto call = QDBusMessage::createMethodCall(
       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-      "org.freedesktop.Notifications", QDBusConnection::sessionBus());
-  if (notify.isValid())
-    // Fire-and-forget: must never block the GUI thread on plasmashell.
-    notify.asyncCall("CloseNotification", id);
+      "org.freedesktop.Notifications", "CloseNotification");
+  call.setArguments({id});
+  // Explicit messages avoid synchronous dynamic-proxy introspection.
+  QDBusConnection::sessionBus().asyncCall(call);
   // Deliberately leaves m_lastNotificationId alone: click-matching for a
   // newer prompt (e.g. authorize) must keep working after an older
   // transient notice is withdrawn.
@@ -119,6 +131,10 @@ void NotificationService::showQueuedNotification(
     m_noticeQueue.append({title, body, icon, timeout, urgency});
     return;
   }
+  // The dedup stamp was set at enqueue time and this send was already
+  // approved above: clear it so the direct send is not suppressed by
+  // its own stamp (mirrors drainNoticeQueue).
+  m_lastSentMs = -1;
   sendNotification(title, body, icon, timeout, urgency, false, false);
 }
 
@@ -137,14 +153,43 @@ void NotificationService::drainNoticeQueue() {
 bool NotificationService::noteSent(const QString &title, const QString &body) {
   const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
   const qint64 elapsed = m_lastSentMs < 0 ? -1 : (nowMs - m_lastSentMs);
-  if (isRepeatSuppressed(title, body, m_lastTitle, m_lastBody, elapsed)) {
+  if (isRepeatSuppressed(title, body, m_dedupTitle, m_dedupBody, elapsed)) {
     qDebug() << "Suppressing duplicate notification within cooldown:" << title;
     return true;
   }
-  m_lastTitle = title;
-  m_lastBody = body;
+  m_dedupTitle = title;
+  m_dedupBody = body;
   m_lastSentMs = nowMs;
   return false;
+}
+
+quint64 NotificationService::beginReplacingNotification(const QString &title) {
+  ++m_notificationGeneration;
+  m_replaceTargetId = m_lastNotificationId;
+  m_lastTitle = title;
+  m_lastNotificationId = 0;
+  m_pendingWithdrawTitle.clear();
+  return m_notificationGeneration;
+}
+
+bool NotificationService::adoptNotificationReply(quint64 generation, uint id) {
+  if (generation != m_notificationGeneration)
+    return false;
+  if (!m_pendingWithdrawTitle.isEmpty() &&
+      m_pendingWithdrawTitle == m_lastTitle) {
+    m_pendingWithdrawTitle.clear();
+    return false;
+  }
+  m_lastNotificationId = id;
+  return true;
+}
+
+bool NotificationService::mayWithdrawNotification(quint64 generation,
+                                                uint id) const {
+  // Notify commonly reuses replaces_id. An old reply/timer cannot close
+  // the same id after a successor owns it, including its reply round-trip.
+  return generation == m_notificationGeneration ||
+         (id != m_lastNotificationId && id != m_replaceTargetId);
 }
 
 QString NotificationService::notificationIconPath() {
@@ -192,15 +237,6 @@ void NotificationService::sendNotification(const QString &title,
     return;
   }
 
-  QDBusInterface notify(
-      "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
-      "org.freedesktop.Notifications", QDBusConnection::sessionBus());
-
-  if (!notify.isValid()) {
-    qWarning() << "D-Bus notification interface not available";
-    return;
-  }
-
   QString appIcon = resolveNotificationIcon(icon, notificationIconPath());
 
   const QVariantMap hints = notificationHints(urgency, authorizeAction);
@@ -229,51 +265,74 @@ void NotificationService::sendNotification(const QString &title,
     actions << actionId << actionLabel;
   }
 
-  QDBusReply<uint> reply =
-      notify.call("Notify",
-                  "Trophy", // app_name (keep it short)
-                  replacePrevious ? m_lastNotificationId
-                                  : 0u, // replaces_id (0 = stack alongside)
-                  appIcon,              // app_icon
-                  title,                // summary
-                  body,                 // body
-                  actions,              // actions
-                  hints,                // hints
-                  timeout               // timeout (ms)
-      );
-
-  if (reply.isValid()) {
-    const uint id = reply.value();
-    // Only the replace path owns the "last" slot: a stacked popup must
-    // never disturb authorize click-matching or closeLastNotification.
-    if (replacePrevious)
-      m_lastNotificationId = id;
-    // Self-dismiss transient notices per id: timeout 0 means "stay until
-    // acted on" (the authorize prompt). Withdrawing an already-replaced
-    // id is a daemon-side no-op, so each notice owns its own countdown
-    // instead of sharing one timer. The countdown also marks the end of
-    // the on-screen window that queued notices wait for.
-    if (timeout > 0) {
-      ++m_visibleTransients;
-      QTimer::singleShot(timeout, this, [this, id]() {
-        closeNotificationById(id);
-        if (m_visibleTransients > 0 && --m_visibleTransients == 0 &&
-            !m_noticeQueue.isEmpty()) {
-          // Hold one beat past the withdraw so the slide-out animation
-          // completes before the queued notice arrives (drainNoticeQueue
-          // still no-ops if another transient appeared meanwhile).
-          QTimer::singleShot(kQueueDrainGraceMs, this,
-                             [this]() { drainNoticeQueue(); });
-        }
-      });
-    }
-  } else {
-    qWarning() << "Failed to send notification:" << reply.error().message();
-  }
+  // Fire-and-forget: a blocking Notify call here would freeze the GUI thread
+  // (and recording controls) while a hung daemon stalls. The reply id is
+  // harvested in the watcher callback, where the replace-slot store and
+  // the self-dismiss countdown live so behavior is unchanged.
+  const uint replacesId = replacePrevious ? m_lastNotificationId : 0u;
+  const quint64 generation = replacePrevious
+                                 ? beginReplacingNotification(title)
+                                 : m_notificationGeneration;
+  auto call = QDBusMessage::createMethodCall(
+      "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+      "org.freedesktop.Notifications", "Notify");
+  call.setArguments({QStringLiteral("Trophy"), replacesId, appIcon, title,
+                     body, actions, hints, timeout});
+  QDBusPendingCall pending = QDBusConnection::sessionBus().asyncCall(call);
+  auto *watcher = new QDBusPendingCallWatcher(pending, this);
+  connect(watcher, &QDBusPendingCallWatcher::finished, this,
+          [this, generation, timeout, replacePrevious](QDBusPendingCallWatcher *w) {
+            QDBusPendingReply<uint> reply = *w;
+            w->deleteLater();
+            if (!reply.isValid()) {
+              qWarning() << "Failed to send notification:"
+                         << reply.error().message();
+              return;
+            }
+            const uint id = reply.value();
+            // Only the replace path owns the "last" slot: a stacked popup
+            // must never disturb authorize click-matching or
+            // closeLastNotification.
+            if (replacePrevious) {
+              // Stale replies and closed pending prompts cannot reclaim
+              // action ownership. A daemon may reuse a replaced id; do not
+              // withdraw that id if a newer reply already adopted it.
+              if (!adoptNotificationReply(generation, id) &&
+                  mayWithdrawNotification(generation, id)) {
+                closeNotificationById(id);
+              }
+            }
+            // Self-dismiss transient notices per id: timeout 0 means "stay
+            // until acted on" (the authorize prompt). Withdrawing an
+            // already-replaced id is a daemon-side no-op, so each notice
+            // owns its own countdown instead of sharing one timer. The
+            // countdown also marks the end of the on-screen window that
+            // queued notices wait for.
+            if (timeout > 0) {
+              ++m_visibleTransients;
+              QTimer::singleShot(timeout, this, [this, id, generation,
+                                               replacePrevious]() {
+                if (!replacePrevious || mayWithdrawNotification(generation, id))
+                  closeNotificationById(id);
+                if (m_visibleTransients > 0 && --m_visibleTransients == 0 &&
+                    !m_noticeQueue.isEmpty()) {
+                  // Hold one beat past the withdraw so the slide-out
+                  // animation completes before the queued notice arrives
+                  // (drainNoticeQueue still no-ops if another transient
+                  // appeared meanwhile).
+                  QTimer::singleShot(kQueueDrainGraceMs, this,
+                                     [this]() { drainNoticeQueue(); });
+                }
+              });
+            }
+          });
 }
 
 void NotificationService::onActionInvoked(uint id, const QString &action) {
-  if (id == m_lastNotificationId || m_lastNotificationId == 0) {
+  // The ActionInvoked connection is daemon-wide (all apps): only our own
+  // last notification id may emit, and never while idle (id 0 would
+  // otherwise fire on any app's action).
+  if (id == m_lastNotificationId && m_lastNotificationId != 0) {
     QString resolved = action;
     // Body-clicking the authorize prompt invokes the "default" action on
     // supporting daemons: that counts as authorize, same as the button.
@@ -298,8 +357,6 @@ void NotificationService::onNotificationClosed(uint id, uint reason) {
     m_lastNotificationId = 0;
     if (isAuthorize)
       emit notificationClicked(QStringLiteral("dismissed"));
-  } else if (id == m_lastNotificationId) {
-    m_lastNotificationId = 0;
   }
 }
 

@@ -230,7 +230,7 @@ Rectangle {
                                         TrophySlider {
                                             id: mainStorageSlider
                                             Layout.fillWidth: true
-                                            from: 0; to: 500; stepSize: 0.1
+                                            from: 0; to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500; stepSize: 0.1
                                             value: settingsManager ? (settingsManager.maxStorageSize / (1024 * 1024 * 1024)) : 50
                                             onMoved: {
                                                 if (!pressed && settingsManager)
@@ -292,6 +292,17 @@ Rectangle {
                                         id: micBox; Layout.fillWidth: true
                                         property var devices: audioDeviceEnumerator ? audioDeviceEnumerator.inputDevices : []
                                         model: { let names = ["Default Input"]; for (let d of devices) { if (d.id !== "default") names.push(d.name); } return names; }
+                                        Binding {
+                                            target: micBox
+                                            property: "currentIndex"
+                                            value: (function() {
+                                                if (!settingsManager || !audioDeviceEnumerator) return 0;
+                                                let devs = audioDeviceEnumerator.inputDevices;
+                                                let saved = settingsManager.microphoneDevice;
+                                                for (let i = 0; i < devs.length; i++) { if (devs[i].id === saved) return i; }
+                                                return 0;
+                                            })()
+                                        }
                                         onActivated: if (settingsManager && currentIndex < devices.length) settingsManager.microphoneDevice = devices[currentIndex].id
                                     }
                                     Label { text: qsTr("Audio Capture Mode"); font.weight: Font.Bold; color: Theme.textColor }
@@ -300,8 +311,9 @@ Rectangle {
                                         TrophyRadioButton { text: qsTr("Game + Voice"); checked: settingsManager ? settingsManager.audioMode === "game" : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "game" }
                                         TrophyRadioButton { text: qsTr("Entire Desktop"); checked: settingsManager ? settingsManager.audioMode === "desktop" : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.audioMode = "desktop" }
                                     }
-                                    Label { text: qsTr("Recording Tracks"); font.weight: Font.Bold; color: Theme.textColor }
+                                    Label { text: qsTr("Recording Tracks"); font.weight: Font.Bold; color: Theme.textColor; visible: settingsManager && settingsManager.audioMode === "game" }
                                     RowLayout {
+                                        visible: settingsManager && settingsManager.audioMode === "game"
                                         spacing: Theme.spacingLarge
                                         TrophyRadioButton { text: qsTr("Single (Mixed)"); checked: settingsManager ? !settingsManager.separateAudioTracks : true; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = false }
                                         TrophyRadioButton { text: qsTr("Separate (Multi)"); checked: settingsManager ? settingsManager.separateAudioTracks : false; enabled: !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: if (settingsManager) settingsManager.separateAudioTracks = true }
@@ -695,7 +707,7 @@ Rectangle {
                                 Label { text: qsTr("Keyboard Shortcuts"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
                                 Label { text: qsTr("Two keys that work even inside your game."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                             }
-                            // F9 card
+                            // User-assigned recording key
                             Rectangle {
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.preferredWidth: 500
@@ -719,7 +731,7 @@ Rectangle {
                                     }
                                 }
                             }
-                            // F10 card
+                            // User-assigned clip key
                             Rectangle {
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.preferredWidth: 500
@@ -925,10 +937,9 @@ Rectangle {
     FolderDialog {
         id: folderDialog
         title: qsTr("Select Recordings Folder")
-        currentFolder: settingsManager ? ("file://" + settingsManager.recordingsPath) : ""
+        currentFolder: settingsManager ? recordingLibrary.localFileUrl(settingsManager.recordingsPath) : ""
         onAccepted: {
-            var path = selectedFolder.toString();
-            if (path.startsWith("file://")) path = path.substring(7);
+            var path = selectedFolder.toLocalFile();
             if (settingsManager) settingsManager.recordingsPath = path;
         }
     }

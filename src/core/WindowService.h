@@ -1,7 +1,10 @@
 #pragma once
 
+#include "detection/WindowInfo.h"
+
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QVariantMap>
 
@@ -13,7 +16,14 @@ class WaylandWindowMonitor;
  * @brief Service to list available windows for manual recording.
  *
  * Answers from the shared WaylandWindowMonitor backend (KWin first).
- * Window ids are the compositor's window ids (KWin client.windowId).
+ * Window ids are the compositor's window ids, except on KWin where the
+ * script reports id 0 for every window: the monitor assigns synthetic
+ * ids (WaylandWindowMonitor::kSyntheticIdBase + snapshot position) at
+ * ingest time, so every listed row still has a distinct id. Treat the
+ * id as an opaque token: getVisibleWindows() hands out the maps the
+ * pickers list (each map's "id" travels with it through QML
+ * search/filter/sort), and the title/pid/class lookups resolve that
+ * id — never a positional row number, which filtering would shift.
  * Without a monitor attached, all queries return empty/0 (safe no-op).
  */
 class WindowService : public QObject {
@@ -51,7 +61,19 @@ public:
 private:
   QString fetchWindowTitle(unsigned long windowId);
 
-  WaylandWindowMonitor *m_monitor = nullptr;
+  /**
+   * @brief Resolve an id handed out by getVisibleWindows().
+   *
+   * Searches the snapshot cache from the last getVisibleWindows() call
+   * first, so lookups hit the SAME rows the picker listed even if a new
+   * compositor snapshot arrived in between (positional synthetic ids
+   * could otherwise remap). Falls back to the live monitor snapshot
+   * for ids created after the listing. Returns false when unknown.
+   */
+  bool findWindow(quint64 id, WindowInfo *out) const;
+
+  QPointer<WaylandWindowMonitor> m_monitor;
+  QList<WindowInfo> m_lastWindows;
 };
 
 } // namespace TrophyBackend

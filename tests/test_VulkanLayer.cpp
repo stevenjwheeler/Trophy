@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include "detection/VulkanLayer.h"
+#include "detection/PersistentReporterLib.h"
 
 using namespace TrophyBackend;
 
@@ -34,6 +35,7 @@ protected:
   QTemporaryDir dataHome;
   QTemporaryDir srcTree;
   QByteArray oldXdgDataHome;
+  QByteArray oldAppDir;
   QString fakeManifest;
   QString fakeLib;
 
@@ -56,10 +58,16 @@ protected:
     lib.close();
 
     oldXdgDataHome = qgetenv("XDG_DATA_HOME");
+    oldAppDir = qgetenv("APPDIR");
+    qunsetenv("APPDIR");
     qputenv("XDG_DATA_HOME", dataHome.path().toUtf8());
   }
 
   void TearDown() override {
+    if (oldAppDir.isNull())
+      qunsetenv("APPDIR");
+    else
+      qputenv("APPDIR", oldAppDir);
     if (oldXdgDataHome.isNull())
       qunsetenv("XDG_DATA_HOME");
     else
@@ -146,4 +154,79 @@ TEST_F(VulkanLayerTest, RemoveRegistrationRoundTrip) {
   EXPECT_FALSE(VulkanLayer::isRegistered());
   // Removing twice is fine (opt-out is idempotent).
   EXPECT_TRUE(VulkanLayer::removeRegistration());
+}
+
+TEST_F(VulkanLayerTest, BundleManifestSurvivesUnmountAndReusesLibrary) {
+  qputenv("APPDIR", srcTree.path().toUtf8());
+  EXPECT_EQ(VulkanLayer::libraryPathForSource(fakeManifest), fakeLib);
+  EXPECT_FALSE(QFileInfo::exists(PersistentReporterLib::directory()));
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib,
+                                        VulkanLayer::destManifestPath()));
+  const QString stable = PersistentReporterLib::install(fakeLib);
+  ASSERT_TRUE(PersistentReporterLib::isOwned(stable, "libtrophy_layer"));
+  const auto modified = QFileInfo(stable).lastModified();
+  EXPECT_EQ(PersistentReporterLib::install(fakeLib), stable);
+  EXPECT_EQ(QFileInfo(stable).lastModified(), modified);
+  QFile manifest(VulkanLayer::destManifestPath());
+  ASSERT_TRUE(manifest.open(QIODevice::ReadOnly));
+  EXPECT_TRUE(manifest.readAll().contains(stable.toUtf8()));
+  ASSERT_TRUE(QFile::remove(fakeLib));
+  ASSERT_TRUE(QFile::remove(fakeManifest));
+  EXPECT_TRUE(VulkanLayer::isRegistered());
+  EXPECT_TRUE(QFile::exists(stable));
+}
+
+TEST_F(VulkanLayerTest, CorruptDurableLibraryDoesNotReplaceManifest) {
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib,
+                                        VulkanLayer::destManifestPath()));
+  QFile manifest(VulkanLayer::destManifestPath());
+  ASSERT_TRUE(manifest.open(QIODevice::ReadOnly));
+  const QByteArray original = manifest.readAll();
+  manifest.close();
+  qputenv("APPDIR", srcTree.path().toUtf8());
+  const QString stable = PersistentReporterLib::install(fakeLib);
+  ASSERT_FALSE(stable.isEmpty());
+  ASSERT_TRUE(QFile::setPermissions(stable, QFileDevice::ReadOwner |
+                                          QFileDevice::WriteOwner));
+  QFile damaged(stable);
+  ASSERT_TRUE(damaged.open(QIODevice::WriteOnly | QIODevice::Truncate));
+  damaged.write("corrupt");
+  damaged.close();
+  EXPECT_FALSE(VulkanLayer::writeManifest(fakeManifest, fakeLib,
+                                         VulkanLayer::destManifestPath()));
+  ASSERT_TRUE(manifest.open(QIODevice::ReadOnly));
+  EXPECT_EQ(manifest.readAll(), original);
+}
+
+TEST_F(VulkanLayerTest, InheritedAppDirAndOutsideSymlinkStayNative) {
+  qputenv("APPDIR", dataHome.path().toUtf8());
+  EXPECT_EQ(PersistentReporterLib::install(fakeLib), fakeLib);
+  const QString link = dataHome.path() + "/libtrophy_layer.so";
+  ASSERT_TRUE(QFile::link(fakeLib, link));
+  EXPECT_EQ(PersistentReporterLib::install(link), link);
+  EXPECT_FALSE(QFileInfo::exists(PersistentReporterLib::directory()));
+}
+
+TEST_F(VulkanLayerTest, OptInRefreshesManifestToNewDurableVersion) {
+  // Supply the normal installed-datadir fallback, pointing into a fake AppDir.
+  ASSERT_TRUE(QDir().mkpath(dataHome.path() + "/trophy"));
+  ASSERT_TRUE(QFile::link(srcTree.path(),
+                         dataHome.path() + "/trophy/vulkan_layer"));
+  qputenv("APPDIR", srcTree.path().toUtf8());
+  ASSERT_EQ(VulkanLayer::sourceManifestPath(),
+            dataHome.path() + "/trophy/vulkan_layer/trophy_layer.json");
+  ASSERT_TRUE(VulkanLayer::ensureRegistered());
+  const QString first = PersistentReporterLib::install(fakeLib);
+  QFile updated(fakeLib);
+  ASSERT_TRUE(updated.open(QIODevice::WriteOnly | QIODevice::Truncate));
+  updated.write("new version");
+  updated.close();
+  EXPECT_TRUE(VulkanLayer::isRegistered());
+  ASSERT_TRUE(VulkanLayer::ensureRegistered());
+  const QString second = PersistentReporterLib::install(fakeLib);
+  EXPECT_NE(first, second);
+  EXPECT_TRUE(QFile::exists(first));
+  QFile manifest(VulkanLayer::destManifestPath());
+  ASSERT_TRUE(manifest.open(QIODevice::ReadOnly));
+  EXPECT_TRUE(manifest.readAll().contains(second.toUtf8()));
 }

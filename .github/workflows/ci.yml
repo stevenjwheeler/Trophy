@@ -20,9 +20,9 @@ permissions:
 
 jobs:
   # A push carrying both a branch ref and a v* tag on the same commit
-  # would build twice (once per ref). Main releases keep the tag run
-  # (branch build skipped); any other branch keeps the branch run and
-  # the tag run is dropped, so non-main tags never cut a release.
+  # would build twice (once per ref). The tag run covers a tagged main
+  # commit (branch build skipped); any other branch keeps the branch run
+  # and the tag run is dropped, so tags only ever build once.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -75,9 +75,16 @@ jobs:
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
           elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "main" ]]; then
-            # Main is the release line: stamp the tag only, never a
-            # commit id. Falls back to 0.0.0 when no tag is reachable.
-            VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+            # Main is the release line: stamp the tag itself, leading v
+            # included (e.g. v0.9.4), never a commit id. Falls back to
+            # v0.0.0 when no tag is reachable.
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "dev" ]]; then
+            # Dev line: base tag plus -dev- and the commit
+            # (e.g. v0.9.4-dev-f1f465b). Releases are cut manually;
+            # CI only names the artifacts.
+            BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            VERSION="${BASE}-dev-${SHA}"
           else
             BRANCH=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}
             SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^A-Za-z0-9.-]/-/g')
@@ -88,36 +95,45 @@ jobs:
           echo "Building Trophy version: $VERSION"
 
       - name: Install System Dependencies
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: |
-            build-essential
-            cmake
-            ninja-build
-            ccache
-            libfuse2t64
-            wget
-            libgl1-mesa-dev
-            libx11-dev
-            libxext-dev
-            libxkbcommon-dev
-            libwayland-dev
-            libxcb-shm0-dev
-            libxcb-cursor0
-            libxkbcommon-x11-0
-            libvulkan-dev
-            libpipewire-0.3-dev
-            libspa-0.2-dev
-            libdrm-dev
-            libavcodec-dev
-            libavformat-dev
-            libavutil-dev
-            libswscale-dev
-            libswresample-dev
-            libva-dev
-            libva-drm2
-            libgtest-dev
-          version: 1.4
+        # Plain apt-get, deliberately NOT cached: the previous
+        # cache-apt-pkgs-action setup kept failing in two ways.
+        # First it swallowed apt errors (a mirror 404 on transitive
+        # libsoup3 debs left libvulkan-dev uninstalled while the step
+        # still reported success, so the build died later with
+        # "Could NOT find Vulkan"). Then it saved that partial
+        # state, so every later run restored the poisoned cache
+        # (see the 1.6 version-bump commit). Direct apt fails fast
+        # on error and retries the update/install cycle, so a
+        # flaked mirror recovers instead of poisoning later runs.
+        # Headless audio daemon for device-enumerating tests: without
+        # it, QAudioOutput construction segfaults inside QtMultimedia
+        # (a bare daemon is enough; nothing plays audio).
+        run: |
+          set -e
+          PACKAGES="build-essential cmake ninja-build ccache libfuse2t64 wget \
+            libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev \
+            libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 \
+            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
+            libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libswresample-dev libva-dev \
+            libva-drm2 libgtest-dev desktop-file-utils appstream"
+          for attempt in 1 2 3; do
+            echo "apt attempt $attempt/3..."
+            if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
+              break
+            fi
+            echo "apt attempt $attempt failed, retrying..."
+            sleep 10
+            if [[ $attempt == "3" ]]; then
+              echo "Final retry with --fix-missing..."
+              sudo apt-get update
+              sudo apt-get install -y --fix-missing $PACKAGES
+            fi
+          done
+          # Fail fast with a clear message instead of a cryptic
+          # "Could NOT find Vulkan" at configure time.
+          test -f /usr/include/vulkan/vulkan.h || { echo "ERROR: libvulkan-dev missing after apt install"; exit 1; }
+          pkg-config --exists libpipewire-0.3 || { echo "ERROR: libpipewire-0.3-dev missing after apt install"; exit 1; }
           
       - name: Restore ccache
         # Purpose-built action instead of raw actions/cache: stable key
@@ -142,7 +158,10 @@ jobs:
       - name: Prepare GTest if not cached
         if: steps.cache-gtest.outputs.cache-hit != 'true'
         run: |
-          cmake -GNinja -S /usr/src/googletest -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
+          # Runners don't reliably ship gtest sources (/usr/src/googletest
+          # is absent), so fetch a pinned copy instead of depending on it.
+          git clone --depth 1 --branch v1.14.0 https://github.com/google/googletest.git gtest_src
+          cmake -GNinja -S gtest_src -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
           cmake --build gtest_build --target install
 
       - name: Prepare Qt or use from cache
@@ -152,7 +171,7 @@ jobs:
           # newer; CMakeLists floor is Qt 6.5). Bump deliberately, not
           # float: a silent major here once broke linuxdeploy bundling.
           version: '6.12.0'
-          modules: 'qtmultimedia'
+          modules: 'qtmultimedia qtwaylandcompositor'
           cache: 'true'
 
       - name: Configure & Build
@@ -167,8 +186,49 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
+      - name: Validate package metadata
+        run: |
+          desktop-file-validate packaging/trophy.desktop
+          appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
+
+      - name: Start headless PipeWire for audio-device tests
+        # Player probe tests instantiate real QML AudioOutput items, whose
+        # constructor enumerates audio devices inside QtMultimedia. On a
+        # runner with PipeWire libraries but no daemon that enumeration
+        # segfaults (QPlatformAudioDevices::create), so provide a bare
+        # headless daemon in the same runtime dir the tests use. An empty
+        # registry enumerates fine; nothing here plays or captures audio.
+        run: |
+          mkdir -p "${{ runner.temp }}/trophy-test-runtime"
+          chmod 700 "${{ runner.temp }}/trophy-test-runtime"
+          export XDG_RUNTIME_DIR="${{ runner.temp }}/trophy-test-runtime"
+          if command -v pipewire >/dev/null; then
+            nohup pipewire >"$RUNNER_TEMP/pipewire.log" 2>&1 &
+            for i in $(seq 1 50); do
+              [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break
+              sleep 0.2
+            done
+            ls -l "$XDG_RUNTIME_DIR" || true
+          else
+            echo "pipewire daemon not installed; audio-device tests may fail"
+          fi
+
       - name: Run Unit Tests
-        run: cd build && ctest --output-on-failure
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/trophy-test-config
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/trophy-test-runtime
+          TMPDIR: ${{ runner.temp }}/trophy-test-tmp
+          QT_QPA_PLATFORM: offscreen
+          # Force ALSA for audio-device enumeration: with PipeWire
+          # libraries but no daemon, QtMultimedia's PipeWire backend
+          # segfaults inside QPlatformAudioDevices::create. No test
+          # plays audio, so the backend only needs to enumerate
+          # cleanly (empty is fine).
+          QT_AUDIO_BACKEND: alsa
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          cd build && ctest --output-on-failure --timeout 300
 
       - name: Generate AppImage
         shell: bash
@@ -208,41 +268,44 @@ jobs:
           export QMAKE=$(which qmake6 || which qmake)
           export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
           export QML_SOURCES_PATHS=$PWD/build/qml
-          export EXTRA_QT_MODULES="quickcontrols2;multimedia"
+          export EXTRA_QT_MODULES="quickcontrols2;multimedia;waylandcompositor"
+          # Qt 6 releases ship either libqwayland.so or the older split
+          # plugins. Never rely on host plugins for a Wayland-only package.
+          QT_PLUGINS=$("$QMAKE" -query QT_INSTALL_PLUGINS)
+          WAYLAND_PLUGINS=("$QT_PLUGINS"/platforms/libqwayland*.so)
+          if [[ ! -f "${WAYLAND_PLUGINS[0]}" ]]; then
+            echo "ERROR: Qt Wayland platform plugins are missing"
+            exit 1
+          fi
+          EXTRA_PLATFORM_PLUGINS="libqoffscreen.so"
+          for plugin in "${WAYLAND_PLUGINS[@]}"; do
+            EXTRA_PLATFORM_PLUGINS+=";$(basename "$plugin")"
+          done
+          export EXTRA_PLATFORM_PLUGINS
           
           # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" \
             --library "$TROPHY_LIB" \
             --desktop-file packaging/trophy.desktop \
-            --icon-file resources/icons/trophy.svg \
-            --plugin qt \
-            --output appimage
+             --icon-file resources/icons/trophy.svg \
+             --plugin qt
+
+          # A root-level executable symlink can resolve Qt/loader paths from
+          # the wrong directory. Keep a real launcher and smoke-test it.
+          rm AppDir/AppRun
+          install -m755 packaging/AppRun AppDir/AppRun
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
 
           # 6. SMOKE TEST
           echo "Running smoke test..."
           GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
           chmod +x "$GENERATED_FILE"
           
-          # Setup minimal environment
-          export XDG_RUNTIME_DIR=/tmp/runtime-ci
-          mkdir -p $XDG_RUNTIME_DIR
-          
-          # Use offscreen to bypass the "No X11 support" check
-          QT_QPA_PLATFORM=offscreen ./"$GENERATED_FILE" & 
-          
-          APP_PID=$!
-          sleep 5
-          if ps -p $APP_PID > /dev/null; then
-             echo "App launched successfully (Headless mode)!"
-             # Guarded reaps: the app may exit on its own between the
-             # ps check and the kill, which must not fail the step.
-             kill $APP_PID || true
-             wait $APP_PID 2>/dev/null || true
-          else
-             echo "App crashed! Check if Wayland-only checks are blocking CI."
-             exit 1
-          fi
+          # Private HOME/XDG/bus, readiness marker and QML-error checks;
+          # surviving for five seconds alone did not prove a working GUI.
+          python3 packaging/smoke_appimage.py "$GENERATED_FILE" \
+            --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
 
           # 7. Consistent artifact name (linuxdeploy usually honors
           # LINUXDEPLOY_OUTPUT_VERSION already — only rename when the
@@ -252,6 +315,17 @@ jobs:
           if [[ "$GENERATED_FILE" != "$TARGET" ]]; then
             mv "$GENERATED_FILE" "$TARGET"
           fi
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/trophy-appimage-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Generate Checksum
         run: |
@@ -265,31 +339,9 @@ jobs:
           path: |
             Trophy-*-x86_64.AppImage
             SHA256SUMS
-          # Releases embed the files, so per-run artifacts are short-lived.
+          # Artifacts are short-lived (14 days); release attachments
+          # are uploaded manually.
           retention-days: 14
-          
-  create-release:
-    needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with:
-          pattern: Trophy-AppImage-*-x86_64
-          merge-multiple: true
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            Trophy-*-x86_64.AppImage
-            SHA256SUMS
-          generate_release_notes: true
-          # Never publish an empty release if the artifact is missing.
-          fail_on_unmatched_files: true
 
   comment-pr:
     needs: build-and-test

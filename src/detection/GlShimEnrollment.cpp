@@ -11,9 +11,10 @@
 #include <QDir>
 #include <QFile>
 #include <QStandardPaths>
-#include <QTextStream>
+#include <QSaveFile>
 
 #include "detection/ShippedLibDirs.h"
+#include "detection/PersistentReporterLib.h"
 
 namespace TrophyBackend {
 
@@ -47,18 +48,50 @@ QString GlShimEnrollment::confFilePath() {
 
 bool GlShimEnrollment::isEnrolled() {
   const QString lib = libraryPath();
-  if (lib.isEmpty())
-    return false;
   QFile f(confFilePath());
   if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
     return false;
   const QString content = QString::fromUtf8(f.readAll());
-  return content.contains(lib);
+  for (const QString &line : content.split('\n')) {
+    const QString trimmed = line.trimmed();
+    if (!trimmed.startsWith("LD_PRELOAD="))
+      continue;
+    for (const QString &entry : trimmed.mid(11).split(':')) {
+      if ((!lib.isEmpty() && entry == lib) ||
+          PersistentReporterLib::isOwned(entry, "libtrophy_gl_shim"))
+        return true;
+    }
+  }
+  return false;
 }
 
 bool GlShimEnrollment::isActiveInCurrentSession() {
   const QString preload = QString::fromLocal8Bit(qgetenv("LD_PRELOAD"));
   return !preload.isEmpty() && preload.contains("trophy_gl_shim");
+}
+
+bool GlShimEnrollment::refreshEnrolledBundle() {
+  const QString source = libraryPath();
+  if (!PersistentReporterLib::isBundled(source))
+    return true;
+  QFile file(confFilePath());
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    return true; // No readable prior consent; never enroll by default.
+  const QString content = QString::fromUtf8(file.readAll());
+  file.close();
+  for (const QString &line : content.split('\n')) {
+    const QString trimmed = line.trimmed();
+    if (!trimmed.startsWith("LD_PRELOAD="))
+      continue;
+    for (const QString &entry : trimmed.mid(11).split(':')) {
+      // Legacy AppImages left a now-missing temporary path. Its explicit
+      // entry in our dedicated enrollment file still records opt-in.
+      if (entry == source || QFileInfo(entry).fileName() == kLibName ||
+          PersistentReporterLib::isOwned(entry, "libtrophy_gl_shim"))
+        return setEnrolled(true);
+    }
+  }
+  return true;
 }
 
 bool GlShimEnrollment::setEnrolled(bool enrolled) {
@@ -70,41 +103,50 @@ bool GlShimEnrollment::setEnrolled(bool enrolled) {
     return QFile::remove(path);
   }
 
-  const QString lib = libraryPath();
+  const QString source = libraryPath();
+  const QString lib =
+      source.isEmpty()
+          ? QString()
+          : PersistentReporterLib::install(source, "libtrophy_gl_shim");
   if (lib.isEmpty())
     return false;
 
   // Merge with any foreign LD_PRELOAD already present in our file.
   QString other;
+  QString existingContent;
   QFile existing(path);
   if (existing.open(QIODevice::ReadOnly | QIODevice::Text)) {
-    const QString content = QString::fromUtf8(existing.readAll());
+    existingContent = QString::fromUtf8(existing.readAll());
     existing.close();
-    for (const QString &line : content.split('\n')) {
+    for (const QString &line : existingContent.split('\n')) {
       const QString t = line.trimmed();
       if (t.startsWith("LD_PRELOAD=")) {
         const QString val = t.mid(QString("LD_PRELOAD=").size());
         for (const QString &entry : val.split(':')) {
           if (!entry.isEmpty() && !entry.contains("trophy_gl_shim") &&
-              entry != lib)
+              entry != lib && entry != source)
             other += (other.isEmpty() ? "" : ":") + entry;
         }
       }
     }
   }
 
-  QDir().mkpath(QFileInfo(path).absolutePath());
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-    return false;
-  QTextStream out(&f);
-  out << "# Managed by Trophy: preload the OpenGL game-detection shim.\n";
-  out << "# Takes effect on next login. Remove this file to opt out.\n";
-  out << "LD_PRELOAD=" << lib;
+  QString content = "# Managed by Trophy: preload the OpenGL game-detection shim.\n"
+                    "# Takes effect on next login. Remove this file to opt out.\n"
+                    "LD_PRELOAD=" + lib;
   if (!other.isEmpty())
-    out << ":" << other;
-  out << "\n";
-  return true;
+    content += ':' + other;
+  content += '\n';
+  if (existingContent == content)
+    return true; // Startup refresh must not rewrite an unchanged enrollment.
+
+  if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+    return false;
+  QSaveFile f(path);
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+    return false;
+  const QByteArray bytes = content.toUtf8();
+  return f.write(bytes) == bytes.size() && f.commit();
 }
 
 } // namespace TrophyBackend

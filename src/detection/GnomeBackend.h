@@ -12,6 +12,7 @@
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <atomic>
 
 namespace TrophyBackend {
 
@@ -42,7 +43,7 @@ public:
   /** True when the shell answers Eval at all (checked on first refresh). */
   bool start();
   void stop() { m_active = false; }
-  bool isActive() const { return m_active; }
+  bool isActive() const { return m_active.load(); }
 
   /** Single Eval round-trip; called by the monitor's 1s watchdog tick. */
   void refresh();
@@ -66,7 +67,7 @@ private:
   mutable QMutex m_mutex;
   QList<WindowInfo> m_windows;
   QString m_lastSignature; // content hash of the last emitted snapshot
-  bool m_active = false;
+  std::atomic_bool m_active{false};
   bool m_probed = false;
 };
 

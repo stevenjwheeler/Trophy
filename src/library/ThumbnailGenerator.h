@@ -12,8 +12,13 @@
 #include <QMutex>
 #include <QObject>
 #include <QQueue>
+#include <QSize>
 #include <QString>
 #include <atomic>
+
+class ThumbnailGeneratorTest;
+struct AVCodecContext;
+struct AVFrame;
 
 namespace TrophyBackend {
 
@@ -43,6 +48,10 @@ private slots:
   void processQueue();
 
 private:
+  friend class ::ThumbnailGeneratorTest;
+  // Private decoder-result seam; production always uses FFmpeg's receiver.
+  int (*m_receiveFrame)(AVCodecContext *, AVFrame *);
+  static QSize thumbnailSize(int width, int height);
   bool generateThumbnailSync(const QString &videoPath,
                              const QString &outputPath);
   QString getThumbnailPath(const QString &videoPath) const;

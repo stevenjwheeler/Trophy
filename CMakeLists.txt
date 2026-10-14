@@ -36,7 +36,7 @@ else()
   # raw "vX.Y.Z-N-gSHA" describe string. Exact tag checkouts
   # keep the tag itself.
   execute_process(
-      COMMAND git describe --tags --exact-match
+      COMMAND git describe --tags --exact-match --dirty=-dirty
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
       OUTPUT_VARIABLE GIT_EXACT_TAG
       OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -69,8 +69,12 @@ else()
     if(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
       set(GIT_VERSION "${GIT_BASE_TAG}-${GIT_BRANCH}-${GIT_SHA}")
     else()
+      # Last resort (no tags at all): stamp the sha, dirty-flagged.
+      # NOTE: version comes from configure-time git queries, so rebuilds
+      # after a checkout keep the old APP_VERSION until you reconfigure.
+      # Local dev rule: re-run cmake configure after switching branches.
       execute_process(
-          COMMAND git describe --tags --always
+          COMMAND git describe --tags --always --dirty=-dirty
           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
           OUTPUT_VARIABLE GIT_VERSION
           OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -163,7 +167,7 @@ if(ENABLE_VAAPI)
     endif()
 endif()
 
-# Find PipeWire (for Wayland/PipeWire capture)
+# PipeWire capture is found a few lines above (Wayland/PipeWire capture).
 
 # Check for NVENC (just check if headers exist)
 if(ENABLE_NVENC)
@@ -201,6 +205,14 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
 # ENCODING_HEADERS.
 add_library(trophy_layer SHARED src/vulkan_layer/trophy_layer.cpp)
 target_link_libraries(trophy_layer PRIVATE Vulkan::Vulkan)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(trophy_layer PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wno-unused-parameter
+    )
+endif()
 set_target_properties(trophy_layer PROPERTIES
     OUTPUT_NAME "trophy_layer"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/vulkan_layer"
@@ -309,6 +321,7 @@ set(CORE_HEADERS
     src/core/ControlServer.h
     src/core/GlobalShortcutManager.h
     src/core/ReplayManager.h
+    src/core/UpdateChecker.h
     src/core/WindowService.h
 )
 
@@ -358,6 +371,8 @@ set(LIBRARY_HEADERS
     src/library/Recording.h
     src/library/ThumbnailGenerator.h
     src/library/ActivityFeed.h
+    src/library/WaveformCache.h
+    src/library/FilmstripCache.h
 )
 
 set(SETTINGS_HEADERS
@@ -531,6 +546,12 @@ endif()
 # Installation
 include(GNUInstallDirs)
 
+# INSTALL_RPATH is a target property: setting CMAKE_INSTALL_RPATH here,
+# after the targets were created, would not update their install RUNPATH.
+# GNUInstallDirs gives the actual libdir (including multilib prefixes).
+set_target_properties(${PROJECT_NAME}App PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+
 install(TARGETS ${PROJECT_NAME}App
     BUNDLE DESTINATION .
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -565,14 +586,27 @@ install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
 )
+# Native/AppImage desktop file is trophy.desktop; Flatpak post-install
+# copies the source metadata alongside its renamed app-id desktop entry.
+# Keep the launchable association truthful in each installed layout.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.stevenjwheeler.Trophy.metainfo.xml"
+    TROPHY_NATIVE_METAINFO)
+string(REPLACE "io.github.stevenjwheeler.Trophy.desktop" "trophy.desktop"
+    TROPHY_NATIVE_METAINFO "${TROPHY_NATIVE_METAINFO}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/io.github.stevenjwheeler.Trophy.metainfo.xml"
+    "${TROPHY_NATIVE_METAINFO}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/io.github.stevenjwheeler.Trophy.metainfo.xml"
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo
+)
 
-# CPack configuration
+# CPack configuration: stamp the tag/branch scheme (sanitized of the
+# leading 'v'), not the hardcoded PROJECT_VERSION (0.0.0), so cpack
+# artifacts agree with the binary's own version.
+string(REGEX REPLACE "^v" "" CPACK_STAMP "${GIT_VERSION}")
 set(CPACK_PACKAGE_NAME "trophy")
 set(CPACK_PACKAGE_VENDOR "Trophy - Game recording and clipping")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
-set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
-set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
-set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_PACKAGE_VERSION "${CPACK_STAMP}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 
 include(CPack)
@@ -586,7 +620,7 @@ endif()
 # Print configuration summary
 message(STATUS "")
 message(STATUS "=== Trophy - Game recording and clipping Configuration ===")
-message(STATUS "Version: ${PROJECT_VERSION}")
+message(STATUS "Version: ${GIT_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "")
 message(STATUS "Features:")

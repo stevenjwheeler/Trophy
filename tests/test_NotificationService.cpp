@@ -80,6 +80,25 @@ protected:
     svc.m_lastNotificationId = id;
     svc.m_lastTitle = title;
   }
+  static uint lastId(const NotificationService &svc) {
+    return svc.m_lastNotificationId;
+  }
+  static QString pendingWithdraw(const NotificationService &svc) {
+    return svc.m_pendingWithdrawTitle;
+  }
+  static void recordStackedNotice(NotificationService &svc) {
+    svc.noteSent("Ready to clip", "Stacked notice");
+  }
+  static quint64 beginNotice(NotificationService &svc, const QString &title) {
+    return svc.beginReplacingNotification(title);
+  }
+  static bool adoptReply(NotificationService &svc, quint64 generation, uint id) {
+    return svc.adoptNotificationReply(generation, id);
+  }
+  static bool mayWithdraw(const NotificationService &svc, quint64 generation,
+                          uint id) {
+    return svc.mayWithdrawNotification(generation, id);
+  }
 };
 } // namespace TrophyBackend
 
@@ -100,6 +119,98 @@ TEST_F(NotificationServiceTest, DefaultActionCountsAsAuthorize) {
       &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("block"))));
   ASSERT_EQ(spy.count(), 1);
   EXPECT_EQ(spy.last()[0].toString(), QString("block"));
+}
+
+TEST_F(NotificationServiceTest, StackedDedupDoesNotChangeAuthorizeOwner) {
+  NotificationService svc;
+  setLastNotice(svc, 42, "New Game: TestGame");
+  recordStackedNotice(svc);
+  QSignalSpy spy(&svc, &NotificationService::notificationClicked);
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("default"))));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.last()[0].toString(), QString("authorize"));
+  spy.clear();
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onNotificationClosed", Q_ARG(uint, 42), Q_ARG(uint, 2)));
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.last()[0].toString(), QString("dismissed"));
+}
+
+TEST_F(NotificationServiceTest, StackedDedupDoesNotLosePendingWithdraw) {
+  NotificationService svc;
+  setLastNotice(svc, 0, "New Game: TestGame");
+  recordStackedNotice(svc);
+  svc.closeAuthorizePrompt("TestGame");
+  EXPECT_EQ(pendingWithdraw(svc), QString("New Game: TestGame"));
+}
+
+TEST_F(NotificationServiceTest, LateReplyCannotStealNewerPrompt) {
+  NotificationService svc;
+  const auto oldRequest = beginNotice(svc, "New Game: OldGame");
+  const auto currentRequest = beginNotice(svc, "New Game: CurrentGame");
+  ASSERT_TRUE(adoptReply(svc, currentRequest, 43));
+  EXPECT_FALSE(adoptReply(svc, oldRequest, 42));
+  EXPECT_EQ(lastId(svc), 43u);
+  EXPECT_TRUE(mayWithdraw(svc, oldRequest, 42));
+  QSignalSpy spy(&svc, &NotificationService::notificationClicked);
+  ASSERT_TRUE(QMetaObject::invokeMethod(
+      &svc, "onActionInvoked", Q_ARG(uint, 42), Q_ARG(QString, QString("authorize"))));
+  EXPECT_EQ(spy.count(), 0);
+}
+
+TEST_F(NotificationServiceTest, OldTimeoutCannotWithdrawReusedReplacementId) {
+  NotificationService svc;
+  const auto oldRequest = beginNotice(svc, "Recording Saved");
+  ASSERT_TRUE(adoptReply(svc, oldRequest, 42));
+  const auto currentRequest = beginNotice(svc, "New Game: CurrentGame");
+  // Protect the id both before and after the new Notify reply arrives.
+  EXPECT_FALSE(mayWithdraw(svc, oldRequest, 42));
+  ASSERT_TRUE(adoptReply(svc, currentRequest, 42));
+  EXPECT_FALSE(mayWithdraw(svc, oldRequest, 42));
+  EXPECT_FALSE(adoptReply(svc, oldRequest, 42));
+  EXPECT_EQ(lastId(svc), 42u);
+}
+
+TEST_F(NotificationServiceTest, WithdrawOfOldSameTitleDoesNotCancelRetry) {
+  NotificationService svc;
+  const auto oldRequest = beginNotice(svc, "New Game: TestGame");
+  svc.closeAuthorizePrompt("TestGame");
+  const auto currentRequest = beginNotice(svc, "New Game: TestGame");
+  EXPECT_FALSE(adoptReply(svc, oldRequest, 42));
+  EXPECT_TRUE(adoptReply(svc, currentRequest, 43));
+  EXPECT_EQ(lastId(svc), 43u);
+  EXPECT_TRUE(pendingWithdraw(svc).isEmpty());
+}
+
+TEST_F(NotificationServiceTest, CloseLastCancelsPendingReply) {
+  NotificationService svc;
+  const auto request = beginNotice(svc, "New Game: TestGame");
+  svc.closeLastNotification();
+  EXPECT_FALSE(adoptReply(svc, request, 42));
+  EXPECT_EQ(lastId(svc), 0u);
+  EXPECT_TRUE(mayWithdraw(svc, request, 42));
+}
+
+TEST_F(NotificationServiceTest, ClosePromptDefersWithdrawWhileReplyInflight) {
+  // Async Notify round-trip: the id is still 0 when the game closes.
+  // closeAuthorizePrompt must record the title so the reply callback can
+  // withdraw the just-published popup instead of letting a dead-name
+  // prompt linger (clicks would hit cleared pendings).
+  NotificationService svc;
+  setLastNotice(svc, 0, "New Game: TestGame");
+  svc.closeAuthorizePrompt("TestGame");
+  EXPECT_EQ(lastId(svc), 0u);
+  EXPECT_EQ(pendingWithdraw(svc), QString("New Game: TestGame"));
+}
+
+TEST_F(NotificationServiceTest, ClosePromptIgnoresUnrelatedGame) {
+  // Title-matched withdraw must never kill an unrelated notice.
+  NotificationService svc;
+  setLastNotice(svc, 7, "New Game: GameA");
+  svc.closeAuthorizePrompt("GameB");
+  EXPECT_EQ(lastId(svc), 7u);
+  EXPECT_TRUE(pendingWithdraw(svc).isEmpty());
 }
 
 TEST_F(NotificationServiceTest, DefaultActionIgnoredOffPrompt) {

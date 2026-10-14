@@ -10,10 +10,12 @@
 #include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QTimer>
+#include <functional>
 #include <memory>
 
 // Forward declarations
 namespace TrophyBackend {
+class ApplicationAudioProbeTest;
 class UpdateChecker;
 class RecordingManager;
 class SettingsManager;
@@ -48,6 +50,10 @@ class Application : public QApplication {
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY recordingStateChanged)
   Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY currentGameChanged)
   Q_PROPERTY(bool isWayland READ isWayland CONSTANT)
+  Q_PROPERTY(bool captureAvailable READ captureAvailable NOTIFY captureAvailabilityChanged)
+  Q_PROPERTY(bool captureAvailabilityPending READ captureAvailabilityPending NOTIFY captureAvailabilityChanged)
+  Q_PROPERTY(bool canStartRecording READ canStartRecording NOTIFY recordingAvailabilityChanged)
+  Q_PROPERTY(QString recordingPhase READ recordingPhase NOTIFY recordingStateChanged)
   Q_PROPERTY(bool trayAvailable READ isTrayAvailable NOTIFY trayAvailabilityChanged)
   Q_PROPERTY(bool suppressNextStorageNotification READ suppressNextStorageNotification WRITE setSuppressNextStorageNotification NOTIFY suppressNextStorageNotificationChanged)
   Q_PROPERTY(bool vulkanLayerRegistered READ vulkanLayerRegistered NOTIFY detectionStatusChanged)
@@ -84,6 +90,10 @@ public:
   bool isRecording() const;
   QString currentGameName() const;
   bool isWayland() const;
+  bool captureAvailable() const { return m_captureAvailable; }
+  bool captureAvailabilityPending() const { return m_captureAvailabilityPending; }
+  bool canStartRecording() const;
+  QString recordingPhase() const;
 
   // Encoder detection (called from QML)
   Q_INVOKABLE bool isEncoderAvailable(const QString &name) const;
@@ -130,6 +140,8 @@ public:
   void setForceMinimized(bool minimized) { m_forceMinimized = minimized; }
 
 signals:
+  void captureAvailabilityChanged();
+  void recordingAvailabilityChanged();
   void recordingStateChanged();
   void currentGameChanged();
   void suppressNextStorageNotificationChanged();
@@ -138,6 +150,11 @@ signals:
   void fatalError(const QString &message);
 
 private:
+  void queryCaptureAvailability();
+  void applyCaptureAvailability(quint64 generation, bool available);
+  bool m_captureAvailable = false;
+  bool m_captureAvailabilityPending = false;
+  quint64 m_captureAvailabilityGeneration = 0;
   void initializeServices();
   void registerQmlTypes();
   void exposeServicesToQml();
@@ -195,8 +212,26 @@ private:
   int m_audioWaitTicks = 0;
   static constexpr int kAudioWaitMs = 2000;
   static constexpr int kAudioWaitMaxTicks = 10;
+  // Probe state: PipeWire lookups run on a worker (each can take seconds),
+  // so a slow query never stacks (skipped ticks don't count) and never
+  // blocks the GUI. Generation drops deliveries superseded by game-close
+  // or a re-arm; timeout ticks count resolved polls only.
+  bool m_audioProbeInflight = false;
+  quint64 m_nextAudioProbeTicket = 0;
+  quint64 m_audioProbeTicket = 0;
+  quint64 m_audioWaitGeneration = 0;
+  friend class ApplicationAudioProbeTest;
+  quint64 claimAudioProbe();
+  void applyGameAudioProbeResult(quint64 ticket, quint64 generation,
+                                bool present,
+                                const std::function<void(bool)> &onResult);
   void startWhenAudioSettled(const QString &game, bool isRecord);
   static bool gameAudioNodePresent(const QString &game, qint64 pid);
+  // One async presence probe (worker thread); onResult runs on the GUI
+  // thread unless superseded by a generation bump (game-close / re-arm).
+  void probeGameAudioAsync(const QString &game, qint64 pid,
+                           quint64 generation,
+                           const std::function<void(bool)> &onResult);
   // Authorizing capture is explicit user consent: record the game on the
   // whitelist (raw match key when the detector still tracks it) so future
   // launches detect instantly and the Games page stays truthful. Runs on

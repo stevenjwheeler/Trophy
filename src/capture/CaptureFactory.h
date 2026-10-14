@@ -9,6 +9,9 @@
 
 #include <QString>
 #include <memory>
+#include <functional>
+
+class QObject;
 
 namespace TrophyBackend {
 
@@ -51,9 +54,16 @@ public:
   static QString displayServerName(DisplayServer server);
 
   /**
-   * @brief Check if PipeWire is available for capture
+   * @brief Last confirmed ScreenCast portal availability; false before probing.
+   * This getter never makes D-Bus calls and does not probe PipeWire nodes.
    */
   static bool isPipeWireAvailable();
+
+  // Probe the ScreenCast version property without introspection or a picker.
+  // Completion runs on context's thread; destroying context cancels delivery.
+  // The caller should publish availability changes from this callback.
+  static void requestPipeWireAvailability(QObject *context,
+                                         std::function<void(bool)> completion);
 };
 
 } // namespace TrophyBackend

@@ -24,7 +24,7 @@ namespace TrophyBackend {
  */
 class GlShimEnrollment {
 public:
-  /** Full path to trophy_gl_shim.so, or empty when not installed. */
+  /** Shipped path to trophy_gl_shim.so, or empty. Read-only lookup. */
   static QString libraryPath();
 
   /**
@@ -48,8 +48,12 @@ public:
   static bool isActiveInCurrentSession();
 
   /** Write (true) or remove (false) the enrollment. Merges, never
-   * clobbers, a foreign LD_PRELOAD entry in our own conf file. */
+   * clobbers, a foreign LD_PRELOAD entry in our own conf file.
+   * Bundle-owned helpers are persisted before atomically updating the conf;
+   * explicit re-enrollment refreshes older durable versions. */
   static bool setEnrolled(bool enrolled);
+  // Refresh existing consent for a relocated/updated portable bundle only.
+  static bool refreshEnrolledBundle();
 };
 
 } // namespace TrophyBackend

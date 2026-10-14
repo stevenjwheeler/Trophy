@@ -11,15 +11,18 @@
 
 #include <QDBusArgument>
 #include <QDBusConnection>
-#include <QDBusInterface>
 #include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusPendingCall>
 #include <QDBusReply>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QMap>
+#include <QMetaObject>
 #include <QStringList>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QUuid>
 #include <chrono>
 
@@ -75,6 +78,8 @@ struct NodeLookupData {
 
   struct pw_main_loop *loop = nullptr;
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool coreFailed = false;
   struct spa_hook coreListener = {};
   struct spa_hook registryListener = {};
 
@@ -85,348 +90,49 @@ struct NodeLookupData {
   uint32_t clientId = 0xFFFFFFFFu;
   QMap<uint32_t, QString> clientNames; // Stores id -> application.name
 };
-} // namespace
 
-namespace TrophyBackend {
+bool waitForCoreSync(NodeLookupData *data, struct pw_core *core) {
+  data->syncComplete = false;
+  data->pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
+  if (data->pendingSync < 0)
+    return false;
 
-WaylandPortalCapture::WaylandPortalCapture(QObject *parent)
-    : IVideoCaptureSource(parent) {
-  qDBusRegisterMetaType<WaylandStream>();
-  qDBusRegisterMetaType<QList<WaylandStream>>();
+  QElapsedTimer elapsed;
+  elapsed.start();
+  struct pw_loop *loop = pw_main_loop_get_loop(data->loop);
+  while (!data->syncComplete && !data->coreFailed && elapsed.elapsed() < 250) {
+    if (pw_loop_iterate(loop, 50) < 0)
+      return false;
+  }
+  return data->syncComplete && !data->coreFailed;
 }
 
-WaylandPortalCapture::~WaylandPortalCapture() {
-  stopCapture();
-  stopPipeWireStream();
-}
+struct SourceMeta {
+  QString name;
+  uint32_t pid = 0;
+  bool found = false;
+};
 
-bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
-  m_config = config;
-  m_restoreToken = config.waylandRestoreToken;
-  m_restoreTokenUsed = !m_restoreToken.isEmpty();
-  m_resolution = QSize(0, 0); // Will be updated by PipeWire
-  m_useDmaBuf = config.useDmaBuf;
-  m_dmaBufNegotiated = false;
-  m_offeredModifiers.clear();
-  m_buffersResultLogged = false;
-#ifdef HAVE_EGL
-  if (m_useDmaBuf) {
-    const auto mods = queryDmaBufModifiers(DRM_FORMAT_XRGB8888);
-    // Offer tiled (non-LINEAR) modifiers first: LINEAR DMA-BUF is not
-    // allocatable on some drivers (verified NVIDIA), which makes the
-    // compositor agree at format level then fall back to SHM buffers.
-    for (uint64_t m : mods) {
-      if (m != DRM_FORMAT_MOD_LINEAR && m != DRM_FORMAT_MOD_INVALID)
-        m_offeredModifiers.push_back(m);
-    }
-    for (uint64_t m : mods) {
-      if (m == DRM_FORMAT_MOD_LINEAR)
-        m_offeredModifiers.push_back(m);
-    }
-    // Bound the offer list: one EnumFormat pod per modifier.
-    if (m_offeredModifiers.size() > 8)
-      m_offeredModifiers.resize(8);
-    qDebug() << "Wayland Portal: EGL reports" << mods.size()
-             << "DMA-BUF modifiers for XRGB8888, offering"
-             << m_offeredModifiers.size();
-  }
-#endif
-  m_dmaBufFrames = 0;
-  m_shmFrames = 0;
-  m_droppedBuffers = 0;
-  m_lastBufferType = -1;
-  m_multiPlaneWarned = false;
-  m_gpuOnlyWarned = false;
-
-  qDebug() << "Wayland Portal capture initialized. Restore token available:"
-           << !m_restoreToken.isEmpty()
-           << "DMA-BUF:" << (m_useDmaBuf ? "enabled" : "disabled");
-  return true;
-}
-
-void WaylandPortalCapture::setFrameCallback(FrameCallback callback) {
-  std::lock_guard<std::mutex> lock(m_callbackMutex);
-  m_callback = std::move(callback);
-}
-
-bool WaylandPortalCapture::startCapture() {
-  if (m_capturing) {
-    return true;
-  }
-  requestScreenShare();
-  return true;
-}
-
-void WaylandPortalCapture::stopCapture() {
-  if (!m_capturing) {
-    // Still drop a lingering portal session (e.g. init'd but never
-    // started, or stopped twice) so no tray indicator is left behind.
-    closePortalSession();
-    return;
-  }
-  stopPipeWireStream();
-  m_capturing = false;
-  closePortalSession();
-  emit captureStopped();
-  qDebug() << "Wayland Portal capture stopped";
-}
-
-void WaylandPortalCapture::closePortalSession() {
-  if (m_sessionHandle.isEmpty())
-    return;
-  const QString handle = m_sessionHandle;
-  m_sessionHandle.clear();
-  if (!QDBusConnection::sessionBus().isConnected())
-    return;
-  QDBusInterface session("org.freedesktop.portal.Desktop", handle,
-                         "org.freedesktop.portal.Session",
-                         QDBusConnection::sessionBus());
-  if (!session.isValid()) {
-    qDebug() << "Wayland Portal: no session interface for" << handle;
-    return;
-  }
-  // Fire-and-forget: a blocking Close on the GUI thread can hang teardown
-  // if the portal side is ever slow to answer.
-  session.asyncCall("Close");
-  qDebug() << "Wayland Portal: session closed:" << handle;
-}
-
-bool WaylandPortalCapture::isCapturing() const { return m_capturing; }
-
-CaptureCapabilities WaylandPortalCapture::capabilities() const {
-  CaptureCapabilities caps;
-  caps.supportsWindowCapture = true;
-  caps.supportsMonitorCapture = true;
-  caps.supportsRegionCapture = false;
-  caps.supportsCursorCapture = true;
-  caps.supportsHardwareFrames = true; // PipeWire can provide DMA-BUF
-  caps.maxFps = 60;
-  return caps;
-}
-
-QSize WaylandPortalCapture::nativeResolution() const { return m_resolution; }
-
-void WaylandPortalCapture::requestScreenShare() {
-  if (m_capturing)
-    return;
-
-  QDBusInterface portal(
-      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-      "org.freedesktop.portal.ScreenCast", QDBusConnection::sessionBus());
-
-  if (!portal.isValid()) {
-    qCritical() << "Portal ScreenCast interface not valid!";
-    emit captureError("Portal ScreenCast interface not valid!");
-    return;
-  }
-
-  // 1. Create Session
-  QString token =
-      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
-  QVariantMap options;
-  options["session_handle_token"] = token;
-  options["handle_token"] = token;
-
-  QDBusMessage msg = portal.call("CreateSession", options);
-  if (msg.type() == QDBusMessage::ErrorMessage) {
-    qCritical() << "Failed to call CreateSession:" << msg.errorMessage();
-    emit captureError("Failed to call CreateSession: " + msg.errorMessage());
-    return;
-  }
-
-  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
-
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSessionCreated(unsigned int, QVariantMap)));
-
-  m_pendingRequestPath = requestPath.path();
-  qDebug() << "Wayland Portal: Session creation requested...";
-}
-
-void WaylandPortalCapture::onSessionCreated(unsigned int response,
-                                            const QVariantMap &results) {
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSessionCreated(unsigned int, QVariantMap)));
-  m_pendingRequestPath.clear();
-
-  if (response != 0) {
-    qWarning() << "Wayland Portal: Session creation failed or cancelled";
-    emit captureError("Wayland Portal: Session creation failed or cancelled");
-    return;
-  }
-
-  m_sessionHandle = results["session_handle"].toString();
-  qDebug() << "Wayland Portal: Session created:" << m_sessionHandle;
-
-  requestSelectSources();
-}
-
-void WaylandPortalCapture::requestSelectSources() {
-  // 2. Select Sources
-  QDBusInterface portal(
-      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-      "org.freedesktop.portal.ScreenCast", QDBusConnection::sessionBus());
-
-  QString token =
-      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
-  QVariantMap options;
-  options["handle_token"] = token;
-  options["multiple"] = false;
-  // Game approvals list windows only (shorter picker); manual recordings
-  // keep monitors as well. 1 = Monitor, 2 = Window.
-  const unsigned int sourceTypes =
-      m_config.windowOnly ? 2u : (1u | 2u);
-  options["types"] = sourceTypes;
-  options["cursor_mode"] = static_cast<unsigned int>(2); // Embedded = 2
-  options["persist_mode"] = static_cast<unsigned int>(2);
-
-  if (!m_restoreToken.isEmpty()) {
-    options["restore_token"] = m_restoreToken;
-  }
-  // Fingerprint (not the token itself) + requested types: a restore that
-  // still shows a picker is diagnosable from the log — e.g. a token saved
-  // by a differently-attributed process, or a monitor token against a
-  // windows-only request.
-  qDebug() << "Wayland Portal: SelectSources types:" << sourceTypes
-           << "restore token:"
-           << (m_restoreToken.isEmpty()
-                   ? QStringLiteral("none")
-                   : m_restoreToken.left(4) + QStringLiteral("..."));
-
-  QDBusMessage msg =
-      portal.call("SelectSources", QDBusObjectPath(m_sessionHandle), options);
-  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
-
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSourcesSelected(unsigned int, QVariantMap)));
-  m_pendingRequestPath = requestPath.path();
-}
-
-void WaylandPortalCapture::onSourcesSelected(unsigned int response,
-                                             const QVariantMap &results) {
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSourcesSelected(unsigned int, QVariantMap)));
-  m_pendingRequestPath.clear();
-
-  if (response != 0) {
-    // A saved restore token may have gone stale (game reinstalled, portal
-    // reset permissions). Do NOT retry without it here: that would pop a
-    // bare portal picker with no context. Hand back to the app, which
-    // deletes the stale token and re-authorizes through the New Game prompt
-    // (a picker following that click is the user's own action).
-    if (m_restoreTokenUsed) {
-      qWarning() << "Wayland Portal: source selection rejected saved restore "
-                    "token; re-authorize instead of showing a picker";
-      emit restoreTokenStale(m_restoreToken);
-      return;
-    }
-    qWarning() << "Wayland Portal: Source selection failed or cancelled";
-    emit captureError("Wayland Portal: Source selection failed or cancelled");
-    return;
-  }
-
-  // 3. Start
-  QDBusInterface portal(
-      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
-      "org.freedesktop.portal.ScreenCast", QDBusConnection::sessionBus());
-
-  QString token =
-      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
-  QVariantMap options;
-  options["handle_token"] = token;
-
-  QDBusMessage msg =
-      portal.call("Start", QDBusObjectPath(m_sessionHandle), "", options);
-  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
-
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onStartResponse(unsigned int, QVariantMap)));
-  m_pendingRequestPath = requestPath.path();
-}
-
-void WaylandPortalCapture::onStartResponse(unsigned int response,
-                                           const QVariantMap &results) {
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onStartResponse(unsigned int, QVariantMap)));
-  m_pendingRequestPath.clear();
-
-  if (response != 0) {
-    // Same rule at Start stage: no silent picker retry — re-authorize.
-    if (m_restoreTokenUsed) {
-      qWarning() << "Wayland Portal: Start rejected saved restore token; "
-                    "re-authorize instead of showing a picker";
-      emit restoreTokenStale(m_restoreToken);
-      return;
-    }
-    qWarning() << "Wayland Portal: Failed to start screencast";
-    emit captureError("Wayland Portal: Failed to start screencast");
-    return;
-  }
-
-  if (results.contains("restore_token")) {
-    m_restoreToken = results["restore_token"].toString();
-    emit restoreTokenUpdated(m_restoreToken);
-  }
-
-  QVariant streamsVar = results["streams"];
-  if (!streamsVar.isValid()) {
-    qCritical() << "Wayland Portal: No PipeWire streams returned";
-    emit captureError("Wayland Portal: No PipeWire streams returned");
-    return;
-  }
-
-  QList<WaylandStream> streams;
-  if (streamsVar.canConvert<QDBusArgument>()) {
-    streams =
-        qdbus_cast<QList<WaylandStream>>(streamsVar.value<QDBusArgument>());
-  }
-
-  if (streams.isEmpty()) {
-    qCritical() << "Wayland Portal: Stream list is empty";
-    emit captureError("Wayland Portal: Stream list is empty");
-    return;
-  }
-
-  const WaylandStream &firstStream = streams.first();
-  uint32_t nodeId = firstStream.nodeId;
-  QVariantMap streamOptions = firstStream.options;
-
-  m_pipewireNodeId = static_cast<int>(nodeId);
-
-  // Fallback portal metadata
-  if (streamOptions.contains("title")) {
-    m_sourceLabel = streamOptions["title"].toString();
-  }
-  if (streamOptions.contains("app_id")) {
-    m_sourceAppId = streamOptions["app_id"].toString();
-    if (m_sourceLabel.isEmpty()) {
-      m_sourceLabel = m_sourceAppId;
-      int lastDot = m_sourceLabel.lastIndexOf('.');
-      if (lastDot != -1)
-        m_sourceLabel = m_sourceLabel.mid(lastDot + 1);
-    }
-  }
-
-  // --- PipeWire Meta-data lookup ---
+// Best-effort PipeWire identity enrichment for a portal-granted node.
+// Runs on a worker thread (bounded waits only); results are marshalled
+// back to the GUI thread by the caller. Never touches capture state.
+SourceMeta querySourceMetadata(uint32_t targetId) {
+  SourceMeta out;
   NodeLookupData lookupData;
-  lookupData.targetId = nodeId;
+  lookupData.targetId = targetId;
   lookupData.loop = pw_main_loop_new(nullptr);
-
-  struct pw_context *context =
-      pw_context_new(pw_main_loop_get_loop(lookupData.loop), nullptr, 0);
-  struct pw_core *core = pw_context_connect(context, nullptr, 0);
+  struct pw_context *context = nullptr;
+  struct pw_core *core = nullptr;
+  bool lookupReady = false;
+  if (lookupData.loop) {
+    context = pw_context_new(pw_main_loop_get_loop(lookupData.loop), nullptr, 0);
+    if (context)
+      core = pw_context_connect(context, nullptr, 0);
+  }
+  if (!lookupData.loop || !context || !core) {
+    qWarning() << "Wayland Portal: unable to create PipeWire metadata lookup;"
+                  " using portal labels";
+  }
 
   static const struct pw_core_events core_events = [] {
     pw_core_events e = {};
@@ -434,12 +140,18 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     e.done = [](void *data, uint32_t id, int seq) {
       auto *d = static_cast<NodeLookupData *>(data);
       if (id == PW_ID_CORE && seq == d->pendingSync)
-        pw_main_loop_quit(d->loop);
+        d->syncComplete = true;
+    };
+    e.error = [](void *data, uint32_t, int, int, const char *) {
+      static_cast<NodeLookupData *>(data)->coreFailed = true;
     };
     return e;
   }();
-  pw_core_add_listener(core, &lookupData.coreListener, &core_events,
-                       &lookupData);
+  if (core) {
+    pw_core_add_listener(core, &lookupData.coreListener, &core_events,
+                         &lookupData);
+    lookupReady = true;
+  }
 
   static const struct pw_metadata_events metadata_events = [] {
     pw_metadata_events e = {};
@@ -459,8 +171,10 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     return e;
   }();
 
-  struct pw_registry *registry =
-      pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+  struct pw_registry *registry = core
+                                     ? pw_core_get_registry(
+                                           core, PW_VERSION_REGISTRY, 0)
+                                     : nullptr;
   lookupData.registry = registry;
 
   static const struct pw_registry_events reg_events = [] {
@@ -531,66 +245,669 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     };
     return e;
   }();
-  pw_registry_add_listener(registry, &lookupData.registryListener, &reg_events,
-                           &lookupData);
+  if (registry) {
+    pw_registry_add_listener(registry, &lookupData.registryListener,
+                             &reg_events, &lookupData);
+  } else {
+    lookupReady = false;
+  }
 
   // First sync to process all existing globals (nodes, clients, metadata
   // objects)
-  lookupData.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-  pw_main_loop_run(lookupData.loop);
+  if (lookupReady)
+    lookupReady = waitForCoreSync(&lookupData, core);
 
   // Second sync: If we bound to a metadata object, wait for it to stream its
   // properties
+  if (lookupReady && lookupData.metadata)
+    lookupReady = waitForCoreSync(&lookupData, core);
+
+  out.name = lookupData.name;
+  out.pid = lookupData.pid;
+  out.found = lookupData.found;
+
   if (lookupData.metadata) {
-    lookupData.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
-    pw_main_loop_run(lookupData.loop);
-  }
-
-  if (lookupData.found) {
-    bool isGeneric = lookupData.name.toLower().contains("kwin") ||
-                     lookupData.name.toLower().contains("wayland");
-    if (m_sourceLabel.isEmpty() || (!isGeneric && lookupData.pid != 0)) {
-      m_sourceLabel = lookupData.name;
-    }
-    m_sourcePid = lookupData.pid;
-    qDebug() << "Wayland Portal selected source:" << m_sourceLabel
-             << "PID:" << m_sourcePid;
-  }
-
-  if (lookupData.metadata)
+    spa_hook_remove(&lookupData.metadataListener);
     pw_proxy_destroy((struct pw_proxy *)lookupData.metadata);
-  pw_proxy_destroy((struct pw_proxy *)registry);
-  pw_core_disconnect(core);
-  pw_context_destroy(context);
-  pw_main_loop_destroy(lookupData.loop);
-  // ------------------------
+  }
+  if (registry) {
+    spa_hook_remove(&lookupData.registryListener);
+    pw_proxy_destroy((struct pw_proxy *)registry);
+  }
+  if (core) {
+    spa_hook_remove(&lookupData.coreListener);
+    pw_core_disconnect(core);
+  }
+  if (context)
+    pw_context_destroy(context);
+  if (lookupData.loop)
+    pw_main_loop_destroy(lookupData.loop);
+  return out;
+}
+} // namespace
 
-  startPipeWireStream(nodeId);
+namespace TrophyBackend {
 
+WaylandPortalCapture::WaylandPortalCapture(QObject *parent)
+    : IVideoCaptureSource(parent) {
+  qDBusRegisterMetaType<WaylandStream>();
+  qDBusRegisterMetaType<QList<WaylandStream>>();
+  m_startWatchdog.setSingleShot(true);
+  m_startWatchdog.setInterval(20000);
+  connect(&m_startWatchdog, &QTimer::timeout, this,
+          &WaylandPortalCapture::onStartWatchdogTimeout);
+  ensureResponseSubscription();
+}
+
+void WaylandPortalCapture::ensureResponseSubscription() {
+  if (m_responseSubscribed)
+    return;
+  // Subscribe once, with no path filter, BEFORE any portal method call:
+  // the bus daemon only delivers signals to match rules registered
+  // before emission, and the portal answers CreateSession in ~3 ms
+  // (measured live) — a connect-after-reply issued while the GUI thread
+  // is busy registers too late and the success Response is lost, hanging
+  // every start at "Session creation requested..." until the watchdog.
+  // Dispatch stays path-keyed: every Response slot drops anything whose
+  // path is not the current m_pendingRequestPath, and generation checks
+  // reject stale attempts, so one process-wide-style subscription is
+  // safe across retries, handoffs and concurrent captures.
+  QDBusConnection bus = QDBusConnection::sessionBus();
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onSessionCreated(unsigned int, QVariantMap)));
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onSourcesSelected(unsigned int, QVariantMap)));
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onStartResponse(unsigned int, QVariantMap)));
+  m_responseSubscribed = true;
+  m_responseSubscribed = true;
+}
+
+WaylandPortalCapture::~WaylandPortalCapture() {
+  stopCapture();
+}
+
+bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
+  if (m_retiring || m_capturing || m_starting)
+    return false;
+  m_config = config;
+  m_restoreToken = config.waylandRestoreToken;
+  m_restoreTokenUsed = !m_restoreToken.isEmpty();
+  // Will be updated by PipeWire (format negotiation, stream thread).
+  m_resolutionWidth.store(0);
+  m_resolutionHeight.store(0);
+  m_useDmaBuf = config.useDmaBuf;
+  m_dmaBufNegotiated = false;
+  m_offeredModifiers.clear();
+  m_buffersResultLogged = false;
+#ifdef HAVE_EGL
+  if (m_useDmaBuf) {
+    const auto mods = queryDmaBufModifiers(DRM_FORMAT_XRGB8888);
+    // Offer tiled (non-LINEAR) modifiers first: LINEAR DMA-BUF is not
+    // allocatable on some drivers (verified NVIDIA), which makes the
+    // compositor agree at format level then fall back to SHM buffers.
+    for (uint64_t m : mods) {
+      if (m != DRM_FORMAT_MOD_LINEAR && m != DRM_FORMAT_MOD_INVALID)
+        m_offeredModifiers.push_back(m);
+    }
+    for (uint64_t m : mods) {
+      if (m == DRM_FORMAT_MOD_LINEAR)
+        m_offeredModifiers.push_back(m);
+    }
+    // Bound the offer list: one EnumFormat pod per modifier.
+    if (m_offeredModifiers.size() > 8)
+      m_offeredModifiers.resize(8);
+    qDebug() << "Wayland Portal: EGL reports" << mods.size()
+             << "DMA-BUF modifiers for XRGB8888, offering"
+             << m_offeredModifiers.size();
+  }
+#endif
+  m_dmaBufFrames.store(0);
+  m_shmFrames.store(0);
+  m_droppedBuffers.store(0);
+  m_lastBufferType.store(-1);
+  // Reset the format-negotiation dedup cache too: a re-init capture that
+  // negotiates the same format as the previous one must still emit ready().
+  m_formatReadyEmitted = false;
+  m_lastFormatVideo = 0;
+  m_lastFormatWidth = 0;
+  m_lastFormatHeight = 0;
+  m_lastFormatModifier = 0;
+  m_multiPlaneWarned = false;
+  m_gpuOnlyWarned = false;
+
+  qDebug() << "Wayland Portal capture initialized. Restore token available:"
+           << !m_restoreToken.isEmpty()
+           << "DMA-BUF:" << (m_useDmaBuf ? "enabled" : "disabled");
+  return true;
+}
+
+void WaylandPortalCapture::setFrameCallback(FrameCallback callback) {
+  std::lock_guard<std::mutex> lock(m_callbackMutex);
+  m_callback = std::move(callback);
+}
+
+bool WaylandPortalCapture::startCapture() {
+  if (m_retiring)
+    return false;
+  if (m_capturing || m_starting) {
+    return true;
+  }
+  requestScreenShare();
+  return true;
+}
+
+void WaylandPortalCapture::clearStartGuard() {
+  m_starting = false;
+  // Invalidate any reply/response still in flight: a late arrival from a
+  // timed-out or cancelled attempt must not be adopted by a newer one
+  // (the bool alone can't tell them apart).
+  ++m_startGeneration;
+  m_startWatchdog.stop();
+  // No per-request disconnect: the Response subscription is permanent
+  // (see ensureResponseSubscription) and every Response slot keys off
+  // the pending path + stage + generation, so stale signals from older
+  // attempts are dropped without touching the shared subscription.
+  m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
+}
+
+void WaylandPortalCapture::onStartWatchdogTimeout() {
+  if (!m_starting || m_attemptGeneration != m_startGeneration)
+    return;
+  // No terminal portal/stream signal arrived in time: drop the pending
+  // attempt so a later start is not blocked. Late portal responses are
+  // ignored via the generation checks in the response handlers.
+  // clearStartGuard() bumps the generation so this attempt's late
+  // replies can never be adopted by the retry.
+  closePortalSession();
+  clearStartGuard();
+  emit captureError(
+      "Wayland Portal: capture start timed out waiting for portal response");
+}
+
+void WaylandPortalCapture::stopCapture() {
+  prepareStopCapture();
+  finishStopCapture();
+}
+
+void WaylandPortalCapture::prepareStopCapture() {
+  if (m_retiring.exchange(true))
+    return;
+  m_nativeEventsEnabled.store(false);
+  ++m_nativeGeneration;
+  clearStartGuard();
+  const bool wasCapturing = m_capturing.exchange(false);
+  closePortalSession();
+  if (wasCapturing)
+    emit captureStopped(); // Logical stop; native retirement is still pending.
+}
+
+void WaylandPortalCapture::finishStopCapture() {
+  std::lock_guard<std::mutex> retirement(m_retirementMutex);
+  if (!m_retiring.load())
+    return;
+  // No QObject state/timers/signals here. An already-entered frame callback
+  // must return before its consumer or native userdata can be released.
+  {
+    std::lock_guard<std::mutex> callback(m_callbackMutex);
+    m_callback = {};
+  }
+  if (m_nativeStopOverride)
+    m_nativeStopOverride();
+  stopPipeWireStream();
+  m_retiring.store(false);
+}
+
+void WaylandPortalCapture::closePortalSession() {
+  if (m_sessionHandle.isEmpty())
+    return;
+  const QString handle = m_sessionHandle;
+  m_sessionHandle.clear();
+  if (!QDBusConnection::sessionBus().isConnected())
+    return;
+  // Fire-and-forget: a blocking Close on the GUI thread can hang teardown
+  // if the portal side is ever slow to answer.
+  const auto close = QDBusMessage::createMethodCall(
+      "org.freedesktop.portal.Desktop", handle,
+      "org.freedesktop.portal.Session", "Close");
+  QDBusConnection::sessionBus().asyncCall(close);
+  qDebug() << "Wayland Portal: session closed:" << handle;
+}
+
+bool WaylandPortalCapture::isCapturing() const { return m_capturing; }
+
+CaptureCapabilities WaylandPortalCapture::capabilities() const {
+  CaptureCapabilities caps;
+  caps.supportsWindowCapture = true;
+  caps.supportsMonitorCapture = true;
+  caps.supportsRegionCapture = false;
+  caps.supportsCursorCapture = true;
+  caps.supportsHardwareFrames = true; // PipeWire can provide DMA-BUF
+  caps.maxFps = 60;
+  return caps;
+}
+
+QSize WaylandPortalCapture::nativeResolution() const {
+  return QSize(m_resolutionWidth.load(), m_resolutionHeight.load());
+}
+
+void WaylandPortalCapture::requestScreenShare() {
+  if (m_retiring || m_capturing || m_starting)
+    return;
+  // Guard the whole portal round-trip: a concurrent start is rejected
+  // while this one is in flight, and the watchdog bounds the wait.
+  // The generation tags this attempt so a late reply from an older,
+  // timed-out attempt can never be adopted after a retry re-arms m_starting.
+  m_starting = true;
+  m_attemptGeneration = ++m_startGeneration;
+  m_startWatchdog.start();
+
+  // 1. Create Session
+  QString token =
+      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
+  QVariantMap options;
+  options["session_handle_token"] = token;
+  options["handle_token"] = token;
+
+  // Async: the method reply arrives in onCreateSessionCallFinished on the
+  // GUI thread. m_starting + the watchdog already bound the wait; late
+  // replies after watchdog/stopCapture are ignored there via m_starting.
+  auto call = QDBusMessage::createMethodCall(
+      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+      "org.freedesktop.portal.ScreenCast", "CreateSession");
+  call.setArguments({options});
+  auto *createWatcher = new QDBusPendingCallWatcher(
+      QDBusConnection::sessionBus().asyncCall(call), this);
+  connect(createWatcher, &QDBusPendingCallWatcher::finished, this,
+          [this, generation = m_attemptGeneration](QDBusPendingCallWatcher *w) {
+            onCreateSessionCallFinished(w, generation);
+          });
+
+  qDebug() << "Wayland Portal: Session creation requested...";
+}
+
+void WaylandPortalCapture::onCreateSessionCallFinished(
+    QDBusPendingCallWatcher *watcher, quint64 generation) {
+  watcher->deleteLater();
+
+  if (!m_starting || generation != m_startGeneration)
+    return; // Stale reply after timeout/cancel; session already dropped.
+
+  const QDBusMessage msg = watcher->reply();
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
+    qCritical() << "Failed to call CreateSession:" << msg.errorMessage();
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    clearStartGuard();
+    emit captureError("Failed to call CreateSession: " + reason);
+    return;
+  }
+
+  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    clearStartGuard();
+    emit captureError("Failed to call CreateSession: invalid request handle");
+    return;
+  }
+
+  // No per-reply connect: the permanent subscription from
+  // ensureResponseSubscription() already covers this path. Just publish
+  // the dispatch key the Response slot matches on.
+  m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Create;
+}
+
+void WaylandPortalCapture::onSessionCreated(unsigned int response,
+                                             const QVariantMap &results) {
+  if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Create ||
+      message().path() != m_pendingRequestPath)
+    return;
+  m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
+
+  if (!m_starting || m_attemptGeneration != m_startGeneration)
+    return; // Stale response after timeout/cancel; session already dropped.
+
+  if (response != 0) {
+    qWarning() << "Wayland Portal: Session creation failed or cancelled";
+    clearStartGuard();
+    emit captureError("Wayland Portal: Session creation failed or cancelled");
+    return;
+  }
+
+  m_sessionHandle = results["session_handle"].toString();
+  if (m_sessionHandle.isEmpty()) {
+    qCritical() << "Wayland Portal: successful CreateSession response has no session handle";
+    clearStartGuard();
+    emit captureError("Wayland Portal: portal returned no session handle");
+    return;
+  }
+  qDebug() << "Wayland Portal: Session created:" << m_sessionHandle;
+
+  requestSelectSources();
+}
+
+void WaylandPortalCapture::requestSelectSources() {
+  // 2. Select Sources
+  QString token =
+      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
+  QVariantMap options;
+  options["handle_token"] = token;
+  options["multiple"] = false;
+  // Game approvals list windows only (shorter picker); manual recordings
+  // keep monitors as well. 1 = Monitor, 2 = Window.
+  const unsigned int sourceTypes =
+      m_config.windowOnly ? 2u : (1u | 2u);
+  options["types"] = sourceTypes;
+  options["cursor_mode"] = static_cast<unsigned int>(2); // Embedded = 2
+  options["persist_mode"] = static_cast<unsigned int>(2);
+
+  if (!m_restoreToken.isEmpty()) {
+    options["restore_token"] = m_restoreToken;
+  }
+  // Fingerprint (not the token itself) + requested types: a restore that
+  // still shows a picker is diagnosable from the log — e.g. a token saved
+  // by a differently-attributed process, or a monitor token against a
+  // windows-only request.
+  qDebug() << "Wayland Portal: SelectSources types:" << sourceTypes
+           << "restore token:"
+           << (m_restoreToken.isEmpty()
+                   ? QStringLiteral("none")
+                   : m_restoreToken.left(4) + QStringLiteral("..."));
+
+  // Async: the method reply arrives in onSelectSourcesCallFinished on the
+  // GUI thread (same m_starting staleness rule as the CreateSession leg).
+  auto call = QDBusMessage::createMethodCall(
+      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+      "org.freedesktop.portal.ScreenCast", "SelectSources");
+  call.setArguments({QVariant::fromValue(QDBusObjectPath(m_sessionHandle)), options});
+  auto *selectWatcher = new QDBusPendingCallWatcher(
+      QDBusConnection::sessionBus().asyncCall(call), this);
+  connect(selectWatcher, &QDBusPendingCallWatcher::finished, this,
+          [this, generation = m_attemptGeneration](QDBusPendingCallWatcher *w) {
+            onSelectSourcesCallFinished(w, generation);
+          });
+}
+
+void WaylandPortalCapture::onSelectSourcesCallFinished(
+    QDBusPendingCallWatcher *watcher, quint64 generation) {
+  watcher->deleteLater();
+
+  if (!m_starting || generation != m_startGeneration)
+    return; // Stale reply after timeout/cancel; session already dropped.
+
+  const QDBusMessage msg = watcher->reply();
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    qCritical() << "Failed to call SelectSources:" << reason;
+    clearStartGuard();
+    emit captureError("Failed to select capture source: " + reason);
+    closePortalSession();
+    return;
+  }
+  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    clearStartGuard();
+    emit captureError("Failed to select capture source: invalid request handle");
+    closePortalSession();
+    return;
+  }
+
+  // Permanent subscription already covers this path (see
+  // ensureResponseSubscription); publish the dispatch key only.
+  m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Select;
+}
+
+void WaylandPortalCapture::onSourcesSelected(unsigned int response,
+                                              const QVariantMap &results) {
+  if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Select ||
+      message().path() != m_pendingRequestPath)
+    return;
+  m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
+
+  if (!m_starting || m_attemptGeneration != m_startGeneration)
+    return; // Stale response after timeout/cancel; session already dropped.
+
+  if (response != 0) {
+    // A saved restore token may have gone stale (game reinstalled, portal
+    // reset permissions). Do NOT retry without it here: that would pop a
+    // bare portal picker with no context. Hand back to the app, which
+    // deletes the stale token and re-authorizes through the New Game prompt
+    // (a picker following that click is the user's own action).
+    if (m_restoreTokenUsed) {
+      qWarning() << "Wayland Portal: source selection rejected saved restore "
+                    "token; re-authorize instead of showing a picker";
+      clearStartGuard();
+      emit restoreTokenStale(m_restoreToken);
+      return;
+    }
+    qWarning() << "Wayland Portal: Source selection failed or cancelled";
+    clearStartGuard();
+    emit captureError("Wayland Portal: Source selection failed or cancelled");
+    return;
+  }
+
+  // 3. Start
+  QString token =
+      QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-');
+  QVariantMap options;
+  options["handle_token"] = token;
+
+  // Async: the method reply arrives in onStartCallFinished on the GUI
+  // thread (same m_starting staleness rule as the earlier legs).
+  auto call = QDBusMessage::createMethodCall(
+      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+      "org.freedesktop.portal.ScreenCast", "Start");
+  call.setArguments({QVariant::fromValue(QDBusObjectPath(m_sessionHandle)),
+                     QString(), options});
+  auto *startWatcher = new QDBusPendingCallWatcher(
+      QDBusConnection::sessionBus().asyncCall(call), this);
+  connect(startWatcher, &QDBusPendingCallWatcher::finished, this,
+          [this, generation = m_attemptGeneration](QDBusPendingCallWatcher *w) {
+            onStartCallFinished(w, generation);
+          });
+}
+
+void WaylandPortalCapture::onStartCallFinished(
+    QDBusPendingCallWatcher *watcher, quint64 generation) {
+  watcher->deleteLater();
+
+  if (!m_starting || generation != m_startGeneration)
+    return; // Stale reply after timeout/cancel; session already dropped.
+
+  const QDBusMessage msg = watcher->reply();
+  if (msg.type() == QDBusMessage::ErrorMessage || msg.arguments().isEmpty()) {
+    const QString reason = msg.type() == QDBusMessage::ErrorMessage
+                               ? msg.errorMessage()
+                               : QStringLiteral("portal returned no request handle");
+    qCritical() << "Failed to call Start:" << reason;
+    clearStartGuard();
+    emit captureError("Failed to start portal capture: " + reason);
+    closePortalSession();
+    return;
+  }
+  QDBusObjectPath requestPath = msg.arguments().at(0).value<QDBusObjectPath>();
+  if (requestPath.path().isEmpty()) {
+    clearStartGuard();
+    emit captureError("Failed to start portal capture: invalid request handle");
+    closePortalSession();
+    return;
+  }
+
+  // Permanent subscription already covers this path (see
+  // ensureResponseSubscription); publish the dispatch key only.
+  m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Start;
+}
+
+void WaylandPortalCapture::onStartResponse(unsigned int response,
+                                            const QVariantMap &results) {
+  if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Start ||
+      message().path() != m_pendingRequestPath)
+    return;
+  m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
+
+  if (!m_starting || m_attemptGeneration != m_startGeneration)
+    return; // Stale response after timeout/cancel; session already dropped.
+
+  if (response != 0) {
+    // Same rule at Start stage: no silent picker retry — re-authorize.
+    if (m_restoreTokenUsed) {
+      qWarning() << "Wayland Portal: Start rejected saved restore token; "
+                    "re-authorize instead of showing a picker";
+      clearStartGuard();
+      emit restoreTokenStale(m_restoreToken);
+      return;
+    }
+    qWarning() << "Wayland Portal: Failed to start screencast";
+    clearStartGuard();
+    emit captureError("Wayland Portal: Failed to start screencast");
+    return;
+  }
+
+  if (results.contains("restore_token")) {
+    const quint64 generation = m_startGeneration;
+    m_restoreToken = results["restore_token"].toString();
+    emit restoreTokenUpdated(m_restoreToken);
+    if (!m_starting || m_retiring || generation != m_startGeneration)
+      return;
+  }
+
+  QVariant streamsVar = results["streams"];
+  if (!streamsVar.isValid()) {
+    qCritical() << "Wayland Portal: No PipeWire streams returned";
+    clearStartGuard();
+    emit captureError("Wayland Portal: No PipeWire streams returned");
+    return;
+  }
+
+  QList<WaylandStream> streams;
+  if (streamsVar.canConvert<QDBusArgument>()) {
+    streams =
+        qdbus_cast<QList<WaylandStream>>(streamsVar.value<QDBusArgument>());
+  }
+
+  if (streams.isEmpty()) {
+    qCritical() << "Wayland Portal: Stream list is empty";
+    clearStartGuard();
+    emit captureError("Wayland Portal: Stream list is empty");
+    return;
+  }
+
+  const WaylandStream &firstStream = streams.first();
+  uint32_t nodeId = firstStream.nodeId;
+  QVariantMap streamOptions = firstStream.options;
+
+  m_pipewireNodeId = static_cast<int>(nodeId);
+
+  // Fallback portal metadata
+  if (streamOptions.contains("title")) {
+    m_sourceLabel = streamOptions["title"].toString();
+  }
+  if (streamOptions.contains("app_id")) {
+    m_sourceAppId = streamOptions["app_id"].toString();
+    if (m_sourceLabel.isEmpty()) {
+      m_sourceLabel = m_sourceAppId;
+      int lastDot = m_sourceLabel.lastIndexOf('.');
+      if (lastDot != -1)
+        m_sourceLabel = m_sourceLabel.mid(lastDot + 1);
+    }
+  }
+
+  // Establish capture before asking PipeWire for optional identity metadata.
+  // The metadata query is best-effort and bounded; it must never delay the
+  // start notification or prevent frames from flowing.
+  if (!startPipeWireStream(nodeId)) {
+    clearStartGuard();
+    closePortalSession();
+    emit captureError("Failed to initialize the PipeWire capture stream");
+    return;
+  }
   m_capturing = true;
+  // Terminal signal reached: stop the start watchdog so it can never fire
+  // mid-recording, and allow a later start.
+  clearStartGuard();
+  const quint64 startedGeneration = m_startGeneration;
   emit captureStarted();
+  if (!m_capturing || m_retiring || startedGeneration != m_startGeneration)
+    return;
+
+  // PipeWire metadata enrichment runs on a worker thread with bounded
+  // waits; portal-provided labels above are already usable. The context-owned
+  // watcher delivers results without the worker touching a QObject.
+  auto *metadata = new QFutureWatcher<SourceMeta>(this);
+  connect(metadata, &QFutureWatcher<SourceMeta>::finished, this,
+          [this, metadata, generation = m_startGeneration] {
+    metadata->deleteLater();
+    try {
+      const SourceMeta meta = metadata->result();
+      applySourceMetadata(meta.name, meta.pid, meta.found, generation);
+    } catch (...) {
+      // Metadata is optional; a failed worker cannot fail the capture.
+    }
+  });
+  // The worker holds only a node id and returns owned data. It may safely
+  // outlive the context; deleting the watcher cancels result delivery, no join.
+  metadata->setFuture(QtConcurrent::run([nodeId] { return querySourceMetadata(nodeId); }));
   emit screenShareGranted(QString::number(nodeId));
 }
 
-void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
+void WaylandPortalCapture::applySourceMetadata(const QString &name,
+                                               uint32_t pid, bool found,
+                                               quint64 generation) {
+  if (!found || !m_capturing || generation != m_startGeneration)
+    return;
+  // Same correction rule the synchronous path used: yield the label only
+  // when the portal one is empty or the PipeWire one is a specific,
+  // PID-backed identity; the PID always refines the portal's.
+  const bool isGeneric = name.contains("kwin", Qt::CaseInsensitive) ||
+                         name.contains("wayland", Qt::CaseInsensitive);
+  if (m_sourceLabel.isEmpty() || (!isGeneric && pid != 0)) {
+    m_sourceLabel = name;
+  }
+  m_sourcePid = pid;
+  qDebug() << "Wayland Portal source metadata applied:" << m_sourceLabel
+           << "PID:" << m_sourcePid;
+}
+
+bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
+  ++m_nativeGeneration;
+  m_nativeEventsEnabled.store(true);
   pw_init(nullptr, nullptr);
 
   m_pw_loop = pw_thread_loop_new("trophy-wayland-capture", nullptr);
   if (!m_pw_loop) {
+    m_nativeEventsEnabled.store(false);
     qCritical() << "Failed to create PipeWire thread loop";
-    return;
+    return false;
   }
 
   m_pw_context = pw_context_new(pw_thread_loop_get_loop(m_pw_loop), nullptr, 0);
   if (!m_pw_context) {
     qCritical() << "Failed to create PipeWire context";
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   if (pw_thread_loop_start(m_pw_loop) < 0) {
     qCritical() << "Failed to start PipeWire thread loop";
-    return;
+    stopPipeWireStream();
+    return false;
   }
+  m_pw_loopStarted = true;
 
   pw_thread_loop_lock(m_pw_loop);
 
@@ -598,7 +915,8 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   if (!m_pw_core) {
     qCritical() << "Failed to connect to PipeWire core";
     pw_thread_loop_unlock(m_pw_loop);
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   static const pw_stream_events stream_events = [] {
@@ -618,7 +936,8 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
   if (!m_pw_stream) {
     qCritical() << "Failed to create PipeWire stream";
     pw_thread_loop_unlock(m_pw_loop);
-    return;
+    stopPipeWireStream();
+    return false;
   }
 
   pw_stream_add_listener(m_pw_stream, &m_pw_stream_listener, &stream_events,
@@ -675,6 +994,9 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
                                 params.data(), params.size());
     if (res < 0) {
       qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+      pw_thread_loop_unlock(m_pw_loop);
+      stopPipeWireStream();
+      return false;
     }
   } else {
     // DMA-BUF disabled by user – always use shared memory
@@ -689,21 +1011,27 @@ void WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
                                 params, 1);
     if (res < 0) {
       qCritical() << "Failed to connect PipeWire stream:" << spa_strerror(res);
+      pw_thread_loop_unlock(m_pw_loop);
+      stopPipeWireStream();
+      return false;
     }
   }
 
   pw_thread_loop_unlock(m_pw_loop);
+  return true;
 }
 
 void WaylandPortalCapture::stopPipeWireStream() {
+  m_nativeEventsEnabled.store(false);
   const uint64_t totalFrames = m_dmaBufFrames + m_shmFrames;
   if (totalFrames > 0 || m_droppedBuffers > 0) {
     qDebug() << "Wayland Portal: capture summary DMA-BUF frames:" << m_dmaBufFrames
              << "SHM frames:" << m_shmFrames
              << "dropped buffers:" << m_droppedBuffers;
   }
-  if (m_pw_loop) {
+  if (m_pw_loop && m_pw_loopStarted) {
     pw_thread_loop_stop(m_pw_loop);
+    m_pw_loopStarted = false;
   }
 
   if (m_pw_stream) {
@@ -727,24 +1055,46 @@ void WaylandPortalCapture::stopPipeWireStream() {
   }
 }
 
+void WaylandPortalCapture::postNativeReady(quint64 generation) {
+  QMetaObject::invokeMethod(this, [this, generation] {
+    if (m_nativeEventsEnabled.load() && generation == m_nativeGeneration.load() &&
+        !m_retiring.load())
+      emit ready();
+  }, Qt::QueuedConnection);
+}
+
+void WaylandPortalCapture::postNativeError(const QString &error, quint64 generation) {
+  QMetaObject::invokeMethod(this, [this, error, generation] {
+    if (m_nativeEventsEnabled.load() && generation == m_nativeGeneration.load() &&
+        !m_retiring.load())
+      emit captureError(error);
+  }, Qt::QueuedConnection);
+}
+
 void WaylandPortalCapture::on_stream_state_changed(void *data,
                                                    enum pw_stream_state old,
                                                    enum pw_stream_state state,
                                                    const char *error) {
   WaylandPortalCapture *self = static_cast<WaylandPortalCapture *>(data);
+  const quint64 generation = self->m_nativeGeneration.load();
+  if (!self->m_nativeEventsEnabled.load())
+    return;
   qDebug() << "PipeWire stream state changed:" << pw_stream_state_as_string(old)
            << "->" << pw_stream_state_as_string(state);
 
   if (state == PW_STREAM_STATE_ERROR) {
     qCritical() << "PipeWire stream error:"
                 << (error ? error : "Unknown error");
-    emit self->captureError(error ? error : "Unknown PipeWire error");
+    self->postNativeError(error ? error : "Unknown PipeWire error", generation);
   }
 }
 
 void WaylandPortalCapture::on_stream_param_changed(
     void *data, unsigned int id, const struct spa_pod *param) {
   WaylandPortalCapture *self = static_cast<WaylandPortalCapture *>(data);
+  const quint64 generation = self->m_nativeGeneration.load();
+  if (!self->m_nativeEventsEnabled.load())
+    return;
   if (!param)
     return;
 
@@ -830,8 +1180,10 @@ void WaylandPortalCapture::on_stream_param_changed(
       break;
     }
 
-    self->m_resolution = QSize(info.size.width, info.size.height);
-    qDebug() << "Wayland Portal: Negotiated resolution:" << self->m_resolution
+    self->m_resolutionWidth.store(info.size.width);
+    self->m_resolutionHeight.store(info.size.height);
+    qDebug() << "Wayland Portal: negotiated resolution:"
+             << QSize(info.size.width, info.size.height)
              << "DMA-BUF active:" << self->m_dmaBufNegotiated
              << "Format:" << QString::number(self->m_negotiatedFormat, 16)
              << "Modifier:" << QString::number(self->m_negotiatedModifier, 16);
@@ -858,12 +1210,31 @@ void WaylandPortalCapture::on_stream_param_changed(
       qDebug() << "Wayland Portal: Requested DMA-BUF buffer objects from compositor";
     }
 
-    emit self->ready();
+    // Emit ready() only on the first negotiation or an actual format
+    // change: a mid-stream renegotiation of the same format must not
+    // re-fire downstream encoder init. These fields are touched only on
+    // the PipeWire stream thread (reset by initialize()).
+    const bool formatChanged =
+        !self->m_formatReadyEmitted ||
+        self->m_lastFormatVideo != info.format ||
+        self->m_lastFormatWidth != info.size.width ||
+        self->m_lastFormatHeight != info.size.height ||
+        self->m_lastFormatModifier != self->m_negotiatedModifier;
+    if (formatChanged) {
+      self->m_formatReadyEmitted = true;
+      self->m_lastFormatVideo = info.format;
+      self->m_lastFormatWidth = info.size.width;
+      self->m_lastFormatHeight = info.size.height;
+      self->m_lastFormatModifier = self->m_negotiatedModifier;
+      self->postNativeReady(generation);
+    }
   }
 }
 
 void WaylandPortalCapture::on_stream_process(void *data) {
   WaylandPortalCapture *self = static_cast<WaylandPortalCapture *>(data);
+  if (!self->m_nativeEventsEnabled.load())
+    return;
   pw_buffer *b = pw_stream_dequeue_buffer(self->m_pw_stream);
   if (!b)
     return;
@@ -892,8 +1263,8 @@ void WaylandPortalCapture::on_stream_process(void *data) {
                          .count();
 
   VideoFrame frame;
-  frame.width     = self->m_resolution.width();
-  frame.height    = self->m_resolution.height();
+  frame.width     = self->m_resolutionWidth.load();
+  frame.height    = self->m_resolutionHeight.load();
   frame.timestamp = ts;
 
   if (d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
@@ -932,7 +1303,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     // destroyed mid-invoke.
     {
       std::lock_guard<std::mutex> lock(self->m_callbackMutex);
-      if (self->m_callback) {
+      if (self->m_nativeEventsEnabled.load() && self->m_callback) {
         self->m_dmaBufFrames++;
         noteBufferType(1, self->m_dmaBufFrames, "dmaBuf");
         self->m_callback(frame);
@@ -947,7 +1318,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
 
     {
       std::lock_guard<std::mutex> lock(self->m_callbackMutex);
-      if (self->m_callback) {
+      if (self->m_nativeEventsEnabled.load() && self->m_callback) {
         self->m_shmFrames++;
         noteBufferType(0, self->m_shmFrames, "shm");
         self->m_callback(frame);

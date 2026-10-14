@@ -13,6 +13,7 @@
 #include <QObject>
 #include <QString>
 #include <QPointer>
+#include <QTimer>
 
 namespace TrophyBackend {
 
@@ -75,7 +76,9 @@ private:
   QNetworkAccessManager m_network;
   QString m_currentVersion;
   QPointer<QNetworkReply> m_reply;
-  bool m_pendingManualCheck = false;
+  // Bounds a hung GET: aborting settles via the normal error path so
+  // one wedged request can't suppress checks for the whole session.
+  QTimer m_requestTimeout;
 
   static constexpr const char *kApiUrl =
       "https://api.github.com/repos/OasisLab-Software/Trophy/releases/latest";

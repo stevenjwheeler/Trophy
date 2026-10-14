@@ -141,6 +141,50 @@ void SettingsManager::load() {
   }
 
   qDebug() << "Settings loaded from" << filePath;
+  // load() assigns members directly (never via setters), so no saves fire
+  // here — verified: only plain m_ assignments plus the no-op migration
+  // hook above. But no change signals were emitted either, so QML bound
+  // before load would keep stale values. Emit the full property-change
+  // set so bindings refresh (unconditional: cheap, and load is rare).
+  // Covers every Q_PROPERTY NOTIFY signal in SettingsManager.h
+  // (encoderDisplayName shares encoderChanged; settingsLoaded/Saved are
+  // not property signals and are handled separately).
+  emit videoBitrateChanged();
+  emit videoResolutionChanged();
+  emit fpsChanged();
+  emit encoderChanged();
+  emit containerFormatChanged();
+  emit encoderPresetChanged();
+  emit maxVideoBitrateChanged();
+  emit useVBRChanged();
+  emit useDmaBufChanged();
+  emit clipBufferSecondsChanged();
+  emit autoResolutionChanged();
+  emit audioModeChanged();
+  emit gameAudioDeviceChanged();
+  emit microphoneDeviceChanged();
+  emit voiceChatAppChanged();
+  emit separateAudioTracksChanged();
+  emit recordingsPathChanged();
+  emit maxStorageSizeChanged();
+  emit autoDeleteOldestChanged();
+  emit autoDetectGamesChanged();
+  emit autoRecordEnabledChanged();
+  emit windowTrackingEnabledChanged();
+  emit vulkanLayerEnabledChanged();
+  emit setupCompletedChanged();
+  emit minimizeToTrayChanged();
+  emit startMinimizedChanged();
+  emit startOnLoginChanged();
+  emit instantReplayEnabledChanged();
+  emit globalShortcutsEnabledChanged();
+  emit updateCheckEnabledChanged();
+  emit notifyRecordingsChanged();
+  emit notifyClipsChanged();
+  emit notifyStorageChanged();
+  emit completionSoundEnabledChanged();
+  emit replayCachePathChanged();
+  emit waylandRestoreTokensChanged();
   emit settingsLoaded();
 }
 
@@ -250,7 +294,9 @@ void SettingsManager::resetToDefaults() {
   emit encoderPresetChanged();
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
+  emit useDmaBufChanged();
   emit clipBufferSecondsChanged();
+  emit autoResolutionChanged();
 
   emit audioModeChanged();
   emit gameAudioDeviceChanged();
@@ -272,11 +318,13 @@ void SettingsManager::resetToDefaults() {
   emit startOnLoginChanged();
   emit instantReplayEnabledChanged();
   emit globalShortcutsEnabledChanged();
+  emit updateCheckEnabledChanged();
   emit replayCachePathChanged();
   emit notifyRecordingsChanged();
   emit notifyClipsChanged();
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
+  emit waylandRestoreTokensChanged();
 }
 
 void SettingsManager::loadDefaults() {
@@ -319,6 +367,11 @@ void SettingsManager::loadDefaults() {
   m_instantReplayEnabled = true;
   m_globalShortcutsEnabled = true;
   m_updateCheckEnabled = true;
+  // DVR segment dir: empty means the /tmp default. Reset like every other
+  // persisted value.
+  m_replayCachePath.clear();
+  // NOTE: m_waylandRestoreTokens deliberately untouched — per-game portal
+  // authorizations survive a settings reset.
 
   // Notifications (all on)
   m_notifyRecordings = true;

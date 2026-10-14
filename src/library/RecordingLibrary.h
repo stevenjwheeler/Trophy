@@ -11,15 +11,18 @@
 #include <QList>
 #include <QObject>
 #include <QSet>
+#include <QUrl>
 #include <QString>
 #include <QStringList>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace TrophyBackend {
 
 class Recording;
 class ThumbnailGenerator;
+class StorageManager;
 
 /**
  * @brief Manages the library of recorded videos
@@ -66,6 +69,7 @@ public:
   Q_INVOKABLE void refresh();
   Q_INVOKABLE Recording *get(int index) const;
   Q_INVOKABLE Recording *getRecording(const QString &filePath) const;
+  Q_INVOKABLE QUrl localFileUrl(const QString &filePath) const;
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
   /**
@@ -79,6 +83,9 @@ public:
    */
   Q_INVOKABLE void saveClipRange(const QString &sourcePath,
                                  double startSeconds, double endSeconds);
+  // Optional storage gate for saveClipRange (see ReplayManager::m_storage
+  // for the policy). Wired by Application; unset means no limit checks.
+  void setStorageManager(StorageManager *storage) { m_storage = storage; }
   // Batch counterpart of removeRecording: erases every listed path in
   // one pass and settles the filtered model once, then emits
   // recordingsRemoved with the paths actually dropped. Emits nothing
@@ -135,16 +142,35 @@ private:
   void loadCustomTitles();
   void saveCustomTitles() const;
   QString customTitlesPath() const;
+  // Batch scope for scan/refresh: defers recordingsChanged emits and
+  // custom-titles disk writes so a 100-file scan settles once at the end
+  // instead of once per file. Counter, not bool, so nested scopes nest.
+  void beginBatch();
+  void endBatch();
 
   QString m_libraryPath;
   QString m_searchQuery;
+  // Optional storage gate for saveClipRange (plain pointer: the manager
+  // is app-owned and outlives the library; never dereferenced off-thread).
+  StorageManager *m_storage = nullptr;
   int m_sortOrder = NewestFirst;
   QString m_activeRecordingPath;
   std::vector<std::unique_ptr<Recording>> m_recordings;
   QList<Recording *> m_filteredRecordings;
   QFileSystemWatcher m_watcher;
   std::unique_ptr<ThumbnailGenerator> m_thumbnailGenerator;
-  bool m_ignoreNextChange = false;
+  // Absolute paths the library itself just touched (deleteRecording).
+  // The watcher only reports the directory, so the next event diffs the
+  // listing and swallows only these paths — an unrelated file changed in
+  // the same burst still triggers a refresh (the old single bool dropped
+  // it unconditionally).
+  QSet<QString> m_suppressedPaths;
+  // Batch depth for scan/refresh (see beginBatch): while > 0,
+  // updateFilteredRecordings settles the list but defers its emit and
+  // saveCustomTitles defers its write; endBatch settles + emits + writes
+  // once.
+  int m_batchDepth = 0;
+  mutable bool m_titlesDirty = false;
   // Source path of an in-flight user rename (set by onRecordingRenamed,
   // consumed by the refresh that follows). The old file is genuinely
   // gone from disk, but observers must not hear recordingRemoved for
@@ -162,6 +188,7 @@ private:
   // calls fail fast — but the flag itself must only flip on the GUI
   // thread (worker completion hops back via queued invoke).
   bool m_clipSaving = false;
+  std::thread m_clipThread;
 };
 
 } // namespace TrophyBackend

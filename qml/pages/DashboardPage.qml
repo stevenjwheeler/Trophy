@@ -240,13 +240,16 @@ Page {
                     spacing: Theme.spacingMedium
 
                     ColumnLayout {
+                        objectName: "statusTextColumn"
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
                         spacing: 4
 
                         RowLayout {
                             spacing: 8
                             Rectangle {
                                 width: 10; height: 10; radius: 5
+                                Layout.alignment: Qt.AlignVCenter
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
                                 SequentialAnimation on opacity {
                                     running: (recordingManager && recordingManager.isRecording)
@@ -256,7 +259,10 @@ Page {
                                 }
                             }
                             Label {
-                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING") : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
+                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
+                                      : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
+                                      : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
+                                      : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
                                 font.pixelSize: 10; font.weight: Font.Black
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                             }
@@ -273,7 +279,11 @@ Page {
 
                     Button {
                         id: recordBtn
+                        objectName: "recordButton"
+                        enabled: (recordingManager && recordingManager.isRecording)
+                                 || (app && app.canStartRecording)
                         Layout.preferredWidth: 44; Layout.preferredHeight: 44
+                        Layout.alignment: Qt.AlignVCenter
                         icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
                         icon.width: 24; icon.height: 24
                         icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
@@ -292,16 +302,27 @@ Page {
             // Storage Usage
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 100
+                Layout.preferredHeight: storageContent.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
                 ColumnLayout {
+                    id: storageContent
                     anchors.fill: parent; anchors.margins: Theme.spacingMedium; spacing: Theme.spacingSmall
                     RowLayout {
                         Layout.fillWidth: true
-                        Label { text: qsTr("Storage Usage"); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                        Label { text: qsTr("Storage Usage"); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignTop; Layout.topMargin: 1 }
                         Item { Layout.fillWidth: true }
-                        Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
+                        ColumnLayout {
+                            spacing: 2
+                            Layout.alignment: Qt.AlignTop
+                            Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignRight }
+                            Label {
+                                text: ((typeof storageManager !== "undefined" && storageManager && storageManager.autoDeleteOldest) ? qsTr("Auto-Cleanup: on") : qsTr("Auto-Cleanup: off"))
+                                font.pixelSize: Theme.fontSizeTiny
+                                color: (typeof storageManager !== "undefined" && storageManager && storageManager.autoDeleteOldest) ? Theme.successColor : Theme.textMutedColor
+                                Layout.alignment: Qt.AlignRight
+                            }
+                        }
                     }
                     Label {
                         text: (typeof storageManager !== "undefined" && storageManager) ? (storageManager.maxSize > 0 ? (formatSize(storageManager.usedSize) + " / " + formatSize(storageManager.maxSize)) : (formatSize(storageManager.usedSize) + " / " + qsTr("Unlimited"))) : "0 B / 0 B"
@@ -342,6 +363,8 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall
                             font.weight: Font.Medium
                             color: Theme.textSecondaryColor
+                            Layout.alignment: Qt.AlignTop
+                            Layout.topMargin: 1
                         }
                         Item { Layout.fillWidth: true }
                         TrophyButton {
@@ -357,67 +380,67 @@ Page {
                         Layout.fillWidth: true
                         columns: 3
                         columnSpacing: Theme.spacingMedium
-                        rowSpacing: Theme.spacingSmall
+                        rowSpacing: 0
 
-                        // Encoder
-                        ColumnLayout {
-                            spacing: 2
-                            Label { text: qsTr("Encoder"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
-                            Label {
-                                text: {
-                                    if (settingsManager && settingsManager.encoder === "auto") {
-                                         var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "");
-                                         return active || (settingsManager ? settingsManager.encoderDisplayName : "");
-                                     }
-                                    return settingsManager ? settingsManager.encoderDisplayName : "";
-                                }
-                                font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; elide: Text.ElideRight
+                        // One header row + value row per text pair, with a
+                        // meter riding each value row: sharing the row (and
+                        // centering both) is what lines bars up with the
+                        // values. A spanned meter column can never align 3
+                        // bars against 2 text rows.
+                        Label { text: qsTr("Encoder"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 0 }
+                        Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 1 }
+                        Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 2 }
+                        Label {
+                            text: {
+                                if (settingsManager && settingsManager.encoder === "auto") {
+                                     var active = (recordingManager && recordingManager.isRecording && recordingManager.activeEncoderName) ? recordingManager.activeEncoderName : (recordingManager ? recordingManager.detectedEncoderName : "");
+                                     return active || (settingsManager ? settingsManager.encoderDisplayName : "");
+                                 }
+                                return settingsManager ? settingsManager.encoderDisplayName : "";
                             }
+                            font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; elide: Text.ElideRight
+                            Layout.row: 1; Layout.column: 0; Layout.alignment: Qt.AlignVCenter
+                        }
+                        Label {
+                            text: (settingsManager ? settingsManager.resolution : "") === "auto" ? qsTr("Auto (%1x%2)").arg(settingsManager.autoResolutionWidth).arg(settingsManager.autoResolutionHeight) : (settingsManager ? settingsManager.resolution : "")
+                            font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
+                            Layout.row: 1; Layout.column: 1; Layout.alignment: Qt.AlignVCenter
+                        }
+                        AudioLevelMeter {
+                            id: meter0
+                            horizontal: true
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 18
+                            Layout.row: 1; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
+                            label: audioMixer ? audioMixer.trackName(0) : ""
+                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(0, muted) }
                         }
 
-                        // Resolution
-                        ColumnLayout {
-                            spacing: 2
-                            Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
-                            Label {
-                                text: settingsManager.resolution === "auto" ? qsTr("Auto (%1x%2)").arg(settingsManager.autoResolutionWidth).arg(settingsManager.autoResolutionHeight) : settingsManager.resolution
-                                font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
-                            }
+                        Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0 }
+                        Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 1 }
+                        AudioLevelMeter {
+                            id: meter1
+                            // Desktop mode merges to one track (system + mic
+                            // mixed); game mode keeps 3.
+                            visible: !(settingsManager && settingsManager.audioMode === "desktop")
+                            horizontal: true
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 18
+                            Layout.row: 2; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
+                            label: audioMixer ? audioMixer.trackName(1) : ""
+                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(1, muted) }
                         }
-
-                        // Audio levels (spans both rows; one icon+bar row
-                        // per track)
-                        ColumnLayout {
-                            Layout.rowSpan: 2
-                            Layout.fillHeight: true
-                            spacing: 2
-                            Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
-                            Repeater {
-                                id: dashMeters
-                                model: 3
-
-                                AudioLevelMeter {
-                                    horizontal: true
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 24
-                                    label: audioMixer ? audioMixer.trackName(index) : ""
-                                    onMutedChanged: if (app) app.setTrackMuted(index, muted)
-                                }
-                            }
-                        }
-
-                        // Quality
-                        ColumnLayout {
-                            spacing: 2
-                            Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
-                            Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor }
-                        }
-
-                        // FPS
-                        ColumnLayout {
-                            spacing: 2
-                            Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor }
-                            Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor }
+                        Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 0; Layout.alignment: Qt.AlignVCenter }
+                        Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
+                        AudioLevelMeter {
+                            id: meter2
+                            visible: !(settingsManager && settingsManager.audioMode === "desktop")
+                            horizontal: true
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 18
+                            Layout.row: 3; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
+                            label: audioMixer ? audioMixer.trackName(2) : ""
+                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(2, muted) }
                         }
                     }
 
@@ -428,9 +451,10 @@ Page {
                         onTriggered: {
                             if (!app) return;
                             const live = (recordingManager && recordingManager.isRecording) || (replayManager && replayManager.active);
-                            for (let i = 0; i < 3; i++) {
-                                const m = dashMeters.itemAt(i);
-                                if (m) {
+                            const meters = [meter0, meter1, meter2];
+                            for (let i = 0; i < meters.length; i++) {
+                                const m = meters[i];
+                                if (m && m.visible) {
                                     m.level = live ? app.trackLevel(i) : 0;
                                     m.muted = app.isTrackMuted(i);
                                 }
@@ -609,7 +633,7 @@ Page {
 
     Connections {
         target: recordingLibrary
-        function onCountChanged() { activityModel.updateActivity() }
+        function onRecordingsChanged() { activityModel.updateActivity() }
         function onRecordingRemoved(filePath) {
             root.pushActivityEvent("deleted", "orange", qsTr("Deleted: %1").arg(root.activityGameName(filePath)), qsTr("Removed from library"))
         }
@@ -619,7 +643,7 @@ Page {
             }
         }
     }
-    Connections { target: recordingManager; function onIsRecordingChanged() { activityModel.updateActivity() } }
+    Connections { target: recordingManager; function onStateChanged() { activityModel.updateActivity() } }
     Connections {
         target: activityFeed
         function onEventsChanged() { activityModel.updateActivity() }

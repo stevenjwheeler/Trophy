@@ -9,12 +9,18 @@
 
 #include <QDBusArgument>
 #include <QDBusMetaType>
+#include <QDBusMessage>
 #include <QDBusObjectPath>
+#include <QDBusPendingCall>
 #include <QMap>
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVariantMap>
+
+class GlobalShortcutTest;
+class GlobalShortcutPortalTest;
 
 namespace TrophyBackend {
 
@@ -50,8 +56,9 @@ inline const QDBusArgument &operator>>(const QDBusArgument &arg,
  * Registers toggle-recording (F9) and save-clip (F10); the portal shows
  * a system dialog on first bind where the user can remap them. Works
  * from inside games. When no portal/backend exists the manager reports
- * unavailable and everything silently keeps working through the
- * in-app shortcuts and tray.
+ * unavailable; recording/clip actions remain accessible from the UI and
+ * tray. No hardcoded in-app F9/F10 bindings: they would conflict with
+ * user-remapped portal shortcuts and could trigger the action twice.
  */
 class GlobalShortcutManager : public QObject {
   Q_OBJECT
@@ -110,19 +117,50 @@ signals:
   void saveClipRequested();
 
 private slots:
-  void onSessionResponse(unsigned int response, const QVariantMap &results);
-  void onBindResponse(unsigned int response, const QVariantMap &results);
+  void onSessionResponse(unsigned int response, const QVariantMap &results,
+                         const QDBusMessage &message = QDBusMessage());
+  void onBindResponse(unsigned int response, const QVariantMap &results,
+                      const QDBusMessage &message = QDBusMessage());
   void onShortcutsChanged(const QDBusObjectPath &sessionHandle,
                           const QList<PortalShortcut> &shortcuts);
+  void onRequestTimeout();
 
 private:
+  friend class ::GlobalShortcutTest;
+  friend class ::GlobalShortcutPortalTest;
+
   void bindShortcuts();
+  // Emits availabilityChanged only on an actual flip (QML binds to
+  // the available property for the no-portal fallback path).
+  void setAvailable(bool available);
+  void disconnectSessionSignals();
+  void retireUnboundSession();
+  quint64 beginRequest(bool binding);
+  void clearRequest();
+  void watchRequest(const QDBusPendingCall &call, quint64 generation,
+                     bool binding);
+  void queryAvailability();
+  void ensureResponseSubscription();
 
   QString m_sessionHandle;
   QString m_pendingRequestPath;
+  // Permanent portal Request/Response subscription: the daemon-side
+  // match rule must exist before any method call goes out (see
+  // ensureResponseSubscription). Both Response slots already drop
+  // anything whose path is not the current m_pendingRequestPath.
+  bool m_responseSubscribed = false;
+  quint64 m_requestGeneration = 0;
+  bool m_requestInFlight = false;
+  bool m_bindingRequest = false;
   QVariantMap m_boundShortcuts;
   bool m_bound = false;
   bool m_enabled = true;
+  bool m_available = false;
+  quint64 m_availabilityGeneration = 0;
+  QTimer m_availabilityTimeout;
+  // Covers the method reply AND the subsequent portal Response. Expiry
+  // invalidates reply watchers before allowing a fresh flow.
+  QTimer m_requestTimeout;
 };
 
 } // namespace TrophyBackend

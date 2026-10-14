@@ -11,17 +11,64 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QtConcurrent>
+#include <limits>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
 namespace TrophyBackend {
 
-ThumbnailGenerator::ThumbnailGenerator(QObject *parent) : QObject(parent) {}
+namespace {
+bool validDecodedFrame(const AVFrame *frame) {
+  if (!frame || frame->width <= 0 || frame->height <= 0 ||
+      av_image_check_size(frame->width, frame->height, 0, nullptr) < 0)
+    return false;
+  const auto format = static_cast<AVPixelFormat>(frame->format);
+  const auto *descriptor = av_pix_fmt_desc_get(format);
+  if (!descriptor || (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL))
+    return false;
+  int minimumStrides[4] = {};
+  const int planes = av_pix_fmt_count_planes(format);
+  if (planes <= 0 || planes > 4 ||
+      av_image_fill_linesizes(minimumStrides, format, frame->width) < 0)
+    return false;
+  for (int plane = 0; plane < planes; ++plane) {
+    // Negative strides are legal; widen before negation (INT_MIN).
+    const qint64 stride = frame->linesize[plane];
+    if (!frame->data[plane] ||
+        (stride < 0 ? -stride : stride) < minimumStrides[plane])
+      return false;
+    const auto *buffer = av_frame_get_plane_buffer(frame, plane);
+    if (!buffer)
+      return false;
+    const auto base = reinterpret_cast<uintptr_t>(buffer->data);
+    const auto data = reinterpret_cast<uintptr_t>(frame->data[plane]);
+    if (data < base || data - base >= buffer->size)
+      return false;
+    const size_t offset = data - base;
+    const int rows = (plane == 1 || plane == 2)
+                         ? AV_CEIL_RSHIFT(frame->height, descriptor->log2_chroma_h)
+                         : frame->height;
+    const qint64 travel = stride * (rows - 1);
+    if (travel < 0 && static_cast<uint64_t>(-travel) > offset)
+      return false;
+    const auto forward = travel > 0 ? static_cast<uint64_t>(travel) : 0;
+    if (forward > buffer->size - offset ||
+        static_cast<size_t>(minimumStrides[plane]) >
+            buffer->size - offset - forward)
+      return false;
+  }
+  return !(descriptor->flags & AV_PIX_FMT_FLAG_PAL) || frame->data[1];
+}
+} // namespace
+
+ThumbnailGenerator::ThumbnailGenerator(QObject *parent)
+    : QObject(parent), m_receiveFrame(&avcodec_receive_frame) {}
 
 ThumbnailGenerator::~ThumbnailGenerator() {
   m_terminating = true;
@@ -71,6 +118,19 @@ QString ThumbnailGenerator::getThumbnailPath(const QString &videoPath) const {
   return thumbDir + "/" + videoInfo.completeBaseName() + ".jpg";
 }
 
+QSize ThumbnailGenerator::thumbnailSize(int width, int height) {
+  if (width <= 0 || height <= 0)
+    return {};
+
+  constexpr int thumbWidth = 320;
+  // Widen before multiplication: even valid positive int dimensions can
+  // overflow height * thumbWidth. Reject heights QSize/FFmpeg cannot represent.
+  const qint64 thumbHeight = qMax(qint64(1), qint64(height) * thumbWidth / width);
+  if (thumbHeight > std::numeric_limits<int>::max())
+    return {};
+  return {thumbWidth, static_cast<int>(thumbHeight)};
+}
+
 bool ThumbnailGenerator::generateThumbnailSync(const QString &videoPath,
                                                const QString &outputPath) {
   AVFormatContext *formatCtx = nullptr;
@@ -81,6 +141,7 @@ bool ThumbnailGenerator::generateThumbnailSync(const QString &videoPath,
   AVPacket *packet = nullptr;
 
   bool success = false;
+  bool draining = false;
 
   // Open input
   if (avformat_open_input(&formatCtx, videoPath.toUtf8().constData(), nullptr,
@@ -113,8 +174,11 @@ bool ThumbnailGenerator::generateThumbnailSync(const QString &videoPath,
 
   // Create codec context
   codecCtx = avcodec_alloc_context3(codec);
-  avcodec_parameters_to_context(codecCtx,
-                                formatCtx->streams[videoStreamIndex]->codecpar);
+  if (!codecCtx || avcodec_parameters_to_context(
+                       codecCtx,
+                       formatCtx->streams[videoStreamIndex]->codecpar) < 0) {
+    goto cleanup;
+  }
 
   if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
     goto cleanup;
@@ -135,39 +199,57 @@ bool ThumbnailGenerator::generateThumbnailSync(const QString &videoPath,
     goto cleanup;
   }
 
-  // Read frames until we get a video frame
-  while (!m_terminating && av_read_frame(formatCtx, packet) >= 0) {
-    if (packet->stream_index == videoStreamIndex) {
-      if (avcodec_send_packet(codecCtx, packet) >= 0) {
-        if (avcodec_receive_frame(codecCtx, frame) >= 0) {
+  // Read until the first decoded frame. A short clip can end while the
+  // decoder still buffers its only frame; drain on clean EOF, not read errors.
+  while (!m_terminating) {
+    const int readResult = av_read_frame(formatCtx, packet);
+    if (readResult < 0) {
+      if (readResult != AVERROR_EOF)
+        break;
+      draining = true;
+    }
+    if (draining || packet->stream_index == videoStreamIndex) {
+      if (avcodec_send_packet(codecCtx, draining ? nullptr : packet) >= 0) {
+        if (m_receiveFrame(codecCtx, frame) >= 0) {
           // Got a frame, convert to RGB and save
-          int thumbWidth = 320;
-          int thumbHeight = (codecCtx->height * thumbWidth) / codecCtx->width;
+          const QSize size = thumbnailSize(frame->width, frame->height);
+          if (size.isEmpty() || !validDecodedFrame(frame)) {
+            qWarning() << "Thumbnail: invalid decoded frame"
+                       << frame->width << "x" << frame->height;
+            av_packet_unref(packet);
+            break;
+          }
+          const int thumbWidth = size.width();
+          const int thumbHeight = size.height();
 
           rgbFrame->width = thumbWidth;
           rgbFrame->height = thumbHeight;
           rgbFrame->format = AV_PIX_FMT_RGB24;
 
           if (av_frame_get_buffer(rgbFrame, 0) >= 0) {
-            swsCtx = sws_getContext(codecCtx->width, codecCtx->height,
-                                    codecCtx->pix_fmt, thumbWidth, thumbHeight,
-                                    AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr,
-                                    nullptr, nullptr);
+            swsCtx = sws_getContext(
+                frame->width, frame->height,
+                static_cast<AVPixelFormat>(frame->format), thumbWidth,
+                thumbHeight, AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr,
+                nullptr, nullptr);
 
             if (swsCtx) {
-              sws_scale(swsCtx, frame->data, frame->linesize, 0,
-                        codecCtx->height, rgbFrame->data, rgbFrame->linesize);
+              const int scaledRows = sws_scale(
+                  swsCtx, frame->data, frame->linesize, 0, frame->height,
+                  rgbFrame->data, rgbFrame->linesize);
 
               // Save as JPEG using Qt
               QImage image(rgbFrame->data[0], thumbWidth, thumbHeight,
                            rgbFrame->linesize[0], QImage::Format_RGB888);
 
-              if (image.save(outputPath, "JPEG", 85)) {
+              if (scaledRows == thumbHeight &&
+                  image.save(outputPath, "JPEG", 85)) {
                 success = true;
                 qDebug() << "Generated thumbnail:" << outputPath;
               }
 
-              sws_freeContext(swsCtx);
+              // Freed in cleanup below (a future `continue` here
+              // must not leak the context).
             }
           }
 
@@ -177,9 +259,13 @@ bool ThumbnailGenerator::generateThumbnailSync(const QString &videoPath,
       }
     }
     av_packet_unref(packet);
+    if (draining)
+      break;
   }
 
 cleanup:
+  if (swsCtx)
+    sws_freeContext(swsCtx);
   if (packet)
     av_packet_free(&packet);
   if (rgbFrame)

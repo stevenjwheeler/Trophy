@@ -5,6 +5,7 @@
  */
 
 #include <QCoreApplication>
+#include <QSignalSpy>
 #include <gtest/gtest.h>
 
 #include "core/UpdateChecker.h"
@@ -72,4 +73,19 @@ TEST(UpdateCheckerTest, CompareVersions) {
   // Leading zeros / large components
   EXPECT_EQ(UpdateChecker::compareVersions(1, 0, 0, 0, 9, 0), 1);
   EXPECT_EQ(UpdateChecker::compareVersions(0, 0, 0, 0, 0, 0), 0);
+}
+
+TEST(UpdateCheckerTest, EmptyVersionFinishesWithoutNetwork) {
+  // No current version (fresh state): checkNow must settle immediately
+  // with "nothing newer" and never touch the network — in a sandbox
+  // without --share=network the request would only burn the 15s abort
+  // timeout. Default-constructed QNAM performs no I/O by itself.
+  UpdateChecker checker;
+  checker.setCurrentVersion(QString());
+  QSignalSpy spy(&checker, &UpdateChecker::checkFinished);
+  checker.checkNow();
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_FALSE(spy.last()[0].toBool());
+  EXPECT_TRUE(spy.last()[1].toString().isEmpty());
+  EXPECT_TRUE(spy.last()[2].toString().isEmpty());
 }

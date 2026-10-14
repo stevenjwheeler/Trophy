@@ -59,6 +59,8 @@ ApplicationWindow {
     }
 
     function shiftSelectRange(currentIndex) {
+        if (currentIndex < 0)
+            return;
         if (lastSelectedIndex === -1 || !recordingLibrary) {
             // First selection in this sequence - just toggle normally
             if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
@@ -143,13 +145,7 @@ ApplicationWindow {
     function openFolder(path) {
         if (!path) return;
 
-        var url = path;
-        if (!url.startsWith("file://")) {
-            if (!url.startsWith("/"))
-                url = "/" + url;
-            url = `file://${url}`;
-        }
-        Qt.openUrlExternally(url);
+        Qt.openUrlExternally(recordingLibrary.localFileUrl(path));
     }
 
     // In-app player overlay (content area; Back/Escape closes
@@ -638,27 +634,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Ctrl+Q"
-        onActivated: Qt.quit()
-    }
-
-    Shortcut {
-        sequence: "F9"
-        onActivated: {
-            if (window.recordingManager) {
-                if (window.recordingManager.isRecording)
-                    window.recordingManager.stopRecording();
-                else if (window.gameDetector && window.gameDetector.currentGameName !== "")
-                    window.recordingManager.startRecording(window.gameDetector.currentGameName);
-            }
-        }
-    }
-
-    Shortcut {
-        sequence: "F10"
-        onActivated: {
-            if (window.app)
-                window.app.requestReplay();
-        }
+        onActivated: window.close()
     }
 
     TrophyDialog {
@@ -881,10 +857,7 @@ ApplicationWindow {
         id: exportDialog
         title: qsTr("Choose Export Directory")
         onAccepted: {
-            var destDir = exportDialog.selectedFolder.toString();
-            if (destDir.startsWith("file://")) {
-                destDir = destDir.substring(7); // remove file://
-            }
+            var destDir = exportDialog.selectedFolder.toLocalFile();
             if (window.storageManager) {
                 for (var i = 0; i < window.selectedRecordings.length; i++) {
                     window.storageManager.exportRecording(window.selectedRecordings[i], destDir);

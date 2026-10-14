@@ -149,6 +149,11 @@ bool AudioEncoder::initialize(const AudioEncoderConfig &config) {
 
   m_sampleCount = 0;
   m_requiredFrameSize = m_codecCtx->frame_size > 0 ? m_codecCtx->frame_size : 1024;
+  // A reused encoder must not inherit the prior session's origin shift or
+  // buffered tail: both would bake a permanent skew into the new stream.
+  m_startOffset = 0;
+  m_offsetApplied = false;
+  m_accumBuffer.clear();
   m_initialized = true;
 
   qDebug() << "Audio encoder initialized:" << config.codec << config.sampleRate
@@ -265,47 +270,90 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
 
   int count = 0;
   int channels = m_frame->ch_layout.nb_channels;
-
-  // Flush any remaining buffered samples by padding with zeros
-  if (!m_accumBuffer.empty()) {
-    int remaining = m_accumBuffer.size() / channels;
-    if (remaining > 0 && remaining < m_requiredFrameSize) {
-      // Pad with zeros to complete the frame
-      m_accumBuffer.resize(m_requiredFrameSize * channels, 0.0f);
-
-      if (av_frame_make_writable(m_frame) == 0) {
-        // Convert and send the padded frame
-        writeFrameSamples();
-
-        m_frame->nb_samples = m_requiredFrameSize;
-        m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
-                       m_codecCtx->sample_rate;
-        m_sampleCount += m_requiredFrameSize;
-
-        avcodec_send_frame(m_codecCtx, m_frame);
+  auto receiveAvailable = [&]() {
+    while (true) {
+      const int ret = avcodec_receive_packet(m_codecCtx, m_packet);
+      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+        return true;
+      if (ret < 0)
+        return false;
+      EncodedPacket output;
+      if (processPacket(m_packet, output)) {
+        packets.push_back(std::move(output));
+        ++count;
       }
-      m_accumBuffer.clear();
     }
+  };
+  auto sendFrame = [&]() {
+    while (true) {
+      const int ret = avcodec_send_frame(m_codecCtx, m_frame);
+      if (ret == AVERROR(EAGAIN)) {
+        if (!receiveAvailable())
+          return false;
+        continue;
+      }
+      if (ret < 0)
+        return false;
+      m_sampleCount += m_requiredFrameSize;
+      return receiveAvailable();
+    }
+  };
+
+  const size_t frameSamples =
+      static_cast<size_t>(m_requiredFrameSize) * channels;
+  // Encode every complete frame left in the accumulator before treating
+  // the final partial frame as a padded tail. encodeAudio() intentionally
+  // returns after producing one packet, so larger input batches can leave
+  // multiple complete frames buffered here.
+  while (m_accumBuffer.size() >= frameSamples) {
+    if (av_frame_make_writable(m_frame) < 0) {
+      emit encodingError("Failed to make audio frame writable while flushing");
+      return count;
+    }
+    writeFrameSamples();
+    m_frame->nb_samples = m_requiredFrameSize;
+    m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
+                   m_codecCtx->sample_rate;
+    if (!sendFrame()) {
+      emit encodingError("Failed to send buffered audio frame while flushing");
+      return count;
+    }
+    m_accumBuffer.erase(m_accumBuffer.begin(),
+                        m_accumBuffer.begin() + frameSamples);
   }
 
-  // Send EOF to encoder
-  avcodec_send_frame(m_codecCtx, nullptr);
+  // Pad only a genuine incomplete tail to the next codec frame.
+  if (!m_accumBuffer.empty() && m_accumBuffer.size() < frameSamples) {
+    m_accumBuffer.resize(frameSamples, 0.0f);
+    if (av_frame_make_writable(m_frame) < 0) {
+      emit encodingError("Failed to make padded audio frame writable");
+      return count;
+    }
+    writeFrameSamples();
+    m_frame->nb_samples = m_requiredFrameSize;
+    m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
+                   m_codecCtx->sample_rate;
+    if (!sendFrame()) {
+      emit encodingError("Failed to send padded audio frame while flushing");
+      return count;
+    }
+    m_accumBuffer.clear();
+  }
 
-  // Receive all remaining packets
+  // Send EOF only after all buffered frames have been submitted, then drain
+  // the encoder's delayed packets.
   while (true) {
-    int ret = avcodec_receive_packet(m_codecCtx, m_packet);
-    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-      break;
+    const int ret = avcodec_send_frame(m_codecCtx, nullptr);
+    if (ret == AVERROR(EAGAIN)) {
+      if (!receiveAvailable())
+        break;
+      continue;
     }
-    if (ret < 0) {
-      break;
-    }
-
-    EncodedPacket output;
-    if (processPacket(m_packet, output)) {
-      packets.push_back(std::move(output));
-      count++;
-    }
+    if (ret >= 0 || ret == AVERROR_EOF)
+      receiveAvailable();
+    else
+      emit encodingError("Failed to send audio encoder EOF");
+    break;
   }
 
   return count;
@@ -314,9 +362,9 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
 bool AudioEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {
   output.data.resize(packet->size);
   memcpy(output.data.data(), packet->data, packet->size);
-  output.pts = packet->pts;
-  output.dts = packet->dts;
-  output.duration = packet->duration;
+  output.pts = av_rescale_q(packet->pts, m_codecCtx->time_base, {1, 1000});
+  output.dts = (packet->dts == AV_NOPTS_VALUE) ? output.pts : av_rescale_q(packet->dts, m_codecCtx->time_base, {1, 1000});
+  output.duration = av_rescale_q(packet->duration, m_codecCtx->time_base, {1, 1000});
   output.isKeyframe = true; // Audio frames are always keyframes
   output.streamIndex = 1;   // Audio stream
 
@@ -347,6 +395,11 @@ void AudioEncoder::cleanup() {
   if (m_codecCtx) {
     avcodec_free_context(&m_codecCtx);
   }
+  // Drop any prior session's origin shift and buffered tail so a reused
+  // encoder starts time at zero (see initialize()).
+  m_startOffset = 0;
+  m_offsetApplied = false;
+  m_accumBuffer.clear();
   m_initialized = false;
 }
 

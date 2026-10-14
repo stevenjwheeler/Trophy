@@ -4,10 +4,42 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME AppImageSmokeTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
+    add_test(NAME ReporterAbiTest.StaticFixtures
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterAbi.py")
+endif()
+
+add_executable(test_PlayerProbe test_PlayerProbe.cpp)
+target_compile_definitions(test_PlayerProbe PRIVATE
+    PLAYER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/PlayerPage.qml"
+    AUDIO_METER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/components/AudioLevelMeter.qml")
+target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_PlayerProbe)
+
+# Optional script API fixture: Node is test tooling only, never a runtime
+# dependency for Trophy or for builds without it.
+find_program(TROPHY_NODE_EXECUTABLE node)
+if(TROPHY_NODE_EXECUTABLE)
+    add_test(NAME KWinScriptTest.WindowEventsAndFiltering
+        COMMAND "${TROPHY_NODE_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_KWinScript.js"
+            "${CMAKE_SOURCE_DIR}/resources/kwin/trophy-monitor/contents/code/main.js")
+endif()
+
 # Common includes and link libraries
 set(TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/src
 )
+
+# Warning flags for every test target (warnings only — never -Werror, so
+# this can't red the suite; it surfaces the same bug classes -Wall caught
+# in the main lib). Mirrors the main target + shim flag sets.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+endif()
 
 set(TEST_LINK_LIBS
     GTest::GTest
@@ -16,6 +48,12 @@ set(TEST_LINK_LIBS
     Qt6::Gui
     Qt6::Test
 )
+
+add_executable(test_ApplicationAudioProbe test_ApplicationAudioProbe.cpp)
+target_include_directories(test_ApplicationAudioProbe PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ApplicationAudioProbe PRIVATE
+    ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ApplicationAudioProbe)
 
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
@@ -200,7 +238,7 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/tests/RecordingManagerLinkStubs.cpp
 )
 target_include_directories(test_RecordingBackend PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS})
-target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES})
+target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network Qt6::Concurrent PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES})
 if(EGL_FOUND)
     # PUBLIC so executables linking this static lib inherit the EGL dep.
     target_link_libraries(test_RecordingBackend PUBLIC PkgConfig::EGL)
@@ -210,6 +248,62 @@ add_executable(test_RecordingManager test_RecordingManager.cpp)
 target_include_directories(test_RecordingManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
 gtest_discover_tests(test_RecordingManager)
+
+add_executable(test_WaylandPortalCapture test_WaylandPortalCapture.cpp)
+target_include_directories(test_WaylandPortalCapture PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_WaylandPortalCapture PRIVATE test_RecordingBackend Qt6::DBus Qt6::Test PkgConfig::PIPEWIRE)
+find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+    # Fake portal owns the desktop portal name only on a private bus.
+    set_property(TARGET test_WaylandPortalCapture PROPERTY TEST_LAUNCHER
+        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+endif()
+gtest_discover_tests(test_WaylandPortalCapture)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
+    add_test(NAME WaylandPortalCaptureTest.PrivateBusIntegration
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" --
+            "${CMAKE_COMMAND}" -E env TROPHY_PRIVATE_PORTAL_TESTS=1
+            $<TARGET_FILE:test_WaylandPortalCapture>)
+endif()
+
+add_executable(test_NotificationPortal test_NotificationPortal.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/NotificationService.cpp)
+target_include_directories(test_NotificationPortal PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_NotificationPortal PRIVATE test_RecordingBackend
+    GTest::GTest Qt6::DBus Qt6::Test PkgConfig::PIPEWIRE)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+    set_property(TARGET test_NotificationPortal PROPERTY TEST_LAUNCHER
+        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+endif()
+gtest_discover_tests(test_NotificationPortal)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
+    add_test(NAME NotificationPortalTest.PrivateBusIntegration
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- "${CMAKE_COMMAND}" -E env
+            TROPHY_PRIVATE_PORTAL_TESTS=1 $<TARGET_FILE:test_NotificationPortal>)
+endif()
+
+add_executable(test_GlobalShortcutPortal test_GlobalShortcutPortal.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/GlobalShortcutManager.cpp)
+target_include_directories(test_GlobalShortcutPortal PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_GlobalShortcutPortal PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Test)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+    set_property(TARGET test_GlobalShortcutPortal PROPERTY TEST_LAUNCHER
+        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+endif()
+gtest_discover_tests(test_GlobalShortcutPortal)
+if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
+    add_test(NAME GlobalShortcutPortalTest.PrivateBusIntegration
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- "${CMAKE_COMMAND}" -E env
+            TROPHY_PRIVATE_PORTAL_TESTS=1 $<TARGET_FILE:test_GlobalShortcutPortal>)
+endif()
+
+add_executable(test_PipeWireAudioSource test_PipeWireAudioSource.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.h
+    ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h)
+target_include_directories(test_PipeWireAudioSource PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+gtest_discover_tests(test_PipeWireAudioSource)
 
 add_executable(test_ReplayManager test_ReplayManager.cpp)
 target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
@@ -223,8 +317,8 @@ gtest_discover_tests(test_RecordingSession)
 
 
 add_executable(test_Recording test_Recording.cpp ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp)
-target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMAT_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS})
-target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES})
+target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMAT_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS})
+target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} Qt6::Concurrent ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${AVCODEC_LIBRARIES})
 gtest_discover_tests(test_Recording)
 
 add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp)
@@ -282,6 +376,12 @@ add_executable(test_AudioMixer test_AudioMixer.cpp
 target_include_directories(test_AudioMixer PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_AudioMixer PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 gtest_discover_tests(test_AudioMixer)
+
+# --- PipeWire sync wait (bounded-loop logic, no daemon required) ---
+add_executable(test_PipeWireSyncWait test_PipeWireSyncWait.cpp)
+target_include_directories(test_PipeWireSyncWait PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireSyncWait PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_PipeWireSyncWait)
 
 # --- AudioEncoder (needs FFmpeg audio encoders at runtime, skips otherwise) ---
 add_executable(test_AudioEncoder test_AudioEncoder.cpp
@@ -512,6 +612,22 @@ add_executable(test_VulkanLayer test_VulkanLayer.cpp
 target_include_directories(test_VulkanLayer PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_VulkanLayer PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_VulkanLayer)
+
+# Real reporter export, exercised without creating a Vulkan instance.
+find_package(Threads REQUIRED)
+add_library(VulkanReporterNext SHARED VulkanReporterNext.cpp)
+target_include_directories(VulkanReporterNext PRIVATE ${Vulkan_INCLUDE_DIRS})
+target_link_libraries(VulkanReporterNext PRIVATE Threads::Threads)
+add_library(VulkanReporterFixture SHARED VulkanReporterFixture.cpp)
+target_include_directories(VulkanReporterFixture PRIVATE ${Vulkan_INCLUDE_DIRS})
+target_link_libraries(VulkanReporterFixture PRIVATE trophy_layer VulkanReporterNext)
+add_executable(test_VulkanReporter test_VulkanReporter.cpp)
+target_compile_definitions(test_VulkanReporter PRIVATE
+    TROPHY_LAYER_FILE="$<TARGET_FILE:trophy_layer>"
+    VULKAN_REPORTER_FIXTURE_FILE="$<TARGET_FILE:VulkanReporterFixture>")
+target_link_libraries(test_VulkanReporter PRIVATE ${TEST_LINK_LIBS} Vulkan::Vulkan dl)
+add_dependencies(test_VulkanReporter trophy_layer VulkanReporterFixture)
+gtest_discover_tests(test_VulkanReporter)
 
 # --- HardwareInfo (PCI mapping + gather smoke; degrades headless) ---
 add_executable(test_HardwareInfo test_HardwareInfo.cpp

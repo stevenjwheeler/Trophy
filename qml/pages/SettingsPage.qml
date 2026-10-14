@@ -434,7 +434,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("Video Encoder")
-                        help: qsTr("Auto picks the best hardware encoder (NVENC, VA-API, or AV1). AV1 gives the best quality but needs modern hardware.")
+                        help: qsTr("Auto picks the best hardware encoder (NVENC, VA-API, or x264). AV1 gives the best quality but needs modern hardware.")
 
                         TrophyComboBox {
                             id: encoderBox
@@ -592,11 +592,12 @@ Page {
                                             color: isChecked ? "white" : Theme.textSecondaryColor
                                         }
 
-                                        MouseArea {
-                                            anchors.fill: parent
+                                        HoverHandler {
                                             cursorShape: Qt.PointingHandCursor
+                                        }
+                                        TapHandler {
                                             enabled: !(recordingManager && recordingManager.isRecording)
-                                            onClicked: {
+                                            onTapped: {
                                                 if (settingsManager)
                                                     settingsManager.fps = modelData;
                                             }
@@ -843,6 +844,9 @@ Page {
 
                     SettingStack {
                         label: qsTr("Audio Track Configuration")
+                        // Desktop mode always records one merged track, so
+                        // there is nothing to configure here.
+                        visible: settingsManager ? settingsManager.audioMode === "game" : true
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -1491,7 +1495,7 @@ Page {
         title: qsTr("Select Recordings Folder")
         onAccepted: {
             if (settingsManager)
-                settingsManager.recordingsPath = selectedFolder.toString().replace("file://", "");
+                settingsManager.recordingsPath = selectedFolder.toLocalFile();
         }
     }
 
@@ -1501,7 +1505,7 @@ Page {
         title: qsTr("Select Clip Cache Folder")
         onAccepted: {
             if (settingsManager)
-                settingsManager.replayCachePath = selectedFolder.toString().replace("file://", "");
+                settingsManager.replayCachePath = selectedFolder.toLocalFile();
         }
     }
 
@@ -1773,11 +1777,12 @@ Page {
             }
         }
 
-        MouseArea {
-            anchors.fill: parent
-            enabled: cardEnabled
+        HoverHandler {
             cursorShape: Qt.PointingHandCursor
-            onClicked: chosen()
+        }
+        TapHandler {
+            enabled: cardEnabled
+            onTapped: chosen()
         }
     }
 

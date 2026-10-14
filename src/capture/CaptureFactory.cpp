@@ -8,8 +8,13 @@
 #include "CaptureFactory.h"
 #include <QDebug>
 #include <QProcessEnvironment>
-#include <QDBusInterface>
 #include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#include <QDBusVariant>
+#include <QTimer>
+#include <atomic>
 
 #include "IVideoCaptureSource.h"
 
@@ -18,6 +23,11 @@
 #endif
 
 namespace TrophyBackend {
+
+namespace {
+std::atomic_bool portalAvailable{false};
+std::atomic<quint64> availabilityGeneration{0};
+}
 
 CaptureFactory::DisplayServer CaptureFactory::detectDisplayServer() {
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -92,13 +102,38 @@ bool CaptureFactory::isPipeWireAvailable() {
 #ifndef HAVE_PIPEWIRE
   return false;
 #else
-  // On Wayland, we need the ScreenCast portal.
-  // We can check if the interface exists on D-Bus.
-  QDBusInterface portal("org.freedesktop.portal.Desktop",
-                         "/org/freedesktop/portal/desktop",
-                         "org.freedesktop.portal.ScreenCast",
-                         QDBusConnection::sessionBus());
-  return portal.isValid();
+  return portalAvailable.load();
+#endif
+}
+
+void CaptureFactory::requestPipeWireAvailability(
+    QObject *context, std::function<void(bool)> completion) {
+  if (!context)
+    return;
+#ifndef HAVE_PIPEWIRE
+  QTimer::singleShot(0, context, [completion = std::move(completion)] {
+    if (completion) completion(false);
+  });
+#else
+  const quint64 generation = ++availabilityGeneration;
+  auto call = QDBusMessage::createMethodCall(
+      "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+      "org.freedesktop.DBus.Properties", "Get");
+  call.setArguments({QStringLiteral("org.freedesktop.portal.ScreenCast"),
+                     QStringLiteral("version")});
+  auto *watcher = new QDBusPendingCallWatcher(
+      QDBusConnection::sessionBus().asyncCall(call, 3000), context);
+  QObject::connect(watcher, &QDBusPendingCallWatcher::finished, context,
+                   [watcher, generation, completion = std::move(completion)] {
+    QDBusPendingReply<QDBusVariant> reply = *watcher;
+    watcher->deleteLater();
+    const QVariant version = reply.isValid() ? reply.value().variant() : QVariant();
+    const bool available = version.metaType().id() == QMetaType::UInt &&
+                           version.toUInt() > 0;
+    if (generation == availabilityGeneration.load())
+      portalAvailable.store(available);
+    if (completion) completion(available);
+  });
 #endif
 }
 

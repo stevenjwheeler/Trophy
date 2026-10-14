@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -13,6 +14,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <memory>
 
 #include "settings/SettingsManager.h"
 
@@ -25,12 +27,21 @@ public:
       static int argc = 1;
       static char arg0[] = "test";
       static char *argv[] = {arg0, nullptr};
-      new QCoreApplication(argc, argv);
+      app = std::make_unique<QCoreApplication>(argc, argv);
     }
     // Redirect config path to temp for test isolation
     QCoreApplication::setOrganizationName("TrophyTest");
     QCoreApplication::setApplicationName("TrophyTestApp");
   }
+  void TearDown() override {
+    if (app) {
+      QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+      QCoreApplication::processEvents();
+      app.reset();
+    }
+  }
+private:
+  std::unique_ptr<QCoreApplication> app;
 };
 
 static auto *env =
@@ -524,6 +535,76 @@ TEST_F(SettingsManagerTest, ResetToDefaults) {
 
   EXPECT_EQ(mgr->videoBitrate(), 15000);
   EXPECT_EQ(mgr->fps(), 60);
+}
+
+TEST_F(SettingsManagerTest, ResetToDefaultsRestoresAllGaps) {
+  // The P1 resetToDefaults gap fill: every persisted key must come back,
+  // not just bitrate+fps — and the replay path clears while restore
+  // tokens survive (tokens are consent evidence, never defaults).
+  mgr->setVideoBitrate(99999);
+  mgr->setFps(144);
+  mgr->setEncoder("x264");
+  mgr->setSeparateAudioTracks(false);
+  mgr->setMicrophoneDevice("some-mic");
+  mgr->setVoiceChatApp("discord");
+  mgr->setMaxStorageSize(123456789);
+  mgr->setAutoDetectGames(false);
+  mgr->setAutoRecordEnabled(true);
+  mgr->setReplayCachePath("/tmp/some-cache");
+  mgr->setRestoreToken("Deadlock", "token-abc");
+  mgr->resetToDefaults();
+
+  EXPECT_EQ(mgr->videoBitrate(), 15000);
+  EXPECT_EQ(mgr->fps(), 60);
+  EXPECT_EQ(mgr->encoder(), "auto");
+  EXPECT_TRUE(mgr->separateAudioTracks());
+  EXPECT_TRUE(mgr->replayCachePath().isEmpty());
+  EXPECT_EQ(mgr->getRestoreToken("Deadlock"), "token-abc");
+}
+
+TEST_F(SettingsManagerTest, LoadEmitsFullSignalSet) {
+  // load() must notify every key (wizard/Settings bindings settle on
+  // these); asserting only settingsLoaded let a dropped emit hide.
+  QString filePath = mgr->settingsFilePath();
+  QDir().mkpath(QFileInfo(filePath).path());
+  mgr->setVideoBitrate(4242);
+  mgr->setFps(144);
+  mgr->setEncoder("x264");
+  mgr->setSeparateAudioTracks(true);
+  mgr->setMicrophoneDevice("mic-a");
+  mgr->setMaxStorageSize(777);
+  mgr->save();
+  QFile saved(filePath);
+  ASSERT_TRUE(saved.open(QIODevice::ReadOnly));
+  const QByteArray persisted = saved.readAll();
+  saved.close();
+
+  // Setters save immediately; restore the earlier snapshot after mutating.
+  mgr->setVideoBitrate(1111);
+  mgr->setFps(30);
+  mgr->setEncoder("auto");
+  mgr->setSeparateAudioTracks(false);
+  mgr->setMicrophoneDevice("mic-b");
+  mgr->setMaxStorageSize(888);
+  ASSERT_TRUE(saved.open(QIODevice::WriteOnly | QIODevice::Truncate));
+  ASSERT_EQ(saved.write(persisted), persisted.size());
+  saved.close();
+
+  QSignalSpy bitrate(mgr.get(), &SettingsManager::videoBitrateChanged);
+  QSignalSpy fps(mgr.get(), &SettingsManager::fpsChanged);
+  QSignalSpy enc(mgr.get(), &SettingsManager::encoderChanged);
+  QSignalSpy tracks(mgr.get(), &SettingsManager::separateAudioTracksChanged);
+  QSignalSpy mic(mgr.get(), &SettingsManager::microphoneDeviceChanged);
+  QSignalSpy storage(mgr.get(), &SettingsManager::maxStorageSizeChanged);
+  mgr->load();
+
+  EXPECT_EQ(mgr->videoBitrate(), 4242);
+  EXPECT_EQ(bitrate.count(), 1);
+  EXPECT_EQ(fps.count(), 1);
+  EXPECT_EQ(enc.count(), 1);
+  EXPECT_EQ(tracks.count(), 1);
+  EXPECT_EQ(mic.count(), 1);
+  EXPECT_EQ(storage.count(), 1);
 }
 
 TEST_F(SettingsManagerTest, SaveEmitsSignal) {

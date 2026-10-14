@@ -19,6 +19,15 @@ UpdateChecker::UpdateChecker(QObject *parent)
     : QObject(parent), m_network(this) {
   m_network.setRedirectPolicy(
       QNetworkRequest::NoLessSafeRedirectPolicy);
+  // A hung GET must not wedge checks for the session: aborting the
+  // reply drives finished(), so the normal error path settles it.
+  m_requestTimeout.setSingleShot(true);
+  m_requestTimeout.setInterval(15000);
+  connect(&m_requestTimeout, &QTimer::timeout, this, [this]() {
+    if (m_reply) {
+      m_reply->abort();
+    }
+  });
 }
 
 UpdateChecker::~UpdateChecker() {
@@ -72,12 +81,14 @@ int UpdateChecker::compareVersions(int aMajor, int aMinor,
 
 void UpdateChecker::checkNow() {
   if (m_currentVersion.isEmpty()) {
+    // Nothing to compare against: settle immediately so the Info
+    // page's spinner doesn't hang on a check that never runs.
+    emit checkFinished(false, QString(), QString());
     return;
   }
   if (m_reply) {
-    // A check is already in flight; remember the extra caller
-    // so its signal isn't swallowed (one reply, one finish).
-    m_pendingManualCheck = true;
+    // A check is already in flight; its finish covers this caller
+    // too, so concurrent callers coalesce onto the one reply.
     return;
   }
   startRequest();
@@ -91,9 +102,11 @@ void UpdateChecker::startRequest() {
   m_reply = m_network.get(request);
   connect(m_reply, &QNetworkReply::finished, this,
           &UpdateChecker::onReplyFinished);
+  m_requestTimeout.start();
 }
 
 void UpdateChecker::onReplyFinished() {
+  m_requestTimeout.stop();
   QPointer<QNetworkReply> reply = m_reply;
   m_reply = nullptr;
   if (!reply) {

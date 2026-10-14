@@ -11,6 +11,7 @@
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QThreadPool>
 #include <gtest/gtest.h>
 
@@ -67,9 +68,17 @@ protected:
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
       return QString();
     const QString path = tempDir.path() + "/" + name;
-    QStringList args{"-y",          "-v",     "error", "-f", "lavfi", "-i",
-                     "testsrc=size=320x240:rate=30:duration=1", "-pix_fmt",
-                     "yuv420p",     "-metadata", QString("title=%1").arg(title)};
+    QStringList args{"-y",
+                     "-v",
+                     "error",
+                     "-f",
+                     "lavfi",
+                     "-i",
+                     "testsrc=size=320x240:rate=30:duration=1",
+                     "-pix_fmt",
+                     "yuv420p",
+                     "-metadata",
+                     QString("title=%1").arg(title)};
     if (!kind.isEmpty())
       args << "-metadata" << QString("trophy-kind=%1").arg(kind);
     for (auto it = extra.constBegin(); it != extra.constEnd(); ++it)
@@ -85,6 +94,7 @@ protected:
 
   void waitForProbe() {
     QThreadPool::globalInstance()->waitForDone(10000);
+    QCoreApplication::processEvents();
   }
 };
 
@@ -193,8 +203,7 @@ TEST_F(RecordingTest, KindTagMarksClipWithoutSuffix) {
 }
 
 TEST_F(RecordingTest, NoKindTagLeavesRecording) {
-  QString path =
-      makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
+  QString path = makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
   if (path.isEmpty())
     GTEST_SKIP() << "ffmpeg unavailable";
   Recording rec(path);
@@ -220,8 +229,7 @@ TEST_F(RecordingTest, TrophyVersionTagIsExposed) {
 }
 
 TEST_F(RecordingTest, NoVersionTagLeavesVersionEmpty) {
-  QString path =
-      makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
+  QString path = makeTitledClip("Deadlock_2026-10-01_19-31-31.mkv", "Deadlock");
   if (path.isEmpty())
     GTEST_SKIP() << "ffmpeg unavailable";
   Recording rec(path);
@@ -281,14 +289,90 @@ TEST_F(RecordingTest, HalfTrophyDateTimeFallsBackToCreationTime) {
             QString("2021-05-06_07-08-09"));
 }
 
+// --- stream layout from the same probe pass ---
+
+TEST_F(RecordingTest, ProbeExposesVideoCodecFpsAndResolution) {
+  QString path = makeTitledClip("StreamInfo.mkv", "Deadlock", "recording");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_FALSE(rec.videoCodec().isEmpty());
+  EXPECT_NEAR(rec.fps(), 30.0, 0.5);
+  EXPECT_EQ(rec.width(), 320);
+  EXPECT_EQ(rec.height(), 240);
+  EXPECT_EQ(rec.audioTrackCount(), 0);
+  EXPECT_TRUE(rec.audioCodec().isEmpty());
+}
+
+TEST_F(RecordingTest, ProbeCountsAudioStreamsWithCodec) {
+  if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  const QString path = tempDir.path() + "/WithAudio.mkv";
+  QProcess proc;
+  proc.start("ffmpeg", QStringList{
+                           "-y", "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc=size=320x240:rate=30:duration=1", "-f",
+                           "lavfi", "-i", "sine=frequency=440:duration=1",
+                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                           path});
+  if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
+      !QFile::exists(path))
+    GTEST_SKIP() << "ffmpeg aac encoding unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.audioTrackCount(), 1);
+  EXPECT_EQ(rec.audioCodec(), "aac");
+  EXPECT_NEAR(rec.fps(), 30.0, 0.5);
+}
+
+// --- trophy-encoder tag (which encoder wrote the pixels) ---
+
+TEST_F(RecordingTest, EncoderTagRoundTripsToDisplayName) {
+  QMap<QString, QString> extra{{"trophy-encoder", "nvenc_h264"}};
+  QString path = makeTitledClip("Encoded.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.encoderName(), "NVENC");
+}
+
+TEST_F(RecordingTest, MissingEncoderTagLeavesNameEmpty) {
+  QString path = makeTitledClip("Untagged.mkv", "Deadlock", "recording");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_TRUE(rec.encoderName().isEmpty());
+}
+
+TEST(RecordingEncoderDisplayName, KnownTagsMapToFriendlyNames) {
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_h264"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_hevc"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_av1"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("vaapi_h264"), "VA-API");
+  EXPECT_EQ(Recording::encoderDisplayName("vaapi_av1"), "VA-API");
+  EXPECT_EQ(Recording::encoderDisplayName("x264"), "x264");
+  EXPECT_EQ(Recording::encoderDisplayName("NVENC_H264"), "NVENC");
+}
+
+TEST(RecordingEncoderDisplayName, UnknownTagsPassThroughRaw) {
+  EXPECT_EQ(Recording::encoderDisplayName("quicksync_h264"), "quicksync_h264");
+  EXPECT_EQ(Recording::encoderDisplayName(""), "");
+}
+
 // --- TrophyMetadata helpers (no ffmpeg needed) ---
 
 TEST(TrophyMetadataHelpers, DateTimeRoundTrip) {
   const QDateTime now = QDateTime::currentDateTime();
-  const QString stamp =
-      now.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss"));
-  const QDateTime parsed = trophyDateTimeFromTags(trophyDateString(now),
-                                                  trophyTimeString(now));
+  const QString stamp = now.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss"));
+  const QDateTime parsed =
+      trophyDateTimeFromTags(trophyDateString(now), trophyTimeString(now));
   EXPECT_TRUE(parsed.isValid());
   EXPECT_EQ(parsed.toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")), stamp);
   // Recorder stamp is second-granular by construction.
@@ -296,20 +380,28 @@ TEST(TrophyMetadataHelpers, DateTimeRoundTrip) {
 }
 
 TEST(TrophyMetadataHelpers, DateTimeRejectsGarbage) {
-  EXPECT_FALSE(
-      trophyDateTimeFromTags(QStringLiteral("not-a-date"),
-                             QStringLiteral("03-04-05"))
-          .isValid());
-  EXPECT_FALSE(trophyDateTimeFromTags(QStringLiteral("2020-01-02"),
-                                      QStringLiteral(""))
-                   .isValid());
-  EXPECT_FALSE(trophyDateTimeFromTags(QStringLiteral(""),
+  EXPECT_FALSE(trophyDateTimeFromTags(QStringLiteral("not-a-date"),
                                       QStringLiteral("03-04-05"))
                    .isValid());
+  EXPECT_FALSE(
+      trophyDateTimeFromTags(QStringLiteral("2020-01-02"), QStringLiteral(""))
+          .isValid());
+  EXPECT_FALSE(
+      trophyDateTimeFromTags(QStringLiteral(""), QStringLiteral("03-04-05"))
+          .isValid());
 }
 
 TEST(TrophyMetadataHelpers, VersionIsNeverEmpty) {
   EXPECT_FALSE(trophyVersion().isEmpty());
+}
+
+TEST(TrophyMetadataHelpers, EncoderTagStampedAndSkippedWhenEmpty) {
+  QMap<QString, QString> meta;
+  stampTrophyEncoder(meta, "nvenc_h264");
+  EXPECT_EQ(meta.value("trophy-encoder"), "nvenc_h264");
+  stampTrophyEncoder(meta, "");
+  EXPECT_EQ(meta.value("trophy-encoder"), "nvenc_h264");
+  EXPECT_EQ(meta.size(), 1);
 }
 
 // --- Thumbnail path ---
@@ -386,6 +478,28 @@ TEST_F(RecordingTest, ContainerTitleOverridesFileNameByDefault) {
   // Trophy bakes the game name into the container at record time, and the
   // probe prefers that tag over the filename.
   EXPECT_EQ(rec.gameName(), "Embedded Title");
+}
+
+TEST_F(RecordingTest, ProbePublishesMetadataOnOwningThread) {
+  const QString path = makeTitledClip("Filename_Title_2026-01-15_20-30-00.mkv",
+                                      "Container Title");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable or clip render failed";
+
+  Recording rec(path);
+  const QThread *ownerThread = QThread::currentThread();
+  bool signalOnOwnerThread = false;
+  QObject::connect(&rec, &Recording::metadataChanged, &rec, [&]() {
+    signalOnOwnerThread = QThread::currentThread() == ownerThread;
+  });
+  rec.loadMetadata();
+  QThreadPool::globalInstance()->waitForDone(10000);
+  // Worker completion queues the result; it must not mutate public QObject
+  // state before the owning thread dispatches that queued publication.
+  EXPECT_EQ(rec.gameName(), "Filename Title");
+  QCoreApplication::processEvents();
+  EXPECT_EQ(rec.gameName(), "Container Title");
+  EXPECT_TRUE(signalOnOwnerThread);
 }
 
 TEST_F(RecordingTest, PreferFileNameTitleKeepsRenamedName) {

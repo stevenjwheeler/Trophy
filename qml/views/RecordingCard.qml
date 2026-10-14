@@ -99,7 +99,7 @@ Rectangle {
                 id: sourceImage
                 width: parent.width
                 height: parent.height
-                source: root.recording && root.recording.thumbnailPath ? "file://" + root.recording.thumbnailPath : "qrc:/icons/video.svg"
+                source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
                 fillMode: Image.PreserveAspectCrop
                 opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
                 visible: false 

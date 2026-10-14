@@ -85,10 +85,17 @@ namespace {
 
 #ifdef HAVE_PIPEWIRE
 
+// Bounded sync wait (matches the sibling helpers in PipeWireAudioSource.cpp):
+// the constructor runs on the GUI thread, so an unbounded pw_main_loop_run
+// would hang forever if the daemon stalls.
+constexpr int kDeviceEnumSyncTimeoutMs = 3000;
+
 struct DeviceEnumData {
   QList<AudioDeviceInfo> *inputs = nullptr;
   QList<AudioDeviceInfo> *outputs = nullptr;
   int pendingSync = 0;
+  bool syncComplete = false;
+  bool syncFailed = false;
   struct pw_main_loop *loop = nullptr;
   struct spa_hook registryListener = {};
   struct spa_hook coreListener = {};
@@ -200,7 +207,17 @@ static void enumRegistryGlobal(void *userdata, uint32_t id,
 static void enumCoreDone(void *userdata, uint32_t id, int seq) {
   auto *data = static_cast<DeviceEnumData *>(userdata);
   if (id == PW_ID_CORE && seq == data->pendingSync)
-    pw_main_loop_quit(data->loop);
+    data->syncComplete = true;
+}
+
+static void enumCoreError(void *userdata, uint32_t id, int /*seq*/, int res,
+                          const char *message) {
+  auto *data = static_cast<DeviceEnumData *>(userdata);
+  if (id != PW_ID_CORE)
+    return;
+  data->syncFailed = true;
+  qWarning() << "PipeWire device enumeration failed:" << res
+             << (message ? message : "core error");
 }
 
 #endif
@@ -238,6 +255,7 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
     struct pw_core_events e = {};
     e.version = PW_VERSION_CORE_EVENTS;
     e.done = enumCoreDone;
+    e.error = enumCoreError;
     return e;
   }();
   pw_core_add_listener(core, &data.coreListener, &core_events, &data);
@@ -258,8 +276,24 @@ void AudioDeviceEnumerator::enumeratePipeWire() {
   // Trigger sync
   data.pendingSync = pw_core_sync(core, PW_ID_CORE, 0);
 
-  // Run event loop until sync completes
-  pw_main_loop_run(data.loop);
+  // Bounded wait on the calling (GUI) thread: never hang forever if the
+  // daemon stalls. Reuses the injectable helper from PipeWireAudioSource.h.
+  const bool synced =
+      data.pendingSync >= 0 &&
+      detail::waitForPipeWireSync(
+          [&](int waitMs) {
+            return pw_loop_iterate(pw_main_loop_get_loop(data.loop), waitMs);
+          },
+          [&] { return data.syncComplete || data.syncFailed; },
+          kDeviceEnumSyncTimeoutMs);
+  if (!synced || !data.syncComplete || data.syncFailed) {
+    qWarning() << "PipeWire device enumeration sync timed out or failed";
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(registry));
+    pw_core_disconnect(core);
+    pw_context_destroy(ctx);
+    pw_main_loop_destroy(data.loop);
+    return;
+  }
 
   // Prepend "Default" entries
   AudioDeviceInfo defaultInput;

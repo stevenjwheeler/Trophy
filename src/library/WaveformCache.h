@@ -13,6 +13,8 @@
 #include <QSet>
 #include <QString>
 #include <QVariantList>
+#include <QVector>
+#include <functional>
 
 namespace TrophyBackend {
 
@@ -39,9 +41,12 @@ public:
   explicit WaveformCache(QObject *parent = nullptr);
   ~WaveformCache() override = default;
 
-  // Number of audio streams (0 when the file won't open).
-  // Synchronous, but only opens the container (no decode).
-  Q_INVOKABLE int audioTrackCount(const QString &filePath);
+  // Container probe for worker/test use: -1 means unavailable, 0 no audio.
+  static int audioTrackCount(const QString &filePath);
+  // Player probes must never open a container on the GUI thread. Caller
+  // supplies an operation id so close/reopen of the same path is safe.
+  Q_INVOKABLE void requestAudioTrackCount(const QString &filePath,
+                                          int requestId);
 
   // Async peaks for one audio stream (0 = first). Emits
   // peaksReady even on failure (with an empty list) so QML
@@ -55,12 +60,35 @@ public:
   static constexpr int kBuckets = 8000;
 
 signals:
+  void audioTrackCountReady(const QString &filePath, int requestId, int count);
   void peaksReady(const QString &filePath, int track,
                   const QVariantList &peaks);
 
 private:
+  friend class WaveformCacheTestPeer;
+  // Worker-local instrumentation, copied before scheduling. Empty in production.
+  struct DecodeStats {
+    int passes = 0;
+    qint64 reads = 0;
+    qint64 packets = 0;
+    int tracks = 0;
+    int decoderDrains = 0;
+    int resamplerDrains = 0;
+    qint64 samples = 0;
+    qint64 drainSamples = 0;
+    qint64 blocks = 0;
+    qint64 blockCapacity = 0;
+    qint64 outputCapacity = 0;
+    qint64 maxOutputCapacity = 0;
+    bool cleanEof = false;
+  };
+  std::function<void(const DecodeStats &)> m_decodeObserver;
+  std::function<int(int, qint64)> m_readResultOverride;
   // In-flight files and the tracks still owed an emit.
   QMap<QString, QSet<int>> m_pending;
+  // Exists only while delivering a settled job, so reentrant requests reuse
+  // its memory even if the sidecar couldn't be written.
+  QMap<QString, QVector<QVector<float>>> m_delivering;
 };
 
 } // namespace TrophyBackend

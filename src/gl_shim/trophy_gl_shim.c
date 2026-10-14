@@ -19,6 +19,7 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -32,22 +33,62 @@
 
 #define SOCKET_PATH "/tmp/trophy-detection.sock"
 
-static int g_sock = -1;
-static int g_notified = 0;
-static int g_disabled = -1; /* -1 unknown, 0 no, 1 yes */
+typedef void (*glx_swap_fn)(void *, unsigned long);
+typedef int (*egl_swap_fn)(void *, void *);
+typedef void (*sdl_swap_fn)(void *);
+static glx_swap_fn g_real_glx_swap;
+static egl_swap_fn g_real_egl_swap;
+static sdl_swap_fn g_real_sdl_swap;
+
+static int g_sock = -1; /* every access via __atomic_* below */
+ /* 0 = not reported, 1 = initializing or deliberately disabled, 2 = live. */
+static int g_notified = 0; /* every access via __atomic_* below */
+static int g_disabled = -1; /* -1 unknown, 0 no, 1 yes; __atomic_* only */
+static pid_t g_report_pid = 0; /* PID owning g_sock/g_notified; fork guard */
 static long g_last_health_check = 0; /* monotonic seconds */
+static long g_last_connect_attempt = 0; /* monotonic seconds */
+
+static int claim_second(long *last, long now) {
+    long observed = __atomic_load_n(last, __ATOMIC_RELAXED);
+    while (observed != now) {
+        if (__atomic_compare_exchange_n(last, &observed, now, 0,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return 1;
+    }
+    return 0;
+}
+
+static int socket_is_alive(int fd) {
+    char byte;
+    ssize_t n = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n > 0 ||
+           (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
+                      errno == EINTR));
+}
 
 /* --- helpers (only run once, not per-frame) --- */
 
+static void app_basename(char *buf, size_t cap);
+
 static int is_disabled(void) {
-    if (g_disabled != -1)
-        return g_disabled;
+    int cached = __atomic_load_n(&g_disabled, __ATOMIC_ACQUIRE);
+    if (cached != -1)
+        return cached;
     const char *e = getenv("DISABLE_TROPHY_DETECTION");
     if (e && e[0] != '\0' && !(e[0] == '0' && e[1] == '\0')) {
-        g_disabled = 1;
+        __atomic_store_n(&g_disabled, 1, __ATOMIC_RELEASE);
         return 1;
     }
-    /* Never report Trophy itself */
+    /* Never report Trophy itself. /proc/self/comm is the calling *thread's*
+     * name, so a first swap off the main thread never matches — check the
+     * process exe basename instead (comm kept as a fallback). */
+    char app[128];
+    app_basename(app, sizeof(app));
+    if (strcmp(app, "trophy") == 0 || strcmp(app, "TrophyApp") == 0) {
+        __atomic_store_n(&g_disabled, 1, __ATOMIC_RELEASE);
+        return 1;
+    }
     char comm[64];
     int fd = open("/proc/self/comm", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
@@ -61,12 +102,12 @@ static int is_disabled(void) {
                 *nl = '\0';
             if (strcmp(comm, "trophy") == 0 ||
                 strcmp(comm, "TrophyApp") == 0) {
-                g_disabled = 1;
+                __atomic_store_n(&g_disabled, 1, __ATOMIC_RELEASE);
                 return 1;
             }
         }
     }
-    g_disabled = 0;
+    __atomic_store_n(&g_disabled, 0, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -89,29 +130,55 @@ static void app_basename(char *buf, size_t cap) {
 }
 
 static void notify_start(void) {
-    if (__atomic_load_n(&g_notified, __ATOMIC_ACQUIRE) != 0) {
+    /* Fork safety: g_sock/g_notified are inherited across fork(). A forked
+     * child (new PID) must re-report with its own PID, never reuse the
+     * parent's connection or stay silent on an inherited "live" flag.
+     * (fork+exec resets everything anyway; plain fork keeps the exe, so the
+     * cached g_disabled stays valid.) */
+    pid_t self = getpid();
+    if (__atomic_load_n(&g_report_pid, __ATOMIC_ACQUIRE) != self) {
+        int inherited = __atomic_exchange_n(&g_sock, -1, __ATOMIC_ACQ_REL);
+        if (inherited >= 0)
+            close(inherited);
+        __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_report_pid, self, __ATOMIC_RELEASE);
+    }
+    int state = __atomic_load_n(&g_notified, __ATOMIC_ACQUIRE);
+    if (state == 2) {
         // Already reported: cheap once-per-second health check so a
         // Trophy restart is noticed and the next swap re-reports.
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        if (ts.tv_sec == g_last_health_check)
+        if (!claim_second(&g_last_health_check, ts.tv_sec))
             return;
-        g_last_health_check = ts.tv_sec;
-        if (g_sock >= 0 && send(g_sock, "", 0, MSG_NOSIGNAL) != 0) {
-            close(g_sock);
-            g_sock = -1;
+        int sock = __atomic_load_n(&g_sock, __ATOMIC_ACQUIRE);
+        if (sock < 0 || !socket_is_alive(sock)) {
+            int old = __atomic_exchange_n(&g_sock, -1, __ATOMIC_ACQ_REL);
+            if (old >= 0)
+                close(old);
             __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         }
         return;
     }
+    if (state == 1)
+        return; /* another thread is connecting, or detection is disabled */
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    // Retry a failed initial connection at most once per second instead of
+    // opening a socket on every swap while Trophy is not running.
+    if (!claim_second(&g_last_connect_attempt, ts.tv_sec))
+        return;
     if (__atomic_exchange_n(&g_notified, 1, __ATOMIC_ACQ_REL) != 0)
-        return; /* lost the race; winner reports */
+        return;
     if (is_disabled())
         return;
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         return;
+    }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -120,9 +187,11 @@ static void notify_start(void) {
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
+        __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         return;
     }
-    g_sock = fd; /* kept open until unload so STOP can reuse it */
+    /* Kept open until unload so STOP can reuse it. */
+    __atomic_store_n(&g_sock, fd, __ATOMIC_RELEASE);
 
     char app[128];
     app_basename(app, sizeof(app));
@@ -133,47 +202,68 @@ static void notify_start(void) {
 
     /* Single stack buffer, single send: "START:<pid>:<app>:<appid>\n" */
     char msg[256];
-    pid_t pid = getpid();
-    /* manual integer formatting to avoid snprintf locale/malloc concerns? snprintf is fine here (once per process). */
-    int len = snprintf(msg, sizeof(msg), "START:%d:%s:%s\n", (int)pid, app, appid);
+    int len = snprintf(msg, sizeof(msg), "START:%d:%s:%s\n", (int)self, app,
+                       appid);
     if (len > 0) {
-        if ((size_t)len >= sizeof(msg))
+        if ((size_t)len >= sizeof(msg)) {
             len = (int)sizeof(msg) - 1;
-        (void)send(fd, msg, (size_t)len, MSG_NOSIGNAL);
+            /* Clamping cut the trailing '\n'; the server only fires on full
+             * lines, so restore it or notify-once never retries. */
+            msg[sizeof(msg) - 1] = '\n';
+        }
+        if (send(fd, msg, (size_t)len, MSG_NOSIGNAL) < 0) {
+            close(fd);
+            __atomic_store_n(&g_sock, -1, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
+            return;
+        }
     }
+    __atomic_store_n(&g_notified, 2, __ATOMIC_RELEASE);
 }
 
 __attribute__((destructor)) static void trophy_gl_unload(void) {
-    if (g_notified == 0 || g_sock < 0)
+    /* A forked child that never reported must not send STOP for the parent:
+     * just drop the inherited socket copy. */
+    if (__atomic_load_n(&g_report_pid, __ATOMIC_ACQUIRE) != getpid()) {
+        int inherited = __atomic_exchange_n(&g_sock, -1, __ATOMIC_ACQ_REL);
+        if (inherited >= 0)
+            close(inherited);
+        return;
+    }
+    if (__atomic_load_n(&g_notified, __ATOMIC_ACQUIRE) == 0)
+        return;
+    int sock = __atomic_exchange_n(&g_sock, -1, __ATOMIC_ACQ_REL);
+    if (sock < 0)
         return;
     char msg[64];
     int len = snprintf(msg, sizeof(msg), "STOP:%d\n", (int)getpid());
     if (len > 0) {
         if ((size_t)len >= sizeof(msg))
             len = (int)sizeof(msg) - 1;
-        (void)send(g_sock, msg, (size_t)len, MSG_NOSIGNAL);
+        (void)send(sock, msg, (size_t)len, MSG_NOSIGNAL);
     }
-    close(g_sock);
-    g_sock = -1;
+    close(sock);
 }
 
 /* --- interposed entry points (ABI-compatible, header-free) --- */
 
 void glXSwapBuffers(void *dpy, unsigned long drawable) {
-    typedef void (*fn_t)(void *, unsigned long);
-    static fn_t real_fn = NULL;
+    glx_swap_fn real_fn = __atomic_load_n(&g_real_glx_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "glXSwapBuffers");
+        real_fn = (glx_swap_fn)dlsym(RTLD_NEXT, "glXSwapBuffers");
+    if (real_fn)
+        __atomic_store_n(&g_real_glx_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         real_fn(dpy, drawable);
 }
 
 int eglSwapBuffers(void *dpy, void *surf) {
-    typedef int (*fn_t)(void *, void *);
-    static fn_t real_fn = NULL;
+    egl_swap_fn real_fn = __atomic_load_n(&g_real_egl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "eglSwapBuffers");
+        real_fn = (egl_swap_fn)dlsym(RTLD_NEXT, "eglSwapBuffers");
+    if (real_fn)
+        __atomic_store_n(&g_real_egl_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         return real_fn(dpy, surf);
@@ -181,10 +271,11 @@ int eglSwapBuffers(void *dpy, void *surf) {
 }
 
 void SDL_GL_SwapWindow(void *window) {
-    typedef void (*fn_t)(void *);
-    static fn_t real_fn = NULL;
+    sdl_swap_fn real_fn = __atomic_load_n(&g_real_sdl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
-        real_fn = (fn_t)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
+        real_fn = (sdl_swap_fn)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
+    if (real_fn)
+        __atomic_store_n(&g_real_sdl_swap, real_fn, __ATOMIC_RELEASE);
     notify_start();
     if (real_fn)
         real_fn(window);

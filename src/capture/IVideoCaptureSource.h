@@ -159,6 +159,14 @@ public:
    */
   virtual void stopCapture() = 0;
 
+  // Optional two-phase retirement. Call prepare on the QObject owner thread,
+  // then finish on a worker while retaining the source and callback consumers.
+  // Destroy/reuse only after finish returns, back on the owner thread. Do not
+  // concurrently call stopCapture/destruct or launch multiple retirements.
+  // Unsupported sources retain synchronous owner-thread stop compatibility.
+  virtual void prepareStopCapture() { stopCapture(); }
+  virtual void finishStopCapture() {}
+
   /**
    * @brief Check if currently capturing
    */

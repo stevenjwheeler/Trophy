@@ -20,9 +20,67 @@ Page {
     property string fileTitle: ""
     property string fileDate: ""
 
-    // Audio stream count for the open file (0 = none/unknown).
-    // Assigned on open; lanes rebuild from it.
+    // Library entry for the open file (null when unknown): drives the
+    // file-info dialog. Reactive on filePath; the entry's own NOTIFYs
+    // refresh rows as the background probe lands.
+    readonly property var infoRec: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.getRecording(filePath) : null
+
+    function formatInfoSize(bytes) {
+        if (!bytes)
+            return "0 B"
+        var kb = 1024
+        var mb = kb * 1024
+        var gb = mb * 1024
+        if (bytes >= gb)
+            return (bytes / gb).toFixed(1) + " GB"
+        if (bytes >= mb)
+            return (bytes / mb).toFixed(0) + " MB"
+        if (bytes >= kb)
+            return (bytes / kb).toFixed(0) + " KB"
+        return bytes + " B"
+    }
+
+    function formatInfoFps(fps) {
+        if (!(fps > 0))
+            return "–"
+        var rounded = Math.round(fps)
+        return Math.abs(fps - rounded) < 0.005 ? rounded.toString() : fps.toFixed(2)
+    }
+
+    function codecDisplayName(codec) {
+        if (!codec)
+            return "–"
+        var names = {
+            "h264": "H.264", "hevc": "H.265", "av1": "AV1",
+            "mpeg4": "MPEG-4", "vp9": "VP9",
+            "aac": "AAC", "opus": "Opus", "mp3": "MP3",
+            "flac": "FLAC", "pcm_s16le": "PCM", "vorbis": "Vorbis"
+        }
+        return names[codec.toLowerCase()] || codec
+    }
+
+    // Audio stream count (-1 = unavailable or pending, 0 = no audio).
+    // Delivered asynchronously; lanes rebuild only for the current open.
     property int trackCount: 0
+    property int audioProbeId: 0
+    property bool audioProbePending: false
+    // audioTrackCount returns -1 when the file can't be opened (unknown,
+    // not empty). Lane math/models clamp to >= 0; the label below
+    // distinguishes "unavailable" from a definitive "no audio".
+    readonly property int audioLanes: Math.max(0, trackCount)
+
+    Connections {
+        target: typeof waveformCache !== "undefined" ? waveformCache : null
+        function onAudioTrackCountReady(path, requestId, count) {
+            if (requestId !== playerPage.audioProbeId || path !== playerPage.filePath)
+                return
+            playerPage.audioProbePending = false
+            playerPage.trackCount = count
+            // Expanding from the video-only pending state must fit every
+            // newly discovered lane, without undoing a user's larger card.
+            playerPage.tracksHeight = Math.max(playerPage.tracksHeight, playerPage.minTracksHeight)
+        }
+    }
 
     // True per-track mute: one audio-only pipeline per stream
     // (the video output stays silent), all driven in lockstep.
@@ -156,8 +214,8 @@ Page {
     readonly property real minTracksHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + trackCount) * (minLaneHeight + Theme.spacingSmall)
-        + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
+        + (1 + audioLanes) * (minLaneHeight + Theme.spacingSmall)
+        + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     // Lane height while the card fits its content;
     // compressing the card shrinks every lane down
@@ -170,7 +228,7 @@ Page {
             return fullLaneHeight
         var interior = tracksHeight - Theme.spacingMedium * 2
         return Math.max(minLaneHeight, Math.min(fullLaneHeight,
-            (interior - zoomRow.implicitHeight) / (1 + trackCount) - Theme.spacingSmall))
+            (interior - zoomRow.implicitHeight) / (1 + audioLanes) - Theme.spacingSmall))
     }
 
     // Uncompressed content height, derived from the
@@ -183,8 +241,8 @@ Page {
     readonly property real tracksNaturalHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + trackCount) * (fullLaneHeight + Theme.spacingSmall)
-        + (trackCount === 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
+        + (1 + audioLanes) * (fullLaneHeight + Theme.spacingSmall)
+        + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     function setTracksHeight(height) {
         var floor = Math.min(minTracksHeight, tracksNaturalHeight)
@@ -219,24 +277,30 @@ Page {
         filePath = path || ""
         fileTitle = title || ""
         fileDate = dateStr || ""
-        trackCount = (filePath !== "" && typeof waveformCache !== "undefined")
-            ? waveformCache.audioTrackCount(filePath) : 0
+        audioProbeId++
+        trackCount = -1
+        audioProbePending = filePath !== "" && typeof waveformCache !== "undefined" && waveformCache !== null
+        if (audioProbePending)
+            waveformCache.requestAudioTrackCount(filePath, audioProbeId)
         // Start with the tracks at their smallest: the
         // video gets the room, and the card expands on
         // drag (or double-click for full height).
         tracksHeight = minTracksHeight
-        player.source = filePath !== "" ? "file://" + filePath : ""
+        player.source = filePath !== "" ? recordingLibrary.localFileUrl(filePath) : ""
         if (filePath !== "")
             playAll()
     }
 
     function close() {
         stopAll()
+        fileInfoDialog.close()
         player.source = ""
         filePath = ""
         fileTitle = ""
         fileDate = ""
         trackCount = 0
+        audioProbeId++
+        audioProbePending = false
         mutedTracks = []
         clipMode = false
         clearClipRange()
@@ -470,6 +534,18 @@ Page {
                 font.pixelSize: Theme.fontSizeSmall
                 font.family: "monospace"
             }
+
+            TrophyButton {
+                implicitHeight: 28
+                implicitWidth: 32
+                padding: 0
+                Layout.alignment: Qt.AlignVCenter
+                text: "ⓘ"
+                ToolTip.text: qsTr("File info")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: fileInfoDialog.open()
+            }
         }
 
         VideoPlayer {
@@ -524,15 +600,22 @@ Page {
         // creation: setting it with no open source is ignored.
         Instantiator {
             id: audioPipelines
-            model: playerPage.trackCount
+            model: playerPage.audioLanes
 
             MediaPlayer {
-                source: playerPage.filePath !== "" ? "file://" + playerPage.filePath : ""
+                source: playerPage.filePath !== "" ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
                 autoPlay: false
                 playbackRate: playerPage.playbackRate
                 onMediaStatusChanged: {
-                    if (mediaStatus === MediaPlayer.LoadedMedia)
+                    if (mediaStatus === MediaPlayer.LoadedMedia) {
                         activeAudioTrack = index
+                        // Track discovery now runs asynchronously: a new
+                        // audio pipeline can load after video has started.
+                        // Join its current position/state, not time zero.
+                        position = playerPage.playPosition
+                        if (player.playing)
+                            play()
+                    }
                 }
                 audioOutput: AudioOutput {
                     volume: playerPage.masterVolume
@@ -714,7 +797,7 @@ Page {
                         visible: playerPage.clipMode
                         text: playerPage.clipSaving ? qsTr("Saving…") : qsTr("Snip")
                         baseColor: Theme.accentColor || "#3498db"
-                        enabled: playerPage.clipRangeValid() && !playerPage.clipSaving
+                        enabled: playerPage.clipRangeValid() && !playerPage.clipSaving && !(typeof storageManager !== "undefined" && storageManager !== null && storageManager.maxSize > 0 && storageManager.usedSize > storageManager.maxSize)
                         onClicked: playerPage.snipClip()
                     }
 
@@ -798,14 +881,14 @@ Page {
                 }
 
                 Repeater {
-                    model: playerPage.trackCount
+                    model: playerPage.audioLanes
 
                     WaveLane {
                         Layout.fillWidth: true
                         laneHeight: playerPage.laneHeight
                         filePath: playerPage.filePath
                         trackIndex: index
-                        trackTotal: playerPage.trackCount
+                        trackTotal: playerPage.audioLanes
                         laneMuted: playerPage.mutedTracks.indexOf(index) !== -1
                         playPosition: playerPage.playPosition
                         playDuration: playerPage.playDuration
@@ -834,10 +917,10 @@ Page {
 
                 Label {
                     id: noAudioLabel
-                    text: qsTr("No audio tracks in this file.")
+                    text: playerPage.audioProbePending ? qsTr("Reading audio tracks…") : playerPage.trackCount < 0 ? qsTr("Audio tracks unavailable.") : qsTr("No audio tracks in this file.")
                     color: Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
-                    visible: playerPage.trackCount === 0
+                    visible: playerPage.trackCount <= 0
                 }
             }
         }
@@ -859,6 +942,12 @@ Page {
         property double viewStartMs: 0
         property double viewSpanMs: 0
         property var peaks: []
+        // Set on arrival (even empty) so the spinner stops —
+        // mirrors VideoLane stripDone. The cache emits [] on
+        // failure, so settled-with-empty means no decodable
+        // audio (e.g. an empty voice track), not "still busy".
+        property bool peaksDone: false
+        readonly property bool trackEmpty: peaksDone && peaks.length === 0 && filePath !== ""
         // Track caption (Game/Voice/Mic), resolved once
         // so both header layouts can show it.
         readonly property string headerText: (typeof waveformCache !== "undefined" && waveformCache !== null) ? waveformCache.trackLabel(trackIndex, trackTotal) : ""
@@ -900,6 +989,7 @@ Page {
 
         function refreshPeaks() {
             peaks = []
+            peaksDone = false
             wave.requestPaint()
             if (filePath !== "" && typeof waveformCache !== "undefined" && waveformCache !== null)
                 waveformCache.requestPeaks(filePath, trackIndex)
@@ -925,7 +1015,9 @@ Page {
             function onPeaksReady(readyPath, readyTrack, readyPeaks) {
                 if (readyPath === lane.filePath && readyTrack === lane.trackIndex) {
                     lane.peaks = readyPeaks
+                    lane.peaksDone = true
                     wave.requestPaint()
+                    zebra.requestPaint()
                 }
             }
         }
@@ -1060,12 +1152,61 @@ Page {
 
                 // Still decoding: spinner until the first peaks
                 // arrive (even silence resolves — zeros paint).
+                // Gated on the settled flag so an empty/failed
+                // track stops spinning (see trackEmpty below).
                 BusyIndicator {
                     width: 24
                     height: 24
                     anchors.centerIn: parent
                     running: visible
-                    visible: lane.peaks.length === 0 && lane.filePath !== ""
+                    visible: !lane.peaksDone && lane.filePath !== ""
+                }
+
+                // No decodable audio on this track (settled with
+                // an empty peak list, e.g. an empty voice track):
+                // dimmed like the muted state, with diagonal
+                // zebra striping so it reads as "no signal" rather
+                // than "still loading". Non-visual items only, so
+                // scrub/zoom/pan input still reaches the areas
+                // beneath; the header caption stays intact.
+                Item {
+                    anchors.fill: parent
+                    visible: lane.trackEmpty
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#80000000"
+                    }
+
+                    Canvas {
+                        id: zebra
+                        anchors.fill: parent
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.clearRect(0, 0, width, height)
+                            if (width <= 0 || height <= 0)
+                                return
+                            ctx.strokeStyle = Theme.withOpacity(Theme.textMutedColor, 0.35)
+                            ctx.lineWidth = 1
+                            var step = 10
+                            var d = width + height
+                            for (var s = -height; s < d; s += step) {
+                                ctx.beginPath()
+                                ctx.moveTo(s, 0)
+                                ctx.lineTo(s + height, height)
+                                ctx.stroke()
+                            }
+                        }
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                    }
+
+                    Label {
+                        anchors.centerIn: parent
+                        text: qsTr("No audio")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
                 }
 
                 // Shared playhead: positioned overlay, so the
@@ -1359,7 +1500,7 @@ Page {
                         x: (vlane.viewSpanMs > 0 ? (thumbStart - vlane.viewStartMs) / vlane.viewSpanMs * stripArea.width : 0) + 1
                         width: (vlane.viewSpanMs > 0 ? thumbSpan / vlane.viewSpanMs * stripArea.width : 0) - 2
                         height: stripArea.height
-                        source: "file://" + modelData
+                        source: recordingLibrary.localFileUrl(modelData)
                         fillMode: Image.PreserveAspectCrop
                         visible: vlane.viewSpanMs > 0 && x + width > 0 && x < stripArea.width
                     }
@@ -1506,6 +1647,135 @@ Page {
                             vlane.clipHandleMoved(1, vlane.viewStartMs + px / stripArea.width * vlane.viewSpanMs)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // File info dialog (ⓘ next to the header timer). Rows read the
+    // library entry so probe NOTIFYs refresh them; every row guards a
+    // null entry (unknown file) with a fallback.
+    component InfoRow: RowLayout {
+        property string rowName: ""
+        property string rowValue: ""
+        Layout.fillWidth: true
+        spacing: Theme.spacingMedium
+        Label {
+            text: rowName
+            color: Theme.textSecondaryColor
+            font.pixelSize: Theme.fontSizeSmall
+            Layout.preferredWidth: 110
+        }
+        Label {
+            text: rowValue
+            color: Theme.textColor
+            font.pixelSize: Theme.fontSizeSmall
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+    }
+
+    Dialog {
+        id: fileInfoDialog
+        modal: true
+        anchors.centerIn: parent
+        width: 440
+        padding: 0
+
+        Overlay.modal: Rectangle {
+            color: Theme.withOpacity("#000000", 0.5)
+        }
+
+        background: Rectangle {
+            color: Theme.cardColor
+            radius: Theme.radiusLarge
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingSmall
+
+            Label {
+                text: qsTr("File Info")
+                font.pixelSize: Theme.fontSizeLarge
+                font.weight: Font.Bold
+                color: Theme.textColor
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.spacingLarge
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                spacing: 4
+
+                InfoRow {
+                    rowName: qsTr("File")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.fileName : playerPage.fileTitle
+                }
+                InfoRow {
+                    rowName: qsTr("Type")
+                    rowValue: playerPage.infoRec ? (playerPage.infoRec.isClip ? qsTr("Clip") : qsTr("Recording")) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Game")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.gameName : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Date")
+                    rowValue: playerPage.fileDate !== "" ? playerPage.fileDate : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Duration")
+                    rowValue: playerPage.infoRec ? player.formatTime(playerPage.infoRec.duration * 1000) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Size")
+                    rowValue: playerPage.infoRec ? playerPage.formatInfoSize(playerPage.infoRec.size) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Resolution")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.width > 0 && playerPage.infoRec.height > 0) ? (playerPage.infoRec.width + "×" + playerPage.infoRec.height) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Frame rate")
+                    rowValue: playerPage.infoRec ? playerPage.formatInfoFps(playerPage.infoRec.fps) + (playerPage.infoRec.fps > 0 ? qsTr(" fps") : "") : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Video")
+                    rowValue: playerPage.infoRec ? playerPage.codecDisplayName(playerPage.infoRec.videoCodec) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Encoder")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.encoderName !== "") ? playerPage.infoRec.encoderName : qsTr("Unknown")
+                }
+                InfoRow {
+                    rowName: qsTr("Audio")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.audioTrackCount > 0) ? (playerPage.infoRec.audioTrackCount + " × " + playerPage.codecDisplayName(playerPage.infoRec.audioCodec)) : qsTr("None")
+                }
+                InfoRow {
+                    rowName: qsTr("Recorded with")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.trophyVersion !== "") ? ("Trophy " + playerPage.infoRec.trophyVersion) : qsTr("Unknown version")
+                }
+                InfoRow {
+                    rowName: qsTr("Location")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.directory : "–"
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingLarge
+                Item { Layout.fillWidth: true }
+                TrophyButton {
+                    text: qsTr("Close")
+                    onClicked: fileInfoDialog.close()
                 }
             }
         }

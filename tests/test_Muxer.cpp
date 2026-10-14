@@ -10,6 +10,11 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cerrno>
+#include <atomic>
+#include <future>
+#include <thread>
+#include <sys/stat.h>
 
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
@@ -45,7 +50,80 @@ class MuxerTest : public ::testing::Test {
 protected:
   QTemporaryDir tempDir;
   void SetUp() override { ASSERT_TRUE(tempDir.isValid()); }
+  static void failOutputClose(FFmpegMuxer &muxer) {
+    closeCalls = 0;
+    muxer.m_closeOutput = [](AVIOContext **io) {
+      ++closeCalls;
+      const int result = avio_closep(io);
+      return result < 0 ? result : AVERROR(EIO);
+    };
+  }
+  static void restoreOutputClose(FFmpegMuxer &muxer) {
+    muxer.m_closeOutput = &avio_closep;
+  }
+  inline static int closeCalls = 0;
+  static std::unique_lock<std::mutex> lockIo(FFmpegMuxer &muxer) {
+    return std::unique_lock<std::mutex>(muxer.m_muxerMutex);
+  }
 };
+
+TEST_F(MuxerTest, ByteTelemetryDoesNotWaitForNativeIoLock) {
+  FFmpegMuxer muxer;
+  ASSERT_TRUE(muxer.initialize(tempDir.path() + "/telemetry.mkv"));
+  StreamInfo audio;
+  audio.type = StreamInfo::Type::Audio;
+  audio.codecId = AV_CODEC_ID_PCM_S16LE;
+  audio.sampleRate = 48000;
+  audio.channels = 2;
+  ASSERT_GE(muxer.addStream(audio), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  const auto before = muxer.bytesWritten();
+  ASSERT_GT(before, 0);
+  std::promise<void> held, release;
+  auto heldSignal = held.get_future();
+  auto releaseSignal = release.get_future();
+  std::atomic<bool> released{false};
+  std::thread writer([&] {
+    auto lock = lockIo(muxer);
+    held.set_value();
+    // Deadlock guard only; success asserts lock ownership, not elapsed time.
+    releaseSignal.wait_for(std::chrono::seconds(5));
+    released.store(true);
+  });
+  heldSignal.wait();
+  const auto snapshot = muxer.bytesWritten();
+  const bool completedWhileLocked = !released.load();
+  release.set_value();
+  writer.join();
+  EXPECT_TRUE(completedWhileLocked);
+  EXPECT_EQ(snapshot, before);
+}
+
+TEST_F(MuxerTest, CloseFailureIsRetainedAndByteCountSurvivesClose) {
+  FFmpegMuxer muxer;
+  const QString path = tempDir.path() + "/close-failure.mkv";
+  ASSERT_TRUE(muxer.initialize(path));
+  StreamInfo audio;
+  audio.type = StreamInfo::Type::Audio;
+  audio.codecId = AV_CODEC_ID_PCM_S16LE;
+  audio.sampleRate = 48000;
+  audio.channels = 2;
+  ASSERT_GE(muxer.addStream(audio), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  failOutputClose(muxer);
+  EXPECT_FALSE(muxer.finalize());
+  EXPECT_FALSE(muxer.finalize());
+  EXPECT_EQ(closeCalls, 1);
+  EXPECT_GT(muxer.bytesWritten(), 0);
+  EXPECT_TRUE(QFileInfo::exists(path)); // Preserve partial output for recovery.
+  ASSERT_TRUE(muxer.initialize(tempDir.path() + "/fresh.mkv"));
+  EXPECT_EQ(muxer.bytesWritten(), 0);
+  restoreOutputClose(muxer);
+  ASSERT_GE(muxer.addStream(audio), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  EXPECT_TRUE(muxer.finalize());
+  EXPECT_GT(muxer.bytesWritten(), 0);
+}
 
 static bool haveX264() {
   return avcodec_find_encoder_by_name("libx264") != nullptr;
@@ -346,6 +424,66 @@ TEST_F(MuxerTest, NvencFullChromaWhenAvailable) {
   EXPECT_GT(rStd, 1.0) << "right-half chroma is flat: NVENC upload broken";
 }
 
+TEST_F(MuxerTest, AddStreamAfterHeaderRejected) {
+  // Post-header addStream must fail loudly (-1), not corrupt the trailer:
+  // DVR handoff builds successor legs ahead of time and a late stream
+  // must never sneak into a sealed header. PCM needs no encoder.
+  FFmpegMuxer muxer;
+  ASSERT_TRUE(muxer.initialize(tempDir.path() + "/sealed.mkv"));
+  StreamInfo v;
+  v.type = StreamInfo::Type::Audio;
+  v.codecId = AV_CODEC_ID_PCM_S16LE;
+  v.sampleRate = 48000;
+  v.channels = 2;
+  v.bitrate = 1536;
+  ASSERT_GE(muxer.addStream(v), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  StreamInfo late = v;
+  EXPECT_EQ(muxer.addStream(late), -1);
+  EXPECT_TRUE(muxer.finalize());
+}
+
+TEST_F(MuxerTest, DoubleFinalizeIsSafe) {
+  // Teardown races (DVR rotation + game-close stop) can finalize twice:
+  // the second call must be a no-op success, never a second trailer.
+  FFmpegMuxer muxer;
+  ASSERT_TRUE(muxer.initialize(tempDir.path() + "/twice.mkv"));
+  StreamInfo v;
+  v.type = StreamInfo::Type::Audio;
+  v.codecId = AV_CODEC_ID_PCM_S16LE;
+  v.sampleRate = 48000;
+  v.channels = 2;
+  v.bitrate = 1536;
+  ASSERT_GE(muxer.addStream(v), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  EXPECT_TRUE(muxer.finalize());
+  EXPECT_TRUE(muxer.finalize());
+}
+
+TEST_F(MuxerTest, ReinitAfterPartialFailureSucceeds) {
+  // initialize() is cleanup-first: abandoning a half-built muxer (portal
+  // failure mid-start) and reusing the object must yield a working file,
+  // not state leaked from the first attempt.
+  FFmpegMuxer muxer;
+  ASSERT_TRUE(muxer.initialize(tempDir.path() + "/abandoned.mkv"));
+  EncodedPacket pkt; // pre-header write fails; object now "used"
+  pkt.streamIndex = 0;
+  EXPECT_FALSE(muxer.writePacket(pkt));
+
+  const QString out = tempDir.path() + "/reused.mkv";
+  ASSERT_TRUE(muxer.initialize(out));
+  StreamInfo v;
+  v.type = StreamInfo::Type::Audio;
+  v.codecId = AV_CODEC_ID_PCM_S16LE;
+  v.sampleRate = 48000;
+  v.channels = 2;
+  v.bitrate = 1536;
+  ASSERT_GE(muxer.addStream(v), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  EXPECT_TRUE(muxer.finalize());
+  EXPECT_TRUE(QFileInfo(out).size() > 0);
+}
+
 TEST_F(MuxerTest, BytesWrittenTracksHeaderAndPackets) {
   // Live size readout regression: the muxer byte counter (AVIO position)
   // must grow with the header and every packet, without needing real
@@ -386,4 +524,50 @@ TEST_F(MuxerTest, BytesWrittenTracksHeaderAndPackets) {
   // *below* the on-disk size (the old stat()-based readout's failure).
   EXPECT_GE(muxer.bytesWritten(), QFileInfo(out).size());
   EXPECT_TRUE(muxer.finalize());
+}
+
+TEST_F(MuxerTest, NativeEnospcRemainsFailureAndReinitializeRecovers) {
+  // /dev/full is a character device whose writes return real ENOSPC.
+  // No custom AVIO or injected FFmpeg result is involved, and no file is
+  // created/truncated outside this fixture's temporary directory.
+  struct stat device {};
+  if (stat("/dev/full", &device) != 0 || !S_ISCHR(device.st_mode))
+    GTEST_SKIP() << "/dev/full unavailable";
+  FFmpegMuxer muxer;
+  StreamInfo audio;
+  audio.type = StreamInfo::Type::Audio;
+  audio.codecId = AV_CODEC_ID_PCM_S16LE;
+  audio.sampleRate = 48000;
+  audio.channels = 2;
+  ASSERT_TRUE(muxer.initialize("/dev/full"));
+  ASSERT_EQ(muxer.addStream(audio), 0);
+  // Some FFmpeg versions flush the header immediately, others buffer it.
+  const bool header = muxer.writeHeader();
+  EncodedPacket packet;
+  packet.streamIndex = 0;
+  packet.pts = packet.dts = 0;
+  packet.duration = 20;
+  packet.data.assign(4096, 0);
+  if (header)
+    muxer.writePacket(packet);
+  EXPECT_FALSE(muxer.finalize());
+  EXPECT_FALSE(muxer.finalize()) << "an earlier I/O failure must stay failed";
+  EXPECT_FALSE(muxer.writePacket(packet));
+  EXPECT_FALSE(muxer.writeHeader());
+
+  const QString recovered = tempDir.path() + "/recovered.mkv";
+  ASSERT_TRUE(muxer.initialize(recovered));
+  ASSERT_EQ(muxer.addStream(audio), 0);
+  ASSERT_TRUE(muxer.writeHeader());
+  ASSERT_TRUE(muxer.writePacket(packet));
+  ASSERT_TRUE(muxer.finalize());
+  ASSERT_TRUE(muxer.finalize());
+  EXPECT_FALSE(muxer.writePacket(packet));
+  EXPECT_FALSE(muxer.writeHeader());
+  AVFormatContext *ctx = nullptr;
+  ASSERT_EQ(avformat_open_input(&ctx, recovered.toUtf8().constData(), nullptr,
+                               nullptr), 0);
+  EXPECT_EQ(avformat_find_stream_info(ctx, nullptr), 0);
+  EXPECT_EQ(ctx->nb_streams, 1u);
+  avformat_close_input(&ctx);
 }

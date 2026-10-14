@@ -20,23 +20,37 @@ QString WindowService::getWindowTitle(unsigned long windowId) {
   return fetchWindowTitle(windowId);
 }
 
-QString WindowService::fetchWindowTitle(unsigned long windowId) {
-  if (!m_monitor)
-    return QString();
-  for (const WindowInfo &w : m_monitor->windows()) {
-    if (w.id == windowId)
-      return w.title;
+bool WindowService::findWindow(quint64 id, WindowInfo *out) const {
+  for (const WindowInfo &w : m_lastWindows) {
+    if (w.id == id) {
+      if (out)
+        *out = w;
+      return true;
+    }
   }
+  if (!m_monitor)
+    return false;
+  for (const WindowInfo &w : m_monitor->windows()) {
+    if (w.id == id) {
+      if (out)
+        *out = w;
+      return true;
+    }
+  }
+  return false;
+}
+
+QString WindowService::fetchWindowTitle(unsigned long windowId) {
+  WindowInfo w;
+  if (findWindow(windowId, &w))
+    return w.title;
   return QString();
 }
 
 unsigned long WindowService::getPidForWindow(unsigned long windowId) {
-  if (!m_monitor)
-    return 0;
-  for (const WindowInfo &w : m_monitor->windows()) {
-    if (w.id == windowId && w.pid > 0)
-      return (unsigned long)w.pid;
-  }
+  WindowInfo w;
+  if (findWindow(windowId, &w) && w.pid > 0)
+    return (unsigned long)w.pid;
   return 0;
 }
 
@@ -56,12 +70,9 @@ QString WindowService::getProcessNameForWindow(unsigned long windowId) {
 }
 
 QString WindowService::getWindowClassForWindow(unsigned long windowId) {
-  if (!m_monitor)
-    return QString();
-  for (const WindowInfo &w : m_monitor->windows()) {
-    if (w.id == windowId)
-      return w.appId;
-  }
+  WindowInfo w;
+  if (findWindow(windowId, &w))
+    return w.appId;
   return QString();
 }
 
@@ -69,7 +80,11 @@ QVariantList WindowService::getVisibleWindows() {
   QVariantList out;
   if (!m_monitor)
     return out;
-  for (const WindowInfo &w : m_monitor->windows()) {
+  // Cache the exact snapshot handed out so later id lookups resolve
+  // against these rows even if the compositor pushes a new snapshot
+  // before the caller looks the id up.
+  m_lastWindows = m_monitor->windows();
+  for (const WindowInfo &w : m_lastWindows) {
     QVariantMap m;
     m["id"] = QVariant::fromValue<quint64>(w.id);
     m["title"] = w.title;
