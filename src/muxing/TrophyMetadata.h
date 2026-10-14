@@ -75,6 +75,17 @@ stampTrophyVersionDateTime(QMap<QString, QString> &meta,
   meta[QStringLiteral("trophy-time")] = trophyTimeString(now);
 }
 
+// Which encoder wrote the pixels (canonical EncoderFactory name, e.g.
+// "nvenc_h264" or "x264"). The container codec ("H.264") cannot tell
+// NVENC apart from x264 after the fact; this tag can. Read back by the
+// library probe for the player file-info dialog; clips inherit it via
+// the clipper's metadata copy. Same MP4 caveat as the other tags.
+inline void stampTrophyEncoder(QMap<QString, QString> &meta,
+                               const QString &encoderName) {
+  if (!encoderName.isEmpty())
+    meta[QStringLiteral("trophy-encoder")] = encoderName;
+}
+
 // Full stamp for finished files: kind + version + capture moment.
 // `now` is local time (matches the filename timestamp); creation_time
 // stays a separate UTC ISO string owned by the call sites.

@@ -289,6 +289,83 @@ TEST_F(RecordingTest, HalfTrophyDateTimeFallsBackToCreationTime) {
             QString("2021-05-06_07-08-09"));
 }
 
+// --- stream layout from the same probe pass ---
+
+TEST_F(RecordingTest, ProbeExposesVideoCodecFpsAndResolution) {
+  QString path = makeTitledClip("StreamInfo.mkv", "Deadlock", "recording");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_FALSE(rec.videoCodec().isEmpty());
+  EXPECT_NEAR(rec.fps(), 30.0, 0.5);
+  EXPECT_EQ(rec.width(), 320);
+  EXPECT_EQ(rec.height(), 240);
+  EXPECT_EQ(rec.audioTrackCount(), 0);
+  EXPECT_TRUE(rec.audioCodec().isEmpty());
+}
+
+TEST_F(RecordingTest, ProbeCountsAudioStreamsWithCodec) {
+  if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  const QString path = tempDir.path() + "/WithAudio.mkv";
+  QProcess proc;
+  proc.start("ffmpeg", QStringList{
+                           "-y", "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc=size=320x240:rate=30:duration=1", "-f",
+                           "lavfi", "-i", "sine=frequency=440:duration=1",
+                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+                           path});
+  if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
+      !QFile::exists(path))
+    GTEST_SKIP() << "ffmpeg aac encoding unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.audioTrackCount(), 1);
+  EXPECT_EQ(rec.audioCodec(), "aac");
+  EXPECT_NEAR(rec.fps(), 30.0, 0.5);
+}
+
+// --- trophy-encoder tag (which encoder wrote the pixels) ---
+
+TEST_F(RecordingTest, EncoderTagRoundTripsToDisplayName) {
+  QMap<QString, QString> extra{{"trophy-encoder", "nvenc_h264"}};
+  QString path = makeTitledClip("Encoded.mkv", "Deadlock", "recording", extra);
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_EQ(rec.encoderName(), "NVENC");
+}
+
+TEST_F(RecordingTest, MissingEncoderTagLeavesNameEmpty) {
+  QString path = makeTitledClip("Untagged.mkv", "Deadlock", "recording");
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable";
+  Recording rec(path);
+  rec.loadMetadata();
+  waitForProbe();
+  EXPECT_TRUE(rec.encoderName().isEmpty());
+}
+
+TEST(RecordingEncoderDisplayName, KnownTagsMapToFriendlyNames) {
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_h264"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_hevc"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("nvenc_av1"), "NVENC");
+  EXPECT_EQ(Recording::encoderDisplayName("vaapi_h264"), "VA-API");
+  EXPECT_EQ(Recording::encoderDisplayName("vaapi_av1"), "VA-API");
+  EXPECT_EQ(Recording::encoderDisplayName("x264"), "x264");
+  EXPECT_EQ(Recording::encoderDisplayName("NVENC_H264"), "NVENC");
+}
+
+TEST(RecordingEncoderDisplayName, UnknownTagsPassThroughRaw) {
+  EXPECT_EQ(Recording::encoderDisplayName("quicksync_h264"), "quicksync_h264");
+  EXPECT_EQ(Recording::encoderDisplayName(""), "");
+}
+
 // --- TrophyMetadata helpers (no ffmpeg needed) ---
 
 TEST(TrophyMetadataHelpers, DateTimeRoundTrip) {
@@ -316,6 +393,15 @@ TEST(TrophyMetadataHelpers, DateTimeRejectsGarbage) {
 
 TEST(TrophyMetadataHelpers, VersionIsNeverEmpty) {
   EXPECT_FALSE(trophyVersion().isEmpty());
+}
+
+TEST(TrophyMetadataHelpers, EncoderTagStampedAndSkippedWhenEmpty) {
+  QMap<QString, QString> meta;
+  stampTrophyEncoder(meta, "nvenc_h264");
+  EXPECT_EQ(meta.value("trophy-encoder"), "nvenc_h264");
+  stampTrophyEncoder(meta, "");
+  EXPECT_EQ(meta.value("trophy-encoder"), "nvenc_h264");
+  EXPECT_EQ(meta.size(), 1);
 }
 
 // --- Thumbnail path ---

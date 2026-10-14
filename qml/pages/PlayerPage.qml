@@ -20,6 +20,45 @@ Page {
     property string fileTitle: ""
     property string fileDate: ""
 
+    // Library entry for the open file (null when unknown): drives the
+    // file-info dialog. Reactive on filePath; the entry's own NOTIFYs
+    // refresh rows as the background probe lands.
+    readonly property var infoRec: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.getRecording(filePath) : null
+
+    function formatInfoSize(bytes) {
+        if (!bytes)
+            return "0 B"
+        var kb = 1024
+        var mb = kb * 1024
+        var gb = mb * 1024
+        if (bytes >= gb)
+            return (bytes / gb).toFixed(1) + " GB"
+        if (bytes >= mb)
+            return (bytes / mb).toFixed(0) + " MB"
+        if (bytes >= kb)
+            return (bytes / kb).toFixed(0) + " KB"
+        return bytes + " B"
+    }
+
+    function formatInfoFps(fps) {
+        if (!(fps > 0))
+            return "–"
+        var rounded = Math.round(fps)
+        return Math.abs(fps - rounded) < 0.005 ? rounded.toString() : fps.toFixed(2)
+    }
+
+    function codecDisplayName(codec) {
+        if (!codec)
+            return "–"
+        var names = {
+            "h264": "H.264", "hevc": "H.265", "av1": "AV1",
+            "mpeg4": "MPEG-4", "vp9": "VP9",
+            "aac": "AAC", "opus": "Opus", "mp3": "MP3",
+            "flac": "FLAC", "pcm_s16le": "PCM", "vorbis": "Vorbis"
+        }
+        return names[codec.toLowerCase()] || codec
+    }
+
     // Audio stream count (-1 = unavailable or pending, 0 = no audio).
     // Delivered asynchronously; lanes rebuild only for the current open.
     property int trackCount: 0
@@ -254,6 +293,7 @@ Page {
 
     function close() {
         stopAll()
+        fileInfoDialog.close()
         player.source = ""
         filePath = ""
         fileTitle = ""
@@ -493,6 +533,18 @@ Page {
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
                 font.family: "monospace"
+            }
+
+            TrophyButton {
+                implicitHeight: 28
+                implicitWidth: 32
+                padding: 0
+                Layout.alignment: Qt.AlignVCenter
+                text: "ⓘ"
+                ToolTip.text: qsTr("File info")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
+                onClicked: fileInfoDialog.open()
             }
         }
 
@@ -1595,6 +1647,135 @@ Page {
                             vlane.clipHandleMoved(1, vlane.viewStartMs + px / stripArea.width * vlane.viewSpanMs)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // File info dialog (ⓘ next to the header timer). Rows read the
+    // library entry so probe NOTIFYs refresh them; every row guards a
+    // null entry (unknown file) with a fallback.
+    component InfoRow: RowLayout {
+        property string rowName: ""
+        property string rowValue: ""
+        Layout.fillWidth: true
+        spacing: Theme.spacingMedium
+        Label {
+            text: rowName
+            color: Theme.textSecondaryColor
+            font.pixelSize: Theme.fontSizeSmall
+            Layout.preferredWidth: 110
+        }
+        Label {
+            text: rowValue
+            color: Theme.textColor
+            font.pixelSize: Theme.fontSizeSmall
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+    }
+
+    Dialog {
+        id: fileInfoDialog
+        modal: true
+        anchors.centerIn: parent
+        width: 440
+        padding: 0
+
+        Overlay.modal: Rectangle {
+            color: Theme.withOpacity("#000000", 0.5)
+        }
+
+        background: Rectangle {
+            color: Theme.cardColor
+            radius: Theme.radiusLarge
+            border.color: Theme.borderColor
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: Theme.spacingSmall
+
+            Label {
+                text: qsTr("File Info")
+                font.pixelSize: Theme.fontSizeLarge
+                font.weight: Font.Bold
+                color: Theme.textColor
+                Layout.fillWidth: true
+                Layout.topMargin: Theme.spacingLarge
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                spacing: 4
+
+                InfoRow {
+                    rowName: qsTr("File")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.fileName : playerPage.fileTitle
+                }
+                InfoRow {
+                    rowName: qsTr("Type")
+                    rowValue: playerPage.infoRec ? (playerPage.infoRec.isClip ? qsTr("Clip") : qsTr("Recording")) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Game")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.gameName : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Date")
+                    rowValue: playerPage.fileDate !== "" ? playerPage.fileDate : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Duration")
+                    rowValue: playerPage.infoRec ? player.formatTime(playerPage.infoRec.duration * 1000) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Size")
+                    rowValue: playerPage.infoRec ? playerPage.formatInfoSize(playerPage.infoRec.size) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Resolution")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.width > 0 && playerPage.infoRec.height > 0) ? (playerPage.infoRec.width + "×" + playerPage.infoRec.height) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Frame rate")
+                    rowValue: playerPage.infoRec ? playerPage.formatInfoFps(playerPage.infoRec.fps) + (playerPage.infoRec.fps > 0 ? qsTr(" fps") : "") : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Video")
+                    rowValue: playerPage.infoRec ? playerPage.codecDisplayName(playerPage.infoRec.videoCodec) : "–"
+                }
+                InfoRow {
+                    rowName: qsTr("Encoder")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.encoderName !== "") ? playerPage.infoRec.encoderName : qsTr("Unknown")
+                }
+                InfoRow {
+                    rowName: qsTr("Audio")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.audioTrackCount > 0) ? (playerPage.infoRec.audioTrackCount + " × " + playerPage.codecDisplayName(playerPage.infoRec.audioCodec)) : qsTr("None")
+                }
+                InfoRow {
+                    rowName: qsTr("Recorded with")
+                    rowValue: (playerPage.infoRec && playerPage.infoRec.trophyVersion !== "") ? ("Trophy " + playerPage.infoRec.trophyVersion) : qsTr("Unknown version")
+                }
+                InfoRow {
+                    rowName: qsTr("Location")
+                    rowValue: playerPage.infoRec ? playerPage.infoRec.directory : "–"
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingLarge
+                Item { Layout.fillWidth: true }
+                TrophyButton {
+                    text: qsTr("Close")
+                    onClicked: fileInfoDialog.close()
                 }
             }
         }

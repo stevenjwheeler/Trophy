@@ -814,6 +814,8 @@ bool RecordingManager::buildPipeline() {
   // renames (unlike the _Replay filename suffix and timestamp), so cards
   // and the activity feed never depend on the filename.
   stampTrophyTags(outputMetadata, QStringLiteral("recording"));
+  if (m_videoEncoder)
+    stampTrophyEncoder(outputMetadata, m_videoEncoder->name());
 
   // Create recording session to coordinate everything.
   // Desktop mode always records one merged track (system + mic): the

@@ -19,6 +19,8 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavcodec/codec_desc.h>
+#include <libavutil/rational.h>
 }
 
 namespace TrophyBackend {
@@ -59,7 +61,8 @@ void Recording::loadMetadata() {
     m_probeFuture.waitForFinished();
   parseFileNameForGameName();
   const quint64 generation = ++m_probeGeneration;
-  const ProbeResult initial{m_gameName, m_date, 0, 0, 0, m_isClip, {}};
+  const ProbeResult initial{m_gameName, m_date, 0,      0, 0,
+                              m_isClip,      {},        {}, 0.0, 0, {}, {}};
   const QString path = m_filePath;
   const bool preferFileNameTitle = m_preferFileNameTitle;
 
@@ -114,6 +117,25 @@ void Recording::parseFileNameForGameName() {
   if (m_gameName == "Recording") {
     m_gameName = QObject::tr("Unknown Game");
   }
+}
+
+QString Recording::encoderDisplayName(const QString &tag) {
+  // Family prefixes, not an entry per codec: any current or future
+  // "<family>_<codec>" variant (nvenc_hevc, vaapi_av1, ...) resolves
+  // without touching this table.
+  const QString key = tag.trimmed().toLower();
+  if (key.startsWith(QStringLiteral("nvenc")))
+    return QStringLiteral("NVENC");
+  if (key.startsWith(QStringLiteral("vaapi")) ||
+      key.startsWith(QStringLiteral("va-api")))
+    return QStringLiteral("VA-API");
+  if (key == QStringLiteral("x264"))
+    return QStringLiteral("x264");
+  if (key == QStringLiteral("x265"))
+    return QStringLiteral("x265");
+  if (key == QStringLiteral("software"))
+    return QStringLiteral("Software");
+  return tag;
 }
 
 Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
@@ -182,6 +204,15 @@ Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
               .compare(QStringLiteral("clip"), Qt::CaseInsensitive) == 0;
     }
 
+    // Which encoder wrote the pixels (canonical name stamped at record
+    // time). Display mapping happens in encoderDisplayName; absence
+    // keeps the field empty so the dialog falls back to codec only.
+    tag = av_dict_get(formatCtx->metadata, "trophy-encoder", nullptr, 0);
+    if (tag && tag->value) {
+      result.encoderName =
+          encoderDisplayName(QString::fromUtf8(tag->value).trimmed());
+    }
+
     // Recorder version is informational only; older files predate it.
     tag = av_dict_get(formatCtx->metadata, "trophy-version", nullptr, 0);
     if (tag && tag->value) {
@@ -211,7 +242,35 @@ Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       result.width = stream->codecpar->width;
       result.height = stream->codecpar->height;
+      // Codec descriptor name ("h264", "hevc", "av1", ...): display
+      // mapping happens in QML; empty when the codec id is unknown.
+      if (const AVCodecDescriptor *desc =
+              avcodec_descriptor_get(stream->codecpar->codec_id)) {
+        result.videoCodec = QString::fromLatin1(desc->name);
+      }
+      // Measured frame rate, preferring the container average and
+      // falling back to the real-base rate (either can be 0/0).
+      AVRational rate = stream->avg_frame_rate;
+      if (rate.num <= 0 || rate.den <= 0)
+        rate = stream->r_frame_rate;
+      if (rate.num > 0 && rate.den > 0)
+        result.fps = av_q2d(rate);
       break;
+    }
+  }
+
+  // Audio layout: stream count plus the first audio codec's name. Same
+  // header-only read, no extra demux cost.
+  for (unsigned int i = 0; i < formatCtx->nb_streams; i++) {
+    AVStream *stream = formatCtx->streams[i];
+    if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+      ++result.audioTrackCount;
+      if (result.audioCodec.isEmpty()) {
+        if (const AVCodecDescriptor *desc =
+                avcodec_descriptor_get(stream->codecpar->codec_id)) {
+          result.audioCodec = QString::fromLatin1(desc->name);
+        }
+      }
     }
   }
 
@@ -241,6 +300,11 @@ void Recording::applyProbeResult(const ProbeResult &result) {
   m_height = result.height;
   m_isClip = result.isClip;
   m_trophyVersion = result.trophyVersion;
+  m_videoCodec = result.videoCodec;
+  m_fps = result.fps;
+  m_audioTrackCount = result.audioTrackCount;
+  m_audioCodec = result.audioCodec;
+  m_encoderName = result.encoderName;
   emit metadataChanged();
 }
 

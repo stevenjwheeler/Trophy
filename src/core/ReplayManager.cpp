@@ -405,6 +405,8 @@ bool ReplayManager::switchSegment() {
   // Segment start moment (+ recorder version): the clipper inherits these
   // via av_dict_copy, then overwrites them with its own save moment.
   stampTrophyVersionDateTime(meta);
+  if (newEncoder)
+    stampTrophyEncoder(meta, newEncoder->name());
 
   // Audio node lookup; the running PipeWire sources are recreated only
   // when the audio configuration changed (or on the very first segment).

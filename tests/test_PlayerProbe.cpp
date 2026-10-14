@@ -30,6 +30,9 @@ public:
   // Keep pipelines idle: this suite tests the page's probe lifecycle, not
   // decoding, and never passes the fake file paths to FFmpeg.
   Q_INVOKABLE QUrl localFileUrl(const QString &) const { return {}; }
+  // The file-info dialog looks the open path up in the library; unknown
+  // here, so its rows fall back to path-derived text.
+  Q_INVOKABLE QObject *getRecording(const QString &) const { return nullptr; }
 signals:
   void clipSaved(const QString &path, const QString &game, double seconds);
   void clipSaveFailed(const QString &reason);
