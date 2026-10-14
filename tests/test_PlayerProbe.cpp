@@ -146,6 +146,12 @@ TEST_F(PlayerProbeTest, DiscoveredTracksGrowCardFloorAndKeepLargerHeight) {
   page->setProperty("tracksHeight", floor + 50);
   emit waveform.audioTrackCountReady("/fake/tracks.mkv", requestId(), 3);
   EXPECT_DOUBLE_EQ(page->property("tracksHeight").toDouble(), floor + 50);
+  // End with the player closed like every sibling: tearing down live
+  // pipelines with the page (instead of stopping them first) crashes
+  // on machines without a working audio backend.
+  close();
+  EXPECT_TRUE(page->property("filePath").toString().isEmpty());
+  EXPECT_EQ(count(), 0);
 }
 
 TEST(AudioLevelMeterTest, PollingDoesNotEmitMuteIntentButUserToggleDoes) {
