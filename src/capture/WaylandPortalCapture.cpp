@@ -296,6 +296,34 @@ WaylandPortalCapture::WaylandPortalCapture(QObject *parent)
   m_startWatchdog.setInterval(20000);
   connect(&m_startWatchdog, &QTimer::timeout, this,
           &WaylandPortalCapture::onStartWatchdogTimeout);
+  ensureResponseSubscription();
+}
+
+void WaylandPortalCapture::ensureResponseSubscription() {
+  if (m_responseSubscribed)
+    return;
+  // Subscribe once, with no path filter, BEFORE any portal method call:
+  // the bus daemon only delivers signals to match rules registered
+  // before emission, and the portal answers CreateSession in ~3 ms
+  // (measured live) — a connect-after-reply issued while the GUI thread
+  // is busy registers too late and the success Response is lost, hanging
+  // every start at "Session creation requested..." until the watchdog.
+  // Dispatch stays path-keyed: every Response slot drops anything whose
+  // path is not the current m_pendingRequestPath, and generation checks
+  // reject stale attempts, so one process-wide-style subscription is
+  // safe across retries, handoffs and concurrent captures.
+  QDBusConnection bus = QDBusConnection::sessionBus();
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onSessionCreated(unsigned int, QVariantMap)));
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onSourcesSelected(unsigned int, QVariantMap)));
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Request", "Response", this,
+              SLOT(onStartResponse(unsigned int, QVariantMap)));
+  m_responseSubscribed = true;
+  m_responseSubscribed = true;
 }
 
 WaylandPortalCapture::~WaylandPortalCapture() {
@@ -379,17 +407,12 @@ void WaylandPortalCapture::clearStartGuard() {
   // (the bool alone can't tell them apart).
   ++m_startGeneration;
   m_startWatchdog.stop();
-  if (!m_pendingRequestPath.isEmpty()) {
-    QDBusConnection bus = QDBusConnection::sessionBus();
-    for (const char *slot : {
-             SLOT(onSessionCreated(unsigned int, QVariantMap)),
-             SLOT(onSourcesSelected(unsigned int, QVariantMap)),
-             SLOT(onStartResponse(unsigned int, QVariantMap))}) {
-      bus.disconnect("org.freedesktop.portal.Desktop", m_pendingRequestPath,
-                     "org.freedesktop.portal.Request", "Response", this, slot);
-    }
-    m_pendingRequestPath.clear();
-  }
+  // No per-request disconnect: the Response subscription is permanent
+  // (see ensureResponseSubscription) and every Response slot keys off
+  // the pending path + stage + generation, so stale signals from older
+  // attempts are dropped without touching the shared subscription.
+  m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
 }
 
 void WaylandPortalCapture::onStartWatchdogTimeout() {
@@ -532,24 +555,21 @@ void WaylandPortalCapture::onCreateSessionCallFinished(
     return;
   }
 
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSessionCreated(unsigned int, QVariantMap)));
-
+  // No per-reply connect: the permanent subscription from
+  // ensureResponseSubscription() already covers this path. Just publish
+  // the dispatch key the Response slot matches on.
   m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Create;
 }
 
 void WaylandPortalCapture::onSessionCreated(unsigned int response,
                                              const QVariantMap &results) {
   if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Create ||
       message().path() != m_pendingRequestPath)
     return;
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSessionCreated(unsigned int, QVariantMap)));
   m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
 
   if (!m_starting || m_attemptGeneration != m_startGeneration)
     return; // Stale response after timeout/cancel; session already dropped.
@@ -641,23 +661,20 @@ void WaylandPortalCapture::onSelectSourcesCallFinished(
     return;
   }
 
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSourcesSelected(unsigned int, QVariantMap)));
+  // Permanent subscription already covers this path (see
+  // ensureResponseSubscription); publish the dispatch key only.
   m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Select;
 }
 
 void WaylandPortalCapture::onSourcesSelected(unsigned int response,
                                               const QVariantMap &results) {
   if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Select ||
       message().path() != m_pendingRequestPath)
     return;
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onSourcesSelected(unsigned int, QVariantMap)));
   m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
 
   if (!m_starting || m_attemptGeneration != m_startGeneration)
     return; // Stale response after timeout/cancel; session already dropped.
@@ -728,23 +745,20 @@ void WaylandPortalCapture::onStartCallFinished(
     return;
   }
 
-  QDBusConnection::sessionBus().connect(
-      "org.freedesktop.portal.Desktop", requestPath.path(),
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onStartResponse(unsigned int, QVariantMap)));
+  // Permanent subscription already covers this path (see
+  // ensureResponseSubscription); publish the dispatch key only.
   m_pendingRequestPath = requestPath.path();
+  m_pendingStage = PendingStage::Start;
 }
 
 void WaylandPortalCapture::onStartResponse(unsigned int response,
                                             const QVariantMap &results) {
   if (!m_starting || !calledFromDBus() ||
+      m_pendingStage != PendingStage::Start ||
       message().path() != m_pendingRequestPath)
     return;
-  QDBusConnection::sessionBus().disconnect(
-      "org.freedesktop.portal.Desktop", m_pendingRequestPath,
-      "org.freedesktop.portal.Request", "Response", this,
-      SLOT(onStartResponse(unsigned int, QVariantMap)));
   m_pendingRequestPath.clear();
+  m_pendingStage = PendingStage::None;
 
   if (!m_starting || m_attemptGeneration != m_startGeneration)
     return; // Stale response after timeout/cancel; session already dropped.

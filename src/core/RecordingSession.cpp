@@ -1025,7 +1025,7 @@ void RecordingSession::checkForNewAudioNodes() {
   if (m_gamePid != 0 || !m_gameHints.isEmpty())
     reconcileAppTrack(0, m_gamePid, m_gameHints, &m_gameIsFallback);
 
-  if (!m_voiceChatApp.isEmpty()) {
+  if (!m_voiceChatApp.isEmpty() && !m_gameIsFallback) {
     if (m_voiceTrack >= 0 && m_voiceTrack < kAudioTrackCount) {
       // Reserved slot (separate mode always reserves it at build).
       reconcileAppTrack(m_voiceTrack, 0, {m_voiceChatApp}, nullptr);
@@ -1046,6 +1046,17 @@ void RecordingSession::checkForNewAudioNodes() {
       }
     }
     // (merged + unslotted + absent: skip — binding there would evict mic)
+    m_voiceFallbackNoteArmed = true;
+  } else if (m_gameIsFallback && !m_voiceChatApp.isEmpty() &&
+             m_voiceFallbackNoteArmed) {
+    // Track 0 is the whole-system monitor: it already carries voice, so
+    // a separate voice leg would record every call twice (once in each
+    // track). Keep voice unbound (silence) until the game track upgrades
+    // past fallback to a real app node.
+    m_voiceFallbackNoteArmed = false;
+    qDebug() << "Voice chat capture suppressed while game audio is "
+                "full-mix fallback (voice is already in the mix):"
+             << m_voiceChatApp;
   }
 
   // The timer intentionally runs for the whole session: app streams churn

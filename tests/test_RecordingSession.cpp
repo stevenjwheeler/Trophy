@@ -91,6 +91,9 @@ public:
   static bool lookupPending(RecordingSession &session) {
     return session.m_audioLookups[0].worker.valid();
   }
+  static bool lookupPendingTrack(RecordingSession &session, int track) {
+    return session.m_audioLookups[track].worker.valid();
+  }
   static bool connected(RecordingSession &session) {
     return session.m_sourceConnected[0];
   }
@@ -899,6 +902,33 @@ TEST(RecordingSessionTest, IdleChecksNeverRestartFailedDesktopOrMicrophone) {
   RecordingSessionTestPeer::checkNodes(session);
   EXPECT_EQ(raw->starts(), 3);
   EXPECT_FALSE(raw->isCapturing());
+}
+
+TEST(RecordingSessionTest, VoiceBindSuppressedWhileGameTrackIsFullMixFallback) {
+  // Manual recordings leave track 0 on the whole-system monitor, which
+  // already carries voice: binding a separate voice leg records every
+  // call twice (once per track). The retry must not hunt voice while
+  // fallback holds, and must resume once the game track upgrades to a
+  // real app node.
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  AudioMixer mixer(48000, 2);
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                           &mixer, true, 128, 3, {});
+  int calls = 0;
+  RecordingSessionTestPeer::setLookup(session, [&] { ++calls; return 23u; });
+  session.setVoiceChatApp("Discord");
+  session.setVoiceTrack(1);
+  session.setGameIsFallback(true);
+  ASSERT_TRUE(session.start());
+  RecordingSessionTestPeer::checkNodes(session);
+  EXPECT_FALSE(RecordingSessionTestPeer::lookupPendingTrack(session, 1));
+  EXPECT_EQ(calls, 0);
+  session.setGameIsFallback(false);
+  RecordingSessionTestPeer::checkNodes(session);
+  EXPECT_TRUE(RecordingSessionTestPeer::lookupPendingTrack(session, 1));
+  session.stop();
 }
 
 TEST(RecordingSessionTest, HeldLookupKeepsHeartbeatAndCannotAdoptOldIdentity) {

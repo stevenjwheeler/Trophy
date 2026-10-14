@@ -278,6 +278,10 @@ private:
   // Session wall start (steady clock).
   int64_t m_sessionStartMs = -1;
   bool m_gameIsFallback = false;
+  // One-shot note when voice capture is suppressed by full-mix fallback
+  // (see checkForNewAudioNodes); re-arms if the game track ever leaves
+  // fallback so a later suppression is still visible in the log.
+  bool m_voiceFallbackNoteArmed = true;
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };
 

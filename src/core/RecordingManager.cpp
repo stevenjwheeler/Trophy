@@ -744,13 +744,18 @@ bool RecordingManager::buildPipeline() {
 
       // === Voice chat (track 1 in separate; next contiguous slot in merged)
       // ===
+      // Suppressed while track 0 is full-mix fallback: the monitor
+      // already carries voice, so a separate leg would double it. The
+      // slot is still reserved in separate mode (the session retry binds
+      // it once the game track upgrades past fallback); merged mode
+      // leaves it unadopted so no hole stalls the mix gate.
       vcApp = m_preparedAudio.voiceApp;
       voiceTrack = -1;
       if (!vcApp.isEmpty()) {
         const QString vcNodeName = m_preparedAudio.voiceNodeName;
         const QString vcSerial = m_preparedAudio.voiceSerial;
         const uint32_t nodeId = m_preparedAudio.voiceNode;
-        if (nodeId != 0xFFFFFFFF) {
+        if (nodeId != 0xFFFFFFFF && !gameIsFallback) {
           voiceTrack = isSeparate ? 1 : nextContiguous++;
           auto voiceSrc = PipeWireAudioSource::createApplicationSource(
               nodeId, vcNodeName, vcSerial);
@@ -759,8 +764,15 @@ bool RecordingManager::buildPipeline() {
           activeSources++;
           vcSourceAdded = true;
         } else {
-          qDebug() << "No PipeWire node for voice chat app:" << vcApp
-                   << "- retry will bind it when the stream appears";
+          if (gameIsFallback) {
+            qDebug() << "Voice chat capture suppressed while game audio "
+                        "is full-mix fallback (voice is already in the "
+                        "mix):"
+                     << vcApp;
+          } else {
+            qDebug() << "No PipeWire node for voice chat app:" << vcApp
+                     << "- retry will bind it when the stream appears";
+          }
           // Separate mode reserves the slot so the retry has somewhere to
           // bind. Merged mode can't reserve (an empty slot would stall the
           // mix gate), so the retry skips voice instead of clobbering mic.

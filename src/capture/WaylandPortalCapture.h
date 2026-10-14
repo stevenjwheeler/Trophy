@@ -99,6 +99,20 @@ private:
   // Used to retry once without it if the portal rejects the token.
   bool m_restoreTokenUsed = false;
   QString m_pendingRequestPath;
+  // Which portal leg the pending request belongs to. All three Response
+  // slots share one permanent subscription (see
+  // ensureResponseSubscription), so the request path alone cannot route
+  // a signal: at create time the pending path IS the create path and
+  // every slot's path check would pass. The stage picks the single
+  // owning slot; the others drop without touching shared state.
+  enum class PendingStage { None, Create, Select, Start };
+  PendingStage m_pendingStage = PendingStage::None;
+  // Permanent portal Request/Response subscription (see
+  // ensureResponseSubscription): the daemon-side match rule must exist
+  // before any method call goes out, otherwise a fast Response can
+  // arrive before a per-reply connect() registers and is lost forever.
+  bool m_responseSubscribed = false;
+  void ensureResponseSubscription();
 
   pw_thread_loop *m_pw_loop = nullptr;
   pw_context *m_pw_context = nullptr;

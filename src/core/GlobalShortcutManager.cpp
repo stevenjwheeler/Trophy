@@ -50,20 +50,6 @@ QDBusMessage portalCall(const QString &method, const QVariantList &arguments) {
   message.setArguments(arguments);
   return message;
 }
-
-void connectRequest(const QString &requestPath, QObject *receiver,
-                    const char *slot) {
-  QDBusConnection::sessionBus().connect(
-      QString::fromLatin1(kService), requestPath,
-      QString::fromLatin1(kRequestInterface), "Response", receiver, slot);
-}
-
-void disconnectRequest(const QString &requestPath, QObject *receiver,
-                       const char *slot) {
-  QDBusConnection::sessionBus().disconnect(
-      QString::fromLatin1(kService), requestPath,
-      QString::fromLatin1(kRequestInterface), "Response", receiver, slot);
-}
 } // namespace
 
 GlobalShortcutManager::GlobalShortcutManager(QObject *parent)
@@ -89,6 +75,7 @@ GlobalShortcutManager::GlobalShortcutManager(QObject *parent)
     queryAvailability();
   });
   queryAvailability();
+  ensureResponseSubscription();
 }
 
 bool GlobalShortcutManager::isAvailable() const {
@@ -158,14 +145,30 @@ quint64 GlobalShortcutManager::beginRequest(bool binding) {
   return generation;
 }
 
+void GlobalShortcutManager::ensureResponseSubscription() {
+  if (m_responseSubscribed)
+    return;
+  // Same race as the ScreenCast flow: the portal can emit Response
+  // within milliseconds of the method reply, before a connect issued
+  // after the reply registers its daemon-side match rule. Subscribe
+  // once with no path filter; both Response slots key off
+  // m_pendingRequestPath and the request generation.
+  QDBusConnection::sessionBus().connect(
+      QString::fromLatin1(kService), QString(),
+      QString::fromLatin1(kRequestInterface), "Response", this,
+      SLOT(onSessionResponse(unsigned int, QVariantMap, QDBusMessage)));
+  QDBusConnection::sessionBus().connect(
+      QString::fromLatin1(kService), QString(),
+      QString::fromLatin1(kRequestInterface), "Response", this,
+      SLOT(onBindResponse(unsigned int, QVariantMap, QDBusMessage)));
+  m_responseSubscribed = true;
+}
+
 void GlobalShortcutManager::clearRequest() {
   m_requestTimeout.stop();
-  if (!m_pendingRequestPath.isEmpty()) {
-    disconnectRequest(m_pendingRequestPath, this,
-                      SLOT(onSessionResponse(unsigned int, QVariantMap, QDBusMessage)));
-    disconnectRequest(m_pendingRequestPath, this,
-                      SLOT(onBindResponse(unsigned int, QVariantMap, QDBusMessage)));
-  }
+  // No per-request disconnect: the Response subscription is permanent
+  // (see ensureResponseSubscription) and both slots ignore anything
+  // that is not the current pending path/generation.
   m_pendingRequestPath.clear();
   m_requestInFlight = false;
   m_bindingRequest = false;
@@ -189,9 +192,9 @@ void GlobalShortcutManager::watchRequest(const QDBusPendingCall &call,
       retireUnboundSession();
       return;
     }
-    connectRequest(requestPath, this,
-                   binding ? SLOT(onBindResponse(unsigned int, QVariantMap, QDBusMessage))
-                           : SLOT(onSessionResponse(unsigned int, QVariantMap, QDBusMessage)));
+    // No per-reply connect: the permanent subscription from
+    // ensureResponseSubscription() already covers this path. Just
+    // publish the dispatch key the Response slot matches on.
     m_pendingRequestPath = requestPath;
     setAvailable(true); // A valid method reply proves interface support too.
     // Do not restart the timer: method wait and Response share one budget.

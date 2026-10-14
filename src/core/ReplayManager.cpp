@@ -732,7 +732,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
     trackCount++;
   }
   if (!vcApp.isEmpty()) {
-    if (lookup.voiceNodeId != 0xFFFFFFFFu) {
+    if (lookup.voiceNodeId != 0xFFFFFFFFu && gameFound) {
       voiceTrack = isSeparate ? 1 : nextContiguous++;
       if (createSources) {
         auto voiceSrc = PipeWireAudioSource::createApplicationSource(
@@ -743,10 +743,20 @@ void ReplayManager::setupAudioSources(int &trackCount,
       }
       trackCount++;
       voiceFound = true;
-    } else if (isSeparate) {
-      // Separate mode reserves the named slot. Merged mode adopts a free
-      // slot only when voice appears, preserving its current mic assignment.
-      voiceTrack = 1;
+    } else {
+      // Suppressed while track 0 is full-mix fallback (see
+      // RecordingManager): the monitor already carries voice. Reserve
+      // the named slot in separate mode so the session retry can bind
+      // it once the game track upgrades; merged mode adopts a free slot
+      // only when voice appears, preserving its mic assignment.
+      if (!gameFound && lookup.voiceNodeId != 0xFFFFFFFFu) {
+        qDebug() << "DVR voice chat capture suppressed while game audio "
+                    "is full-mix fallback (voice is already in the mix):"
+                 << vcApp;
+      }
+      if (isSeparate) {
+        voiceTrack = 1;
+      }
     }
   }
   if (createSources) {

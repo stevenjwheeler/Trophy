@@ -140,9 +140,15 @@ private:
   void watchRequest(const QDBusPendingCall &call, quint64 generation,
                      bool binding);
   void queryAvailability();
+  void ensureResponseSubscription();
 
   QString m_sessionHandle;
   QString m_pendingRequestPath;
+  // Permanent portal Request/Response subscription: the daemon-side
+  // match rule must exist before any method call goes out (see
+  // ensureResponseSubscription). Both Response slots already drop
+  // anything whose path is not the current m_pendingRequestPath.
+  bool m_responseSubscribed = false;
   quint64 m_requestGeneration = 0;
   bool m_requestInFlight = false;
   bool m_bindingRequest = false;

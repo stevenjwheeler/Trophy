@@ -219,7 +219,37 @@ void StorageManager::notifyLimitCannotCleanup(bool force) {
 }
 
 bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
+  if (m_enforceInFlight) {
+    qWarning() << "enforceStorageLimit re-entered while a pass is in flight; "
+                  "skipping overlapping pass";
+    return isOverLimit();
+  }
+  m_enforceInFlight = true;
   refresh();
+  const qint64 entrySize = m_usedSize;
+  // Every return below must clear the re-entrancy guard.
+  const auto clearGuard = [this]() { m_enforceInFlight = false; };
+
+  if (m_maxSize <= 0) {
+    // A non-positive max size means "no limit"; do not delete recordings.
+    clearGuard();
+    return true;
+  }
+
+  if (!m_autoDeleteOldest && !allowDelete) {
+    if (m_usedSize > m_maxSize) {
+      notifyLimitCannotCleanup(forceNotify);
+      clearGuard();
+      return false;
+    }
+    clearGuard();
+    return true;
+  }
+
+  if (m_usedSize <= m_maxSize) {
+    clearGuard();
+    return true;
+  }
 
   if (m_maxSize <= 0) {
     // A non-positive max size means "no limit"; do not delete recordings.
@@ -254,6 +284,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
   };
 
   qint64 runningSize = m_usedSize;
+  qint64 accountedDeletedBytes = 0;
   QSet<QString> deletedPaths;
   bool deleteFailed = false;
   for (const SnapshotEntry &entry : snapshot) {
@@ -268,15 +299,24 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
     if (!fresh.exists()) {
       continue;
     }
+    // Both the human-readable and the exact byte counts are logged: a
+    // stuck/rounded display once hid a runaway pass that deleted the
+    // whole library, so the bytes must always be auditable here.
     qDebug() << "Storage limit exceeded:" << formatSize(runningSize) << "/"
-             << formatSize(m_maxSize);
-    qDebug() << "Auto-deleting oldest recording:" << entry.path;
+             << formatSize(m_maxSize) << "(" << runningSize << "/"
+             << m_maxSize << "bytes)";
+    qDebug() << "Auto-deleting oldest recording:" << entry.path
+             << "size:" << fresh.size() << "bytes";
     if (!deleteRecordingNoRefresh(entry.path)) {
       deleteFailed = true;
       break;
     }
     deletedPaths.insert(entry.path);
+    // THE load-bearing line: the running total must shrink by what was
+    // just deleted, or this loop eats the whole snapshot. Covered by
+    // EnforceStorageLimitStopsDeletingOnceUnderLimit.
     runningSize -= fresh.size();
+    accountedDeletedBytes += fresh.size();
   }
 
   // One settle walk for the whole pass instead of one per deleted file.
@@ -284,6 +324,17 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
   // the entry refresh.
   if (!deletedPaths.isEmpty()) {
     refresh();
+    // Cross-check the accounting against the disk: if the rescan does
+    // not reflect most of the deleted bytes (stale FS view, hardlinks,
+    // files reappearing), say so loudly instead of letting the 1 Hz
+    // progress ticker fire another full pass on a confused total.
+    const qint64 actualDrop = entrySize - m_usedSize;
+    if (actualDrop < accountedDeletedBytes / 2) {
+      qWarning() << "Storage auto-cleanup accounting mismatch: deleted"
+                 << deletedPaths.size() << "files (" << accountedDeletedBytes
+                 << "bytes) but directory size only dropped by" << actualDrop
+                 << "bytes (" << entrySize << "->" << m_usedSize << ")";
+    }
   }
 
   if (isOverLimit()) {
@@ -307,6 +358,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
     }
   }
 
+  clearGuard();
   return !isOverLimit();
 }
 

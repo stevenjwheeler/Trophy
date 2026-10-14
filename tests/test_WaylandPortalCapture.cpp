@@ -164,6 +164,7 @@ protected:
     capture.m_startGeneration = generation;
     capture.m_attemptGeneration = generation;
     capture.m_pendingRequestPath = requestPath;
+    capture.m_pendingStage = WaylandPortalCapture::PendingStage::Create;
   }
 
   static void deliverOldCreateReply(WaylandPortalCapture &capture,
@@ -182,6 +183,10 @@ protected:
 
   static QString pendingPath(const WaylandPortalCapture &capture) {
     return capture.m_pendingRequestPath;
+  }
+
+  static bool responseSubscribed(const WaylandPortalCapture &capture) {
+    return capture.m_responseSubscribed;
   }
 
   static void cancel(WaylandPortalCapture &capture) {
@@ -337,6 +342,17 @@ TEST_F(WaylandPortalCaptureTest, RestartedCaptureRejectsPriorMetadataGeneration)
   EXPECT_EQ(capture.sourcePid(), 1234u);
   // No native stream was created; teardown takes its null-resource path.
   capture.stopCapture();
+}
+
+TEST_F(WaylandPortalCaptureTest, ResponseSubscriptionExistsBeforeAnyPortalCall) {
+  // The daemon only delivers a signal to match rules registered before
+  // emission, and the portal answers CreateSession in ~3 ms (measured
+  // live): subscribing after the method reply loses the race and every
+  // start hangs at "Session creation requested..." until the watchdog.
+  // The subscription must therefore exist from construction, before any
+  // portal traffic — not per reply.
+  WaylandPortalCapture capture;
+  EXPECT_TRUE(responseSubscribed(capture));
 }
 
 TEST_F(WaylandPortalCaptureTest, LateCreateReplyCannotReplaceRetriedRequest) {

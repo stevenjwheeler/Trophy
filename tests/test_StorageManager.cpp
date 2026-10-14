@@ -131,6 +131,20 @@ protected:
     f.write(QByteArray(size, 'x'));
     f.close();
   }
+
+  // Create a sparse file with the given apparent size (instant, ~no disk
+  // use) and modification time. Lets cleanup tests work at GB scale.
+  void createSparseFile(const QString &name, qint64 size,
+                        const QDateTime &mtime) {
+    QFile f(tempDir.path() + "/" + name);
+    ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+    ASSERT_TRUE(f.resize(size));
+    // Instance setFileTime operates on the open handle: pin the mtime
+    // before closing (a closed instance reports false).
+    ASSERT_TRUE(f.setFileTime(mtime, QFileDevice::FileModificationTime));
+    f.close();
+    ASSERT_EQ(f.size(), size);
+  }
 };
 
 TEST_F(StorageManagerTest, UsagePercentNormal) {
@@ -537,6 +551,50 @@ TEST_F(StorageManagerTest,
   EXPECT_EQ(files.size(), 1);
   EXPECT_TRUE(files.contains("current.mkv"));
   EXPECT_GT(mgr.usedSize(), mgr.maxSize());
+}
+
+TEST_F(StorageManagerTest, EnforceStorageLimitStopsDeletingOnceUnderLimit) {
+  // Regression for the 2026-10-13 incident: with ~100 GB used against a
+  // ~100 GB limit and a recording in progress, auto-cleanup deleted the
+  // ENTIRE library (20 files) instead of just enough. The pass's running
+  // total never shrank, so the loop consumed the whole snapshot and only
+  // stopped at the excluded in-progress file. Every "Storage limit
+  // exceeded" line in the log printed the same frozen size.
+  constexpr qint64 kFileSize = 5LL * 1024 * 1024 * 1024; // 5 GiB, sparse
+  const QDateTime base(QDate(2026, 10, 1), QTime(0, 0));
+  for (int i = 0; i < 20; ++i) {
+    const QString name =
+        QStringLiteral("rec_%1.mkv").arg(i, 3, 10, QChar('0'));
+    createSparseFile(name, kFileSize, base.addSecs(i * 3600));
+  }
+  createSparseFile("current.mkv", kFileSize, base.addSecs(21 * 3600));
+
+  StorageManager mgr(tempDir.path());
+  mgr.setExcludedRecordingPath(tempDir.path() + "/current.mkv");
+  ASSERT_EQ(mgr.usedSize(), 21 * kFileSize);
+  // Room for 18 files: exactly the 3 oldest must go (2 would leave
+  // 19 files = 95 GiB > 93 GiB).
+  mgr.setMaxSize(21 * kFileSize - 12 * 1024 * 1024 * 1024LL);
+  mgr.setAutoDeleteOldest(true);
+
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+
+  // Exactly the 3 oldest are gone; everything else (incl. excluded) stays.
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/rec_000.mkv"));
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/rec_001.mkv"));
+  EXPECT_FALSE(QFile::exists(tempDir.path() + "/rec_002.mkv"));
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/rec_003.mkv"));
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/rec_019.mkv"));
+  EXPECT_TRUE(QFile::exists(tempDir.path() + "/current.mkv"));
+  EXPECT_EQ(mgr.usedSize(), 18 * kFileSize);
+  EXPECT_LE(mgr.usedSize(), mgr.maxSize());
+
+  // A follow-up pass (the 1 Hz progress ticker) must be a no-op.
+  const int filesBefore =
+      QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files).size();
+  EXPECT_TRUE(mgr.enforceStorageLimit());
+  EXPECT_EQ(QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files).size(),
+            filesBefore);
 }
 
 TEST_F(StorageManagerTest,

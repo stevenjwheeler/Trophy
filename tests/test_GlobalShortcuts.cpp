@@ -75,7 +75,19 @@ protected:
   static bool cachedAvailability(const GlobalShortcutManager &mgr) {
     return mgr.m_available;
   }
+
+  static bool responseSubscribed(const GlobalShortcutManager &mgr) {
+    return mgr.m_responseSubscribed;
+  }
 };
+
+TEST_F(GlobalShortcutTest, ResponseSubscriptionExistsBeforeAnyPortalCall) {
+  // Same AddMatch race as the ScreenCast flow: the portal can answer
+  // within milliseconds, so the Response match rule must exist from
+  // construction rather than being registered after a method reply.
+  GlobalShortcutManager mgr;
+  EXPECT_TRUE(responseSubscribed(mgr));
+}
 
 TEST_F(GlobalShortcutTest, EnsureSetupDuringPendingRequestIsSafeNoOp) {
   GlobalShortcutManager mgr;

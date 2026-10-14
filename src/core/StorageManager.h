@@ -158,6 +158,12 @@ private:
   // re-enter enforceStorageLimit per file on a stale size); the bulk
   // completion settles with a single refresh instead.
   int m_bulkDeletesActive = 0;
+  // Re-entrancy guard: enforce runs on the GUI thread from the 1 Hz
+  // recording-progress tick and the watcher debounce timer. A slow pass
+  // (each delete fans out to library rescans) must not interleave with
+  // the next tick on the same files; overlapping passes with
+  // independently snapshotted totals are how a library gets eaten.
+  bool m_enforceInFlight = false;
   QFileSystemWatcher m_watcher;
   // Coalesces filesystem-event bursts (a 50-file import fires per file)
   // into a single enforceStorageLimit pass (see onDirectoryChanged).
