@@ -131,7 +131,9 @@ jobs:
             libgtest-dev
             desktop-file-utils
             appstream
-          version: 1.5
+          # Bumped to invalidate a poisoned cache entry saved by a
+          # mirror-flaked run (partial debs kept restoring).
+          version: 1.6
           
       - name: Restore ccache
         # Purpose-built action instead of raw actions/cache: stable key
