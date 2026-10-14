@@ -156,7 +156,10 @@ jobs:
       - name: Prepare GTest if not cached
         if: steps.cache-gtest.outputs.cache-hit != 'true'
         run: |
-          cmake -GNinja -S /usr/src/googletest -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
+          # Runners don't reliably ship gtest sources (/usr/src/googletest
+          # is absent), so fetch a pinned copy instead of depending on it.
+          git clone --depth 1 --branch v1.14.0 https://github.com/google/googletest.git gtest_src
+          cmake -GNinja -S gtest_src -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
           cmake --build gtest_build --target install
 
       - name: Prepare Qt or use from cache
