@@ -117,6 +117,8 @@ Page {
             Layout.fillHeight: true
             color: Theme.cardColor
             radius: Theme.radiusMedium
+            border.width: 1
+            border.color: Theme.borderColor
 
             ColumnLayout {
                 anchors.fill: parent
@@ -182,6 +184,7 @@ Page {
     // Add game: pick a running window (themed like WindowPickerDialog)
     Dialog {
         id: addGameDialog
+        objectName: "addGameDialog"
 
         property var allWindows: []
         property string searchQuery: ""
@@ -314,9 +317,23 @@ Page {
 
                             Label {
                                 anchors.centerIn: parent
+                                objectName: "pickerIconFallback"
+                                visible: pickerIcon.status !== Image.Ready
                                 text: ((modelData.title || modelData.class) || "?").charAt(0).toUpperCase()
                                 font.pixelSize: Theme.fontSizeNormal
                                 color: Theme.primaryColor
+                            }
+
+                            Image {
+                                id: pickerIcon
+                                objectName: "pickerIcon"
+                                anchors.fill: parent
+                                anchors.margins: 2
+                                source: modelData.iconSource || ""
+                                sourceSize: Qt.size(36, 36)
+                                fillMode: Image.PreserveAspectFit
+                                asynchronous: true
+                                visible: status === Image.Ready
                             }
 
                         }
@@ -363,7 +380,7 @@ Page {
                 Layout.fillWidth: true
                 Layout.margins: Theme.spacingLarge
                 visible: processList.count === 0
-                text: (typeof windowService !== "undefined" && windowService) ? qsTr("No running windows found.") : qsTr("Window tracking is off — enable it in Settings to pick a process.")
+                text: (typeof windowService !== "undefined" && windowService) ? qsTr("No running windows found.") : qsTr("The Game Window Helper is unavailable — check its status in Settings.")
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
                 wrapMode: Text.WordWrap

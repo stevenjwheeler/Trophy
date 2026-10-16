@@ -319,23 +319,17 @@ void Application::initializeServices() {
   m_windowMonitor = std::make_unique<WaylandWindowMonitor>(this);
   m_windowService->setWindowMonitor(m_windowMonitor.get());
   m_gameDetector->setWindowMonitor(m_windowMonitor.get());
-  if (m_settingsManager->windowTrackingEnabled())
-    m_windowMonitor->startMonitoring();
-  else
-    // Heal orphans: a script left behind by an older build, a deleted
-    // settings file or a crash mid-toggle is removed so a disabled
-    // switch never reports "Installed". Mirrors the Vulkan cleanup in
-    // initialize().
-    m_windowMonitor->uninstallBackend();
+  // Required infrastructure: migrate the former opt-in without removing an
+  // existing script, including when upgrading from an opted-out installation.
+  m_settingsManager->setWindowTrackingEnabled(true);
+  // All launches, including first run, check without installing/enabling.
+  // Installation needs the wizard's Install action or an explicit Repair.
+  m_windowMonitor->startMonitoring(false);
   connect(m_settingsManager.get(),
           &SettingsManager::windowTrackingEnabledChanged, this, [this]() {
-            if (m_settingsManager->windowTrackingEnabled()) {
-              m_windowMonitor->startMonitoring();
-            } else {
-              // Explicit opt-out: stop tracking and remove the script
-              // package we installed (reinstalled on re-enable).
-              m_windowMonitor->uninstallBackend();
-            }
+            // Reset-to-defaults/legacy clients must not uninstall a required
+            // component. Keep the persisted compatibility flag enabled.
+            m_settingsManager->setWindowTrackingEnabled(true);
           });
   m_recordingManager = std::make_unique<RecordingManager>(this);
   

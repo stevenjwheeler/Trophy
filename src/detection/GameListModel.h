@@ -13,6 +13,7 @@
 #include <QString>
 #include <QUrl>
 #include "DefaultAppCatalog.h"
+#include "GameIconSource.h"
 
 namespace TrophyBackend {
 
@@ -100,12 +101,7 @@ public:
     case SectionRole:
       return e.section;
     case IconSourceRole:
-      // Base64url keeps filesystem identities out of URL syntax.
-      return QUrl(QStringLiteral("image://gameicon/%1/%2")
-                      .arg(e.steamAppId)
-                      .arg(QString::fromLatin1(e.key.toUtf8().toBase64(
-                          QByteArray::Base64UrlEncoding |
-                          QByteArray::OmitTrailingEquals))));
+      return gameIconSource(e.key, e.steamAppId);
     case IdentifiersRole:
       if (e.isDefault) {
         if (const auto *app = defaultAppInfo(e.key))

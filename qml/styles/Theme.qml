@@ -28,6 +28,7 @@ QtObject {
     readonly property color dividerColor: "#252a3a"
     readonly property color successColor: "#4ade80"
     readonly property color warningColor: "#fbbf24"
+    readonly property color cautionColor: "#fb923c"
     readonly property color errorColor: "#ef4444"
     readonly property color recordingColor: "#ef4444"
     readonly property color recordingPulseColor: "#ff6b6b"

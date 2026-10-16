@@ -6,6 +6,7 @@
  */
 
 import TrophyBackend
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -184,6 +185,8 @@ Page {
                 Layout.preferredHeight: descLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: descLayout
@@ -211,6 +214,8 @@ Page {
                 Layout.preferredHeight: featuresLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: featuresLayout
@@ -219,11 +224,9 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
 
-                    Label {
-                        text: qsTr("✨ Key Features")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Key Features")
+                        iconSource: "qrc:/icons/sparkles.svg"
                     }
 
                     GridLayout {
@@ -233,37 +236,37 @@ Page {
                         rowSpacing: Theme.spacingSmall
 
                         FeatureItem {
-                            icon: "🎬"
+                            iconSource: "qrc:/icons/gpu.svg"
                             title: qsTr("Hardware Acceleration")
                             description: qsTr("NVIDIA NVENC and AMD/Intel VA-API support")
                         }
 
                         FeatureItem {
-                            icon: "🎵"
+                            iconSource: "qrc:/icons/volume-high.svg"
                             title: qsTr("Multi-Track Audio")
                             description: qsTr("Separate game, voice chat, and mic tracks")
                         }
 
                         FeatureItem {
-                            icon: "🎮"
+                            iconSource: "qrc:/icons/gamepad.svg"
                             title: qsTr("Auto Game Detection")
                             description: qsTr("Steam, Proton, and custom game support with automatic detection")
                         }
 
                         FeatureItem {
-                            icon: "💾"
+                            iconSource: "qrc:/icons/storage.svg"
                             title: qsTr("Smart Storage")
                             description: qsTr("Auto-cleanup and crash-resilient formats")
                         }
 
                         FeatureItem {
-                            icon: "⏪"
+                            iconSource: "qrc:/icons/scissors.svg"
                             title: qsTr("Instant Clips")
                             description: qsTr("Background DVR — save recent moments anytime, buffer length adjustable")
                         }
 
                         FeatureItem {
-                            icon: "🔄"
+                            iconSource: "qrc:/icons/refresh.svg"
                             title: qsTr("Automatic Updates")
                             description: qsTr("Daily release check with a one-click download page")
                         }
@@ -280,6 +283,8 @@ Page {
                 Layout.preferredHeight: ackLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: ackLayout
@@ -288,11 +293,9 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
 
-                    Label {
-                        text: qsTr("🙏 Acknowledgments")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Acknowledgments")
+                        iconSource: "qrc:/icons/heart.svg"
                     }
 
                     Label {
@@ -375,6 +378,8 @@ Page {
                 Layout.preferredHeight: licenseLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: licenseLayout
@@ -387,11 +392,9 @@ Page {
                         Layout.fillWidth: true
                         spacing: Theme.spacingSmall
 
-                        Label {
-                            text: qsTr("📜 License")
-                            font.pixelSize: Theme.fontSizeLarge
-                            font.weight: Font.Medium
-                            color: Theme.textColor
+                        SectionHeading {
+                            text: qsTr("License")
+                            iconSource: "qrc:/icons/file-text.svg"
                         }
 
                         Item { Layout.fillWidth: true }
@@ -421,6 +424,8 @@ Page {
                 Layout.preferredHeight: disclaimerLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: disclaimerLayout
@@ -429,11 +434,9 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
 
-                    Label {
-                        text: qsTr("🤖 Development Disclosure")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Development Disclosure")
+                        iconSource: "qrc:/icons/code.svg"
                     }
 
                     Label {
@@ -486,6 +489,27 @@ Page {
         topLeftRadius: 26
     }
 
+    component SectionHeading: RowLayout {
+        id: heading
+
+        property alias text: headingLabel.text
+        property url iconSource
+
+        spacing: Theme.spacingSmall
+
+        TrophyIcon {
+            source: heading.iconSource
+            color: Theme.textSecondaryColor
+        }
+
+        Label {
+            id: headingLabel
+            font.pixelSize: Theme.fontSizeLarge
+            font.weight: Font.Medium
+            color: Theme.textColor
+        }
+    }
+
     // Shared rich-text credit style keeps project/license links usable and
     // wraps long acknowledgments without widening the scroll view.
     component CreditLabel: Label {
@@ -506,7 +530,7 @@ Page {
     component FeatureItem: Item {
         id: featureItem
 
-        property string icon: ""
+        property url iconSource
         property string title: ""
         property string description: ""
 
@@ -525,13 +549,25 @@ Page {
             width: parent.width
             spacing: Theme.spacingTiny
 
-            Label {
+            RowLayout {
                 Layout.fillWidth: true
-                text: featureItem.icon + " " + featureItem.title
-                wrapMode: Text.WordWrap
-                font.pixelSize: Theme.fontSizeNormal
-                font.weight: Font.Medium
-                color: Theme.textColor
+                spacing: Theme.spacingSmall
+
+                TrophyIcon {
+                    source: featureItem.iconSource
+                    color: Theme.textSecondaryColor
+                    Layout.alignment: Qt.AlignTop
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: featureItem.title
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.weight: Font.Medium
+                    color: Theme.textColor
+                }
             }
 
             Label {

@@ -56,15 +56,20 @@ public:
    * install/enable tool sequence runs on a worker and its results are
    * applied back on the owner thread (windowsUpdated so
    * WaylandWindowMonitor refreshes its status labels). Returns true once
-   * the D-Bus object is registered, not once the script is installed. */
-  bool start();
+   * the D-Bus object is registered, not once the script is installed.
+   * With allowRepair=false, missing/disabled installations are left alone
+   * for the explicit repair prompt; healthy installs can still be updated. */
+  bool start(bool allowRepair = false);
   void stop();
   bool isActive() const { return m_active; }
+  bool hasSnapshot() const { return m_hasSnapshot; }
+  /** Owner-thread tick: refresh external enable changes on an owned worker. */
+  void refreshStatus();
 
   QList<WindowInfo> windows() const;
 
   /** Parse a script snapshot into window infos. Never throws. */
-  static QList<WindowInfo> parseSnapshot(const QByteArray &json);
+  static QList<WindowInfo> parseSnapshot(const QByteArray &json, bool *valid = nullptr);
 
   // Script package state (used by the setup wizard + settings UI).
   static QString installedScriptDir();
@@ -120,6 +125,7 @@ private:
   mutable QMutex m_mutex;
   QList<WindowInfo> m_windows;
   bool m_active = false;
+  bool m_hasSnapshot = false;
   bool m_dbusRegistered = false;
   // Test seam: the install-script fixture resets the static enable cache
   // so a future test running the setup worker can't flip
@@ -127,11 +133,13 @@ private:
   // test fixture lives outside namespace TrophyBackend.)
   friend class ::KWinScriptInstallTest;
   friend class KWinWorkerTest;
-  void queueSetup();
+  void queueSetup(bool allowRepair = true);
   static std::shared_future<void> enqueueOperation(std::function<void()> operation);
   static std::function<bool(const QString &, const QStringList &, QString *)> s_toolOverride;
   static std::function<void()> s_restartOverride;
   std::shared_future<void> m_setupFuture;
+  std::future<bool> m_statusFuture;
+  quint64 m_statusGeneration = 0;
   QTimer *m_setupTimer = nullptr;
   // Owner-thread delivery generation. Side effects are separately ordered
   // by enqueueOperation, including setup followed by explicit removal.

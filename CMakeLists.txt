@@ -362,6 +362,7 @@ set(MUXING_HEADERS
 set(DETECTION_HEADERS
     src/detection/DefaultAppCatalog.h
     src/detection/GameIconProvider.h
+    src/detection/GameIconSource.h
     src/detection/GameDetectionService.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
@@ -441,6 +442,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/ActiveRecordingCard.qml
         qml/views/VideoPlayer.qml
         qml/controls/TrophyButton.qml
+        qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
         qml/controls/TrophySlider.qml
         qml/controls/TrophyRadioButton.qml

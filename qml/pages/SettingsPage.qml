@@ -29,14 +29,15 @@ Page {
     property string activeSection: qsTr("Video Recording")
     property bool scrollingProgrammatically: false
     property var sections: [
-        { title: qsTr("Video Recording"), icon: "🎥" },
-        { title: qsTr("Background Clips"), icon: "✂️" },
-        { title: qsTr("Audio Recording"), icon: "🔊" },
-        { title: qsTr("Storage Management"), icon: "💾" },
-        { title: qsTr("Notifications"), icon: "🔔" },
-        { title: qsTr("Game Detection"), icon: "🎮" },
-        { title: qsTr("System Tray"), icon: "📌" },
-        { title: qsTr("Keyboard Shortcuts"), icon: "⌨️" }
+        { title: qsTr("Video Recording"), icon: "qrc:/icons/video.svg" },
+        { title: qsTr("Background Clips"), icon: "qrc:/icons/scissors.svg" },
+        { title: qsTr("Audio Recording"), icon: "qrc:/icons/volume-high.svg" },
+        { title: qsTr("Storage Management"), icon: "qrc:/icons/storage.svg" },
+        { title: qsTr("Notifications"), icon: "qrc:/icons/bell.svg" },
+        { title: qsTr("Game Detection"), icon: "qrc:/icons/gamepad.svg" },
+        { title: qsTr("Detection Helpers"), icon: "qrc:/icons/puzzle.svg" },
+        { title: qsTr("System Tray"), icon: "qrc:/icons/tray.svg" },
+        { title: qsTr("Keyboard Shortcuts"), icon: "qrc:/icons/keyboard.svg" }
     ]
 
     function scrollToSection(sectionTitle) {
@@ -53,6 +54,8 @@ Page {
             card = notificationsCard;
         else if (sectionTitle === "Game Detection")
             card = detectionCard;
+        else if (sectionTitle === "Detection Helpers")
+            card = detectionHelpersCard;
         else if (sectionTitle === "System Tray")
             card = trayCard;
         else if (sectionTitle === "Keyboard Shortcuts")
@@ -104,6 +107,8 @@ Page {
             current = "Keyboard Shortcuts";
         else if (trayCard && y >= trayCard.y)
             current = "System Tray";
+        else if (detectionHelpersCard && y >= detectionHelpersCard.y)
+            current = "Detection Helpers";
         else if (detectionCard && y >= detectionCard.y)
             current = "Game Detection";
         else if (storageCard && y >= storageCard.y)
@@ -325,9 +330,11 @@ Page {
                                 anchors.centerIn: parent
                                 spacing: 6
 
-                                Label {
-                                    text: modelData.icon
-                                    font.pixelSize: Theme.fontSizeSmall
+                                TrophyIcon {
+                                    source: modelData.icon
+                                    width: 16
+                                    height: 16
+                                    color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
 
@@ -424,7 +431,7 @@ Page {
                 SectionCard {
                     id: videoCard
                     sectionTitle: qsTr("Video Recording")
-                    iconText: "🎥"
+                    iconSource: "qrc:/icons/video.svg"
                     description: qsTr("Encoder, quality and output format. Changes apply to the next recording.")
 
                     WarnBanner {
@@ -719,7 +726,7 @@ Page {
                 SectionCard {
                     id: clipsCard
                     sectionTitle: qsTr("Background Clips")
-                    iconText: "✂️"
+                    iconSource: "qrc:/icons/scissors.svg"
                     description: qsTr("Quiet background buffering for instant clips. Changes take effect within a minute.")
 
                     SettingRow {
@@ -809,7 +816,7 @@ Page {
                 SectionCard {
                     id: audioCard
                     sectionTitle: qsTr("Audio Recording")
-                    iconText: "🔊"
+                    iconSource: "qrc:/icons/volume-high.svg"
                     description: qsTr("What gets heard in your recordings, and how tracks are stored.")
 
                     WarnBanner {
@@ -1035,7 +1042,7 @@ Page {
                 SectionCard {
                     id: storageCard
                     sectionTitle: qsTr("Storage Management")
-                    iconText: "💾"
+                    iconSource: "qrc:/icons/storage.svg"
                     description: qsTr("Where recordings live and what happens when space runs out.")
 
                     WarnBanner {
@@ -1178,7 +1185,7 @@ Page {
                 SectionCard {
                     id: notificationsCard
                     sectionTitle: qsTr("Notifications")
-                    iconText: "🔔"
+                    iconSource: "qrc:/icons/bell.svg"
                     description: qsTr("Which popups Trophy may show. Errors, the capture-authorize prompt and direct keypress feedback always show.")
 
                     SettingRow {
@@ -1270,8 +1277,8 @@ Page {
                 SectionCard {
                     id: detectionCard
                     sectionTitle: qsTr("Game Detection")
-                    iconText: "🎮"
-                    description: qsTr("How Trophy notices your games and when it records them.")
+                    iconSource: "qrc:/icons/gamepad.svg"
+                    description: qsTr("Choose whether Trophy detects games and records sessions automatically.")
 
                     SettingRow {
                         label: qsTr("Auto-detect Games")
@@ -1288,53 +1295,8 @@ Page {
                     }
 
                     SettingRow {
-                        label: qsTr("Window tracking")
-                        help: qsTr("See window titles, focus and fullscreen state to name your games. On KDE this installs a read-only helper script (removable in System Settings → KWin Scripts).")
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.windowTrackingEnabled : false
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.windowTrackingEnabled = checked;
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("Vulkan detection layer")
-                        help: qsTr("Standard Vulkan implicit layer that notices games at startup, including Proton titles. Install or remove it here.")
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.vulkanLayerEnabled : false
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.vulkanLayerEnabled = checked;
-                                if (app)
-                                    app.setVulkanLayerEnabled(checked);
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("OpenGL detection shim")
-                        help: (app && app.glShimAvailable) ? qsTr("Session-wide LD_PRELOAD: loads into unrelated programs too, not just OpenGL games. Enabling or disabling takes effect after logging out and back in. Leave off for anti-cheat games; disabling detection does not unload the library. Compatibility is not guaranteed.") : qsTr("Shim library not found in this install.")
-                        rowEnabled: app ? app.glShimAvailable : false
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: app ? app.glShimEnrolled : false
-                            onToggled: {
-                                if (app)
-                                    app.setGlShimEnrolled(checked);
-                            }
-                        }
-                    }
-
-                    SettingRow {
                         label: qsTr("Auto-record")
-                        help: qsTr("Start recording the full game session the moment a game is detected. Never miss a moment!")
+                        help: qsTr("Automatically record the full session when an authorized game is detected.")
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1347,11 +1309,111 @@ Page {
                     }
                 }
 
+                SectionCard {
+                    id: detectionHelpersCard
+                    objectName: "detectionHelpersCard"
+                    sectionTitle: qsTr("Detection Helpers")
+                    iconSource: "qrc:/icons/puzzle.svg"
+                    description: qsTr("Integration status at a glance. Graphics helpers are optional.")
+                    readonly property real statusWidth: Math.max(vulkanControls.badgeWidth, glControls.badgeWidth)
+                    readonly property real actionWidth: Math.max(vulkanHelperSwitch.implicitWidth, glHelperSwitch.implicitWidth)
+
+                    SettingRow {
+                        label: qsTr("Game Window Helper (required)")
+                        help: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
+                              .arg(windowMonitor && windowMonitor.compositorName === "kwin"
+                                   ? qsTr(" On KDE this uses a read-only KWin script.") : "")
+
+                        HelperControls {
+                            id: windowHelperControls
+                            objectName: "gameWindowHelperStatus"
+                            statusWidth: badgeWidth
+                            actionWidth: helperRepair.implicitWidth
+                            showAction: windowMonitor && !windowMonitor.trackingReady
+                            healthy: windowMonitor && windowMonitor.trackingReady
+                            attention: !healthy && !(windowMonitor && windowMonitor.trackingChecking)
+                            text: windowMonitor && windowMonitor.trackingReady
+                                  ? (windowMonitor.compositorName === "kwin" ? qsTr("Installed · Working") : qsTr("Working"))
+                                  : (windowMonitor && windowMonitor.trackingChecking ? qsTr("Checking…")
+                                     : (windowMonitor && windowMonitor.compositorName === "kwin"
+                                         ? (windowMonitor.kwinScriptInstalled
+                                            ? (windowMonitor.kwinScriptEnabled ? qsTr("Installed · Not reporting") : qsTr("Installed · Disabled"))
+                                            : qsTr("Not installed"))
+                                        : qsTr("Unavailable")))
+                            TrophyButton {
+                                id: helperRepair
+                                anchors.right: parent.right
+                                visible: windowHelperControls.showAction
+                                text: qsTr("Repair")
+                                enabled: windowMonitor && !windowMonitor.trackingChecking
+                                onClicked: if (windowMonitor) windowMonitor.repairTracking()
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Vulkan Detection")
+                        help: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles.")
+
+                        HelperControls {
+                            id: vulkanControls
+                            statusWidth: detectionHelpersCard.statusWidth
+                            actionWidth: detectionHelpersCard.actionWidth
+                            healthy: app && app.vulkanLayerRegistered
+                            text: healthy ? qsTr("Enrolled") : qsTr("Not enrolled")
+
+                            TrophySwitch {
+                                id: vulkanHelperSwitch
+                                anchors.right: parent.right
+                                checked: settingsManager ? settingsManager.vulkanLayerEnabled : false
+                                onToggled: {
+                                    if (settingsManager)
+                                        settingsManager.vulkanLayerEnabled = checked;
+                                    if (app)
+                                        app.setVulkanLayerEnabled(checked);
+                                }
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("OpenGL Detection")
+                        helpTextFormat: Text.StyledText
+                        help: (app && app.glShimAvailable)
+                              ? qsTr("Notices games starting OpenGL graphics and notifies Trophy to start recording. Loads into any OpenGL app and %1. Changes require logging out and back in.")
+                                .arg(app.glShimEnrolled
+                                     ? '<font color="' + Theme.cautionColor + '">' + qsTr("may cause issues with anti-cheat games") + '</font>'
+                                     : qsTr("may cause issues with anti-cheat games"))
+                              : qsTr("OpenGL detection helper not found in this install.")
+                        rowEnabled: app ? app.glShimAvailable : false
+
+                        HelperControls {
+                            id: glControls
+                            statusWidth: detectionHelpersCard.statusWidth
+                            actionWidth: detectionHelpersCard.actionWidth
+                            attention: !app || !app.glShimAvailable
+                            enrolled: app && app.glShimEnrolled
+                            text: attention ? qsTr("Unavailable") : (app.glShimEnrolled ? qsTr("Enrolled") : qsTr("Not enrolled"))
+
+                            TrophySwitch {
+                                id: glHelperSwitch
+                                anchors.right: parent.right
+                                checked: app ? app.glShimEnrolled : false
+                                onToggled: {
+                                    if (app)
+                                        app.setGlShimEnrolled(checked);
+                                }
+                            }
+                        }
+                    }
+
+                }
+
                 // ================= TRAY =================
                 SectionCard {
                     id: trayCard
                     sectionTitle: qsTr("System Tray")
-                    iconText: "📌"
+                    iconSource: "qrc:/icons/tray.svg"
                     description: qsTr("How Trophy behaves when you close it or log in.")
 
                     SettingRow {
@@ -1404,7 +1466,7 @@ Page {
                 SectionCard {
                     id: shortcutsCard
                     sectionTitle: qsTr("Keyboard Shortcuts")
-                    iconText: "⌨️"
+                    iconSource: "qrc:/icons/keyboard.svg"
                     description: qsTr("System-wide keys that work even while you're in-game.")
 
                     SettingRow {
@@ -1547,8 +1609,9 @@ Page {
     // ============ REUSABLE CONTROLS (visual only, no logic changes) ============
 
     component SectionCard: Rectangle {
+        id: sectionCard
         property string sectionTitle: ""
-        property string iconText: ""
+        property url iconSource
         property string description: ""
         default property alias content: body.data
 
@@ -1570,9 +1633,9 @@ Page {
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
 
-                Label {
-                    text: iconText
-                    font.pixelSize: Theme.fontSizeLarge
+                TrophyIcon {
+                    source: sectionCard.iconSource
+                    color: Theme.textSecondaryColor
                 }
 
                 ColumnLayout {
@@ -1611,6 +1674,80 @@ Page {
         }
     }
 
+    // Optional helpers share compact status/action columns. A status-only
+    // helper collapses its action slot entirely rather than leaving a gap.
+    // A plain Item honors its implicit width without stretching the label column.
+    component HelperControls: Item {
+        id: helperControls
+        property real statusWidth: 0
+        property real actionWidth: 0
+        property bool showAction: true
+        property alias text: helperBadge.text
+        property alias healthy: helperBadge.healthy
+        property alias attention: helperBadge.attention
+        property alias enrolled: helperBadge.enrolled
+        readonly property real badgeWidth: helperBadge.implicitWidth
+        default property alias action: actionSlot.data
+
+        Layout.leftMargin: Theme.spacingLarge
+        implicitWidth: statusWidth + (showAction ? Theme.spacingMedium + actionWidth : 0)
+        implicitHeight: Math.max(helperBadge.implicitHeight, showAction ? actionSlot.childrenRect.height : 0)
+
+        HelperStatusBadge {
+            id: helperBadge
+            anchors.right: actionSlot.left
+            anchors.rightMargin: helperControls.showAction ? Theme.spacingMedium : 0
+            anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Item {
+            id: actionSlot
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: helperControls.showAction
+            width: helperControls.showAction ? helperControls.actionWidth : 0
+            height: childrenRect.height
+        }
+    }
+
+    component HelperStatusBadge: Rectangle {
+        id: badge
+        property string text: ""
+        property bool healthy: false
+        property bool attention: false
+        property bool enrolled: false
+        readonly property color statusColor: healthy ? Theme.successColor
+                                                   : (enrolled ? Theme.cautionColor : (attention ? Theme.warningColor : Theme.textSecondaryColor))
+
+        implicitWidth: statusRow.implicitWidth + Theme.spacingSmall * 2
+        implicitHeight: statusRow.implicitHeight + Theme.spacingTiny * 2
+        radius: Theme.radiusSmall
+        color: Theme.withOpacity(statusColor, 0.1)
+        border.width: 1
+        border.color: Theme.withOpacity(statusColor, 0.3)
+
+        Row {
+            id: statusRow
+            anchors.centerIn: parent
+            spacing: Theme.spacingSmall
+
+            Rectangle {
+                width: 6
+                height: 6
+                radius: 3
+                anchors.verticalCenter: parent.verticalCenter
+                color: badge.statusColor
+            }
+
+            Label {
+                text: badge.text
+                color: badge.statusColor
+                font.pixelSize: Theme.fontSizeSmall
+                font.weight: Font.Medium
+            }
+        }
+    }
+
     component WarnBanner: Rectangle {
         property string message: ""
 
@@ -1627,8 +1764,9 @@ Page {
             anchors.margins: Theme.spacingSmall
             spacing: Theme.spacingSmall
 
-            Label {
-                text: "⚠️"
+            TrophyIcon {
+                source: "qrc:/icons/warning.svg"
+                color: Theme.warningColor
             }
 
             Label {
@@ -1645,6 +1783,7 @@ Page {
     component SettingRow: ColumnLayout {
         property string label: ""
         property string help: ""
+        property int helpTextFormat: Text.AutoText
         property bool rowEnabled: true
         default property alias control: controlHolder.data
 
@@ -1673,6 +1812,7 @@ Page {
                 Label {
                     Layout.fillWidth: true
                     text: help
+                    textFormat: helpTextFormat
                     color: Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap

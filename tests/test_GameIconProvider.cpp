@@ -377,6 +377,70 @@ TEST_F(GameIconTest, QmlImageLoadsThroughRegisteredProvider) {
   EXPECT_EQ(object->property("sourceSize").toSize(), QSize(40, 40));
 }
 
+TEST_F(GameIconTest, WindowIconSourcesNormalizeAndEncodeWithoutChangingIdentity) {
+  EXPECT_EQ(gameIconSource("  FIREFOX.EXE  "), gameIconSource("firefox"));
+  EXPECT_EQ(gameIconSource("steam_app_42"), gameIconSource("steam_app_42", 42));
+  EXPECT_TRUE(gameIconSource("").isEmpty());
+  const QString key = QString::fromUtf8("org.example.é#app");
+  const QUrl url = gameIconSource(key);
+  EXPECT_EQ(QString::fromUtf8(QByteArray::fromBase64(
+      url.path().section('/', 2).toLatin1(), QByteArray::Base64UrlEncoding)), key);
+}
+
+TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
+  GameListModel model;
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))},
+      {"gameFilterText", ""}, {"showDefaultExclusions", false}});
+  engine.rootContext()->setContextProperty("windowService", QVariant::fromValue<QObject *>(nullptr));
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  window.resize(1113, 700);
+  page->setParentItem(window.contentItem());
+  page->setSize({1113, 700});
+  window.show();
+  auto *dialog = object->findChild<QObject *>("addGameDialog");
+  ASSERT_NE(dialog, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  QTest::qWait(100);
+  const QVariantList windows{
+      QVariantMap{{"title", "Firefox window"}, {"class", "firefox"},
+                  {"iconSource", gameIconSource("firefox")}},
+      QVariantMap{{"title", "Missing program"}, {"class", "missing-app"},
+                  {"iconSource", gameIconSource("missing-app")}}};
+  ASSERT_TRUE(dialog->setProperty("allWindows", windows));
+  auto *content = dialog->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  QList<QQuickItem *> images, letters;
+  std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+    if (item->objectName() == "pickerIcon") images.append(item);
+    if (item->objectName() == "pickerIconFallback") letters.append(item);
+    for (auto *child : item->childItems()) collect(child);
+  };
+  for (int i = 0; i < 100; ++i) {
+    QTest::qWait(10);
+    images.clear();
+    letters.clear();
+    collect(content);
+    if (images.size() == 2 && images[0]->property("status").toInt() == 1 &&
+        images[1]->property("status").toInt() == 3)
+      break;
+  }
+  ASSERT_EQ(images.size(), 2);
+  ASSERT_EQ(letters.size(), 2);
+  EXPECT_TRUE(images[0]->isVisible());
+  EXPECT_FALSE(letters[0]->isVisible());
+  EXPECT_FALSE(images[1]->isVisible());
+  EXPECT_TRUE(letters[1]->isVisible());
+  EXPECT_EQ(letters[1]->property("text").toString(), "M");
+}
+
 TEST_F(GameIconTest, RealGamesPageShowsIconAndKeepsMissingLetterTile) {
   icon("icons/hicolor/48x48/apps/steam_icon_42.png");
   GameListEntry found;

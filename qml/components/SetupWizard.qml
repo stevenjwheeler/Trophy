@@ -22,6 +22,8 @@ Rectangle {
 
     property int currentStep: 0
     property int totalSteps: 7 // Welcome, Storage, Audio, Modules, Hardware, Shortcuts, Finish
+    readonly property bool windowHelperReady: windowMonitor && windowMonitor.trackingReady
+    property bool helperSetupRequested: false
 
     // Reset to first page whenever the wizard is (re-)shown
     onVisibleChanged: {
@@ -370,12 +372,11 @@ Rectangle {
                         }
                     }
 
-                    /// Step 4: Optional Modules
+                    /// Step 4: Required tracking and optional reporters
                     ScrollView {
                         id: step4Scroll
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
-                        property bool isKwin: windowMonitor ? windowMonitor.compositorName.toLowerCase().indexOf("kwin") !== -1 : false
                         ColumnLayout {
                             width: step4Scroll.availableWidth
                             height: Math.max(implicitHeight, step4Scroll.availableHeight)
@@ -384,8 +385,8 @@ Rectangle {
                             ColumnLayout {
                                 Layout.alignment: Qt.AlignHCenter
                                 spacing: 2
-                                Label { text: qsTr("Optional Modules"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
-                                Label { text: qsTr("Three small helpers that spot your games — all optional."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                Label { text: qsTr("Game Detection Setup"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
+                                Label { text: qsTr("The Game Window Helper is required. Graphics detection helpers are optional."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                             }
                             // Module 1: window tracking (KWin script on KDE)
                             Rectangle {
@@ -394,7 +395,9 @@ Rectangle {
                                 implicitHeight: modTrackCol.height + (Theme.spacingMedium * 2)
                                 color: Theme.withOpacity(Theme.textColor, 0.05)
                                 radius: Theme.radiusMedium
-                                border.color: Theme.borderColor
+                                border.width: 1
+                                border.color: root.windowHelperReady ? Theme.successColor : Theme.errorColor
+                                Behavior on border.color { ColorAnimation { duration: Theme.animationNormal } }
                                 ColumnLayout {
                                     id: modTrackCol
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Theme.spacingMedium; anchors.verticalCenter: parent.verticalCenter
@@ -402,15 +405,36 @@ Rectangle {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
-                                        Label { text: qsTr("1. Window tracking — %1").arg(windowMonitor ? windowMonitor.compositorName : qsTr("unknown compositor")); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Label { text: (windowMonitor && step4Scroll.isKwin && windowMonitor.kwinScriptInstalled) ? qsTr("Installed") : ((settingsManager && settingsManager.windowTrackingEnabled) ? qsTr("Installing…") : qsTr("Not installed")); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
-                                        TrophySwitch { checked: settingsManager ? settingsManager.windowTrackingEnabled : false; onToggled: if (settingsManager) settingsManager.windowTrackingEnabled = checked }
+                                        Label { text: qsTr("1. Game Window Helper — %1").arg(windowMonitor ? windowMonitor.compositorName : qsTr("unknown compositor")); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Label { text: windowMonitor && windowMonitor.trackingReady ? qsTr("Working") : (windowMonitor && windowMonitor.trackingChecking ? qsTr("Checking…") : qsTr("Needs attention")); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
                                     }
-                                    Label { text: qsTr("Sees window titles, focus and fullscreen state to name your games. On KDE this installs a tiny read-only script (removable in KWin Scripts)."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                     Label {
-                                        visible: !step4Scroll.isKwin
-                                        text: qsTr("Compositor-specific tracking for %1 is coming soon.").arg(windowMonitor ? windowMonitor.compositorName : qsTr("this system"))
+                                        text: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
+                                              .arg(windowMonitor && windowMonitor.compositorName === "kwin"
+                                                   ? qsTr(" On KDE this uses a read-only KWin script.") : "")
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.textSecondaryColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: windowMonitor && !windowMonitor.trackingReady && !windowMonitor.trackingChecking
+                                        text: qsTr("The helper is not responding. Repair will retry setup for %1. If it still fails, check your compositor's integration and permissions.").arg(windowMonitor ? windowMonitor.compositorName : qsTr("this system"))
                                         font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                    }
+                                    TrophyButton {
+                                        visible: windowMonitor && !windowMonitor.trackingReady
+                                        text: root.helperSetupRequested && windowMonitor && windowMonitor.trackingChecking
+                                              ? qsTr("Setting up…")
+                                              : (windowMonitor && windowMonitor.compositorName === "kwin" && !windowMonitor.kwinScriptInstalled
+                                                 ? qsTr("Install helper") : qsTr("Repair helper"))
+                                        enabled: windowMonitor && (!root.helperSetupRequested || !windowMonitor.trackingChecking)
+                                        onClicked: {
+                                            if (windowMonitor) {
+                                                root.helperSetupRequested = true
+                                                windowMonitor.repairTracking()
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -429,11 +453,11 @@ Rectangle {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
-                                        Label { text: qsTr("2. Vulkan detection layer"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Label { text: app && app.vulkanLayerRegistered ? qsTr("Installed") : qsTr("Not installed"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
+                                        Label { text: qsTr("2. Vulkan Detection"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Label { text: app && app.vulkanLayerRegistered ? qsTr("Enrolled") : qsTr("Not enrolled"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
                                         TrophySwitch { checked: settingsManager ? settingsManager.vulkanLayerEnabled : false; onToggled: if (settingsManager && app) { settingsManager.vulkanLayerEnabled = checked; app.setVulkanLayerEnabled(checked) } }
                                     }
-                                    Label { text: qsTr("Spots the instant a game starts Vulkan graphics, including Proton titles. Detection only — changes nothing."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                    Label { text: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 }
                             }
                             // Module 3: OpenGL detection shim (opt-in)
@@ -452,12 +476,23 @@ Rectangle {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
                                         enabled: app && app.glShimAvailable
-                                        Label { text: qsTr("3. OpenGL detection shim"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Label { text: (app && app.glShimEnrolled) ? qsTr("Installed") : qsTr("Not installed"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
+                                        Label { text: qsTr("3. OpenGL Detection"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Label { text: (app && app.glShimEnrolled) ? qsTr("Enrolled") : qsTr("Not enrolled"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
                                         TrophySwitch { checked: app ? app.glShimEnrolled : false; onToggled: if (app) app.setGlShimEnrolled(checked) }
                                     }
-                                    Label { text: qsTr("Session-wide LD_PRELOAD: loads into unrelated programs too, not just OpenGL games. Enabling or disabling takes effect after logging out and back in. Leave off for anti-cheat games; disabling detection does not unload the library. Compatibility is not guaranteed."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true; opacity: (app && app.glShimAvailable) ? 1.0 : 0.5 }
-                                    Label { visible: app && !app.glShimAvailable; text: qsTr("Shim library not found in this install."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                    Label {
+                                        textFormat: Text.StyledText
+                                        text: qsTr("Notices games starting OpenGL graphics and notifies Trophy to start recording. Loads into any OpenGL app and %1. Changes require logging out and back in.")
+                                              .arg(app && app.glShimEnrolled
+                                                   ? '<font color="' + Theme.cautionColor + '">' + qsTr("may cause issues with anti-cheat games") + '</font>'
+                                                   : qsTr("may cause issues with anti-cheat games"))
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.textSecondaryColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                        opacity: (app && app.glShimAvailable) ? 1.0 : 0.5
+                                    }
+                                    Label { visible: app && !app.glShimAvailable; text: qsTr("OpenGL detection helper not found in this install."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                                 }
                             }
                             Item { Layout.fillHeight: true }
@@ -579,7 +614,7 @@ Rectangle {
                                     spacing: 2
                                     RowLayout {
                                         spacing: Theme.spacingSmall
-                                        Label { text: "✓"; color: Theme.successColor; font.weight: Font.Bold }
+                                        TrophyIcon { source: "qrc:/icons/check.svg"; color: Theme.successColor }
                                         Label { text: qsTr("NVENC"); font.weight: Font.Bold; color: Theme.textColor }
                                     }
                                     Label { text: qsTr("NVIDIA dedicated chip — barely touches game FPS."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
@@ -602,7 +637,7 @@ Rectangle {
                                     spacing: 2
                                     RowLayout {
                                         spacing: Theme.spacingSmall
-                                        Label { text: "✓"; color: Theme.successColor; font.weight: Font.Bold }
+                                        TrophyIcon { source: "qrc:/icons/check.svg"; color: Theme.successColor }
                                         Label { text: qsTr("VA-API"); font.weight: Font.Bold; color: Theme.textColor }
                                     }
                                     Label { text: qsTr("AMD/Intel media engine — small FPS cost."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
@@ -813,7 +848,14 @@ Rectangle {
                             ColumnLayout {
                                 Layout.alignment: Qt.AlignHCenter
                                 spacing: 2
-                                Label { text: "✨"; Layout.alignment: Qt.AlignHCenter; font.pixelSize: 48 }
+                                TrophyIcon {
+                                    source: "qrc:/icons/sparkles.svg"
+                                    color: Theme.highlightedColor
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.bottomMargin: Theme.spacingMedium
+                                    Layout.preferredWidth: 48
+                                    Layout.preferredHeight: 48
+                                }
                                 Label { text: qsTr("You're All Set!"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeTitle; font.weight: Font.Bold; color: Theme.textColor }
                                 Label { text: qsTr("Trophy is now configured and ready to go."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeMedium; color: Theme.textSecondaryColor }
                             }
@@ -881,30 +923,6 @@ Rectangle {
                                         }
                                     }
 
-                                    // Box 2: Tip (Now properly spaced below)
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        // Set height based on internal content
-                                        implicitHeight: tipRow.implicitHeight + (Theme.spacingMedium * 2)
-                                        radius: Theme.radiusNormal
-                                        color: Theme.withOpacity(Theme.primaryColor, 0.1)
-                                        border.color: Theme.withOpacity(Theme.primaryColor, 0.2)
-
-                                        RowLayout {
-                                            id: tipRow
-                                            anchors.fill: parent
-                                            anchors.margins: Theme.spacingMedium
-                                            spacing: Theme.spacingMedium
-                                            Label { text: "💡"; font.pixelSize: 20 }
-                                            Label { 
-                                                text: (globalShortcuts && globalShortcuts.boundShortcuts["toggle-recording"]) ? qsTr("Tip: Press %1 while in-game to start or stop a manual recording.").arg(globalShortcuts.boundShortcuts["toggle-recording"]) : qsTr("Tip: Press your recording key while in-game to start or stop a manual recording.")
-                                                font.pixelSize: Theme.fontSizeSmall
-                                                color: Theme.textColor
-                                                wrapMode: Text.WordWrap
-                                                Layout.fillWidth: true
-                                            }
-                                        }
-                                    }
                                 }
                             }
                             Item { Layout.fillHeight: true }
@@ -924,6 +942,8 @@ Rectangle {
                     TrophyButton {
                         text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
+                        visible: root.currentStep !== 3 || root.windowHelperReady
+                        enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
                         onClicked: {
                             if (root.currentStep < root.totalSteps - 1) root.currentStep++
                             else if (settingsManager) settingsManager.setupCompleted = true

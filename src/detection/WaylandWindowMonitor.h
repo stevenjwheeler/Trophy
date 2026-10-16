@@ -45,12 +45,15 @@ class WaylandWindowMonitor : public QObject {
   Q_PROPERTY(bool kwinScriptInstalled READ kwinScriptInstalled NOTIFY windowsChanged)
   Q_PROPERTY(bool kwinScriptEnabled READ kwinScriptEnabled NOTIFY windowsChanged)
   Q_PROPERTY(bool kwinActive READ kwinActive NOTIFY windowsChanged)
+  Q_PROPERTY(bool trackingReady READ trackingReady NOTIFY windowsChanged)
+  Q_PROPERTY(bool trackingChecking READ trackingChecking NOTIFY windowsChanged)
 
 public:
   explicit WaylandWindowMonitor(QObject *parent = nullptr);
   ~WaylandWindowMonitor() override;
 
-  void startMonitoring();
+  /** Missing/disabled helpers require an explicit Install/Repair action. */
+  void startMonitoring(bool repairBackend = false);
   void stopMonitoring();
   bool isMonitoring() const { return m_monitoring; }
 
@@ -68,6 +71,9 @@ public:
   bool kwinScriptInstalled() const;
   bool kwinScriptEnabled() const;
   bool kwinActive() const;
+  bool trackingReady() const;
+  bool trackingChecking() const { return m_healthTimer.isActive(); }
+  Q_INVOKABLE void repairTracking();
 
   /** Stop tracking and remove the KWin script package we installed. */
   void uninstallBackend();
@@ -110,7 +116,7 @@ private slots:
 
 private:
   friend class WindowMonitorWorkerTest;
-  void setupCompositorTracking();
+  void setupCompositorTracking(bool repairBackend);
   void collectRetired();
   struct Retired {
     std::shared_ptr<QObject> backend;
@@ -122,10 +128,12 @@ private:
   std::function<void()> m_pollOverride; // private deterministic worker seam
 
   QTimer *m_pollTimer = nullptr;
+  QTimer m_healthTimer;
   QString m_focusedAppId;
   QList<WindowInfo> m_windows;
   mutable QMutex m_mutex;
   bool m_monitoring = false;
+  bool m_lastTrackingReady = false;
   QString m_compositor;
   std::shared_ptr<KWinBackend> m_kwin;
   std::shared_ptr<GnomeBackend> m_gnome;

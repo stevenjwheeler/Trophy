@@ -274,7 +274,8 @@ ApplicationWindow {
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
-            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "window tracking", "vulkan", "opengl", "shim", "auto", "record", "launch", "game"] },
+            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
+            { name: "Detection Helpers", section: "Detection Helpers", keywords: ["helpers", "integration", "status", "enrolled", "game window helper", "window tracking", "vulkan", "opengl", "shim", "repair"] },
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
@@ -875,6 +876,46 @@ ApplicationWindow {
             window.clearSelection();
             window.openFolder(destDir);
         }
+    }
+
+    // One warning per failure, re-armed once tracking works again. First-run
+    // setup handles its own check; allow initialization/repair time to finish.
+    QtObject {
+        id: trackingStartupCheck
+        property bool prompted: false
+        function check() {
+            if (!windowMonitor)
+                return;
+            if (windowMonitor.trackingReady) {
+                prompted = false;
+                return;
+            }
+            if (prompted || windowMonitor.trackingChecking || !window.settingsManager ||
+                !window.settingsManager.setupCompleted)
+                return;
+            prompted = true;
+            window.show();
+            trackingRepairDialog.open();
+        }
+        Component.onCompleted: Qt.callLater(check)
+    }
+
+    Connections {
+        target: windowMonitor
+        function onWindowsChanged() {
+            trackingStartupCheck.check();
+            if (windowMonitor.trackingReady)
+                trackingRepairDialog.close();
+        }
+    }
+
+    TrophyDialog {
+        id: trackingRepairDialog
+        title: qsTr("Game Window Helper Needs Attention")
+        message: qsTr("The Game Window Helper is not responding. Trophy needs window identity, focus and fullscreen information to identify games and restore capture to the correct window. Repair will reinstall or restart the compositor integration. Your recordings are still available.")
+        confirmText: qsTr("Repair")
+        cancelText: qsTr("Later")
+        onAccepted: if (windowMonitor) windowMonitor.repairTracking()
     }
 
     SetupWizard {

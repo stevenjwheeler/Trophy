@@ -19,6 +19,25 @@
     <file>icons/trash.svg</file>
     <file>icons/search.svg</file>
     <file>icons/video.svg</file>
+    <file>icons/home.svg</file>
+    <file>icons/gamepad.svg</file>
+    <file>icons/settings.svg</file>
+    <file>icons/info.svg</file>
+    <file>icons/storage.svg</file>
+    <file>icons/bell.svg</file>
+    <file>icons/puzzle.svg</file>
+    <file>icons/tray.svg</file>
+    <file>icons/keyboard.svg</file>
+    <file>icons/headphones.svg</file>
+    <file>icons/microphone.svg</file>
+    <file>icons/warning.svg</file>
+    <file>icons/sparkles.svg</file>
+    <file>icons/heart.svg</file>
+    <file>icons/file-text.svg</file>
+    <file>icons/code.svg</file>
+    <file>icons/refresh.svg</file>
+    <file>icons/lightbulb.svg</file>
+    <file>icons/check.svg</file>
     <file>icons/edit.svg</file>
     <file>icons/scissors.svg</file>
     <file>icons/camera.svg</file>
