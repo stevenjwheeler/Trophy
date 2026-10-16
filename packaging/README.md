@@ -5,6 +5,9 @@ distribution paths. Build outside the repository's CloudDrive mount.
 
 ## Flatpak — experimental
 
+See [the feature-parity plan](FLATPAK_PLAN.md) for the proposed architecture,
+implementation phases and release gates.
+
 `io.github.stevenjwheeler.Trophy.yml` is a development manifest, not a
 feature-equivalent release package. Manual capture through the desktop
 portal is the intended evaluation path; it still needs a packaged live
