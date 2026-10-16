@@ -203,21 +203,33 @@ Rectangle {
 
             // Seek back 10s
             TrophyButton {
-                implicitWidth: 52
+                implicitWidth: 36
                 implicitHeight: 36
                 padding: 0
                 horizontalPadding: 0
-                text: qsTr("−10")
+                icon.source: "qrc:/icons/seek-back-10.svg"
+                icon.width: 24
+                icon.height: 24
+                Accessible.name: qsTr("Back 10 seconds")
+                ToolTip.text: qsTr("Back 10 seconds")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
                 onClicked: root.seekRequested(Math.max(0, mediaPlayer.position - 10000))
             }
 
             // Seek forward 10s
             TrophyButton {
-                implicitWidth: 52
+                implicitWidth: 36
                 implicitHeight: 36
                 padding: 0
                 horizontalPadding: 0
-                text: qsTr("+10")
+                icon.source: "qrc:/icons/seek-forward-10.svg"
+                icon.width: 24
+                icon.height: 24
+                Accessible.name: qsTr("Forward 10 seconds")
+                ToolTip.text: qsTr("Forward 10 seconds")
+                ToolTip.visible: hovered
+                ToolTip.delay: 600
                 onClicked: {
                     var target = mediaPlayer.position + 10000
                     if (mediaPlayer.duration > 0)
