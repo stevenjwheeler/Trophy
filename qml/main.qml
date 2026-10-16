@@ -442,11 +442,12 @@ ApplicationWindow {
                     onResultSelected: function(result) { navigateToResult(result); }
                 }
 
-                // Right section: Recording Pill and Window Controls
+                // Keep the recording pill in the space below the window controls.
                 RowLayout {
                     anchors.right: parent.right
-                    anchors.rightMargin: windowButtons.width + Theme.spacingMedium
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Theme.spacingSmall
+                    anchors.top: windowButtons.bottom
+                    anchors.bottom: parent.bottom
                     spacing: Theme.spacingMedium
 
                     Rectangle {
@@ -527,13 +528,21 @@ ApplicationWindow {
                     anchors.top: parent.top
 
                     TrophyWindowButton {
-                        symbol: "—"
+                        iconSource: "qrc:/icons/window-bug.svg"
+                        hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
+                        ToolTip.text: qsTr("Report a bug")
+                        ToolTip.visible: hovered
+                        onClicked: window.app.reportBug()
+                    }
+
+                    TrophyWindowButton {
+                        iconSource: "qrc:/icons/window-minimize.svg"
                         hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                         onClicked: window.showMinimized()
                     }
 
                     TrophyWindowButton {
-                        symbol: window.visibility === Window.Maximized ? "❐" : "▢"
+                        iconSource: window.visibility === Window.Maximized ? "qrc:/icons/window-restore.svg" : "qrc:/icons/window-maximize.svg"
                         hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                         onClicked: {
                             if (window.visibility === Window.Maximized)
@@ -544,7 +553,7 @@ ApplicationWindow {
                     }
 
                     TrophyWindowButton {
-                        symbol: "✕"
+                        iconSource: "qrc:/icons/window-close.svg"
                         hoverColor: Theme.errorColor
                         hoverIconColor: "white"
                         isCloseButton: true

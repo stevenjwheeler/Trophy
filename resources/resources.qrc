@@ -24,6 +24,11 @@
     <file>icons/gpu-nvidia.svg</file>
     <file>icons/gpu-amd.svg</file>
     <file>icons/gpu-intel.svg</file>
+    <file>icons/window-bug.svg</file>
+    <file>icons/window-minimize.svg</file>
+    <file>icons/window-maximize.svg</file>
+    <file>icons/window-restore.svg</file>
+    <file>icons/window-close.svg</file>
     <file>icons/default-apps/steam.svg</file>
     <file>icons/default-apps/discord.svg</file>
     <file>icons/default-apps/obs.svg</file>

@@ -13,6 +13,7 @@
 
 #include "Application.h"
 #include "AutostartManager.h"
+#include "BugReport.h"
 #include "ControlServer.h"
 #include "GlobalShortcutManager.h"
 #include "NotificationService.h"
@@ -1526,6 +1527,11 @@ void Application::requestToggleRecording() {  if (!m_recordingManager) {
   m_notificationService->showNotification(
       "Trophy", "No game detected — open Trophy to record manually.",
       "trophy", 5000, 1);
+}
+
+void Application::reportBug() {
+  const QString tail = readLogTail(bugReportLogPath());
+  QDesktopServices::openUrl(bugReportUrl(applicationVersion(), tail));
 }
 
 void Application::syncAutostartFile() {

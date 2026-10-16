@@ -136,6 +136,10 @@ public:
   Q_INVOKABLE void playRecordingStoppedPing(bool preview);
   // Global-shortcut record toggle (mirrors F9, with feedback).
   Q_INVOKABLE void requestToggleRecording();
+  // Opens a pre-filled GitHub bug report in the browser. Browsers cannot
+  // accept a file attachment via URL, so the issue body embeds the app
+  // version plus the tail of trophy.log (see BugReport.h) instead.
+  Q_INVOKABLE void reportBug();
   // --minimized CLI flag: behave like startMinimized for this launch.
   void setForceMinimized(bool minimized) { m_forceMinimized = minimized; }
 

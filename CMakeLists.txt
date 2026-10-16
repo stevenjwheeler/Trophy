@@ -243,6 +243,7 @@ configure_file(
 # Source files
 set(CORE_SOURCES
     src/core/Application.cpp
+    src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
     src/core/RecordingSession.cpp

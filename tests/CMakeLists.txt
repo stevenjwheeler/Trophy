@@ -164,6 +164,15 @@ target_include_directories(test_GlobalShortcuts PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_GlobalShortcuts PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
 gtest_discover_tests(test_GlobalShortcuts)
 
+# --- BugReport (prefilled GitHub issue URL + log tail; no daemon needed) ---
+add_executable(test_BugReport test_BugReport.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/BugReport.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/BugReport.h
+)
+target_include_directories(test_BugReport PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_BugReport PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_BugReport)
+
 # --- ControlServer (isolated socket path; no GUI needed) ---
 add_executable(test_ControlServer test_ControlServer.cpp ${CMAKE_SOURCE_DIR}/src/core/ControlServer.cpp)
 target_include_directories(test_ControlServer PRIVATE ${TEST_INCLUDE_DIRS})
