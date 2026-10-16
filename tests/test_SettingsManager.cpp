@@ -460,6 +460,42 @@ TEST_F(SettingsManagerTest, ReplayCachePathIsQmlExposed) {
   EXPECT_EQ(mgr->property("replayCachePath").toString(), "/tmp/qml-probe");
 }
 
+TEST_F(SettingsManagerTest, LibraryListViewDefaultsToGrid) {
+  EXPECT_FALSE(mgr->libraryListView());
+}
+
+TEST_F(SettingsManagerTest, SetLibraryListViewEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::libraryListViewChanged);
+  mgr->setLibraryListView(true);
+  EXPECT_TRUE(mgr->libraryListView());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setLibraryListView(true);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, LibraryListViewPersistsRoundTrip) {
+  mgr->setLibraryListView(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_TRUE(mgr2->libraryListView());
+}
+
+TEST_F(SettingsManagerTest, LibraryListViewIsQmlExposed) {
+  // Same regression class as replayCachePath: without Q_PROPERTY, QML
+  // writes land on a dynamic property and reads get `undefined`.
+  const QMetaObject *mo = mgr->metaObject();
+  const int idx = mo->indexOfProperty("libraryListView");
+  ASSERT_GE(idx, 0) << "libraryListView missing from metaobject";
+  const QMetaProperty prop = mo->property(idx);
+  EXPECT_TRUE(prop.isWritable());
+  EXPECT_TRUE(prop.hasNotifySignal());
+  EXPECT_TRUE(mgr->setProperty("libraryListView", true));
+  EXPECT_TRUE(mgr->libraryListView());
+  EXPECT_TRUE(mgr->property("libraryListView").toBool());
+}
+
 TEST_F(SettingsManagerTest, LegacySingularTokenKeyNotPersisted) {
   // The old "waylandRestoreToken" key (never mapped to a game) must not be
   // written anymore; only the per-game map persists. Note the map key

@@ -26,7 +26,7 @@ Rectangle {
     // first paint before the background probe lands.
     readonly property bool isClip: root.recording && (root.recording.isClip || (root.recording.fileName || "").endsWith("_Replay.mkv"))
     
-    height: 180
+    height: Theme.recordingCardHeight
     radius: Theme.radiusMedium
     color: Theme.cardColor
     clip: true
@@ -88,8 +88,9 @@ Rectangle {
         // --- THUMBNAIL SECTION ---
         Item {
             id: thumbnailContainer
+            objectName: "gridThumbnail"
             Layout.fillWidth: true
-            Layout.preferredHeight: 125
+            Layout.preferredHeight: 180
             
             // This keeps the bottom edge razor sharp where it meets the info section
             clip: true
@@ -243,33 +244,35 @@ Rectangle {
         ColumnLayout {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: Theme.spacingSmall; spacing: 2
             Label {
+                objectName: "gridTitle"
                 text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
                 font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
             }
-            Label {
-                text: root.recording ? formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
-                font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
-            }
-            Item { Layout.fillHeight: true }
             RowLayout {
                 Layout.fillWidth: true
-                spacing: Theme.spacingSmall
+                spacing: 6
+
                 Label {
-                    text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
-                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor; Layout.fillWidth: true; Layout.alignment: Qt.AlignBottom
+                    objectName: "gridType"
+                    text: root.isClip ? qsTr("Clip") : qsTr("Recording")
+                    color: root.isClip ? Theme.highlightedColor : Theme.primaryColor
+                    font.pixelSize: Theme.fontSizeTiny
+                    font.weight: Font.Medium
                 }
-                Rectangle {
-                    Layout.alignment: Qt.AlignBottom
-                    width: badgeLabel.width + 12; height: badgeLabel.height + 6
-                    radius: 4
-                    color: root.isClip ? Theme.withOpacity(Theme.highlightedColor, 0.2) : Theme.withOpacity(Theme.errorColor, 0.2)
-                    Label {
-                        id: badgeLabel; anchors.centerIn: parent
-                        text: root.isClip ? qsTr("Clip") : qsTr("Recording")
-                        color: root.isClip ? Theme.highlightedColor : Theme.errorColor
-                        font.pixelSize: Theme.fontSizeTiny; font.weight: Font.Medium
-                    }
+
+                Label {
+                    objectName: "gridMetadata"
+                    text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
+                    elide: Text.ElideRight; Layout.fillWidth: true
                 }
+            }
+            Label {
+                objectName: "gridDate"
+                Layout.fillWidth: true
+                text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
+                font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor
+                elide: Text.ElideRight
             }
         }
     }

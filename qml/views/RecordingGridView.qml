@@ -15,7 +15,7 @@ GridView {
 
     property int skip: 0
 
-    property int minCellWidth: 280
+    property int minCellWidth: 340
     cellWidth: {
         var availableWidth = width - leftMargin - rightMargin;
         var cols = Math.floor(availableWidth / minCellWidth);
@@ -43,7 +43,9 @@ GridView {
     Label {
         anchors.centerIn: parent
         visible: root.count === 0
-        text: qsTr("No recordings found\nRecord some gameplay to see it here!")
+        text: recordingLibrary && (recordingLibrary.kindFilter !== 0 || recordingLibrary.searchQuery.length > 0)
+            ? qsTr("No matching captures\nTry another filter or search.")
+            : qsTr("No captures yet\nRecord some gameplay to see it here!")
         color: Theme.textMutedColor
         horizontalAlignment: Text.AlignHCenter
         font.pixelSize: Theme.fontSizeMedium

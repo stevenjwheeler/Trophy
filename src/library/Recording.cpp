@@ -54,20 +54,66 @@ void Recording::setThumbnailPath(const QString &path) {
   }
 }
 
+void Recording::updateForRename(const QString &newPath) {
+  if (newPath.isEmpty() || newPath == m_filePath) {
+    return;
+  }
+
+  const QFileInfo info(newPath);
+  m_filePath = newPath;
+  m_fileName = info.fileName();
+  m_directory = info.absolutePath();
+  m_size = info.size();
+  // The new filename is authoritative (the container still carries the
+  // pre-rename title tag baked in at record time).
+  m_preferFileNameTitle = true;
+  // Only the filename-derived fields follow the new name. Clip identity
+  // keeps its probed/tagged value: renaming a legacy "_Replay" clip to
+  // a plain name must not flip its badge to Recording.
+  const bool keepClip = m_isClip;
+  parseFileNameForGameName();
+  m_isClip = keepClip;
+  // Re-probe the new path without joining any probe still in flight for
+  // the old one: launchProbe pins a fresh generation, so the stale
+  // completion drops itself instead of overwriting the fields above,
+  // and the new probe fills in duration/resolution/codecs (preferring
+  // the filename for the title, as set above).
+  launchProbe();
+  // The renamer moves the sidecar thumbnail alongside the video; pick
+  // up the new name (or clear when it is absent — the caller queues a
+  // fresh generation, mirroring addRecording).
+  const QString thumbPath =
+      m_directory + "/.thumbnails/" + info.completeBaseName() + ".jpg";
+  const QString thumb =
+      QFileInfo::exists(thumbPath) ? thumbPath : QString();
+
+  emit fileChanged();
+  emit metadataChanged();
+  setThumbnailPath(thumb);
+}
+
 void Recording::loadMetadata() {
   // Do not replace a running future: an earlier probe still accesses this
   // object and must finish before filename-derived fields are reset.
   if (m_probeFuture.isRunning())
     m_probeFuture.waitForFinished();
   parseFileNameForGameName();
+  launchProbe();
+}
+
+void Recording::launchProbe() {
   const quint64 generation = ++m_probeGeneration;
-  const ProbeResult initial{m_gameName, m_date, 0,      0, 0,
-                              m_isClip,      {},        {}, 0.0, 0, {}, {}};
+  const ProbeResult initial{m_gameName, m_date, m_duration, m_width,
+                            m_height, m_isClip,  m_trophyVersion,
+                            m_videoCodec, m_fps, m_audioTrackCount,
+                            m_audioCodec, m_encoderName};
   const QString path = m_filePath;
   const bool preferFileNameTitle = m_preferFileNameTitle;
 
   // Probe into worker-local data only. QML and list sorting may read the
   // getters while this runs, so the worker must never mutate QObject fields.
+  // The generation pin drops stale completions: a probe overtaken by a
+  // rename (or a newer probe) never applies.
   QPointer<Recording> self(this);
   m_probeFuture = QtConcurrent::run(
       [self, path, initial, preferFileNameTitle, generation]() {

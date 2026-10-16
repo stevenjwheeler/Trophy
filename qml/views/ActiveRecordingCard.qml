@@ -49,7 +49,7 @@ Rectangle {
         // --- THUMBNAIL SECTION (same geometry as RecordingCard) ---
         Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: 125
+            Layout.preferredHeight: 180
             clip: true
 
             // Full-bleed background with top-rounded corners only —
@@ -167,10 +167,6 @@ Rectangle {
                 text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
                 color: Theme.textSecondaryColor
                 font.pixelSize: Theme.fontSizeTiny
-            }
-
-            Item {
-                Layout.fillHeight: true
             }
 
             Label {

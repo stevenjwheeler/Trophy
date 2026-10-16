@@ -120,6 +120,7 @@ void SettingsManager::load() {
   m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
   m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
+  m_libraryListView = general["libraryListView"].toBool(false);
 
   // Load notification options (all default on)
   QJsonObject notifications = root["notifications"].toObject();
@@ -183,6 +184,7 @@ void SettingsManager::load() {
   emit notifyClipsChanged();
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
+  emit libraryListViewChanged();
   emit replayCachePathChanged();
   emit waylandRestoreTokensChanged();
   emit settingsLoaded();
@@ -249,6 +251,7 @@ void SettingsManager::save() {
   general["globalShortcuts"] = m_globalShortcutsEnabled;
   general["updateCheck"] = m_updateCheckEnabled;
   general["replayCachePath"] = m_replayCachePath;
+  general["libraryListView"] = m_libraryListView;
   root["general"] = general;
 
   // Notification options
@@ -324,6 +327,7 @@ void SettingsManager::resetToDefaults() {
   emit notifyClipsChanged();
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
+  emit libraryListViewChanged();
   emit waylandRestoreTokensChanged();
 }
 
@@ -378,6 +382,7 @@ void SettingsManager::loadDefaults() {
   m_notifyClips = true;
   m_notifyStorage = true;
   m_completionSoundEnabled = true;
+  m_libraryListView = false;
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -636,6 +641,14 @@ void SettingsManager::setCompletionSoundEnabled(bool enabled) {
     m_completionSoundEnabled = enabled;
     save();
     emit completionSoundEnabledChanged();
+  }
+}
+
+void SettingsManager::setLibraryListView(bool enabled) {
+  if (m_libraryListView != enabled) {
+    m_libraryListView = enabled;
+    save();
+    emit libraryListViewChanged();
   }
 }
 

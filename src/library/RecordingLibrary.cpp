@@ -109,10 +109,19 @@ void RecordingLibrary::setSearchQuery(const QString &query) {
 }
 
 void RecordingLibrary::setSortOrder(int order) {
+  if (order < NewestFirst || order > NameZA)
+    return;
   if (m_sortOrder != order) {
     m_sortOrder = order;
     updateFilteredRecordings();
   }
+}
+
+void RecordingLibrary::setKindFilter(int filter) {
+  if (filter < AllCaptures || filter > NoCaptures || m_kindFilter == filter)
+    return;
+  m_kindFilter = filter;
+  updateFilteredRecordings();
 }
 
 void RecordingLibrary::refresh() {
@@ -314,9 +323,26 @@ void RecordingLibrary::onRecordingRenamed(const QString &oldPath,
   m_fileNameTitlePreferred.remove(QFileInfo(oldPath).fileName());
   if (!newPath.isEmpty()) {
     m_fileNameTitlePreferred.insert(QFileInfo(newPath).fileName());
-    // Mark the source so the refresh below doesn't report its
-    // disappearance as a deletion (see removeRecording).
-    m_renameSource = oldPath;
+    // Adopt the rename in place when the source is still tracked and
+    // the target is not: the delegate keeps its live object (updated
+    // via fileChanged/metadataChanged/thumbnailPathChanged) instead of
+    // watching its recording get deleted and hoping the view rebuilds
+    // the replacement in time. The refresh that follows this signal
+    // then finds everything consistent and settles with no churn.
+    // Anything else (untracked source, already-tracked target) falls
+    // through to the remove + add scan path, which still needs the
+    // deletion swallow below.
+    if (Recording *recording = getRecording(oldPath);
+        recording && !getRecording(newPath)) {
+      recording->updateForRename(newPath);
+      if (recording->thumbnailPath().isEmpty()) {
+        m_thumbnailGenerator->generateThumbnail(newPath);
+      }
+    } else {
+      // Mark the source so the refresh below doesn't report its
+      // disappearance as a deletion (see removeRecording).
+      m_renameSource = oldPath;
+    }
   }
   saveCustomTitles();
 }
@@ -466,6 +492,10 @@ void RecordingLibrary::addRecording(const QString &filePath) {
   recording->setPreferFileNameTitle(
       m_fileNameTitlePreferred.contains(QFileInfo(filePath).fileName()));
   recording->loadMetadata();
+  // Duration, date, title and clip identity arrive asynchronously. Reapply
+  // the current view when probing completes (including renamed clips).
+  connect(recording.get(), &Recording::metadataChanged, this,
+          &RecordingLibrary::updateFilteredRecordings);
 
   // Request thumbnail generation
   if (recording->thumbnailPath().isEmpty()) {
@@ -613,6 +643,12 @@ void RecordingLibrary::updateFilteredRecordings() {
     }
 
     // Apply search filter
+    if (m_kindFilter == NoCaptures ||
+        (m_kindFilter == RecordingsOnly && rec->isClip()) ||
+        (m_kindFilter == ClipsOnly && !rec->isClip())) {
+      continue;
+    }
+
     if (!m_searchQuery.isEmpty()) {
       if (!rec->gameName().contains(m_searchQuery, Qt::CaseInsensitive) &&
           !rec->fileName().contains(m_searchQuery, Qt::CaseInsensitive)) {
@@ -623,28 +659,24 @@ void RecordingLibrary::updateFilteredRecordings() {
     m_filteredRecordings.append(rec.get());
   }
 
-  // Apply sorting
-  switch (m_sortOrder) {
-  case NewestFirst:
-    std::sort(m_filteredRecordings.begin(), m_filteredRecordings.end(),
-              [](Recording *a, Recording *b) { return a->date() > b->date(); });
-    break;
-  case OldestFirst:
-    std::sort(m_filteredRecordings.begin(), m_filteredRecordings.end(),
-              [](Recording *a, Recording *b) { return a->date() < b->date(); });
-    break;
-  case LargestFirst:
-    std::sort(m_filteredRecordings.begin(), m_filteredRecordings.end(),
-              [](Recording *a, Recording *b) { return a->size() > b->size(); });
-    break;
-  case NameAZ:
-    std::sort(m_filteredRecordings.begin(), m_filteredRecordings.end(),
-              [](Recording *a, Recording *b) {
-                return a->gameName().compare(b->gameName(),
-                                             Qt::CaseInsensitive) < 0;
-              });
-    break;
-  }
+  // A path tie-break keeps equal dates/sizes/durations deterministic as
+  // background metadata arrives and the view is rebuilt.
+  std::sort(m_filteredRecordings.begin(), m_filteredRecordings.end(),
+            [this](Recording *a, Recording *b) {
+    int comparison = 0;
+    const auto compare = [](auto x, auto y) { return x < y ? -1 : x > y ? 1 : 0; };
+    switch (m_sortOrder) {
+    case NewestFirst: comparison = compare(b->date(), a->date()); break;
+    case OldestFirst: comparison = compare(a->date(), b->date()); break;
+    case LargestFirst: comparison = compare(b->size(), a->size()); break;
+    case SmallestFirst: comparison = compare(a->size(), b->size()); break;
+    case LongestFirst: comparison = compare(b->duration(), a->duration()); break;
+    case ShortestFirst: comparison = compare(a->duration(), b->duration()); break;
+    case NameAZ: comparison = a->gameName().compare(b->gameName(), Qt::CaseInsensitive); break;
+    case NameZA: comparison = b->gameName().compare(a->gameName(), Qt::CaseInsensitive); break;
+    }
+    return comparison != 0 ? comparison < 0 : a->filePath() < b->filePath();
+  });
 
   if (m_batchDepth > 0) {
     // Inside a scan/refresh batch: the list above is settled (callers

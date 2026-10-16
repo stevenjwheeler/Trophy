@@ -30,6 +30,43 @@ target_compile_definitions(test_PlayerProbe PRIVATE
 target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_PlayerProbe)
 
+# Headless engine load of the real library card (rename rebind keeps
+# thumbnail). Views never polish offscreen here, so this covers the card
+# bindings only; the model side is covered in test_RecordingLibrary.
+add_executable(test_RecordingCardBinding test_RecordingCardBinding.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.h
+    ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/Recording.h
+    ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.h
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.cpp
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.h
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.h
+)
+target_compile_definitions(test_RecordingCardBinding PRIVATE
+    CARD_QML_FILE="${CMAKE_SOURCE_DIR}/qml/views/RecordingCard.qml")
+target_include_directories(test_RecordingCardBinding PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+target_link_libraries(test_RecordingCardBinding PRIVATE
+    GTest::GTest
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+    Qt6::Qml
+    Qt6::Test
+    Qt6::Concurrent
+    ${AVFORMAT_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+)
+gtest_discover_tests(test_RecordingCardBinding)
+
 # Optional script API fixture: Node is test tooling only, never a runtime
 # dependency for Trophy or for builds without it.
 find_program(TROPHY_NODE_EXECUTABLE node)

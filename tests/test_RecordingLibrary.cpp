@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QProcess>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -61,21 +62,25 @@ protected:
   // system ffmpeg. Empty string when ffmpeg is unavailable (callers
   // should SKIP).
   QString makeTitledClip(const QString &name, const QString &title,
-                         int durationSec = 1) {
+                         int durationSec = 1, const QString &kind = {},
+                         const QString &date = "2026-01-01T12:00:00Z") {
     if (QStandardPaths::findExecutable("ffmpeg").isEmpty())
       return QString();
     const QString path = tempDir.path() + "/" + name;
     QProcess proc;
-    proc.start(
-        "ffmpeg",
-        {"-y", "-v", "error", "-f", "lavfi", "-i",
+    QStringList args = {"-y", "-v", "error", "-f", "lavfi", "-i",
          QString("testsrc=size=320x240:rate=30:duration=%1").arg(durationSec),
          "-pix_fmt", "yuv420p",
          // Fixed GOP: real recordings have regular
          // keyframes; the encoder default here writes a
          // single head keyframe, which nothing can cut.
          "-g", "12", "-keyint_min", "12", "-metadata",
-         QString("title=%1").arg(title), path});
+          QString("title=%1").arg(title), "-metadata",
+          QString("creation_time=%1").arg(date)};
+    if (!kind.isEmpty())
+      args << "-metadata" << QString("trophy-kind=%1").arg(kind);
+    args << path;
+    proc.start("ffmpeg", args);
     if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
         !QFile::exists(path))
       return QString();
@@ -124,6 +129,93 @@ TEST_F(RecordingLibraryTest, SortOrdersChangeSequence) {
   EXPECT_GT(lib.get(0)->size(), lib.get(1)->size());
   EXPECT_EQ(lib.get(0)->filePath(), b);
   EXPECT_EQ(lib.get(1)->filePath(), a);
+}
+
+TEST_F(RecordingLibraryTest, KindFilterCombinesWithSearchAndActiveExclusion) {
+  const auto clip = createFile("Hades_2026-01-15_20-30-00_Replay.mkv");
+  createFile("Hades_2026-01-16_20-30-00.mkv");
+  createFile("Portal_2026-01-16_20-30-00_Replay.mkv");
+  RecordingLibrary lib(tempDir.path());
+  lib.setKindFilter(RecordingLibrary::ClipsOnly);
+  EXPECT_EQ(lib.count(), 2);
+  lib.setSearchQuery("hades");
+  ASSERT_EQ(lib.count(), 1);
+  EXPECT_EQ(lib.get(0)->filePath(), clip);
+  lib.setActiveRecordingPath(clip);
+  EXPECT_EQ(lib.count(), 0);
+  lib.setActiveRecordingPath({});
+  lib.setKindFilter(RecordingLibrary::RecordingsOnly);
+  ASSERT_EQ(lib.count(), 1);
+  EXPECT_FALSE(lib.get(0)->isClip());
+  lib.setSearchQuery({});
+  lib.setKindFilter(RecordingLibrary::AllCaptures);
+  EXPECT_EQ(lib.count(), 3);
+  lib.setKindFilter(RecordingLibrary::NoCaptures);
+  EXPECT_EQ(lib.count(), 0);
+  lib.setKindFilter(RecordingLibrary::AllCaptures);
+  EXPECT_EQ(lib.count(), 3);
+}
+
+TEST_F(RecordingLibraryTest, AdditionalSortOrdersAndInvalidValues) {
+  const auto a = createFile("Alpha.mkv", 8192);
+  const auto b = createFile("Beta.mkv", 16384);
+  RecordingLibrary lib(tempDir.path());
+  lib.setSortOrder(RecordingLibrary::SmallestFirst);
+  EXPECT_EQ(lib.get(0)->filePath(), a);
+  lib.setSortOrder(RecordingLibrary::NameZA);
+  EXPECT_EQ(lib.get(0)->filePath(), b);
+  QSignalSpy changed(&lib, &RecordingLibrary::recordingsChanged);
+  lib.setSortOrder(-1);
+  lib.setSortOrder(999);
+  lib.setKindFilter(-1);
+  lib.setKindFilter(999);
+  EXPECT_EQ(lib.sortOrder(), RecordingLibrary::NameZA);
+  EXPECT_EQ(lib.kindFilter(), RecordingLibrary::AllCaptures);
+  EXPECT_EQ(changed.count(), 0);
+}
+
+TEST_F(RecordingLibraryTest, MetadataCompletionReappliesDurationDateAndKind) {
+  const auto shortPath = makeTitledClip("Renamed.mkv", "Zulu", 1, "clip",
+                                       "2026-01-02T12:00:00Z");
+  const auto longPath = makeTitledClip("Other.mkv", "Alpha", 3);
+  if (shortPath.isEmpty() || longPath.isEmpty())
+    GTEST_SKIP() << "ffmpeg fixture unavailable";
+
+  RecordingLibrary lib(tempDir.path());
+  // Apply before queued probe results; a renamed clip has no suffix.
+  lib.setKindFilter(RecordingLibrary::ClipsOnly);
+  lib.setSortOrder(RecordingLibrary::LongestFirst);
+  waitForProbes();
+  ASSERT_EQ(lib.count(), 1);
+  EXPECT_EQ(lib.get(0)->filePath(), shortPath);
+  lib.setKindFilter(RecordingLibrary::AllCaptures);
+  ASSERT_EQ(lib.count(), 2);
+  EXPECT_EQ(lib.get(0)->filePath(), longPath);
+  EXPECT_GT(lib.get(0)->duration(), lib.get(1)->duration());
+  lib.setSortOrder(RecordingLibrary::ShortestFirst);
+  EXPECT_EQ(lib.get(0)->filePath(), shortPath);
+  lib.setSortOrder(RecordingLibrary::NewestFirst);
+  EXPECT_EQ(lib.get(0)->filePath(), shortPath);
+  lib.setSortOrder(RecordingLibrary::OldestFirst);
+  EXPECT_EQ(lib.get(0)->filePath(), longPath);
+  lib.setSortOrder(RecordingLibrary::NameAZ);
+  EXPECT_EQ(lib.get(0)->filePath(), longPath);
+  lib.setSortOrder(RecordingLibrary::NameZA);
+  EXPECT_EQ(lib.get(0)->filePath(), shortPath);
+}
+
+TEST_F(RecordingLibraryTest, EqualSortValuesUseStablePathOrder) {
+  const auto b = createFile("Beta.mkv");
+  const auto a = createFile("Alpha.mkv");
+  RecordingLibrary lib(tempDir.path());
+  for (const auto sort : {RecordingLibrary::LargestFirst,
+                          RecordingLibrary::SmallestFirst,
+                          RecordingLibrary::LongestFirst,
+                          RecordingLibrary::ShortestFirst}) {
+    lib.setSortOrder(sort);
+    EXPECT_EQ(lib.get(0)->filePath(), a);
+    EXPECT_EQ(lib.get(1)->filePath(), b);
+  }
 }
 
 TEST_F(RecordingLibraryTest, ActiveRecordingExcludedFromCount) {
@@ -470,17 +562,61 @@ TEST_F(RecordingLibraryTest, RemoveRecordingsSwallowsRenameSource) {
   RecordingLibrary lib(tempDir.path());
   ASSERT_EQ(lib.count(), 2);
 
-  // Same rule as the single path: a rename source vanishing from the
-  // model is not a deletion, so it must not reach the activity feed.
+  // The rename is adopted in place, so the stale source path is no
+  // longer tracked at all: a bulk remove listing it only drops the
+  // other selection, and the adopted recording survives under its new
+  // path (never reported as removed).
   const QString newPath = tempDir.path() + "/New_2026-01-15_20-30-00.mkv";
   ASSERT_TRUE(QFile::rename(oldPath, newPath));
   lib.onRecordingRenamed(oldPath, newPath);
 
   QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
   lib.removeRecordings({oldPath, keep});
-  EXPECT_EQ(lib.count(), 0);
+  EXPECT_EQ(lib.count(), 1);
   ASSERT_EQ(batchSpy.count(), 1);
   EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({keep}));
+  EXPECT_NE(lib.getRecording(newPath), nullptr);
+}
+
+TEST_F(RecordingLibraryTest, UnadoptedRenameSourceStillSwallowed) {
+  // Fallback path: the rename target is already tracked, so in-place
+  // adoption is skipped and the vanished source is removed by the
+  // model instead — still not a deletion for observers.
+  const QString oldPath = createFile("Old_2026-01-15_20-30-00.mkv");
+  const QString clashPath = createFile("New_2026-01-15_20-30-00.mkv");
+  const QString keep = createFile("Keep_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 3);
+
+  ASSERT_TRUE(QFile::rename(
+      oldPath, tempDir.path() + "/MovedAside_2026-01-15_20-30-00.mkv"));
+  lib.onRecordingRenamed(oldPath, clashPath);
+
+  QSignalSpy removedSpy(&lib, &RecordingLibrary::recordingRemoved);
+  QSignalSpy batchSpy(&lib, &RecordingLibrary::recordingsRemoved);
+  lib.removeRecordings({oldPath, keep});
+  EXPECT_EQ(lib.count(), 1);
+  EXPECT_NE(lib.getRecording(clashPath), nullptr);
+  EXPECT_EQ(removedSpy.count(), 0);
+  ASSERT_EQ(batchSpy.count(), 1);
+  EXPECT_EQ(batchSpy.first().first().toStringList(), QStringList({keep}));
+}
+
+TEST_F(RecordingLibraryTest, UnadoptedSingleRemoveStillSwallowed) {
+  // Same fallback rule on the single path: the rename target is
+  // already tracked, so adoption is skipped, the source is marked,
+  // and its direct removal stays silent.
+  const QString oldPath = createFile("Old_2026-01-15_20-30-00.mkv");
+  const QString clashPath = createFile("New_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 2);
+
+  lib.onRecordingRenamed(oldPath, clashPath);
+  QSignalSpy removedSpy(&lib, &RecordingLibrary::recordingRemoved);
+  lib.removeRecording(oldPath);
+  EXPECT_EQ(lib.count(), 1);
+  EXPECT_NE(lib.getRecording(clashPath), nullptr);
+  EXPECT_EQ(removedSpy.count(), 0);
 }
 
 TEST_F(RecordingLibraryTest, BulkDeleteWiringSettlesOnceEndToEnd) {
@@ -649,4 +785,155 @@ TEST_F(RecordingLibraryTest, SaveClipRangeUsesUniqueNameOnCollision) {
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     EXPECT_EQ(file.readAll(), QByteArray("occupied"));
   }
+}
+
+TEST_F(RecordingLibraryTest, AppWiredRenamePreservesThumbnail) {
+  // Full in-app rename flow: StorageManager moves the video + sidecar
+  // thumbnail, recordingRenamed is wired to the library exactly like
+  // Application wires it (onRecordingRenamed BEFORE refresh), plus the
+  // explicit refresh main.qml's performRename issues. The recreated
+  // Recording must carry the moved thumbnail — a blank card that only
+  // recovers after restart means this regressed.
+  const QString oldPath = createFile("Old_Game_2026-01-15_20-30-00.mkv");
+  QDir(tempDir.path()).mkpath(".thumbnails");
+  const QString oldThumb =
+      tempDir.path() + "/.thumbnails/Old_Game_2026-01-15_20-30-00.jpg";
+  {
+    QFile thumb(oldThumb);
+    ASSERT_TRUE(thumb.open(QIODevice::WriteOnly));
+    thumb.write(QByteArray(512, 't'));
+  }
+
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 1);
+  Recording *before = lib.getRecording(oldPath);
+  ASSERT_NE(before, nullptr);
+  EXPECT_EQ(before->thumbnailPath(), oldThumb);
+
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::onRecordingRenamed);
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::refresh);
+
+  QSignalSpy changedSpy(&lib, &RecordingLibrary::recordingsChanged);
+  QSignalSpy fileChangedSpy(before, &Recording::fileChanged);
+  const QString newPath = storage.renameRecording(oldPath, "New Title");
+  ASSERT_FALSE(newPath.isEmpty());
+  // The rename's signal-driven refresh must notify (the grid only
+  // rebinds on recordingsChanged; correct content without the emit
+  // leaves the card bound to the deleted pre-rename object: blank
+  // until restart).
+  EXPECT_GE(changedSpy.count(), 1) << "rename produced no model notification";
+  EXPECT_EQ(lib.count(), 1);
+  Recording *signaled = lib.getRecording(newPath);
+  // Adopted in place: the same object survives, so delegates never
+  // observe a deleted recording even if a view rebuild lags.
+  EXPECT_EQ(signaled, before) << "rename swapped the Recording object";
+  ASSERT_NE(signaled, nullptr);
+  EXPECT_FALSE(signaled->thumbnailPath().isEmpty());
+  EXPECT_GE(fileChangedSpy.count(), 1) << "rename did not notify fileChanged";
+  EXPECT_EQ(signaled->filePath(), newPath);
+  EXPECT_EQ(signaled->fileName(), QFileInfo(newPath).fileName());
+  EXPECT_EQ(signaled->gameName(), QString("New Title"));
+  // main.qml performRename() issues one more refresh after the rename.
+  lib.refresh();
+  waitForProbes();
+
+  ASSERT_EQ(lib.count(), 1);
+  Recording *after = lib.getRecording(newPath);
+  ASSERT_NE(after, nullptr) << "renamed file missing from library";
+  EXPECT_EQ(after, before);
+  EXPECT_FALSE(after->thumbnailPath().isEmpty())
+      << "thumbnail lost across rename (card goes blank until restart)";
+  if (!after->thumbnailPath().isEmpty())
+    EXPECT_TRUE(QFile::exists(after->thumbnailPath()));
+}
+
+TEST_F(RecordingLibraryTest, RenameDuringProbeKeepsNewName) {
+  // The initial probe of a real file takes tens of ms; renaming
+  // immediately (as the app flow does) must not let the stale
+  // in-flight completion overwrite the adopted name afterwards.
+  const QString oldPath =
+      makeTitledClip("Old_Game_2026-01-15_20-30-00.mkv", "Old Game");
+  if (oldPath.isEmpty())
+    GTEST_SKIP() << "ffmpeg CLI unavailable";
+
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 1);
+  Recording *rec = lib.getRecording(oldPath);
+  ASSERT_NE(rec, nullptr);
+
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::onRecordingRenamed);
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::refresh);
+
+  const QString newPath = storage.renameRecording(oldPath, "New Title");
+  ASSERT_FALSE(newPath.isEmpty());
+  lib.refresh();
+  waitForProbes();
+
+  ASSERT_EQ(lib.count(), 1);
+  Recording *after = lib.getRecording(newPath);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(after, rec) << "rename during probe swapped the object";
+  EXPECT_EQ(after->gameName(), QString("New Title"))
+      << "stale probe completion reverted the adopted name";
+  EXPECT_GT(after->duration(), 0) << "adopted probe never filled metadata";
+}
+
+TEST_F(RecordingLibraryTest, RenamePreservesClipIdentityWhenSuffixStripped) {
+  // Legacy clips carry _Replay in the name but no trophy-kind tag;
+  // renaming drops the timestamp/_Replay suffix, which must not flip
+  // the Clip badge to Recording.
+  const QString oldPath =
+      makeTitledClip("ClipGame_2026-01-15_20-30-00_Replay.mkv", "ClipGame");
+  if (oldPath.isEmpty())
+    GTEST_SKIP() << "ffmpeg CLI unavailable";
+
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path());
+  waitForProbes();
+  ASSERT_EQ(lib.count(), 1);
+  ASSERT_TRUE(lib.get(0)->isClip());
+
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::onRecordingRenamed);
+  QObject::connect(&storage, &StorageManager::recordingRenamed, &lib,
+                   &RecordingLibrary::refresh);
+
+  const QString newPath = storage.renameRecording(oldPath, "Cool");
+  ASSERT_FALSE(newPath.isEmpty());
+  // No timestamp to preserve (old name ended in _Replay): plain name.
+  EXPECT_EQ(newPath, tempDir.path() + "/Cool.mkv");
+  lib.refresh();
+  waitForProbes();
+
+  ASSERT_EQ(lib.count(), 1);
+  Recording *after = lib.getRecording(newPath);
+  ASSERT_NE(after, nullptr);
+  EXPECT_TRUE(after->isClip()) << "rename flipped clip identity";
+  EXPECT_EQ(after->gameName(), QString("Cool"));
+}
+
+TEST_F(RecordingLibraryTest, RenameAdoptionFallsBackWhenSourceUntracked) {
+  // A rename notification for a source the library never tracked
+  // cannot adopt in place: the file still arrives via the classic
+  // remove + add scan path.
+  const QString tracked = createFile("Tracked_2026-01-15_20-30-00.mkv");
+  const QString dropped = createFile("Fresh_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  ASSERT_EQ(lib.count(), 2);
+
+  QSignalSpy removedSpy(&lib, &RecordingLibrary::recordingRemoved);
+  lib.onRecordingRenamed(tempDir.path() + "/Ghost_2026-01-15_20-30-00.mkv",
+                         dropped);
+  lib.refresh();
+
+  EXPECT_EQ(lib.count(), 2);
+  EXPECT_NE(lib.getRecording(tracked), nullptr);
+  EXPECT_NE(lib.getRecording(dropped), nullptr);
+  EXPECT_EQ(removedSpy.count(), 0);
 }

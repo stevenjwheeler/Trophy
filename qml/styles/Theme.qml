@@ -78,8 +78,8 @@ QtObject {
     readonly property int navRailWidth: 72
     readonly property int navRailExpandedWidth: 200
     // Card sizes
-    readonly property int recordingCardWidth: 280
-    readonly property int recordingCardHeight: 200
+    readonly property int recordingCardWidth: 340
+    readonly property int recordingCardHeight: 248
 
     // Helper functions
     function withOpacity(color, opacity) {

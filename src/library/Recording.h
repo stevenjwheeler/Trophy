@@ -23,15 +23,15 @@ namespace TrophyBackend {
 class Recording : public QObject {
   Q_OBJECT
 
-  Q_PROPERTY(QString filePath READ filePath CONSTANT)
-  Q_PROPERTY(QString fileName READ fileName CONSTANT)
-  Q_PROPERTY(QString directory READ directory CONSTANT)
+  Q_PROPERTY(QString filePath READ filePath NOTIFY fileChanged)
+  Q_PROPERTY(QString fileName READ fileName NOTIFY fileChanged)
+  Q_PROPERTY(QString directory READ directory NOTIFY fileChanged)
   Q_PROPERTY(QString gameName READ gameName NOTIFY metadataChanged)
   // Produced asynchronously by probeVideoFile: filesystem dates first,
   // then the container tags (trophy-date/time win over creation_time).
   Q_PROPERTY(QDateTime date READ date NOTIFY metadataChanged)
   Q_PROPERTY(qint64 duration READ duration NOTIFY metadataChanged)
-  Q_PROPERTY(qint64 size READ size CONSTANT)
+  Q_PROPERTY(qint64 size READ size NOTIFY fileChanged)
   Q_PROPERTY(
       QString thumbnailPath READ thumbnailPath NOTIFY thumbnailPathChanged)
   Q_PROPERTY(int width READ width NOTIFY metadataChanged)
@@ -97,7 +97,28 @@ public:
    */
   void loadMetadata();
 
+  /**
+   * @brief Adopt an in-app rename in place, keeping this object alive.
+   *
+   * Updates path/name/directory/size, re-derives the display name from
+   * the new filename (which is authoritative after a user rename), and
+   * re-resolves the sidecar thumbnail. Container-derived fields
+   * (duration, resolution, codecs, date, clip identity, encoder) are kept
+   * while a fresh probe fills missing metadata from the new path. Any
+   * probe still in flight for the old path is invalidated so its late
+   * result cannot overwrite the new name.
+   *
+   * Keeping the object (instead of delete + recreate) keeps every QML
+   * delegate bound to a live object across the rename: the card updates
+   * through property notifies and never observes a deleted recording.
+   */
+  void updateForRename(const QString &newPath);
+
 signals:
+  // Identity/location of the file (path, name, directory, size).
+  // Emitted by updateForRename; the object stays the same, so views
+  // rebind without a model reset.
+  void fileChanged();
   void thumbnailPathChanged();
   void metadataChanged();
 
@@ -120,6 +141,10 @@ private:
   static ProbeResult probeVideoFile(const QString &filePath, ProbeResult result,
                                     bool preferFileNameTitle);
   void applyProbeResult(const ProbeResult &result);
+  // Shared probe launch for loadMetadata (after joining any running
+  // probe) and updateForRename (without joining: the generation pin
+  // retires the stale in-flight probe instead of blocking the GUI).
+  void launchProbe();
 
   QString m_filePath;
   QString m_fileName;

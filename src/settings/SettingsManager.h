@@ -113,6 +113,10 @@ class SettingsManager : public QObject {
   // needed).
   Q_PROPERTY(bool completionSoundEnabled READ completionSoundEnabled WRITE setCompletionSoundEnabled
                  NOTIFY completionSoundEnabledChanged)
+  // Dashboard library layout: false = grid, true = list. Persisted so the
+  // dashboard reopens in the user's last-used mode.
+  Q_PROPERTY(bool libraryListView READ libraryListView WRITE setLibraryListView
+                 NOTIFY libraryListViewChanged)
   
   // Wayland Restore Tokens
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
@@ -238,6 +242,10 @@ public:
   bool completionSoundEnabled() const { return m_completionSoundEnabled; }
   void setCompletionSoundEnabled(bool enabled);
 
+  // Dashboard library layout (false = grid, true = list).
+  bool libraryListView() const { return m_libraryListView; }
+  void setLibraryListView(bool enabled);
+
   // Replay cache dir for DVR segments; empty = /tmp/trophy/replay (RAM-backed).
   // Point it at /tmp (tmpfs) to hold the rolling buffer in RAM.
   QString replayCachePath() const { return m_replayCachePath; }
@@ -297,6 +305,7 @@ signals:
   void notifyClipsChanged();
   void notifyStorageChanged();
   void completionSoundEnabledChanged();
+  void libraryListViewChanged();
   void replayCachePathChanged();
   void waylandRestoreTokensChanged();
 
@@ -366,6 +375,8 @@ private:
   bool m_notifyClips = true;
   bool m_notifyStorage = true;
   bool m_completionSoundEnabled = true;
+  // Dashboard library layout (false = grid, true = list).
+  bool m_libraryListView = false;
   
   // Wayland Restore Tokens
   QVariantMap m_waylandRestoreTokens;

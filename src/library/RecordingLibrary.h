@@ -41,12 +41,18 @@ class RecordingLibrary : public QObject {
                  recordingsChanged)
   Q_PROPERTY(
       int sortOrder READ sortOrder WRITE setSortOrder NOTIFY recordingsChanged)
+  Q_PROPERTY(int kindFilter READ kindFilter WRITE setKindFilter NOTIFY recordingsChanged)
   // True while a player-range clip is remuxing on the worker thread.
   Q_PROPERTY(bool clipSaving READ clipSaving NOTIFY clipSavingChanged)
 
 public:
-  enum SortOrder { NewestFirst = 0, OldestFirst, LargestFirst, NameAZ };
+  enum SortOrder {
+    NewestFirst = 0, OldestFirst, LargestFirst, NameAZ,
+    SmallestFirst, LongestFirst, ShortestFirst, NameZA
+  };
   Q_ENUM(SortOrder)
+  enum KindFilter { AllCaptures = 0, RecordingsOnly, ClipsOnly, NoCaptures };
+  Q_ENUM(KindFilter)
 
   explicit RecordingLibrary(const QString &libraryPath,
                             QObject *parent = nullptr);
@@ -63,6 +69,8 @@ public:
 
   int sortOrder() const { return m_sortOrder; }
   void setSortOrder(int order);
+  int kindFilter() const { return m_kindFilter; }
+  void setKindFilter(int filter);
 
   bool clipSaving() const { return m_clipSaving; }
 
@@ -107,6 +115,11 @@ public:
    * Connect to StorageManager::recordingRenamed BEFORE refresh: the
    * container still carries the pre-rename title tag, so without this the
    * background probe would revert the displayed name to the stale tag.
+   * The tracked object adopts the new path in place (see
+   * Recording::updateForRename), so the refresh that follows settles
+   * with no remove/add churn; only untracked sources fall back to the
+   * remove + add scan path (whose source disappearance is swallowed via
+   * m_renameSource, not reported as a deletion).
    */
   void onRecordingRenamed(const QString &oldPath, const QString &newPath);
 
@@ -154,6 +167,7 @@ private:
   // is app-owned and outlives the library; never dereferenced off-thread).
   StorageManager *m_storage = nullptr;
   int m_sortOrder = NewestFirst;
+  int m_kindFilter = AllCaptures;
   QString m_activeRecordingPath;
   std::vector<std::unique_ptr<Recording>> m_recordings;
   QList<Recording *> m_filteredRecordings;
@@ -171,10 +185,11 @@ private:
   // once.
   int m_batchDepth = 0;
   mutable bool m_titlesDirty = false;
-  // Source path of an in-flight user rename (set by onRecordingRenamed,
-  // consumed by the refresh that follows). The old file is genuinely
-  // gone from disk, but observers must not hear recordingRemoved for
-  // it — otherwise renames show up as deletions in the activity feed.
+  // Source path of an in-flight user rename that could not be adopted
+  // in place (set by onRecordingRenamed, consumed by the refresh that
+  // follows). The old file is genuinely gone from disk, but observers
+  // must not hear recordingRemoved for it — otherwise renames show up
+  // as deletions in the activity feed.
   QString m_renameSource;
   // File names (not paths) whose filename-derived title wins over the
   // container title tag. Populated by user renames, persisted next to the
