@@ -245,6 +245,9 @@ public:
 
   QVariantMap waylandRestoreTokens() const { return m_waylandRestoreTokens; }
   Q_INVOKABLE QString getRestoreToken(const QString &key) const;
+  QString getRestoreTokenForIdentity(const QString &key, const QString &legacyName) const;
+  void setRestoreTokenForIdentity(const QString &key, const QString &legacyName,
+                                 const QString &token);
   Q_INVOKABLE void setRestoreToken(const QString &key, const QString &token);
   Q_INVOKABLE void removeRestoreToken(const QString &key);
 

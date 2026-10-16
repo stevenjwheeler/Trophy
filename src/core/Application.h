@@ -193,13 +193,15 @@ private:
   QTimer *m_detectionDebounceTimer = nullptr;
   // Window-gated capture: a portal restore references concrete windows, so
   // a token-armed capture waits for the game's window before requesting.
-  // Rule: a picker only ever follows an explicit user action — the wait
-  // timing out falls back to the authorize prompt, never a bare picker.
+  // Approved games keep waiting on snapshots after the initial timeout;
+  // a picker only ever follows explicit user action.
   QTimer *m_windowWaitTimer = nullptr;
   QString m_pendingWindowGame;
+  QString m_pendingCaptureKey;
   bool m_pendingWindowIsRecord = false;
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
+  void resumePendingCapture();
   // Audio-settled capture: auto-armed recording/DVR waits for the
   // game's PipeWire node to exist (stable across two polls) before
   // starting, so launch sessions don't open on monitor fallback and
@@ -245,6 +247,15 @@ private:
   // the game, else the pending name). Both forms normalize, so exe-case
   // variants match.
   bool isGameBlocked(const QString &game) const;
+  // Prompt gate shared by the debounce fire and the window-wait fallback:
+  // blocked games and token-approved games never prompt (approval is
+  // token-derived; the silent path already owns approved games).
+  bool shouldShowAuthorizePrompt(const QString &game) const;
+  bool isCurrentCaptureGame(const QString &game) const;
+  QString restoreTokenForGame(const QString &game) const;
+  void onWindowWaitTimeout();
+  void onAuthorizeDebounceFired();
+  friend class ApplicationAuthorizePromptTest;
   bool m_suppressNextStorageNotification = false;
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;

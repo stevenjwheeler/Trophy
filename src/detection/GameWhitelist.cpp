@@ -6,6 +6,7 @@
  */
 
 #include "GameWhitelist.h"
+#include "DefaultAppCatalog.h"
 
 #include <QDebug>
 #include <QDir>
@@ -27,10 +28,8 @@ QStringList GameWhitelist::defaultBlacklistEntries() {
       "steam",
       "discord",
       "obs",
-      "obs64",
       "unknown vulkan game",
       "vkcube",
-      "vkcube-wayland",
       // Browsers
       "firefox",
       "chrome",
@@ -44,9 +43,7 @@ QStringList GameWhitelist::defaultBlacklistEntries() {
       // Chat / social
       "slack",
       "telegram",
-      "telegram-desktop",
       "signal",
-      "signal-desktop",
       "element",
       "zoom",
       // Media
@@ -81,16 +78,18 @@ QString GameWhitelist::normalizeKey(const QString &key) {
   return n;
 }
 
+bool GameWhitelist::isPlaceholderReporterKey(const QString &key) {
+  return normalizeKey(key) == QStringLiteral("unknown vulkan game");
+}
+
 QString GameWhitelist::prettySystemName(const QString &canonicalKey) {
   static const QMap<QString, QString> pretty{
       {"xalia", "Xalia"},
       {"steam", "Steam"},
       {"discord", "Discord"},
       {"obs", "OBS"},
-      {"obs64", "OBS (64-bit)"},
       {"unknown vulkan game", "Unknown Vulkan Game"},
       {"vkcube", "Vulkan Cube (test app)"},
-      {"vkcube-wayland", "Vulkan Cube (test app, Wayland)"},
       {"firefox", "Firefox"},
       {"chrome", "Chrome"},
       {"chromium", "Chromium"},
@@ -102,9 +101,7 @@ QString GameWhitelist::prettySystemName(const QString &canonicalKey) {
       {"thunderbird", "Thunderbird"},
       {"slack", "Slack"},
       {"telegram", "Telegram"},
-      {"telegram-desktop", "Telegram"},
       {"signal", "Signal"},
-      {"signal-desktop", "Signal"},
       {"element", "Element"},
       {"zoom", "Zoom"},
       {"spotify", "Spotify"},
@@ -125,7 +122,7 @@ QString GameWhitelist::prettySystemName(const QString &canonicalKey) {
       {"nautilus", "Files"},
       {"thunar", "Thunar"},
   };
-  return pretty.value(canonicalKey, canonicalKey);
+  return pretty.value(defaultExclusionKey(normalizeKey(canonicalKey)), canonicalKey);
 }
 
 GameWhitelist::GameWhitelist() {
@@ -179,7 +176,7 @@ void GameWhitelist::load() {
   // Load blacklist (same normalization; first display spelling wins)
   QJsonArray blacklistArr = root["blacklist"].toArray();
   for (const QJsonValue &val : blacklistArr) {
-    QString entry = normalizeKey(val.toString());
+    QString entry = defaultExclusionKey(normalizeKey(val.toString()));
     if (!entry.isEmpty() && !m_blacklist.contains(entry)) {
         m_blacklist.append(entry);
     }
@@ -194,15 +191,35 @@ void GameWhitelist::load() {
 
   // Honor explicit removals of built-ins: the constructor seeded them,
   // the file simply omits them, so subtract the recorded markers.
+  // Legacy split rows (obs64, signal-desktop, etc.) map to their app here.
+  // If either former row was unblocked, keep the consolidated app unblocked.
   QJsonArray removedArr = root["removedDefaults"].toArray();
   for (const QJsonValue &val : removedArr) {
-    const QString entry = normalizeKey(val.toString());
+    const QString entry = defaultExclusionKey(normalizeKey(val.toString()));
     if (!entry.isEmpty()) {
       if (!m_removedDefaults.contains(entry))
         m_removedDefaults.append(entry);
       m_blacklist.removeAll(entry);
     }
   }
+
+  // One-time repair: the authorize path used to whitelist the Vulkan
+  // layer's null-name placeholder ("unknown vulkan game") under whichever
+  // game authorized last, so every unidentified reporter instantly
+  // (mis)detected as that game. The placeholder carries no identity, so
+  // drop the mapping and let the built-in default blacklist entry stand
+  // again. Steam-identified reporters now key off steam_app_<id> instead
+  // (see onSocketReadyRead); re-applied on every load, so a stale file
+  // can never resurrect the alias.
+  if (m_whitelist.contains(QStringLiteral("unknown vulkan game"))) {
+    qInfo() << "Dropping placeholder whitelist entry for 'unknown vulkan "
+               "game' - null-name reporters carry no game identity";
+    m_whitelist.remove(QStringLiteral("unknown vulkan game"));
+  }
+  if (m_removedDefaults.removeAll(QStringLiteral("unknown vulkan game")) >
+          0 &&
+      !m_blacklist.contains(QStringLiteral("unknown vulkan game")))
+    m_blacklist.append(QStringLiteral("unknown vulkan game"));
 
   qDebug() << "Loaded" << m_whitelist.size() << "whitelisted and"
           << m_blacklist.size() << "blacklisted entries";
@@ -260,7 +277,7 @@ void GameWhitelist::save() const {
 void GameWhitelist::addToWhitelist(const QString &windowClass,
                                    const QString &displayName) {
   const QString key = normalizeKey(windowClass);
-  if (key.isEmpty())
+  if (key.isEmpty() || isPlaceholderReporterKey(key))
     return;
   QString name = displayName.trimmed().isEmpty() ? key : displayName.trimmed();
   m_whitelist[key] = name;
@@ -286,7 +303,7 @@ QStringList GameWhitelist::whitelistEntries() const {
 }
 
 void GameWhitelist::addToBlacklist(const QString &windowClass) {
-  const QString key = normalizeKey(windowClass);
+  const QString key = defaultExclusionKey(normalizeKey(windowClass));
   if (key.isEmpty())
     return;
   if (!m_blacklist.contains(key)) {
@@ -307,7 +324,7 @@ void GameWhitelist::forgetCustomKey(const QString &key) {
 }
 
 void GameWhitelist::removeFromBlacklist(const QString &windowClass) {
-  const QString key = normalizeKey(windowClass);
+  const QString key = defaultExclusionKey(normalizeKey(windowClass));
   m_blacklist.removeAll(key);
   // Explicitly dropping a built-in must survive restarts (the
   // constructor re-seeds defaults every launch).
@@ -318,7 +335,7 @@ void GameWhitelist::removeFromBlacklist(const QString &windowClass) {
 }
 
 bool GameWhitelist::isBlacklisted(const QString &windowClass) const {
-  return m_blacklist.contains(normalizeKey(windowClass));
+  return m_blacklist.contains(defaultExclusionKey(normalizeKey(windowClass)));
 }
 
 QStringList GameWhitelist::blacklistEntries() const { return m_blacklist; }

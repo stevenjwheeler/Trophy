@@ -6,11 +6,16 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 
 #include "detection/GameWhitelist.h"
+#include "detection/DefaultAppCatalog.h"
 
 using namespace TrophyBackend;
 
@@ -95,6 +100,117 @@ TEST_F(GameWhitelistTest, DefaultListCollapsedToCanonical) {
   EXPECT_TRUE(wl->isBlacklisted("steam.exe"));
   EXPECT_TRUE(wl->isBlacklisted("DISCORD"));
   EXPECT_TRUE(wl->isBlacklisted("Xalia.EXE"));
+}
+
+TEST_F(GameWhitelistTest, DefaultAliasesMatchExactlyAndStayOnOneVetoRow) {
+  const auto defaults = GameWhitelist::defaultBlacklistEntries();
+  for (const auto &app : defaultAppCatalog()) {
+    SCOPED_TRACE(app.key.toStdString());
+    EXPECT_TRUE(defaults.contains(app.key));
+    EXPECT_TRUE(wl->isBlacklisted(app.key));
+    for (const QString &alias : app.aliases) {
+      EXPECT_TRUE(wl->isBlacklisted(alias));
+      EXPECT_TRUE(wl->isBlacklisted(alias.toUpper() + ".EXE"));
+      EXPECT_FALSE(wl->isBlacklisted(alias + ".game"));
+      EXPECT_FALSE(wl->isBlacklisted("game-" + alias));
+      EXPECT_EQ(GameWhitelist::normalizeKey(alias), alias);
+    }
+  }
+  EXPECT_EQ(defaultAppCatalog().size(), defaults.size());
+  EXPECT_TRUE(wl->isBlacklisted("com.obsproject.Studio"));
+  EXPECT_FALSE(wl->isBlacklisted("exe:/games/com.obsproject.studio"));
+  EXPECT_FALSE(wl->isBlacklisted("my-obs-game"));
+  // Presentation-only aliases must not become detection rules.
+  EXPECT_FALSE(wl->isBlacklisted("utilities-terminal"));
+  EXPECT_FALSE(wl->isBlacklisted("system-file-manager"));
+  wl->addToBlacklist("com.obsproject.Studio");
+  EXPECT_FALSE(wl->blacklistEntries().contains("com.obsproject.studio"));
+  EXPECT_EQ(wl->blacklistEntries().count("obs"), 1);
+}
+
+TEST_F(GameWhitelistTest, DefaultAliasUnblockReblockAndPersistence) {
+  for (const auto &app : defaultAppCatalog()) {
+    if (app.aliases.isEmpty())
+      continue;
+    SCOPED_TRACE(app.key.toStdString());
+    wl->removeFromBlacklist(app.aliases.first());
+    EXPECT_FALSE(wl->isBlacklisted(app.key));
+    for (const QString &alias : app.aliases)
+      EXPECT_FALSE(wl->isBlacklisted(alias));
+  }
+  wl->save();
+  GameWhitelist restored;
+  restored.load();
+  EXPECT_FALSE(restored.isBlacklisted("obs"));
+  EXPECT_FALSE(restored.isBlacklisted("com.obsproject.Studio"));
+  restored.addToBlacklist("OBS-STUDIO.EXE");
+  EXPECT_TRUE(restored.isBlacklisted("obs"));
+  EXPECT_TRUE(restored.isBlacklisted("com.obsproject.Studio"));
+  EXPECT_FALSE(restored.removedDefaults().contains("obs"));
+  restored.save();
+  GameWhitelist reblocked;
+  reblocked.load();
+  EXPECT_TRUE(reblocked.isBlacklisted("com.obsproject.Studio"));
+}
+
+TEST_F(GameWhitelistTest, DefaultAliasDoesNotRewriteWhitelistOrCustomIdentity) {
+  wl->addToWhitelist("com.obsproject.Studio", "Custom title");
+  EXPECT_TRUE(wl->isWhitelisted("com.obsproject.Studio"));
+  EXPECT_FALSE(wl->isWhitelisted("obs"));
+  wl->addToBlacklist("exe:/games/obsidian/game");
+  EXPECT_TRUE(wl->isBlacklisted("exe:/games/obsidian/game"));
+  EXPECT_FALSE(wl->isBlacklisted("exe:/games/obsidian/game2"));
+  EXPECT_EQ(wl->getWhitelistName("com.obsproject.Studio"), "Custom title");
+}
+
+TEST_F(GameWhitelistTest, LegacyAliasVetoesAndRemovalMarkersMigrateOnLoad) {
+  const QString path = configHome.path() + "/trophy/game-whitelist.json";
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write(R"({"blacklist":["com.obsproject.Studio","obs-studio"],
+                  "removedDefaults":["com.obsproject.Studio"]})");
+  file.close();
+  wl->load();
+  EXPECT_FALSE(wl->isBlacklisted("obs"));
+  EXPECT_FALSE(wl->isBlacklisted("com.obsproject.Studio"));
+  EXPECT_FALSE(wl->blacklistEntries().contains("obs-studio"));
+  EXPECT_TRUE(wl->removedDefaults().contains("obs"));
+}
+
+TEST_F(GameWhitelistTest, DuplicateDefaultsMergeAndPreserveEitherUnblockChoice) {
+  const QList<QPair<QString, QString>> groups{
+      {"obs", "obs64"}, {"signal", "signal-desktop"},
+      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"}};
+  const QString path = configHome.path() + "/trophy/game-whitelist.json";
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
+  for (const auto &[canonical, legacy] : groups) {
+    SCOPED_TRACE(legacy.toStdString());
+    EXPECT_FALSE(GameWhitelist::defaultBlacklistEntries().contains(legacy));
+    // Legacy lists can contain both rows; load coalesces them into one veto.
+    for (const QString &removed : {QString(), canonical, legacy}) {
+      QFile file(path);
+      ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+      file.write(QJsonDocument(QJsonObject{
+          {"blacklist", QJsonArray{canonical, legacy}},
+          {"removedDefaults", removed.isEmpty() ? QJsonArray{} : QJsonArray{removed}},
+          {"whitelist", QJsonObject{{legacy, "User chosen title"}}}}).toJson());
+      file.close();
+      GameWhitelist restored;
+      restored.load();
+      EXPECT_EQ(restored.blacklistEntries().count(canonical), removed.isEmpty() ? 1 : 0);
+      EXPECT_FALSE(restored.blacklistEntries().contains(legacy));
+      EXPECT_EQ(restored.isBlacklisted(legacy), removed.isEmpty());
+      EXPECT_EQ(restored.isBlacklisted(canonical), removed.isEmpty());
+      // Consolidating veto rows never migrates an identity/approval key.
+      EXPECT_EQ(restored.getWhitelistName(legacy), "User chosen title");
+      restored.save();
+      GameWhitelist roundTrip;
+      roundTrip.load();
+      EXPECT_EQ(roundTrip.isBlacklisted(legacy), removed.isEmpty());
+      EXPECT_FALSE(roundTrip.blacklistEntries().contains(legacy));
+    }
+  }
 }
 
 TEST_F(GameWhitelistTest, RemovedDefaultsPersistAcrossReload) {
@@ -250,6 +366,40 @@ TEST_F(GameWhitelistTest, LoadNonExistentFile) {
   wl->load();
   EXPECT_TRUE(wl->whitelistEntries().isEmpty());
   EXPECT_TRUE(wl->isBlacklisted("steam"));
+}
+
+TEST_F(GameWhitelistTest, PlaceholderReporterKeyPredicate) {
+  EXPECT_TRUE(GameWhitelist::isPlaceholderReporterKey("Unknown Vulkan Game"));
+  EXPECT_TRUE(GameWhitelist::isPlaceholderReporterKey("unknown vulkan game"));
+  EXPECT_TRUE(GameWhitelist::isPlaceholderReporterKey("Unknown Vulkan Game.exe"));
+  EXPECT_FALSE(GameWhitelist::isPlaceholderReporterKey("steam_app_1422450"));
+  EXPECT_FALSE(GameWhitelist::isPlaceholderReporterKey("Deadlock"));
+  EXPECT_FALSE(GameWhitelist::isPlaceholderReporterKey(""));
+}
+
+TEST_F(GameWhitelistTest, PlaceholderWhitelistEntryRepairedOnLoad) {
+  // Regression: the authorize path used to whitelist the Vulkan null-name
+  // placeholder under whichever game authorized last, aliasing every
+  // unidentified reporter to that game. Loading such a file must drop the
+  // mapping and restore the built-in default blacklist entry.
+  ASSERT_TRUE(QDir().mkpath(configHome.path() + "/trophy"));
+  QFile legacy(configHome.path() + "/trophy/game-whitelist.json");
+  ASSERT_TRUE(legacy.open(QIODevice::WriteOnly));
+  legacy.write(R"({"whitelist":{"unknown vulkan game":"Some Game"},
+                   "removedDefaults":["unknown vulkan game"]})");
+  legacy.close();
+
+  auto reloaded = std::make_unique<GameWhitelist>();
+  reloaded->load();
+  EXPECT_FALSE(reloaded->isWhitelisted("unknown vulkan game"));
+  EXPECT_TRUE(reloaded->isBlacklisted("unknown vulkan game"));
+  EXPECT_FALSE(
+      reloaded->removedDefaults().contains("unknown vulkan game"));
+}
+
+TEST_F(GameWhitelistTest, PlaceholderCannotBeWhitelistedThroughCrud) {
+  wl->addToWhitelist("Unknown Vulkan Game", "First Game");
+  EXPECT_FALSE(wl->isWhitelisted("unknown vulkan game"));
 }
 
 // --- Mixed operations ---

@@ -49,19 +49,49 @@ static auto *env =
 
 class SettingsManagerTest : public ::testing::Test {
 protected:
-  void SetUp() override { mgr = std::make_unique<SettingsManager>(); }
+  QTemporaryDir configHome;
+  QByteArray oldConfigHome;
+  void SetUp() override {
+    ASSERT_TRUE(configHome.isValid());
+    oldConfigHome = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
+    mgr = std::make_unique<SettingsManager>();
+  }
 
   void TearDown() override {
     // Clean up settings file if created
     QString path = mgr->settingsFilePath();
     QFile::remove(path);
     mgr.reset();
+    if (oldConfigHome.isNull())
+      qunsetenv("XDG_CONFIG_HOME");
+    else
+      qputenv("XDG_CONFIG_HOME", oldConfigHome);
   }
 
   std::unique_ptr<SettingsManager> mgr;
 };
 
 // --- Default Values ---
+
+TEST_F(SettingsManagerTest, IdentityTokenMigrationAndRenameKeepApproval) {
+  mgr->setRestoreToken("Game.exe", "legacy-token");
+  const QString first = "exe:/games/first/game";
+  const QString second = "exe:/games/second/game";
+  EXPECT_EQ(mgr->getRestoreTokenForIdentity(first, "Game.exe"), "legacy-token");
+  QSignalSpy changed(mgr.get(), &SettingsManager::waylandRestoreTokensChanged);
+  mgr->setRestoreTokenForIdentity(first, "Game.exe", "legacy-token");
+  EXPECT_EQ(changed.count(), 1);
+  EXPECT_TRUE(mgr->getRestoreToken("Game.exe").isEmpty());
+  EXPECT_EQ(mgr->getRestoreTokenForIdentity(first, "Renamed Game"), "legacy-token");
+  EXPECT_TRUE(mgr->getRestoreTokenForIdentity(second, "Game.exe").isEmpty());
+  mgr->setRestoreTokenForIdentity(first, "Game.exe", "legacy-token");
+  EXPECT_EQ(changed.count(), 1);
+  SettingsManager reloaded;
+  reloaded.load();
+  EXPECT_EQ(reloaded.getRestoreToken(first), "legacy-token");
+  EXPECT_TRUE(reloaded.getRestoreToken("Game.exe").isEmpty());
+}
 
 TEST_F(SettingsManagerTest, DefaultVideoBitrate) {
   EXPECT_EQ(mgr->videoBitrate(), 15000);

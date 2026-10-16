@@ -683,6 +683,27 @@ QString SettingsManager::getRestoreToken(const QString &key) const {
   return m_waylandRestoreTokens.value(key).toString();
 }
 
+QString SettingsManager::getRestoreTokenForIdentity(const QString &key,
+                                                   const QString &legacyName) const {
+  const QString token = getRestoreToken(key);
+  return token.isEmpty() ? getRestoreToken(legacyName) : token;
+}
+
+void SettingsManager::setRestoreTokenForIdentity(const QString &key,
+                                                const QString &legacyName,
+                                                const QString &token) {
+  if (key.isEmpty() || token.isEmpty())
+    return;
+  const QVariantMap before = m_waylandRestoreTokens;
+  m_waylandRestoreTokens[key] = token;
+  if (legacyName != key)
+    m_waylandRestoreTokens.remove(legacyName);
+  if (before != m_waylandRestoreTokens) {
+    save();
+    emit waylandRestoreTokensChanged();
+  }
+}
+
 void SettingsManager::setRestoreToken(const QString &key, const QString &token) {
   if (m_waylandRestoreTokens.value(key).toString() != token) {
     m_waylandRestoreTokens[key] = token;

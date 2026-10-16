@@ -4,6 +4,17 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_GameIconProvider test_GameIconProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameIconProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+target_include_directories(test_GameIconProvider PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_GameIconProvider PRIVATE
+    GAMES_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/GameListPage.qml")
+target_link_libraries(test_GameIconProvider PRIVATE
+    GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_GameIconProvider)
+
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME AppImageSmokeTest.Harness
@@ -54,6 +65,12 @@ target_include_directories(test_ApplicationAudioProbe PRIVATE ${TEST_INCLUDE_DIR
 target_link_libraries(test_ApplicationAudioProbe PRIVATE
     ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_ApplicationAudioProbe)
+
+add_executable(test_ApplicationAuthorizePrompt test_ApplicationAuthorizePrompt.cpp)
+target_include_directories(test_ApplicationAuthorizePrompt PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ApplicationAuthorizePrompt PRIVATE
+    ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ApplicationAuthorizePrompt)
 
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
@@ -246,7 +263,7 @@ endif()
 
 add_executable(test_RecordingManager test_RecordingManager.cpp)
 target_include_directories(test_RecordingManager PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
+target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
 gtest_discover_tests(test_RecordingManager)
 
 add_executable(test_WaylandPortalCapture test_WaylandPortalCapture.cpp)
@@ -325,7 +342,9 @@ add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_S
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
 target_compile_definitions(test_GameDetectionService PRIVATE TROPHY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS} Qt6::Network Qt6::DBus)
-gtest_discover_tests(test_GameDetectionService)
+# Every case uses the frozen reporter endpoint. Parallel CTest processes
+# must not mistake another test's listener for the user's live app.
+gtest_discover_tests(test_GameDetectionService PROPERTIES RESOURCE_LOCK trophy_detection_socket)
 
 # --- test_EncoderTest (The New Matrix Test) ---
 add_executable(test_EncoderTest

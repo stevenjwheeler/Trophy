@@ -23,6 +23,44 @@
     <file>icons/gpu-nvidia.svg</file>
     <file>icons/gpu-amd.svg</file>
     <file>icons/gpu-intel.svg</file>
+    <file>icons/default-apps/steam.svg</file>
+    <file>icons/default-apps/discord.svg</file>
+    <file>icons/default-apps/obs.svg</file>
+    <file>icons/default-apps/firefox.svg</file>
+    <file>icons/default-apps/google-chrome.svg</file>
+    <file>icons/default-apps/chromium.svg</file>
+    <file>icons/default-apps/brave.svg</file>
+    <file>icons/default-apps/microsoft-edge.svg</file>
+    <file>icons/default-apps/opera.svg</file>
+    <file>icons/default-apps/vivaldi.svg</file>
+    <file>icons/default-apps/librewolf.svg</file>
+    <file>icons/default-apps/thunderbird.svg</file>
+    <file>icons/default-apps/slack.svg</file>
+    <file>icons/default-apps/telegram.svg</file>
+    <file>icons/default-apps/signal-desktop.svg</file>
+    <file>icons/default-apps/element.svg</file>
+    <file>icons/default-apps/zoom.svg</file>
+    <file>icons/default-apps/spotify.svg</file>
+    <file>icons/default-apps/vlc.svg</file>
+    <file>icons/default-apps/mpv.svg</file>
+    <file>icons/default-apps/gimp.svg</file>
+    <file>icons/default-apps/krita.svg</file>
+    <file>icons/default-apps/inkscape.svg</file>
+    <file>icons/default-apps/blender.svg</file>
+    <file>icons/default-apps/visual-studio-code.svg</file>
+    <file>icons/default-apps/konsole.svg</file>
+    <file>icons/default-apps/gnome-terminal.svg</file>
+    <file>icons/default-apps/alacritty.svg</file>
+    <file>icons/default-apps/kitty.svg</file>
+    <file>icons/default-apps/foot.svg</file>
+    <file>icons/default-apps/wezterm.svg</file>
+    <file>icons/default-apps/dolphin.svg</file>
+    <file>icons/default-apps/nautilus.svg</file>
+    <file>icons/default-apps/thunar.svg</file>
+    <file>icons/default-apps/generic-game.svg</file>
+    <file>icons/default-apps/generic-cube.svg</file>
+    <file>icons/default-apps/README.md</file>
+    <file alias="icons/default-apps/LICENSE">../LICENSE</file>
     <file>sounds/clip-saved.wav</file>
     <file>sounds/recording-stopped.wav</file>
   </qresource>

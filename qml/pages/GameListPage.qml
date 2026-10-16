@@ -111,7 +111,7 @@ Page {
 
         }
 
-        // Unified list: Now playing / Ready to capture / Games
+        // Unified list: Now playing / Ready to capture / Apps
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -163,6 +163,8 @@ Page {
                         entryDefault: model.isDefault || false
                         entryHasToken: model.hasToken || false
                         entryTokenKey: model.tokenKey || ""
+                        entryIconSource: model.iconSource || ""
+                        entryIdentifiers: model.identifiers || []
                         onNotice: function(text) {
                             root.statusMessage = text
                             statusTimer.restart()
@@ -526,6 +528,8 @@ Page {
         property bool entryDefault: false
         property bool entryHasToken: false
         property string entryTokenKey: ""
+        property url entryIconSource: ""
+        property var entryIdentifiers: []
 
         signal notice(string text)
 
@@ -570,8 +574,22 @@ Page {
                 Label {
                     anchors.centerIn: parent
                     text: gameItem.entryDisplay.charAt(0).toUpperCase()
+                    objectName: "gameIconFallback"
+                    visible: gameIcon.status !== Image.Ready
                     font.pixelSize: Theme.fontSizeLarge
                     color: gameItem.entryRunning ? Theme.successColor : Theme.primaryColor
+                }
+
+                Image {
+                    id: gameIcon
+                    objectName: "gameIcon"
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    source: gameItem.entryIconSource
+                    sourceSize: Qt.size(40, 40)
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    visible: status === Image.Ready
                 }
 
             }
@@ -593,7 +611,13 @@ Page {
                 }
 
                 Label {
+                    objectName: "gameEntrySubtitle"
                     text: {
+                        if (gameItem.entryDefault) {
+                            const count = gameItem.entryIdentifiers.length
+                            return count === 1 ? qsTr("Default exclusion · 1 identifier")
+                                               : qsTr("Default exclusion · %1 identifiers").arg(count)
+                        }
                         let sub = gameItem.entryKey
                         if (gameItem.entrySteamAppId > 0 && gameItem.entryKey.indexOf("steam_app_") !== 0)
                             sub += " • AppID " + gameItem.entrySteamAppId
@@ -603,7 +627,14 @@ Page {
                     font.pixelSize: Theme.fontSizeSmall
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    visible: text !== "" && text !== gameItem.entryDisplay
+                    visible: gameItem.entryDefault || (text !== "" && text !== gameItem.entryDisplay)
+                    ToolTip.visible: gameItem.entryDefault && identifierHover.hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: gameItem.entryIdentifiers.join("\n")
+
+                    HoverHandler {
+                        id: identifierHover
+                    }
                 }
 
             }

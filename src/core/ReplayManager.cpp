@@ -6,6 +6,7 @@
  */
 
 #include "ReplayManager.h"
+#include "detection/GameDetectionService.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -251,6 +252,7 @@ void ReplayManager::clearSegments() {
 }
 
 bool ReplayManager::beginCapture() {
+  m_captureIdentity = m_gameDetector ? m_gameDetector->captureKeyForGame(m_gameName) : m_gameName;
   m_capture = m_captureFactory ? m_captureFactory() : CaptureFactory::createBestSource();
   if (!m_capture) {
     qWarning() << "Replay DVR: no capture source";
@@ -262,7 +264,7 @@ bool ReplayManager::beginCapture() {
   cfg.targetFps = m_settings->fps();
   cfg.useDmaBuf = m_settings->useDmaBuf();
   cfg.windowOnly = true; // DVR is always game-targeted
-  cfg.waylandRestoreToken = m_settings->getRestoreToken(m_gameName);
+  cfg.waylandRestoreToken = m_settings->getRestoreTokenForIdentity(m_captureIdentity, m_gameName);
   if (!cfg.waylandRestoreToken.isEmpty()) {
     qDebug() << "DVR: using saved Wayland restore token for:" << m_gameName
              << "(fp:" << cfg.waylandRestoreToken.left(4) << ")";
@@ -275,6 +277,7 @@ bool ReplayManager::beginCapture() {
 void ReplayManager::connectCaptureSignals() {
   const QPointer<IVideoCaptureSource> owner(m_capture.get());
   const uint64_t generation = m_captureGeneration;
+  const QString tokenKey = m_captureIdentity;
   connect(m_capture.get(), &IVideoCaptureSource::ready, this,
           [this, owner, generation] {
             if (generation == m_captureGeneration && owner && owner == m_capture.get())
@@ -286,12 +289,12 @@ void ReplayManager::connectCaptureSignals() {
               onCaptureError(error);
           }, Qt::QueuedConnection);
   connect(m_capture.get(), &IVideoCaptureSource::restoreTokenUpdated, this,
-          [this, owner, generation](const QString &token) {
+          [this, owner, generation, tokenKey](const QString &token) {
             if (generation == m_captureGeneration && owner && owner == m_capture.get() && m_settings &&
                 !m_gameName.isEmpty()) {
               qDebug() << "DVR: saving Wayland restore token for game:"
                        << m_gameName << "(fp:" << token.left(4) << ")";
-              m_settings->setRestoreToken(m_gameName, token);
+              m_settings->setRestoreTokenForIdentity(tokenKey, m_gameName, token);
             }
           });
   connect(m_capture.get(), &IVideoCaptureSource::restoreTokenStale, this,
@@ -307,10 +310,11 @@ void ReplayManager::onRestoreTokenStale(const QString &oldToken) {
   // Copy before stopDvr(): it clears m_gameName, and the re-auth prompt
   // needs the identity (RecordingManager follows the same pattern).
   const QString game = m_gameName;
+  const QString identity = m_captureIdentity;
   qWarning() << "DVR: saved restore token rejected for" << game
              << "- re-authorizing";
   stopDvr();
-  emit restoreAuthNeeded(game);
+  emit restoreAuthNeeded(game, identity);
 }
 
 void ReplayManager::onCaptureReady() {

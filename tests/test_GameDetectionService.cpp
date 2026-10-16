@@ -225,6 +225,23 @@ protected:
   }
 
   void livenessTimeout() { service->onLivenessTimeout(); }
+  qint64 failoverTarget() const { return service->lowestLiveTrackedPid(); }
+  void selectFocused() { service->onMonitorWindowsChanged(); }
+  void track(qint64 pid, const QString &name, const QString &key) {
+    service->trackGame(pid, name, key);
+  }
+  void checkIdentity(const QString &reporter, const QString &exe,
+                     const QStringList &argv, uint steamId,
+                     const QString &key, const QString &name, bool ignored = false,
+                     const QString &prefix = {}) {
+    const auto identity = GameDetectionService::resolveReporterIdentity(
+        reporter, exe, argv, steamId, prefix);
+    EXPECT_EQ(identity.ignored, ignored);
+    if (!ignored) {
+      EXPECT_EQ(identity.key, key);
+      EXPECT_EQ(identity.name, name);
+    }
+  }
   bool livenessTimerActive() const {
     return service->m_livenessTimer->isActive();
   }
@@ -330,6 +347,43 @@ TEST_F(GameDetectionServiceTest, BlacklistedProcessIgnored) {
   EXPECT_EQ(service->currentGamePid(), 0);
 }
 
+TEST_F(GameDetectionServiceTest, DefaultReverseDnsAliasVetoesSocketStartUntilUnblocked) {
+  FakeSteamHome steam(424242, "com.obsproject.Studio");
+  ASSERT_TRUE(steam.isValid());
+  QSignalSpy detected(service.get(), &GameDetectionService::gameDetected);
+  // A wire app ID supplies confidence, so only the default veto prevents
+  // detection. The frozen protocol and targeted-PID resolution are unchanged.
+  GameClient app;
+  ASSERT_TRUE(app.connect());
+  ASSERT_TRUE(app.send("START:7191:com.obsproject.Studio:424242\n"));
+  pump(100);
+  EXPECT_EQ(detected.count(), 0);
+  EXPECT_FALSE(hasPidState(7191));
+  EXPECT_TRUE(service->isBlocked("com.obsproject.Studio"));
+
+  ASSERT_TRUE(service->unblockGame("obs"));
+  EXPECT_FALSE(service->isBlocked("com.obsproject.Studio"));
+  ASSERT_TRUE(app.send("START:7191:com.obsproject.Studio:424242\n"));
+  pump(100);
+  ASSERT_EQ(detected.count(), 1);
+  EXPECT_EQ(service->currentGamePid(), 7191);
+
+  QSignalSpy closed(service.get(), &GameDetectionService::gameClosed);
+  ASSERT_TRUE(service->moveToBlacklist("obs"));
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  EXPECT_EQ(closed.count(), 1);
+}
+
+TEST_F(GameDetectionServiceTest, ReblockingDefaultRetiresItsNativeExecutableIdentity) {
+  ASSERT_TRUE(service->unblockGame("obs"));
+  seedTrackedGame(7192, "OBS Studio", "exe:/usr/bin/obs", true);
+  QSignalSpy closed(service.get(), &GameDetectionService::gameClosed);
+  ASSERT_TRUE(service->moveToBlacklist("com.obsproject.Studio"));
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  EXPECT_FALSE(hasPidState(7192));
+  EXPECT_EQ(closed.count(), 1);
+}
+
 TEST_F(GameDetectionServiceTest, StopMessageClosesGame) {
   service->addToWhitelist("Some Game", "Some Game");
   QSignalSpy closedSpy(service.get(), &GameDetectionService::gameClosed);
@@ -396,6 +450,181 @@ TEST_F(GameDetectionServiceTest, SteamAppIdDetectsInstantly) {
   ASSERT_EQ(spy.count(), 1);
   EXPECT_EQ(service->currentGameName(), "Proton Game");
   EXPECT_EQ(service->currentGamePid(), 6101);
+}
+
+TEST_F(GameDetectionServiceTest, SteamAppIdReportKeysOffSteamAppId) {
+  // Regression (phantom Living Hell prompt): null-name Vulkan reporters
+  // (the Proton/DXVK norm) must not share one match key. With a Steam id
+  // present the stored key is steam_app_<id>, so two games never alias to
+  // whichever authorized last.
+  constexpr uint firstId = 610101;
+  constexpr uint secondId = 610102;
+  FakeSteamHome steam(firstId, "First Placeholder Game");
+  ASSERT_TRUE(steam.isValid());
+  {
+    QFile second(steam.appsDir() +
+                 QString("/appmanifest_%1.acf").arg(secondId));
+    ASSERT_TRUE(second.open(QIODevice::WriteOnly | QIODevice::Text));
+    second.write(QString("\"AppState\" { \"appid\" \"%1\" \"name\" "
+                        "\"Second Placeholder Game\" }\n")
+                     .arg(secondId)
+                     .toUtf8());
+  }
+  // Identity resolution must precede the shared placeholder's default
+  // veto: users should not have to unblock it to detect real Steam games.
+  EXPECT_TRUE(service->isBlocked("unknown vulkan game"));
+
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+  GameClient first;
+  ASSERT_TRUE(first.connect());
+  ASSERT_TRUE(first.send(
+      QString("START:6101:Unknown Vulkan Game:%1\n").arg(firstId)));
+  pump(300);
+  ASSERT_EQ(service->currentGameName(), "First Placeholder Game");
+  EXPECT_EQ(service->currentGameKey(),
+            QString("steam_app_%1").arg(firstId));
+
+  GameClient second;
+  ASSERT_TRUE(second.connect());
+  ASSERT_TRUE(second.send(
+      QString("START:6102:Unknown Vulkan Game:%1\n").arg(secondId)));
+  pump(300);
+  ASSERT_EQ(service->currentGameName(), "Second Placeholder Game");
+  EXPECT_EQ(service->currentGameKey(),
+            QString("steam_app_%1").arg(secondId));
+  EXPECT_EQ(spy.count(), 2);
+}
+
+TEST_F(GameDetectionServiceTest, GenericNativeReportUsesExecutableIdentity) {
+  checkIdentity("Unknown Vulkan Game", "/opt/Games/NativeGame", {}, 0,
+                "exe:/opt/games/nativegame", "NativeGame");
+}
+
+TEST_F(GameDetectionServiceTest, WineIdentityUsesGameNotLoaderOrArguments) {
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64-preloader",
+                {"C:\\GOG Games\\My Game\\Game.exe", "--fullscreen"}, 0,
+                "wine::c:/gog games/my game/game", "Game.exe");
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64",
+                {"wine64", "/games/Other Game.exe"}, 0,
+                "wine::/games/other game", "Other Game.exe");
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64",
+                {"wine64", "--debug", "/games/NotTheProcess.exe"}, 0, "", "", true);
+}
+
+TEST_F(GameDetectionServiceTest, SharedEngineNameUsesDistinctExecutables) {
+  checkIdentity("Unity", "/games/First.exe", {}, 0, "exe:/games/first", "First.exe");
+  checkIdentity("Unity", "/games/Second.exe", {}, 0, "exe:/games/second", "Second.exe");
+}
+
+TEST_F(GameDetectionServiceTest, SameExecutableBasenameDoesNotAliasAcrossInstallations) {
+  checkIdentity("Unknown Vulkan Game", "/games/First/Game.exe", {}, 0,
+                "exe:/games/first/game", "Game.exe");
+  checkIdentity("Unknown Vulkan Game", "/games/Second/Game.exe", {}, 0,
+                "exe:/games/second/game", "Game.exe");
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64", {"C:\\Game.exe"}, 0,
+                "wine:/prefix/first:c:/game", "Game.exe", false, "/prefix/first");
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64", {"C:\\Game.exe"}, 0,
+                "wine:/prefix/second:c:/game", "Game.exe", false, "/prefix/second");
+}
+
+TEST_F(GameDetectionServiceTest, SameDisplayNameDifferentIdentitiesStillSwitchLifecycle) {
+  QSignalSpy detected(service.get(), &GameDetectionService::gameDetected);
+  QSignalSpy closed(service.get(), &GameDetectionService::gameClosed);
+  track(6303, "Game.exe", "exe:/games/first/game");
+  track(6304, "Game.exe", "exe:/games/second/game");
+  EXPECT_EQ(service->currentGameKey(), "exe:/games/second/game");
+  EXPECT_EQ(detected.count(), 2);
+  EXPECT_EQ(closed.count(), 1);
+}
+
+TEST_F(GameDetectionServiceTest, HelperSteamEnvironmentDoesNotMakeGame) {
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/wine64",
+                {"C:\\windows\\system32\\d3ddriverquery64.exe"}, 1422450,
+                "", "", true);
+  checkIdentity("wineopenxr test instance", "/games/game.exe", {}, 1422450,
+                "", "", true);
+  checkIdentity("Unknown Vulkan Game", "/usr/bin/steamwebhelper", {}, 1422450,
+                "", "", true);
+}
+
+TEST_F(GameDetectionServiceTest, BackgroundReporterCannotStealVisibleGame) {
+  auto currentWindow = snapshotFor(6301, true, true);
+  monitor.ingestSnapshot(currentWindow);
+  track(6301, "Playing", "playing");
+  track(6302, "Background", "background");
+  EXPECT_EQ(service->currentGameName(), "Playing");
+  auto otherWindow = snapshotFor(6302, true, true);
+  currentWindow[0].focused = false;
+  monitor.ingestSnapshot({currentWindow.first(), otherWindow.first()});
+  EXPECT_EQ(service->currentGameName(), "Background");
+}
+
+TEST_F(GameDetectionServiceTest, BlockingIdentityRetiresAllItsProcesses) {
+  seedTrackedGame(6401, "Same Game", "same-game", true);
+  seedTrackedGame(6402, "Same Game", "same-game");
+  ASSERT_TRUE(service->addToBlacklist("same-game"));
+  EXPECT_FALSE(hasPidState(6401));
+  EXPECT_FALSE(hasPidState(6402));
+  monitor.ingestSnapshot(snapshotFor(6402, true, true));
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+}
+
+TEST_F(GameDetectionServiceTest, GenericNativeSocketReportResolvesBeforeDefaultVeto) {
+  const qint64 pid = QCoreApplication::applicationPid();
+  ASSERT_EQ(GameDetectionService::steamAppIdForPid(pid), 0u);
+  // No Steam or whitelist evidence: native executable identity is not
+  // proof of a game, so it still needs the focused/fullscreen gate.
+  GameClient game;
+  ASSERT_TRUE(game.connect());
+  ASSERT_TRUE(game.send(QString("START:%1:Unknown Vulkan Game:0\n").arg(pid)));
+  pump(100);
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  monitor.ingestSnapshot(snapshotFor(pid, true, true));
+  pump(100);
+  EXPECT_EQ(service->currentGamePid(), pid);
+  EXPECT_EQ(service->currentGameKey(),
+            "exe:" + QFileInfo(QString("/proc/%1/exe").arg(pid)).symLinkTarget().toLower());
+  EXPECT_NE(service->currentGameName(), "Unknown Vulkan Game");
+}
+
+TEST_F(GameDetectionServiceTest, SteamHelperRejectedWithoutUnblockingPlaceholder) {
+  GameClient helper;
+  ASSERT_TRUE(helper.connect());
+  ASSERT_TRUE(helper.send("START:6501:d3ddriverquery64.exe:1422450\n"));
+  pump(100);
+  EXPECT_TRUE(service->currentGameName().isEmpty());
+  EXPECT_FALSE(hasPidState(6501));
+}
+
+TEST_F(GameDetectionServiceTest, FailoverPrefersSameIdentityThenFocusedGame) {
+  JoinedChild other;
+  JoinedChild successor;
+  other.start("sleep", {"60"});
+  successor.start("sleep", {"60"});
+  ASSERT_TRUE(other.waitForStarted());
+  ASSERT_TRUE(successor.waitForStarted());
+  seedTrackedGame(other.processId(), "Other", "other");
+  seedTrackedGame(successor.processId(), "Playing", "playing");
+  seedTrackedGame(2147483647, "Playing", "playing", true);
+  EXPECT_EQ(failoverTarget(), successor.processId());
+  monitor.ingestSnapshot(snapshotFor(other.processId(), true, true));
+  // Reset only the representative to emulate its death after the
+  // snapshot: focused evidence must outrank a background same-game PID.
+  seedTrackedGame(2147483647, "Playing", "playing", true);
+  EXPECT_EQ(failoverTarget(), other.processId());
+}
+
+TEST_F(GameDetectionServiceTest, UnrelatedStopCannotRetireReporter) {
+  ASSERT_TRUE(service->addToWhitelist("Held Game", "Held Game"));
+  GameClient game;
+  ASSERT_TRUE(game.connect());
+  ASSERT_TRUE(game.send("START:6502:Held Game:0\n"));
+  pump(100);
+  GameClient stranger;
+  ASSERT_TRUE(stranger.connect());
+  ASSERT_TRUE(stranger.send("STOP:6502\n"));
+  pump(100);
+  EXPECT_EQ(service->currentGamePid(), 6502);
 }
 
 TEST_F(GameDetectionServiceTest, FocusedFullscreenDetectsWithoutWhitelist) {
@@ -1026,7 +1255,7 @@ TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   ASSERT_TRUE(sys.isValid());
   EXPECT_TRUE(model->data(sys, GameListModel::DefaultRole).toBool());
   EXPECT_EQ(model->data(sys, GameListModel::SectionRole).toString(),
-            QString("Games"));
+            QString("Apps"));
   EXPECT_EQ(model->data(sys, GameListModel::ListedRole).toInt(), 2);
   service->setShowDefaultExclusions(false);
   EXPECT_FALSE(rowByKey("discord").isValid());
@@ -1040,7 +1269,7 @@ TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   EXPECT_EQ(model->data(idx, GameListModel::DisplayRole).toString(),
             QString("Model Game"));
   EXPECT_EQ(model->data(idx, GameListModel::SectionRole).toString(),
-            QString("Games"));
+            QString("Apps"));
   EXPECT_EQ(model->data(idx, GameListModel::ListedRole).toInt(), 1);
   EXPECT_FALSE(model->data(idx, GameListModel::DefaultRole).toBool());
 
@@ -1057,7 +1286,7 @@ TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   idx = rowByKey("model-block");
   ASSERT_TRUE(idx.isValid());
   EXPECT_EQ(model->data(idx, GameListModel::SectionRole).toString(),
-            QString("Games"));
+            QString("Apps"));
   EXPECT_EQ(model->data(idx, GameListModel::ListedRole).toInt(), 2);
   EXPECT_FALSE(model->data(idx, GameListModel::DefaultRole).toBool());
   EXPECT_FALSE(service->addToBlacklist("model-block.exe"));
@@ -1070,8 +1299,38 @@ TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   EXPECT_FALSE(service->removeFromBlacklist("model-block.exe"));
 }
 
+TEST_F(GameDetectionServiceTest, DefaultRowsConsolidateAndSearchTheirIdentifiers) {
+  service->setShowDefaultExclusions(true);
+  auto *model = service->gamesModel();
+  const QList<QPair<QString, QString>> groups{
+      {"obs", "obs64"}, {"signal", "signal-desktop"},
+      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"}};
+  for (const auto &[canonical, legacy] : groups) {
+    SCOPED_TRACE(legacy.toStdString());
+    int count = 0;
+    for (int row = 0; row < model->rowCount(); ++row) {
+      const auto index = model->index(row, 0);
+      const auto key = model->data(index, GameListModel::KeyRole).toString();
+      EXPECT_NE(key, legacy);
+      if (key == canonical) {
+        ++count;
+        EXPECT_TRUE(model->data(index, GameListModel::DefaultRole).toBool());
+        EXPECT_TRUE(model->data(index, GameListModel::IdentifiersRole).toStringList().contains(legacy));
+      }
+    }
+    EXPECT_EQ(count, 1);
+    service->setGameFilterText(legacy);
+    ASSERT_EQ(model->rowCount(), 1);
+    EXPECT_EQ(model->data(model->index(0, 0), GameListModel::KeyRole).toString(), canonical);
+    service->setGameFilterText("");
+    ASSERT_TRUE(service->unblockGame(legacy));
+    EXPECT_FALSE(service->isBlocked(canonical));
+    EXPECT_FALSE(service->isBlocked(legacy));
+  }
+}
+
 TEST_F(GameDetectionServiceTest, MoveBetweenListsIsAtomic) {
-  // The Games page moves rows with one call: remove+add must persist
+  // The Apps page moves rows with one call: remove+add must persist
   // together even though each half alone would reset the model. Poles
   // govern the block veto only; listing membership is orthogonal.
   EXPECT_TRUE(service->moveToWhitelist("moveme", "Move Me"));
@@ -1094,7 +1353,7 @@ TEST_F(GameDetectionServiceTest, MoveBetweenListsIsAtomic) {
   for (int r = 0; r < model->rowCount(); ++r) {
     const QModelIndex i = model->index(r, 0);
     if (model->data(i, GameListModel::KeyRole).toString() == "moveme" &&
-        model->data(i, GameListModel::SectionRole).toString() == "Games")
+        model->data(i, GameListModel::SectionRole).toString() == "Apps")
       allowedRow = true;
   }
   EXPECT_TRUE(allowedRow);
@@ -1159,7 +1418,7 @@ TEST_F(GameDetectionServiceTest, SteamGameKeyForm) {
   ASSERT_TRUE(row.isValid());
   EXPECT_EQ(model->data(row, GameListModel::SteamAppIdRole).toUInt(), 1422450u);
   EXPECT_EQ(model->data(row, GameListModel::SectionRole).toString(),
-            QString("Games"));
+            QString("Apps"));
   EXPECT_TRUE(service->removeFromWhitelist("steam_app_1422450"));
 }
 
@@ -1199,7 +1458,7 @@ TEST_F(GameDetectionServiceTest, UnifiedModelShowsLiveGame) {
     const QModelIndex i = model->index(r, 0);
     if (model->data(i, GameListModel::KeyRole).toString() == "live-game" &&
         !model->data(i, GameListModel::RunningRole).toBool() &&
-        model->data(i, GameListModel::SectionRole).toString() == "Games")
+        model->data(i, GameListModel::SectionRole).toString() == "Apps")
       allowedRow = true;
   }
   EXPECT_TRUE(allowedRow);
@@ -1262,7 +1521,7 @@ TEST_F(GameDetectionServiceTest, BlockedQueryMirrorsVeto) {
 
 TEST_F(GameDetectionServiceTest, BlockingLiveGameRetiresTracking) {
   // Vetoing the tracked game clears the dashboard (currentGameName) and
-  // the row survives as Blocked in the Games pool.
+  // the row survives as Blocked in the Apps pool.
   EXPECT_TRUE(service->addToWhitelist("retire-game.exe", "Retire Game"));
   GameClient game;
   ASSERT_TRUE(game.connect());
@@ -1287,7 +1546,7 @@ TEST_F(GameDetectionServiceTest, BlockingLiveGameRetiresTracking) {
   EXPECT_TRUE(service->forgetGame("retire-game"));
 }
 
-TEST_F(GameDetectionServiceTest, GamesPoolSortsAlphabetically) {
+TEST_F(GameDetectionServiceTest, AppsPoolSortsAlphabetically) {
   service->setShowDefaultExclusions(true);
   EXPECT_TRUE(service->addToWhitelist("zebra-game", "Zebra"));
   EXPECT_TRUE(service->addToWhitelist("alpha-game", "Alpha"));
@@ -1299,7 +1558,7 @@ TEST_F(GameDetectionServiceTest, GamesPoolSortsAlphabetically) {
   for (int r = 0; r < model->rowCount(); ++r) {
     const QModelIndex i = model->index(r, 0);
     ASSERT_EQ(model->data(i, GameListModel::SectionRole).toString(),
-              QString("Games"));
+              QString("Apps"));
     const QString display =
         model->data(i, GameListModel::DisplayRole).toString();
     EXPECT_TRUE(last.isEmpty() ||
@@ -1337,7 +1596,7 @@ TEST_F(GameDetectionServiceTest, TokenGamesFormApprovedSection) {
         "Ready to capture")
       approvedLeft = true;
     if (model->data(i, GameListModel::KeyRole).toString() == "token-game" &&
-        model->data(i, GameListModel::SectionRole).toString() == "Games")
+        model->data(i, GameListModel::SectionRole).toString() == "Apps")
       poolRow = true;
   }
   EXPECT_FALSE(approvedLeft);

@@ -43,6 +43,8 @@ public:
   QStringList whitelistEntries() const;
 
   // Blacklist operations
+  // Known default app IDs resolve to the built-in row for veto CRUD only.
+  // No fuzzy matching; whitelist/token/stable-identity keys are unchanged.
   void addToBlacklist(const QString &windowClass);
   void removeFromBlacklist(const QString &windowClass);
   bool isBlacklisted(const QString &windowClass) const;
@@ -59,6 +61,10 @@ public:
   // everywhere, so "Steam", "steam" and "steam.exe" are one entry.
   // Display names are stored untouched.
   static QString normalizeKey(const QString &key);
+  // The Vulkan layer's null-name fallback ("Unknown Vulkan Game"): it
+  // carries no game identity, so it must never become a whitelist match
+  // key — every unidentified reporter would alias to one game.
+  static bool isPlaceholderReporterKey(const QString &key);
   // Built-in exclusions (browsers, helpers, test cubes). Shown in their
   // own collapsed section; user entries are never flagged as system.
   static QStringList defaultBlacklistEntries();

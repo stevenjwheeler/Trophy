@@ -288,6 +288,7 @@ set(MUXING_SOURCES
 )
 
 set(DETECTION_SOURCES
+    src/detection/GameIconProvider.cpp
     src/detection/GameDetectionService.cpp
     src/detection/GameWhitelist.cpp
 )
@@ -358,6 +359,8 @@ set(MUXING_HEADERS
 )
 
 set(DETECTION_HEADERS
+    src/detection/DefaultAppCatalog.h
+    src/detection/GameIconProvider.h
     src/detection/GameDetectionService.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
@@ -575,6 +578,10 @@ install(FILES packaging/trophy.desktop
 
 install(FILES resources/icons/trophy.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+)
+
+install(FILES resources/icons/default-apps/README.md LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
 )
 
 install(TARGETS trophy_layer trophy_gl_shim

@@ -131,6 +131,7 @@ void RecordingManager::startRecording(const QString &gameName,
   m_captureReadyForPipeline = false;
   m_cancelInitializing = false;
   m_pendingRestoreAuthorization.clear();
+  m_pendingRestoreIdentity.clear();
   ++m_pipelineGeneration;
   m_recordingFailed = false;
 
@@ -198,6 +199,9 @@ void RecordingManager::startRecording(const QString &gameName,
   // Connect ready signal to finish the pipeline
   const QPointer<IVideoCaptureSource> attemptSource(m_captureSource.get());
   const uint64_t attemptGeneration = m_pipelineGeneration;
+  const QString tokenKey = m_gameDetector
+                               ? m_gameDetector->captureKeyForGame(m_currentGameName)
+                               : m_currentGameName;
   connect(m_captureSource.get(), &IVideoCaptureSource::ready, this,
           [this, attemptSource, attemptGeneration]() {
             if (attemptGeneration == m_pipelineGeneration && attemptSource &&
@@ -215,7 +219,7 @@ void RecordingManager::startRecording(const QString &gameName,
   // Tokens are held indefinitely and only overwritten with fresher ones —
   // never pruned for missing recordings.
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenUpdated,
-          this, [this, attemptSource, attemptGeneration](const QString &token) {
+          this, [this, attemptSource, attemptGeneration, tokenKey](const QString &token) {
             if (attemptGeneration != m_pipelineGeneration || !attemptSource ||
                 attemptSource != m_captureSource.get())
               return;
@@ -228,11 +232,11 @@ void RecordingManager::startRecording(const QString &gameName,
               qDebug() << "Saving Wayland restore token for game:"
                        << m_currentGameName
                        << "(fp:" << token.left(4) << ")";
-              m_settings->setRestoreToken(m_currentGameName, token);
+              m_settings->setRestoreTokenForIdentity(tokenKey, m_currentGameName, token);
             }
           });
   connect(m_captureSource.get(), &IVideoCaptureSource::restoreTokenStale, this,
-          [this, attemptSource, attemptGeneration](const QString &oldToken) {
+          [this, attemptSource, attemptGeneration, tokenKey](const QString &oldToken) {
             if (attemptGeneration != m_pipelineGeneration || !attemptSource ||
                 attemptSource != m_captureSource.get())
               return;
@@ -243,6 +247,7 @@ void RecordingManager::startRecording(const QString &gameName,
             qWarning() << "Saved restore token rejected for"
                        << gameName << "- re-authorizing";
             m_pendingRestoreAuthorization = gameName;
+            m_pendingRestoreIdentity = tokenKey;
             stopRecording();
           });
 
@@ -257,7 +262,7 @@ void RecordingManager::startRecording(const QString &gameName,
   // Use restore token only for automatic recordings, always prompt for manual
   if (!isManual) {
     capConfig.waylandRestoreToken =
-        m_settings->getRestoreToken(m_currentGameName);
+        m_settings->getRestoreTokenForIdentity(tokenKey, m_currentGameName);
     if (!capConfig.waylandRestoreToken.isEmpty()) {
       qDebug() << "Using saved Wayland restore token for:" << m_currentGameName
                << "(fp:" << capConfig.waylandRestoreToken.left(4) << ")";
@@ -552,10 +557,11 @@ void RecordingManager::finishStoppedRecording() {
     m_manualWindowId = 0;
     m_cancelInitializing = false;
     const QString authorize = std::exchange(m_pendingRestoreAuthorization, {});
+    const QString authorizeIdentity = std::exchange(m_pendingRestoreIdentity, {});
     if (!authorize.isEmpty()) m_currentGameName = authorize;
     setState(RecordingState::Idle);
     emit currentGameNameChanged();
-    if (!authorize.isEmpty()) emit restoreAuthNeeded(authorize);
+    if (!authorize.isEmpty()) emit restoreAuthNeeded(authorize, authorizeIdentity);
     return;
   }
   const bool pipelineFailed = m_recordingFailed;
