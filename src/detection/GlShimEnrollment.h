@@ -14,8 +14,8 @@ namespace TrophyBackend {
 /**
  * @brief Opt-in enrollment for the OpenGL detection shim.
  *
- * The shim (trophy_gl_shim.so) only loads into games via LD_PRELOAD, which
- * is session-wide and therefore never enabled silently: the setup wizard
+ * The shim (trophy_gl_shim.so) loads into dynamically linked session programs
+ * via LD_PRELOAD, NOT just games. It is never enabled silently: the setup wizard
  * offers it explicitly and this class persists the choice in
  * $XDG_CONFIG_HOME/environment.d/trophy-gl-shim.conf (takes effect on
  * next login). The conf file is the state — no settings flag needed.
@@ -47,7 +47,7 @@ public:
   /** True when this very process runs with the shim preloaded. */
   static bool isActiveInCurrentSession();
 
-  /** Write (true) or remove (false) the enrollment. Merges, never
+  /** Write (true) or remove our entries (false). Merges, never
    * clobbers, a foreign LD_PRELOAD entry in our own conf file.
    * Bundle-owned helpers are persisted before atomically updating the conf;
    * explicit re-enrollment refreshes older durable versions. */

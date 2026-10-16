@@ -12,15 +12,19 @@ VulkanReporterSnapshot state{};
 VkResult createResult = VK_SUCCESS;
 bool failNextSend = false;
 int dispatchToken;
-struct FakeInstance { void *dispatch; } instance{&dispatchToken};
+struct FakeInstance { void *dispatch; } instances[16];
+unsigned nextInstance = 0;
 constexpr int fakeFd = 123456;
 
 VkResult VKAPI_CALL create(const VkInstanceCreateInfo *,
                           const VkAllocationCallbacks *, VkInstance *output) {
     std::lock_guard<std::mutex> lock(mutex);
     ++state.createCalls;
-    if (createResult == VK_SUCCESS)
+    if (createResult == VK_SUCCESS) {
+        auto &instance = instances[nextInstance++ % 16];
+        instance.dispatch = &dispatchToken;
         *output = reinterpret_cast<VkInstance>(&instance);
+    }
     return createResult;
 }
 }
@@ -66,7 +70,7 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
 extern "C" int socket(int domain, int type, int) noexcept {
     std::lock_guard<std::mutex> lock(mutex);
     ++state.socketCalls;
-    if (domain != AF_UNIX || type != SOCK_STREAM) {
+    if (domain != AF_UNIX || type != (SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK)) {
         errno = EAFNOSUPPORT;
         return -1;
     }
@@ -95,7 +99,7 @@ extern "C" ssize_t send(int fd, const void *bytes, size_t size, int flags) {
         return -1;
     }
     const size_t used = std::strlen(state.messages);
-    if (fd != fakeFd || flags != MSG_NOSIGNAL ||
+    if (fd != fakeFd || flags != (MSG_NOSIGNAL | MSG_DONTWAIT) ||
         size >= sizeof(state.messages) - used) {
         errno = EINVAL;
         return -1;

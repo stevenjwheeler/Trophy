@@ -596,6 +596,10 @@ target_include_directories(test_GlShimEnrollment PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_GlShimEnrollment PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_GlShimEnrollment)
 
+add_executable(test_GlShimReporter test_GlShimReporter.cpp)
+target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
+gtest_discover_tests(test_GlShimReporter)
+
 # --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
 add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/ShippedLibDirs.h

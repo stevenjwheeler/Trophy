@@ -64,6 +64,42 @@ installed by lookup/status checks. Host/Steam-runtime ABI compatibility and
 
 ## Static reporter ABI checks
 
+### Reporter scope and anti-cheat caution
+
+Neither reporter is certified compatible with anti-cheat systems. No hooking
+change, allowlist or disabled-reporting flag can guarantee that a loaded
+library will be accepted. Keep optional reporters off for protected games
+unless the game's policy explicitly permits them. Trophy does not inspect,
+hide from, or bypass anti-cheat software.
+
+The current OpenGL toggle writes **session-wide** `LD_PRELOAD` configuration:
+it loads the shim into unrelated dynamically linked programs, not just games.
+Turning it off affects future login environments; already-running launchers
+and their children can retain the old preload. Log out and back in after
+disabling. `DISABLE_TROPHY_DETECTION=1` stops shim reporting, but cannot prevent
+the dynamic loader from loading a library named in `LD_PRELOAD`.
+
+Prefer leaving global enrollment off and, for a known-compatible native game,
+scoping preload to its launch command (example for the native `~/.local`
+64-bit install):
+
+```sh
+env LD_PRELOAD="$HOME/.local/lib/trophy/libtrophy_gl_shim.so${LD_PRELOAD:+:$LD_PRELOAD}" /absolute/path/to/game
+```
+
+This also affects that game's child processes. It is not an anti-cheat safety
+guarantee or a validated Steam/Proton/32-bit recipe. AppImage mount paths must
+not be used as persistent launch settings. A future per-game enrollment UI
+should replace the broad session toggle, with explicit migration/consent,
+durable paths, loader-path validation and architecture/runtime checks.
+
+Shim coverage deliberately remains limited to exported GLX/EGL/SDL swap
+functions. Games resolving entry points privately may bypass it; do not add
+`dlsym`/get-proc-address interception simply to increase coverage without a
+separate compatibility review. Remaining reporter verification includes real
+loader/driver execution, Vulkan fork/unload and allocation/thread-failure paths,
+and host/Steam ABI tests. Fake native-operation tests do not establish these.
+
 Run without loading the reporters or starting a game:
 
 ```sh

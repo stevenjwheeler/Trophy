@@ -1319,7 +1319,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("OpenGL detection shim")
-                        help: (app && app.glShimAvailable) ? qsTr("Same idea for older OpenGL games. Takes effect after next login via LD_PRELOAD. Leave off for games with strict anti-cheat — some flag any injected library.") : qsTr("Shim library not found in this install.")
+                        help: (app && app.glShimAvailable) ? qsTr("Session-wide LD_PRELOAD: loads into unrelated programs too, not just OpenGL games. Enabling or disabling takes effect after logging out and back in. Leave off for anti-cheat games; disabling detection does not unload the library. Compatibility is not guaranteed.") : qsTr("Shim library not found in this install.")
                         rowEnabled: app ? app.glShimAvailable : false
 
                         TrophySwitch {

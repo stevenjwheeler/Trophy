@@ -456,7 +456,7 @@ Rectangle {
                                         Label { text: (app && app.glShimEnrolled) ? qsTr("Installed") : qsTr("Not installed"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
                                         TrophySwitch { checked: app ? app.glShimEnrolled : false; onToggled: if (app) app.setGlShimEnrolled(checked) }
                                     }
-                                    Label { text: qsTr("Same idea for older OpenGL games. Takes effect after next login via LD_PRELOAD. Leave off for games with strict anti-cheat — some flag any injected library."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true; opacity: (app && app.glShimAvailable) ? 1.0 : 0.5 }
+                                    Label { text: qsTr("Session-wide LD_PRELOAD: loads into unrelated programs too, not just OpenGL games. Enabling or disabling takes effect after logging out and back in. Leave off for anti-cheat games; disabling detection does not unload the library. Compatibility is not guaranteed."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true; opacity: (app && app.glShimAvailable) ? 1.0 : 0.5 }
                                     Label { visible: app && !app.glShimAvailable; text: qsTr("Shim library not found in this install."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                                 }
                             }
