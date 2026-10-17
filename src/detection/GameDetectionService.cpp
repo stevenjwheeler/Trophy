@@ -1170,6 +1170,24 @@ void GameDetectionService::setTokenGames(const QStringList &games) {
   emit tokenGamesChanged();
 }
 
+QUrl GameDetectionService::iconSourceForGame(const QString &name) const {
+  if (name.trimmed().isEmpty())
+    return {};
+  QUrl source;
+  for (int row = 0; row < m_gamesModel->rowCount(); ++row) {
+    const auto index = m_gamesModel->index(row);
+    if (m_gamesModel->data(index, GameListModel::DisplayRole).toString()
+            .compare(name, Qt::CaseInsensitive) != 0)
+      continue;
+    const auto candidate =
+        m_gamesModel->data(index, GameListModel::IconSourceRole).toUrl();
+    if (!source.isEmpty() && source != candidate)
+      return {};
+    source = candidate;
+  }
+  return source.isEmpty() ? gameIconSource(name) : source;
+}
+
 void GameDetectionService::rebuildModels() {
   if (!m_gamesModel)
     return;

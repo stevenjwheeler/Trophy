@@ -4,6 +4,12 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_Theme test_Theme.cpp)
+target_compile_definitions(test_Theme PRIVATE
+    THEME_STYLES_DIR="${CMAKE_SOURCE_DIR}/qml/styles")
+target_link_libraries(test_Theme PRIVATE GTest::GTest Qt6::Quick Qt6::Qml)
+gtest_discover_tests(test_Theme)
+
 add_executable(test_GameIconProvider test_GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
@@ -66,6 +72,11 @@ target_link_libraries(test_RecordingCardBinding PRIVATE
     ${SWSCALE_LIBRARIES}
 )
 gtest_discover_tests(test_RecordingCardBinding)
+qt_add_resources(test_RecordingCardBinding "recording_icon_test_resources"
+    PREFIX "/icons"
+    BASE "${CMAKE_SOURCE_DIR}/resources/icons"
+    FILES "${CMAKE_SOURCE_DIR}/resources/icons/manual-recording.svg"
+)
 
 # Optional script API fixture: Node is test tooling only, never a runtime
 # dependency for Trophy or for builds without it.

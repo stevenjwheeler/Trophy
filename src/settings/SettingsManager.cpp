@@ -17,6 +17,16 @@
 
 namespace TrophyBackend {
 
+namespace {
+bool validThemeMode(const QString &mode) {
+  return mode == "dark" || mode == "charcoal" || mode == "amoled";
+}
+bool validAccentColor(const QString &color) {
+  return color == "rose" || color == "blue" || color == "purple" ||
+         color == "teal" || color == "orange" || color == "cyan" || color == "pink";
+}
+}
+
 SettingsManager::SettingsManager(QObject *parent) : QObject(parent) {
   // Set default recordings path
   m_recordingsPath =
@@ -122,6 +132,14 @@ void SettingsManager::load() {
   m_replayCachePath = general["replayCachePath"].toString();
   m_libraryListView = general["libraryListView"].toBool(false);
 
+  const QJsonObject customization = root["customization"].toObject();
+  m_themeMode = customization["themeMode"].toString("dark");
+  m_accentColor = customization["accentColor"].toString("rose");
+  if (!validThemeMode(m_themeMode))
+    m_themeMode = "dark";
+  if (!validAccentColor(m_accentColor))
+    m_accentColor = "rose";
+
   // Load notification options (all default on)
   QJsonObject notifications = root["notifications"].toObject();
   m_notifyRecordings = notifications["recordings"].toBool(true);
@@ -185,6 +203,8 @@ void SettingsManager::load() {
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
+  emit themeModeChanged();
+  emit accentColorChanged();
   emit replayCachePathChanged();
   emit waylandRestoreTokensChanged();
   emit settingsLoaded();
@@ -253,6 +273,11 @@ void SettingsManager::save() {
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;
   root["general"] = general;
+
+  QJsonObject customization;
+  customization["themeMode"] = m_themeMode;
+  customization["accentColor"] = m_accentColor;
+  root["customization"] = customization;
 
   // Notification options
   QJsonObject notifications;
@@ -328,6 +353,8 @@ void SettingsManager::resetToDefaults() {
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
+  emit themeModeChanged();
+  emit accentColorChanged();
   emit waylandRestoreTokensChanged();
 }
 
@@ -383,6 +410,8 @@ void SettingsManager::loadDefaults() {
   m_notifyStorage = true;
   m_completionSoundEnabled = true;
   m_libraryListView = false;
+  m_themeMode = "dark";
+  m_accentColor = "rose";
 }
 
 void SettingsManager::migrateSettings(int fromVersion) {
@@ -649,6 +678,22 @@ void SettingsManager::setLibraryListView(bool enabled) {
     m_libraryListView = enabled;
     save();
     emit libraryListViewChanged();
+  }
+}
+
+void SettingsManager::setThemeMode(const QString &mode) {
+  if (validThemeMode(mode) && m_themeMode != mode) {
+    m_themeMode = mode;
+    save();
+    emit themeModeChanged();
+  }
+}
+
+void SettingsManager::setAccentColor(const QString &color) {
+  if (validAccentColor(color) && m_accentColor != color) {
+    m_accentColor = color;
+    save();
+    emit accentColorChanged();
   }
 }
 

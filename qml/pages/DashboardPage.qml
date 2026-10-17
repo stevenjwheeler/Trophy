@@ -89,7 +89,7 @@ Page {
 
     function scrollToRecording(index) {
         // The grid prepends a live cell; the list uses a separate header.
-        var offset = !root.libraryListView && (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0;
+        var offset = (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0;
         if (libraryView.item)
             libraryView.item.positionViewAtIndex(index + offset, ListView.Beginning);
     }

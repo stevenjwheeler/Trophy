@@ -17,13 +17,16 @@
     <file>icons/seek-forward-10.svg</file>
     <file>icons/fullscreen.svg</file>
     <file>icons/volume-high.svg</file>
+    <file>icons/audio-recording.svg</file>
     <file>icons/volume-muted.svg</file>
     <file>icons/trash.svg</file>
     <file>icons/search.svg</file>
     <file>icons/video.svg</file>
+    <file>icons/manual-recording.svg</file>
     <file>icons/home.svg</file>
     <file>icons/gamepad.svg</file>
     <file>icons/settings.svg</file>
+    <file>icons/paintbrush.svg</file>
     <file>icons/info.svg</file>
     <file>icons/storage.svg</file>
     <file>icons/bell.svg</file>

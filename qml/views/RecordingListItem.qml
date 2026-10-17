@@ -15,10 +15,11 @@ ItemDelegate {
     id: root
 
     property var recording: null
+    property bool live: false
     property int cardIndex: -1
     readonly property bool isSelected: !!(root.recording && window.selectedRecordings && window.selectedRecordings.indexOf(root.recording.filePath) !== -1)
     readonly property bool isSelectionModeActive: !!(window.selectedRecordings && window.selectedRecordings.length > 0)
-    readonly property bool showSelection: root.hovered || root.isSelectionModeActive
+    readonly property bool showSelection: !root.live && (root.hovered || root.isSelectionModeActive)
     property real selectionReveal: root.showSelection ? 1 : 0
     Behavior on selectionReveal {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
@@ -70,7 +71,7 @@ ItemDelegate {
     height: 92
     padding: 10
     horizontalPadding: 12
-    hoverEnabled: true
+    hoverEnabled: !root.live
     onClicked: root.activate(0)
 
     MouseArea {
@@ -149,8 +150,8 @@ ItemDelegate {
         }
         }
 
-        // Keep the preview entirely unobstructed. All metadata belongs
-        // in the details column, not on top of this small image.
+        // Only the small app icon overlays the preview; metadata stays
+        // in the details column.
         Rectangle {
             objectName: "listThumbnail"
             Layout.preferredWidth: 128
@@ -158,7 +159,7 @@ ItemDelegate {
             Layout.alignment: Qt.AlignVCenter
             Layout.rightMargin: Theme.spacingNormal
             radius: Theme.radiusMedium
-            color: "black"
+            color: root.live ? Theme.surfaceColor : "black"
             clip: true
 
             Image {
@@ -181,9 +182,36 @@ ItemDelegate {
 
             MultiEffect {
                 anchors.fill: parent
+                visible: !root.live
                 source: sourceImage
                 maskEnabled: true
                 maskSource: sourceMask
+            }
+
+            RecordingGameIcon {
+                objectName: "listGameIcon"
+                gameName: root.live ? recordingManager.currentGameName : (root.recording ? root.recording.gameName : "")
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.margins: 6
+                width: 24
+                height: width
+            }
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: 20
+                height: 20
+                radius: 10
+                color: Theme.primaryColor
+                visible: root.live
+
+                SequentialAnimation on opacity {
+                    running: root.live && root.visible
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.3; duration: 700; easing.type: Easing.InOutSine }
+                    NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                }
             }
 
         }
@@ -197,7 +225,8 @@ ItemDelegate {
             Layout.rightMargin: Theme.spacingNormal
 
             Label {
-                text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
+                objectName: "listTitle"
+                text: root.live ? (recordingManager.currentGameName || qsTr("Recording…")) : (root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : "")
                 color: Theme.textColor
                 font.pixelSize: Theme.fontSizeNormal
                 font.weight: Font.Bold
@@ -211,14 +240,15 @@ ItemDelegate {
 
                 Label {
                     objectName: "listType"
-                    text: root.isClip ? qsTr("Clip") : qsTr("Recording")
+                    text: root.live ? qsTr("● REC") : (root.isClip ? qsTr("Clip") : qsTr("Recording"))
                     color: root.isClip ? Theme.highlightedColor : Theme.primaryColor
                     font.pixelSize: Theme.fontSizeTiny
                     font.weight: Font.Medium
                 }
 
                 Label {
-                    text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                    objectName: "listMetadata"
+                    text: root.live ? "• " + formatDuration(Math.floor(recordingManager.recordingDuration / 1000)) + " • " + formatSize(recordingManager.recordingSize) : (root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : "")
                     color: Theme.textSecondaryColor
                     font.pixelSize: Theme.fontSizeTiny
                     elide: Text.ElideRight
@@ -227,7 +257,7 @@ ItemDelegate {
             }
 
             Label {
-                text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
+                text: root.live ? qsTr("Recording in progress") : (root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : "")
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeTiny
                 elide: Text.ElideRight
@@ -239,8 +269,8 @@ ItemDelegate {
             objectName: "listActions"
             // Opacity, rather than visibility, preserves the action slot
             // so titles and metadata never jump when the pointer enters.
-            opacity: root.hovered && !root.isSelectionModeActive ? 1 : 0
-            enabled: root.hovered && !root.isSelectionModeActive
+            opacity: !root.live && root.hovered && !root.isSelectionModeActive ? 1 : 0
+            enabled: !root.live && root.hovered && !root.isSelectionModeActive
             Behavior on opacity { NumberAnimation { duration: Theme.animationFast } }
             spacing: Theme.spacingSmall
             Layout.alignment: Qt.AlignVCenter

@@ -23,6 +23,12 @@ ApplicationWindow {
     required property var gameDetector
     required property var settingsManager
 
+    Binding {
+        target: Theme
+        property: "settings"
+        value: window.settingsManager
+    }
+
     // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
@@ -290,6 +296,7 @@ ApplicationWindow {
 
         // Search settings (names must match SettingsPage sections)
         var settings = [
+            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
             { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "zero-copy", "dma-buf"] },
             { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
@@ -620,7 +627,10 @@ ApplicationWindow {
                         DashboardPage { id: dashboardPage }
                         GameListPage { id: gameListPage }
                         SettingsPage { id: settingsPage }
-                        InfoPage { id: infoPage }
+                        InfoPage {
+                            id: infoPage
+                            onReportBugRequested: window.app.reportBug()
+                        }
                     }
 
                     // In-app player: overlays the content area only,
@@ -646,6 +656,20 @@ ApplicationWindow {
                             }
                         }
                         onFullscreenRequested: playerFullscreen = !playerFullscreen
+                    }
+
+                    // Pure black removes the usual page/shell contrast. Draw
+                    // the page's existing silhouette above its contents, with
+                    // no input handlers and no chrome in fullscreen playback.
+                    Rectangle {
+                        anchors.fill: parent
+                        z: 1
+                        visible: Theme.amoled && !playerPage.playerFullscreen
+                        color: "transparent"
+                        topLeftRadius: 26
+                        bottomRightRadius: 12
+                        border.width: 1
+                        border.color: Theme.borderColor
                     }
                 }
             }

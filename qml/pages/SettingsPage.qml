@@ -42,6 +42,8 @@ Page {
             card = trayCard;
         else if (sectionTitle === "Keyboard Shortcuts")
             card = shortcutsCard;
+        else if (sectionTitle === "Customization")
+            card = customizationCard;
 
         if (!card)
             return;
@@ -188,7 +190,7 @@ Page {
             }
 
             Label {
-                text: qsTr("Tune capture quality, audio, storage and detection.")
+                text: qsTr("Tune capture quality, audio, storage, detection and appearance.")
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.textSecondaryColor
             }
@@ -218,6 +220,42 @@ Page {
                 width: Math.min(parent.width - 12, 800)
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: Theme.spacingLarge
+
+                // ================= CUSTOMIZATION =================
+                SectionCard {
+                    id: customizationCard
+                    sectionTitle: qsTr("Customization")
+                    iconSource: "qrc:/icons/paintbrush.svg"
+                    description: qsTr("Choose a theme and accent color. Changes apply immediately.")
+
+                    SettingRow {
+                        label: qsTr("Theme")
+                        help: qsTr("Default keeps the classic navy palette. Charcoal is neutral gray. AMOLED uses a pure-black background.")
+
+                        TrophyComboBox {
+                            id: themeModeBox
+                            objectName: "themeModeBox"
+                            Layout.preferredWidth: 200
+                            property var values: ["dark", "charcoal", "amoled"]
+                            model: [qsTr("Default"), qsTr("Charcoal"), qsTr("AMOLED")]
+                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 0
+                            onActivated: settingsManager.themeMode = values[currentIndex]
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Accent color")
+                        help: qsTr("Used for buttons, switches and selections. Recording and warning colors stay distinct.")
+
+                        AccentColorPicker {
+                            selectedKey: settingsManager ? settingsManager.accentColor : "rose"
+                            onColorSelected: function(key) {
+                                if (settingsManager)
+                                    settingsManager.accentColor = key;
+                            }
+                        }
+                    }
+                }
 
                 // ================= VIDEO =================
                 SectionCard {
@@ -608,7 +646,7 @@ Page {
                 SectionCard {
                     id: audioCard
                     sectionTitle: qsTr("Audio Recording")
-                    iconSource: "qrc:/icons/volume-high.svg"
+                    iconSource: "qrc:/icons/audio-recording.svg"
                     description: qsTr("What gets heard in your recordings, and how tracks are stored.")
 
                     WarnBanner {

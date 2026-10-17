@@ -74,6 +74,62 @@ protected:
 
 // --- Default Values ---
 
+TEST_F(SettingsManagerTest, CustomizationDefaultsAndRoundTrip) {
+  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->accentColor(), "rose");
+  QSignalSpy modeChanged(mgr.get(), &SettingsManager::themeModeChanged);
+  QSignalSpy accentChanged(mgr.get(), &SettingsManager::accentColorChanged);
+  for (const QString &mode : {QString("charcoal"), QString("amoled"), QString("dark")}) {
+    mgr->setThemeMode(mode);
+    for (const QString &accent : {QString("blue"), QString("purple"), QString("teal"),
+                                 QString("orange"), QString("cyan"), QString("pink"), QString("rose")}) {
+      mgr->setAccentColor(accent);
+      SettingsManager reloaded;
+      reloaded.load();
+      EXPECT_EQ(reloaded.themeMode(), mode);
+      EXPECT_EQ(reloaded.accentColor(), accent);
+    }
+  }
+  EXPECT_EQ(modeChanged.count(), 3);
+  EXPECT_EQ(accentChanged.count(), 21);
+  mgr->setThemeMode("dark");
+  mgr->setAccentColor("rose");
+  mgr->setThemeMode("invalid");
+  mgr->setAccentColor("#ffffff");
+  EXPECT_EQ(modeChanged.count(), 3);
+  EXPECT_EQ(accentChanged.count(), 21);
+}
+
+TEST_F(SettingsManagerTest, CustomizationLoadFallbacksAndResetNotify) {
+  mgr->setThemeMode("amoled");
+  mgr->setAccentColor("teal");
+  QSignalSpy modeChanged(mgr.get(), &SettingsManager::themeModeChanged);
+  QSignalSpy accentChanged(mgr.get(), &SettingsManager::accentColorChanged);
+  for (const auto &customization : {QJsonObject{}, QJsonObject{{"themeMode", "bad"},
+                                                             {"accentColor", 42}}}) {
+    QFile file(mgr->settingsFilePath());
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    file.write(QJsonDocument(QJsonObject{{"customization", customization}}).toJson());
+    file.close();
+    mgr->load();
+    EXPECT_EQ(mgr->themeMode(), "dark");
+    EXPECT_EQ(mgr->accentColor(), "rose");
+  }
+  EXPECT_EQ(modeChanged.count(), 2);
+  EXPECT_EQ(accentChanged.count(), 2);
+  mgr->setThemeMode("amoled");
+  mgr->setAccentColor("purple");
+  modeChanged.clear();
+  accentChanged.clear();
+  mgr->resetToDefaults();
+  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->accentColor(), "rose");
+  EXPECT_EQ(modeChanged.count(), 1);
+  EXPECT_EQ(accentChanged.count(), 1);
+  EXPECT_TRUE(mgr->metaObject()->property(mgr->metaObject()->indexOfProperty("themeMode")).hasNotifySignal());
+  EXPECT_TRUE(mgr->metaObject()->property(mgr->metaObject()->indexOfProperty("accentColor")).isWritable());
+}
+
 TEST_F(SettingsManagerTest, IdentityTokenMigrationAndRenameKeepApproval) {
   mgr->setRestoreToken("Game.exe", "legacy-token");
   const QString first = "exe:/games/first/game";

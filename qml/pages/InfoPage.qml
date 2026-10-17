@@ -14,6 +14,8 @@ import QtQuick.Layouts
 Page {
     id: root
 
+    signal reportBugRequested()
+
     // Update-check state (fed by updateChecker.checkFinished).
     // updateNewer tints the status; the notice action carries
     // the releases URL, so the page only needs the verdict.
@@ -473,7 +475,7 @@ Page {
 
                 FooterLink {
                     text: qsTr("Report an Issue")
-                    url: "https://github.com/OasisLab-Software/Trophy/issues/new"
+                    onActivated: root.reportBugRequested()
                 }
 
                 FooterLink {
@@ -609,9 +611,18 @@ Page {
     // non-visual handlers: an anchored MouseArea inside a
     // layout child is undefined behavior (engine warning).
     component FooterLink: RowLayout {
+        id: footerLink
+
         property string text: ""
         property string url: ""
         property string iconSource: ""
+
+        signal activated()
+
+        onActivated: {
+            if (url !== "")
+                Qt.openUrlExternally(url)
+        }
 
         spacing: 4
 
@@ -642,7 +653,7 @@ Page {
         }
 
         TapHandler {
-            onTapped: Qt.openUrlExternally(parent.url)
+            onTapped: footerLink.activated()
         }
     }
 

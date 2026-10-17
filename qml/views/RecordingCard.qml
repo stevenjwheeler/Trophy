@@ -241,38 +241,50 @@ Rectangle {
         }
 
         // --- INFO SECTION ---
-        ColumnLayout {
+        RowLayout {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: Theme.spacingSmall; spacing: 2
-            Label {
-                objectName: "gridTitle"
-                text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
-                font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
-            }
-            RowLayout {
+            ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 6
-
+                spacing: 2
                 Label {
-                    objectName: "gridType"
-                    text: root.isClip ? qsTr("Clip") : qsTr("Recording")
-                    color: root.isClip ? Theme.highlightedColor : Theme.primaryColor
-                    font.pixelSize: Theme.fontSizeTiny
-                    font.weight: Font.Medium
+                    objectName: "gridTitle"
+                    text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
+                    font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
                 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
 
+                    Label {
+                        objectName: "gridType"
+                        text: root.isClip ? qsTr("Clip") : qsTr("Recording")
+                        color: root.isClip ? Theme.highlightedColor : Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        font.weight: Font.Medium
+                    }
+
+                    Label {
+                        objectName: "gridMetadata"
+                        text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                        font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
+                        elide: Text.ElideRight; Layout.fillWidth: true
+                    }
+                }
                 Label {
-                    objectName: "gridMetadata"
-                    text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
-                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
-                    elide: Text.ElideRight; Layout.fillWidth: true
+                    objectName: "gridDate"
+                    Layout.fillWidth: true
+                    text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
+                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor
+                    elide: Text.ElideRight
                 }
             }
-            Label {
-                objectName: "gridDate"
-                Layout.fillWidth: true
-                text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
-                font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor
-                elide: Text.ElideRight
+            RecordingGameIcon {
+                objectName: "gridGameIcon"
+                gameName: root.recording ? root.recording.gameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.leftMargin: Theme.spacingSmall
+                Layout.alignment: Qt.AlignVCenter
             }
         }
     }

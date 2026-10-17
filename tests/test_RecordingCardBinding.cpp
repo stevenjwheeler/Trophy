@@ -13,6 +13,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QStandardItemModel>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThreadPool>
@@ -27,9 +28,30 @@ using namespace TrophyBackend;
 
 class CardManagerFake : public QObject {
   Q_OBJECT
-  Q_PROPERTY(bool isRecording READ isRecording CONSTANT)
+  Q_PROPERTY(bool isRecording READ isRecording NOTIFY changed)
+  Q_PROPERTY(QString currentGameName MEMBER gameName NOTIFY changed)
+  Q_PROPERTY(qint64 recordingDuration MEMBER duration NOTIFY changed)
+  Q_PROPERTY(qint64 recordingSize MEMBER size NOTIFY changed)
 public:
-  bool isRecording() const { return false; }
+  bool isRecording() const { return live; }
+  bool live = false;
+  QString gameName = "Manual Recording";
+  qint64 duration = 65000;
+  qint64 size = 1048576;
+signals:
+  void changed();
+};
+
+class CardIconFake : public QObject {
+  Q_OBJECT
+  Q_PROPERTY(QObject *gamesModel READ gamesModel CONSTANT)
+public:
+  QObject *gamesModel() { return &model; }
+  QStandardItemModel model;
+  QString iconPath;
+  Q_INVOKABLE QUrl iconSourceForGame(const QString &name) const {
+    return name == "Game" ? QUrl::fromLocalFile(iconPath) : QUrl();
+  }
 };
 
 class CardWindowFake : public QObject {
@@ -229,6 +251,81 @@ TEST_F(RecordingCardBindingTest, GridDetailsStayCompactWithoutShrinkingThumbnail
   waitForProbes();
 }
 
+TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
+  const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
+  const QString otherPath = createVideo("Other_2026-01-15_20-30-00.mkv");
+  const QString manualPath = createVideo("Manual_Recording_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  CardIconFake detector;
+  detector.iconPath = tempDir.filePath("app.png");
+  QImage iconImage(48, 48, QImage::Format_ARGB32);
+  iconImage.fill(Qt::green);
+  ASSERT_TRUE(iconImage.save(detector.iconPath));
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  engine.rootContext()->setContextProperty("gameDetector", &detector);
+
+  for (const auto &file : {QString("RecordingCard.qml"), QString("RecordingListItem.qml")}) {
+    QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl(file)));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> card(component.create());
+    ASSERT_NE(card, nullptr);
+    auto *item = qobject_cast<QQuickItem *>(card.get());
+    ASSERT_NE(item, nullptr);
+    item->setParentItem(window.contentItem());
+    item->setWidth(680);
+    auto *icon = card->findChild<QQuickItem *>(
+        file == "RecordingCard.qml" ? "gridGameIcon" : "listGameIcon");
+    ASSERT_NE(icon, nullptr);
+    EXPECT_FALSE(icon->isVisible());
+    card->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+    for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+      QTest::qWait(10);
+    ASSERT_TRUE(icon->isVisible());
+    QTest::qWait(50); // Let the layout reclaim the newly visible icon slot.
+    EXPECT_EQ(icon->width(), file == "RecordingCard.qml" ? 40 : 24);
+    qreal detailsWidthWithIcon = 0;
+    if (file == "RecordingCard.qml") {
+      auto *date = card->findChild<QQuickItem *>("gridDate");
+      ASSERT_NE(date, nullptr);
+      detailsWidthWithIcon = date->width();
+      EXPECT_LE(date->mapToItem(icon, QPointF(date->width(), 0)).x(), 0);
+    } else {
+      auto *thumbnail = card->findChild<QQuickItem *>("listThumbnail");
+      ASSERT_NE(thumbnail, nullptr);
+      EXPECT_EQ(icon->parentItem(), thumbnail);
+      EXPECT_EQ(icon->x(), 6);
+      EXPECT_EQ(icon->y(), 6);
+    }
+    card->setProperty("recording", QVariant::fromValue(lib.getRecording(otherPath)));
+    QTest::qWait(50);
+    EXPECT_FALSE(icon->isVisible());
+    if (file == "RecordingCard.qml")
+      EXPECT_GT(card->findChild<QQuickItem *>("gridDate")->width(), detailsWidthWithIcon);
+    // Failed image loads must also disappear, not leave a placeholder.
+    detector.iconPath = tempDir.filePath("missing.png");
+    card->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+    QTest::qWait(100);
+    EXPECT_FALSE(icon->isVisible());
+    detector.iconPath = tempDir.filePath("app.png");
+    detector.model.clear(); // A refreshed app list retries the icon lookup.
+    for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+      QTest::qWait(10);
+    EXPECT_TRUE(icon->isVisible());
+    card->setProperty("recording", QVariant::fromValue(lib.getRecording(manualPath)));
+    for (int n = 0; n < 100 && icon->property("status").toInt() != 1; ++n)
+      QTest::qWait(10);
+    EXPECT_EQ(icon->property("source").toUrl(), QUrl("qrc:/icons/manual-recording.svg"));
+    EXPECT_TRUE(icon->isVisible());
+    QTest::qWait(50);
+    EXPECT_EQ(icon->width(), file == "RecordingCard.qml" ? 40 : 24);
+    if (file == "RecordingListItem.qml") {
+      EXPECT_EQ(icon->x(), 6);
+      EXPECT_EQ(icon->y(), 6);
+    }
+  }
+  waitForProbes();
+}
+
 TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelection) {
   const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
   RecordingLibrary lib(tempDir.path());
@@ -356,10 +453,82 @@ TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelect
   ASSERT_TRUE(QMetaObject::invokeMethod(sort, "activated", Q_ARG(int, 2)));
   EXPECT_EQ(lib.sortOrder(), RecordingLibrary::ShortestFirst);
   ASSERT_TRUE(QMetaObject::invokeMethod(filterPopup, "close"));
-  QTest::qWait(100);
+  for (int n = 0; n < 100 && filterPopup->property("visible").toBool(); ++n)
+    QTest::qWait(10);
   EXPECT_FALSE(filterPopup->property("visible").toBool());
   EXPECT_TRUE(filterButton->property("checked").toBool());
   page.reset();
+  waitForProbes();
+}
+
+TEST_F(RecordingCardBindingTest, LiveListRowMatchesSavedRowsAndUpdatesStats) {
+  createVideo("Game_2026-01-15_20-30-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("RecordingListView.qml")));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> view(component.create());
+  ASSERT_NE(view, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(view.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(680, 400));
+  QTest::qWait(100);
+  EXPECT_EQ(view->property("count").toInt(), 1);
+  EXPECT_EQ(view->property("contentY").toDouble(), 0);
+  // Start while the existing list is visible, without recreating it.
+  manager.live = true;
+  emit manager.changed();
+  QTest::qWait(100);
+  EXPECT_EQ(view->property("count").toInt(), 2);
+  auto *content = view->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  QQuickItem *row = nullptr;
+  QQuickItem *savedRow = nullptr;
+  for (auto *child : content->childItems()) {
+    if (child->objectName() == "liveListRow")
+      row = child;
+    if (child->objectName() == "savedListRow")
+      savedRow = child;
+  }
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(savedRow, nullptr);
+  EXPECT_EQ(savedRow->property("cardIndex").toInt(), 0);
+  EXPECT_GE(row->mapToItem(item, QPointF()).y(), 0);
+  EXPECT_LE(row->mapToItem(item, QPointF(0, row->height())).y(), item->height());
+  EXPECT_TRUE(row->isVisible());
+  EXPECT_EQ(row->height(), 92);
+  EXPECT_EQ(row->width(), 680);
+  auto *thumbnail = row->findChild<QQuickItem *>("listThumbnail");
+  auto *title = row->findChild<QQuickItem *>("listTitle");
+  auto *metadata = row->findChild<QQuickItem *>("listMetadata");
+  auto *selection = row->findChild<QQuickItem *>("listSelection");
+  auto *actions = row->findChild<QQuickItem *>("listActions");
+  ASSERT_NE(thumbnail, nullptr);
+  ASSERT_NE(title, nullptr);
+  ASSERT_NE(metadata, nullptr);
+  ASSERT_NE(selection, nullptr);
+  ASSERT_NE(actions, nullptr);
+  EXPECT_EQ(thumbnail->size(), QSizeF(128, 72));
+  EXPECT_EQ(title->property("text").toString(), "Manual Recording");
+  EXPECT_EQ(metadata->property("text").toString(), QString::fromUtf8("• 1:05 • 1.0 MB"));
+  EXPECT_EQ(row->findChild<QObject *>("listType")->property("text").toString(), QString::fromUtf8("● REC"));
+  windowFake.toggleSelection("/other.mkv");
+  QTest::mouseMove(&window, QPoint(340, 46));
+  QTest::qWait(250);
+  EXPECT_FALSE(selection->isVisible());
+  EXPECT_FALSE(actions->isEnabled());
+  EXPECT_TRUE(QMetaObject::invokeMethod(row, "activate", Q_ARG(QVariant, 0)));
+  EXPECT_TRUE(windowFake.playedPath.isEmpty());
+  manager.duration = 125000;
+  emit manager.changed();
+  EXPECT_TRUE(metadata->property("text").toString().contains("2:05"));
+  manager.live = false;
+  emit manager.changed();
+  QTest::qWait(50);
+  EXPECT_EQ(view->property("count").toInt(), 1);
+  view.reset();
   waitForProbes();
 }
 

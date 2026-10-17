@@ -23,14 +23,18 @@ ListView {
     model: {
         var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
         if (skip > 0) {
-            return full.slice(skip);
+            full = full.slice(skip);
         }
+        if (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording)
+            return [{ __live: true }].concat(full);
         return full;
     }
 
     delegate: RecordingListItem {
-        recording: modelData
-        cardIndex: index + root.skip
+        live: modelData && modelData.__live === true
+        objectName: live ? "liveListRow" : "savedListRow"
+        recording: live ? null : modelData
+        cardIndex: live ? -1 : index + root.skip - ((typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0)
         width: root.width - root.leftMargin - root.rightMargin
     }
 
@@ -43,38 +47,6 @@ ListView {
         color: Theme.textMutedColor
         horizontalAlignment: Text.AlignHCenter
         font.pixelSize: Theme.fontSizeMedium
-    }
-
-    header: Rectangle {
-        id: liveHeader
-        readonly property bool live: typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording
-        width: root.width - root.leftMargin - root.rightMargin
-        height: live ? 70 : 0
-        visible: live
-        radius: Theme.radiusSmall
-        color: Theme.cardColor
-        border.color: Theme.primaryColor
-
-        RowLayout {
-            anchors.fill: parent
-            anchors.margins: Theme.spacingMedium
-            spacing: Theme.spacingMedium
-            Label {
-                text: qsTr("● REC")
-                color: Theme.primaryColor
-                font.bold: true
-            }
-            Label {
-                Layout.fillWidth: true
-                text: liveHeader.live ? (recordingManager.currentGameName || qsTr("Recording…")) : ""
-                color: Theme.textColor
-                elide: Text.ElideRight
-            }
-            Label {
-                text: liveHeader.live ? qsTr("Recording in progress") : ""
-                color: Theme.textSecondaryColor
-            }
-        }
     }
 
     footer: Item {

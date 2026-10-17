@@ -9,23 +9,46 @@ import QtQuick
 pragma Singleton
 
 QtObject {
-    // Color palette - Dark theme
-    readonly property color backgroundColor: "#1a1a2e"
+    id: theme
+    // The app publishes settings on the engine context as well as the window.
+    // This also covers Theme imports through local component directories.
+    // Standalone components/tests without a settings context keep defaults.
+    property var settings: typeof settingsManager !== "undefined" && settingsManager !== null ? settingsManager : null
+    readonly property string mode: settings ? settings.themeMode : "dark"
+    readonly property string accentName: settings ? settings.accentColor : "rose"
+    readonly property bool amoled: mode === "amoled"
+    readonly property bool neutral: mode === "charcoal" || amoled
+    readonly property color backgroundColor: amoled ? "#000000" : neutral ? "#18181b" : "#1a1a2e"
     readonly property color whiteColor: "#ffffff"
-    readonly property color surfaceColor: "#16213e"
-    readonly property color cardColor: "#1f2940"
-    readonly property color cardHoverColor: "#283553"
-    readonly property color primaryColor: "#e94560"
-    readonly property color accentColor: "#e94560"
-    readonly property color primaryHoverColor: "#ff6b6b"
-    readonly property color secondaryColor: "#0f3460"
-    readonly property color highlightedColor: '#1c62b8'
-    readonly property color recordingGridBackgroundColor: '#4b1f2940'
+    readonly property color surfaceColor: amoled ? "#000000" : neutral ? "#202024" : "#16213e"
+    readonly property color cardColor: amoled ? "#090909" : neutral ? "#27272c" : "#1f2940"
+    readonly property color cardHoverColor: amoled ? "#161616" : neutral ? "#323238" : "#283553"
+    readonly property var accentOptions: [
+        { key: "rose", label: qsTr("Rose"), color: "#e94560" },
+        { key: "blue", label: qsTr("Blue"), color: "#397bdc" },
+        { key: "purple", label: qsTr("Purple"), color: "#8055cc" },
+        { key: "teal", label: qsTr("Teal"), color: "#167e78" },
+        { key: "orange", label: qsTr("Orange"), color: "#f97316" },
+        { key: "cyan", label: qsTr("Cyan"), color: "#0891b2" },
+        { key: "pink", label: qsTr("Pink"), color: "#db2777" }
+    ]
+    readonly property color accentColor: {
+        for (var i = 0; i < accentOptions.length; ++i) {
+            if (accentOptions[i].key === accentName)
+                return accentOptions[i].color;
+        }
+        return accentOptions[0].color;
+    }
+    readonly property color primaryColor: accentColor
+    readonly property color primaryHoverColor: accentName === "rose" ? "#ff6b6b" : Qt.lighter(accentColor, 1.25)
+    readonly property color secondaryColor: neutral ? "#303036" : "#0f3460"
+    readonly property color highlightedColor: accentName === "rose" ? "#1c62b8" : Qt.lighter(accentColor, 1.35)
+    readonly property color recordingGridBackgroundColor: withOpacity(cardColor, 0.294)
     readonly property color textColor: "#eaeaea"
     readonly property color textSecondaryColor: "#a0a0a0"
     readonly property color textMutedColor: "#6c6c6c"
-    readonly property color borderColor: "#2d3a4f"
-    readonly property color dividerColor: "#252a3a"
+    readonly property color borderColor: neutral ? "#38383f" : "#2d3a4f"
+    readonly property color dividerColor: neutral ? "#29292e" : "#252a3a"
     readonly property color successColor: "#4ade80"
     readonly property color warningColor: "#fbbf24"
     readonly property color cautionColor: "#fb923c"
@@ -37,12 +60,12 @@ QtObject {
     primaryGradient: Gradient {
         GradientStop {
             position: 0
-            color: "#e94560"
+            color: theme.primaryColor
         }
 
         GradientStop {
             position: 1
-            color: "#ff6b6b"
+            color: theme.primaryHoverColor
         }
 
     }

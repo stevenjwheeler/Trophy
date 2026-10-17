@@ -112,6 +112,9 @@ public:
   QStringList blacklist() const;
 
   QAbstractItemModel *gamesModel() const { return m_gamesFilter; }
+  // Presentation-only lookup for older recordings that carry a title, not
+  // an app identity. Ambiguous titles must not borrow another game's icon.
+  Q_INVOKABLE QUrl iconSourceForGame(const QString &name) const;
   QString gameFilterText() const;
   void setGameFilterText(const QString &text);
   // Portal restore-token games (silent capture). Pushed by Application

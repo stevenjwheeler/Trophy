@@ -64,11 +64,12 @@ Rectangle {
 
             // Pulsing record dot (the "live" placeholder for a thumbnail)
             Rectangle {
+                objectName: "liveRecordingDot"
                 anchors.centerIn: parent
                 width: 40
                 height: 40
                 radius: 20
-                color: Theme.errorColor
+                color: Theme.primaryColor
 
                 SequentialAnimation on opacity {
                     loops: Animation.Infinite
@@ -90,13 +91,14 @@ Rectangle {
 
             // REC badge (top-left), styled like the duration badge
             Rectangle {
+                objectName: "liveRecordingBadge"
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.margins: Theme.spacingSmall
                 width: recLabel.width + 12
                 height: recLabel.height + 4
                 radius: 4
-                color: Theme.errorColor
+                color: Theme.primaryColor
 
                 Label {
                     id: recLabel
@@ -170,8 +172,9 @@ Rectangle {
             }
 
             Label {
+                objectName: "liveRecordingStatus"
                 text: qsTr("In Progress")
-                color: Theme.errorColor
+                color: Theme.primaryColor
                 font.pixelSize: Theme.fontSizeTiny
                 Layout.alignment: Qt.AlignBottom
             }

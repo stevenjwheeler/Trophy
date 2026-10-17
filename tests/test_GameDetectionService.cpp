@@ -1233,6 +1233,17 @@ TEST_F(GameDetectionServiceTest, SteamVerdictPositiveCacheExpiresAtTtl) {
   EXPECT_FALSE(looksLikeSteam(pid));
 }
 
+TEST_F(GameDetectionServiceTest, RecordingIconsUseUnfilteredUnambiguousGameNames) {
+  EXPECT_TRUE(service->iconSourceForGame("").isEmpty());
+  EXPECT_EQ(service->iconSourceForGame("unlisted"), gameIconSource("unlisted"));
+  ASSERT_TRUE(service->addSteamGame(1422450, "Icon Game"));
+  service->setGameFilterText("nothing matches this filter");
+  EXPECT_EQ(service->iconSourceForGame("icon game"),
+            gameIconSource("steam_app_1422450", 1422450));
+  ASSERT_TRUE(service->addSteamGame(42, "Icon Game"));
+  EXPECT_TRUE(service->iconSourceForGame("Icon Game").isEmpty());
+}
+
 TEST_F(GameDetectionServiceTest, UnifiedModelListsAndSections) {
   QAbstractItemModel *model = service->gamesModel();
   ASSERT_NE(model, nullptr);
