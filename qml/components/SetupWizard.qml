@@ -411,22 +411,27 @@ Rectangle {
                                     Label {
                                         text: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
                                               .arg(windowMonitor && windowMonitor.compositorName === "kwin"
-                                                   ? qsTr(" On KDE this uses a read-only KWin script.") : "")
+                                                   ? qsTr(" On KDE this uses a read-only KWin script.")
+                                                   : (windowMonitor && windowMonitor.compositorName === "gnome"
+                                                      ? qsTr(" On GNOME this installs a read-only Shell extension. Logout/login may be required; unsafe mode is not needed.") : ""))
                                         font.pixelSize: Theme.fontSizeSmall
                                         color: Theme.textSecondaryColor
                                         wrapMode: Text.WordWrap
                                         Layout.fillWidth: true
                                     }
                                     Label {
-                                        visible: windowMonitor && !windowMonitor.trackingReady && !windowMonitor.trackingChecking
-                                        text: qsTr("The helper is not responding. Repair will retry setup for %1. If it still fails, check your compositor's integration and permissions.").arg(windowMonitor ? windowMonitor.compositorName : qsTr("this system"))
+                                        visible: windowMonitor && !windowMonitor.trackingReady && (!windowMonitor.trackingChecking || windowMonitor.compositorName === "gnome")
+                                        text: windowMonitor && windowMonitor.compositorName === "gnome"
+                                              ? windowMonitor.gnomeHelperStatus
+                                              : qsTr("The helper is not responding. Repair will retry setup for %1. If it still fails, check your compositor's integration and permissions.").arg(windowMonitor ? windowMonitor.compositorName : qsTr("this system"))
                                         font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true
                                     }
                                     TrophyButton {
                                         visible: windowMonitor && !windowMonitor.trackingReady
                                         text: root.helperSetupRequested && windowMonitor && windowMonitor.trackingChecking
                                               ? qsTr("Setting up…")
-                                              : (windowMonitor && windowMonitor.compositorName === "kwin" && !windowMonitor.kwinScriptInstalled
+                                              : (windowMonitor && ((windowMonitor.compositorName === "kwin" && !windowMonitor.kwinScriptInstalled)
+                                                                   || (windowMonitor.compositorName === "gnome" && !windowMonitor.gnomeHelperInstalled))
                                                  ? qsTr("Install helper") : qsTr("Repair helper"))
                                         enabled: windowMonitor && (!root.helperSetupRequested || !windowMonitor.trackingChecking)
                                         onClicked: {

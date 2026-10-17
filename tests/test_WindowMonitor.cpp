@@ -61,6 +61,12 @@ protected:
   }
   static void collect(WaylandWindowMonitor &monitor) { monitor.collectRetired(); }
   static bool retired(WaylandWindowMonitor &monitor) { return !monitor.m_retired.empty(); }
+  static std::shared_ptr<std::atomic_bool> attachPendingGnomeSetup(WaylandWindowMonitor &monitor) {
+    monitor.m_monitoring = true;
+    monitor.m_gnome = std::make_shared<GnomeBackend>();
+    monitor.m_gnome->m_setupPending->store(true);
+    return monitor.m_gnome->m_setupPending;
+  }
   static void beginHealthCheck(WaylandWindowMonitor &monitor) {
     monitor.m_healthTimer.start(0);
   }
@@ -86,6 +92,18 @@ TEST_F(WindowMonitorWorkerTest, HealthCheckSettlesWithoutCallingTrackingWorking)
   EXPECT_FALSE(monitor.trackingChecking());
   EXPECT_FALSE(monitor.trackingReady());
   EXPECT_GT(changed.count(), 0);
+}
+
+TEST_F(WindowMonitorWorkerTest, PendingGnomeSetupIsRetainedUntilSettled) {
+  WaylandWindowMonitor monitor;
+  const auto pending = attachPendingGnomeSetup(monitor);
+  monitor.stopMonitoring();
+  EXPECT_TRUE(retired(monitor));
+  collect(monitor);
+  EXPECT_TRUE(retired(monitor));
+  pending->store(false);
+  collect(monitor);
+  EXPECT_FALSE(retired(monitor));
 }
 
 TEST_F(WindowMonitorWorkerTest, StopClearsHealthCheckAndReadiness) {

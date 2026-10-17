@@ -149,6 +149,14 @@ bool WaylandWindowMonitor::kwinActive() const {
   return m_kwin && m_kwin->isActive();
 }
 
+QString WaylandWindowMonitor::gnomeHelperStatus() const {
+  return m_gnome ? m_gnome->status() : QString();
+}
+
+bool WaylandWindowMonitor::gnomeHelperInstalled() const {
+  return GnomeBackend::isInstalled();
+}
+
 bool WaylandWindowMonitor::trackingReady() const {
   if (!m_monitoring) return false;
   if (m_kwin)
@@ -287,7 +295,8 @@ void WaylandWindowMonitor::collectRetired() {
     if (retired.poll.valid() && retired.poll.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
       return false;
     const auto kwin = std::dynamic_pointer_cast<KWinBackend>(retired.backend);
-    return !kwin || !kwin->hasPendingWork();
+    const auto gnome = std::dynamic_pointer_cast<GnomeBackend>(retired.backend);
+    return (!kwin || !kwin->hasPendingWork()) && (!gnome || !gnome->hasPendingWork());
   });
   const auto before = m_removals.size();
   std::erase_if(m_removals, [](const auto &future) {
@@ -328,7 +337,7 @@ void WaylandWindowMonitor::setupCompositorTracking(bool repairBackend) {
       connect(m_gnome.get(), &GnomeBackend::windowsUpdated, this,
               [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
-    if (!m_gnome->start())
+    if (!m_gnome->start(repairBackend))
       qWarning() << "GNOME backend failed to start; window data unavailable";
   } else if (m_compositor.contains("hyprland", Qt::CaseInsensitive)) {
     if (!m_hyprland) {

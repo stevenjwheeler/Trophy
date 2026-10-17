@@ -92,6 +92,28 @@ talk to the already-running Trophy over a user-private socket
 (`$XDG_RUNTIME_DIR/trophy-control.sock`); if Trophy isn't running,
 they just launch it.
 
+### GNOME window helper
+
+On GNOME Wayland, Trophy uses the bundled **Trophy Window Helper** Shell
+extension for read-only window identity, focus, fullscreen and minimized state.
+Choose **Install helper** in setup (or **Repair** in Settings) to copy it to
+`$XDG_DATA_HOME/gnome-shell/extensions/trophy-monitor@trophy` (normally under
+`~/.local/share`) and request enabling it. Ordinary startup never installs or
+enables extensions. GNOME unsafe mode is **not** required.
+
+GNOME may not discover a newly copied extension until you **log out and back
+in**. Then enable **Trophy Window Helper** in GNOME Extensions if necessary and
+reopen Trophy. Setup only reports Working after a valid window snapshot arrives;
+an installed extension alone is not sufficient. If it remains unavailable, check
+GNOME Extensions for unsupported-version/errors or disabled user extensions.
+Updating an already loaded extension can also require logout/login.
+
+The extension targets GNOME Shell 45–51's modern extension API. Automated tests
+cover its snapshot logic and Trophy's private-D-Bus integration; real GNOME
+session/capture verification is still pending. Screen capture remains separately
+authorized through the ScreenCast portal. Experimental Flatpak builds still lack
+a host extension-installation bridge; install the helper on the host instead.
+
 ## Screenshots
 *Coming soon*
 

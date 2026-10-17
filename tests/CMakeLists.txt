@@ -71,6 +71,10 @@ gtest_discover_tests(test_RecordingCardBinding)
 # dependency for Trophy or for builds without it.
 find_program(TROPHY_NODE_EXECUTABLE node)
 if(TROPHY_NODE_EXECUTABLE)
+    add_test(NAME GnomeExtensionTest.ReadOnlySnapshots
+        COMMAND "${TROPHY_NODE_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_GnomeExtension.js"
+            "${CMAKE_SOURCE_DIR}/resources/gnome/extension.js")
     add_test(NAME KWinScriptTest.WindowEventsAndFiltering
         COMMAND "${TROPHY_NODE_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/test_KWinScript.js"
@@ -633,6 +637,7 @@ endif()
 # --- WindowMonitor (KWin snapshot parsing + focus + WindowService delegation;
 # no compositor or D-Bus session needed) ---
 add_executable(test_WindowMonitor test_WindowMonitor.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
     ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h
     ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp
@@ -651,6 +656,21 @@ add_executable(test_WindowMonitor test_WindowMonitor.cpp
 target_include_directories(test_WindowMonitor PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_WindowMonitor PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
 gtest_discover_tests(test_WindowMonitor)
+
+# Never let the fake Shell own a name on the user's real session bus.
+find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
+if(TROPHY_DBUS_RUN_SESSION)
+    add_executable(test_GnomeBackend test_GnomeBackend.cpp
+        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp
+        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h
+        ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
+        ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+    target_include_directories(test_GnomeBackend PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_GnomeBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
+    add_test(NAME GnomeBackendTest.PrivateBus
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- ${CMAKE_COMMAND} -E env
+            TROPHY_PRIVATE_GNOME_TEST=1 $<TARGET_FILE:test_GnomeBackend>)
+endif()
 
 # --- GlShimEnrollment (conf-file round-trip; hermetic via env overrides) ---
 add_executable(test_GlShimEnrollment test_GlShimEnrollment.cpp

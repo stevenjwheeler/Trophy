@@ -1,6 +1,8 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
   <qresource prefix="/">
+    <file>gnome/metadata.json</file>
+    <file>gnome/extension.js</file>
     <file>icons/trophy.svg</file>
     <file>icons/record.svg</file>
     <file>icons/stop.svg</file>

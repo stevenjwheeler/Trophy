@@ -1126,7 +1126,9 @@ Page {
                         label: qsTr("Game Window Helper (required)")
                         help: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
                               .arg(windowMonitor && windowMonitor.compositorName === "kwin"
-                                   ? qsTr(" On KDE this uses a read-only KWin script.") : "")
+                                   ? qsTr(" On KDE this uses a read-only KWin script.")
+                                   : (windowMonitor && windowMonitor.compositorName === "gnome"
+                                      ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation. %1").arg(windowMonitor.gnomeHelperStatus) : ""))
 
                         HelperControls {
                             id: windowHelperControls
@@ -1143,7 +1145,9 @@ Page {
                                          ? (windowMonitor.kwinScriptInstalled
                                             ? (windowMonitor.kwinScriptEnabled ? qsTr("Installed · Not reporting") : qsTr("Installed · Disabled"))
                                             : qsTr("Not installed"))
-                                        : qsTr("Unavailable")))
+                                        : (windowMonitor && windowMonitor.compositorName === "gnome"
+                                           ? (windowMonitor.gnomeHelperInstalled ? qsTr("Installed · Not reporting") : qsTr("Not installed"))
+                                           : qsTr("Unavailable"))))
                             TrophyButton {
                                 id: helperRepair
                                 anchors.right: parent.right

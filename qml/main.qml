@@ -913,6 +913,7 @@ ApplicationWindow {
         id: trackingRepairDialog
         title: qsTr("Game Window Helper Needs Attention")
         message: qsTr("The Game Window Helper is not responding. Trophy needs window identity, focus and fullscreen information to identify games and restore capture to the correct window. Repair will reinstall or restart the compositor integration. Your recordings are still available.")
+                 + (windowMonitor && windowMonitor.compositorName === "gnome" ? "\n\n" + windowMonitor.gnomeHelperStatus : "")
         confirmText: qsTr("Repair")
         cancelText: qsTr("Later")
         onAccepted: if (windowMonitor) windowMonitor.repairTracking()
