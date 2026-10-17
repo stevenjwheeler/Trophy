@@ -6,6 +6,7 @@
 #include <QDBusContext>
 #include <QDBusMessage>
 #include <QDir>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
@@ -224,8 +225,11 @@ TEST_F(GnomeBackendTest, InstallRejectsForeignDirectoryAndSymlink) {
 } // namespace TrophyBackend
 
 int main(int argc, char **argv) {
-  QTemporaryDir isolation("/tmp/opencode/trophy-gnome-tests-XXXXXX");
-  if (!isolation.isValid()) return 1;
+  QTemporaryDir isolation;
+  if (!isolation.isValid()) {
+    qCritical() << "Failed to create GNOME test isolation directory:" << isolation.errorString();
+    return 1;
+  }
   qputenv("XDG_DATA_HOME", isolation.filePath("data").toUtf8());
   qputenv("XDG_CONFIG_HOME", isolation.filePath("config").toUtf8());
   QCoreApplication app(argc, argv);
