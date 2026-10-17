@@ -3,41 +3,13 @@
 Native prefix installs and the CI-produced AppImage are the supported
 distribution paths. Build outside the repository's CloudDrive mount.
 
-## Flatpak — experimental
-
-See [the feature-parity plan](FLATPAK_PLAN.md) for the proposed architecture,
-implementation phases and release gates.
-
-`io.github.stevenjwheeler.Trophy.yml` is a development manifest, not a
-feature-equivalent release package. Manual capture through the desktop
-portal is the intended evaluation path; it still needs a packaged live
-smoke test.
-
-Known unsupported integrations:
-
-- Host Vulkan/GL reporters cannot reach the listener in Flatpak's private
-  `/tmp`. The reporter socket protocol remains unchanged.
-- Vulkan manifests, GL enrollment and KWin script installation currently
-  target sandbox paths, not the host integration locations. Do not enable
-  these optional modules expecting host game detection to work.
-- Hyprland/Sway tools and host compositor sockets are not bundled/exposed.
-- Login autostart needs a Background portal implementation or a validated
-  host-config bridge. The generated `flatpak run` command is host-valid,
-  but an entry written to sandbox config is not a host autostart entry.
-- Hardware encoders and NVIDIA runtime extensions need packaged testing.
-
-Do not attempt to resolve these limitations by granting blanket host
-filesystem access or replacing the frozen reporter protocol. A supported
-host-integration design and real-session tests are required before promoting
-the manifest out of experimental status.
-
 ## Verification
 
 An installed tree needs the executable, `libTrophy.so`, both reporter
 libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`
 for the executable's prefix-relative RUNPATH and `ldd` with
 `LD_LIBRARY_PATH` unset. Native/AppImage AppStream metadata must launch
-`trophy.desktop`; Flatpak metadata launches its renamed app-id desktop file.
+`trophy.desktop`.
 
 Run a non-capture AppImage smoke test with:
 

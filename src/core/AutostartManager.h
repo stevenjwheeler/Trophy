@@ -33,11 +33,9 @@ public:
   // Pure Desktop Entry Exec resolver; explicit inputs keep packaging tests
   // independent of the environment the test runner was launched in.
   static QString launchCommand(const QString &execPath,
-                               const QString &appImagePath = QString(),
-                               const QString &flatpakId = QString());
+                               const QString &appImagePath = QString());
   bool setEnabled(bool enabled, const QString &execPath,
-                  const QString &appImagePath = QString(),
-                  const QString &flatpakId = QString());
+                  const QString &appImagePath = QString());
 
 private:
   QString m_configHomeOverride;

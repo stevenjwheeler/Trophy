@@ -80,19 +80,13 @@ bool AutostartManager::isEnabled() const {
 }
 
 QString AutostartManager::launchCommand(const QString &execPath,
-                                       const QString &appImagePath,
-                                       const QString &flatpakId) {
-  if (!flatpakId.isEmpty()) {
-    return QStringLiteral("flatpak run ") + quoteExecPath(flatpakId) +
-           QStringLiteral(" --minimized");
-  }
+                                       const QString &appImagePath) {
   return quoteExecPath(appImagePath.isEmpty() ? execPath : appImagePath) +
          QStringLiteral(" --minimized");
 }
 
 bool AutostartManager::setEnabled(bool enabled, const QString &execPath,
-                                 const QString &appImagePath,
-                                 const QString &flatpakId) {
+                                 const QString &appImagePath) {
   const QString path = filePath();
   if (!enabled) {
     // Only remove entries we own; leave foreign ones alone.
@@ -119,7 +113,7 @@ bool AutostartManager::setEnabled(bool enabled, const QString &execPath,
       << "Version=1.0\n"
       << "Name=Trophy\n"
       << "Comment=Game recording and clipping\n"
-      << "Exec=" << launchCommand(execPath, appImagePath, flatpakId) << "\n"
+      << "Exec=" << launchCommand(execPath, appImagePath) << "\n"
       << "Icon=trophy\n"
       << "Terminal=false\n"
       << "Categories=AudioVideo;Game;\n"

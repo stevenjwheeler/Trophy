@@ -607,9 +607,8 @@ install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
 )
-# Native/AppImage desktop file is trophy.desktop; Flatpak post-install
-# copies the source metadata alongside its renamed app-id desktop entry.
-# Keep the launchable association truthful in each installed layout.
+# The native/AppImage desktop file is trophy.desktop; keep the installed
+# metainfo's launchable association truthful.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.stevenjwheeler.Trophy.metainfo.xml"
     TROPHY_NATIVE_METAINFO)
 string(REPLACE "io.github.stevenjwheeler.Trophy.desktop" "trophy.desktop"

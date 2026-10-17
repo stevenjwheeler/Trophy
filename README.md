@@ -21,10 +21,6 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 1. **Download:** Grab the latest `Trophy-<version>-x86_64.AppImage` from the [Releases Page](https://github.com/OasisLab-Software/Trophy/releases/latest).
 2. **Make it executable:** `chmod +x Trophy-*.AppImage`
 
-The Flatpak manifest is **experimental**, not a feature-equivalent release.
-Host game detection and login autostart are not yet supported in that sandbox;
-see [packaging status](packaging/README.md).
-
 ## Features
 
 ### Recording
@@ -120,8 +116,7 @@ Updating an already loaded extension can also require logout/login.
 The extension targets GNOME Shell 45–51's modern extension API. Automated tests
 cover its snapshot logic and Trophy's private-D-Bus integration; real GNOME
 session/capture verification is still pending. Screen capture remains separately
-authorized through the ScreenCast portal. Experimental Flatpak builds still lack
-a host extension-installation bridge; install the helper on the host instead.
+authorized through the ScreenCast portal.
 
 ## Screenshots
 *Coming soon*

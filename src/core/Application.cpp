@@ -1585,15 +1585,11 @@ void Application::syncAutostartFile() {
   if (!want && !m_autostartManager->isEnabled()) {
     return;
   }
-  QString flatpakId = QString::fromUtf8(qgetenv("FLATPAK_ID"));
-  if (flatpakId.isEmpty() && QFile::exists(QStringLiteral("/.flatpak-info"))) {
-    flatpakId = QStringLiteral("io.github.stevenjwheeler.Trophy");
-  }
   // Refresh managed entries too: older packaged versions stored a transient
-  // AppImage mount path or the sandbox-only /app/bin executable.
+  // AppImage mount path.
   if (!m_autostartManager->setEnabled(
           want, QCoreApplication::applicationFilePath(),
-          QString::fromUtf8(qgetenv("APPIMAGE")), flatpakId)) {
+          QString::fromUtf8(qgetenv("APPIMAGE")))) {
     qCWarning(appLog) << "Failed to sync autostart entry";
   }
 }
