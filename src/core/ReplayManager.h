@@ -26,6 +26,7 @@
 namespace TrophyBackend {
 
 class SettingsManager;
+class GameDetectionService;
 class StorageManager;
 class AudioMixer;
 class IVideoCaptureSource;
@@ -60,9 +61,11 @@ public:
   ~ReplayManager() override;
 
   void setSettingsManager(SettingsManager *settings);
+  void setGameDetectionService(GameDetectionService *detector) { m_gameDetector = detector; }
   void setStorageManager(StorageManager *storage);
 
   bool isActive() const { return m_state == State::Running; }
+  bool isStarting() const { return m_state == State::StartingCapture; }
   QString currentGame() const { return m_gameName; }
 
   // Pure helpers (unit-tested): window/retention over segment lists.
@@ -85,6 +88,8 @@ public slots:
   void saveReplay();
 
 signals:
+  // The capture source is ready; portal selection no longer needs guidance.
+  void captureSelectionFinished();
   void replayStateChanged();
   void replaySaved(const QString &filePath, double seconds);
   void replayFailed(const QString &reason);
@@ -92,7 +97,7 @@ signals:
    * The portal rejected our saved restore token. The app deletes it and
    * re-authorizes through the New Game prompt — never a bare picker.
    */
-  void restoreAuthNeeded(const QString &gameName);
+  void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
 
 private slots:
   void onCaptureReady();
@@ -101,6 +106,8 @@ private slots:
   void rotateSegment();
 
 private:
+  GameDetectionService *m_gameDetector = nullptr; // owner outlives this manager
+  QString m_captureIdentity;
   enum class State { Idle, StartingCapture, Running, Stopping };
 
   void setState(State s);

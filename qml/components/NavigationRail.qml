@@ -6,6 +6,7 @@
  */
 
 import "../styles"
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -19,7 +20,7 @@ Rectangle {
 
     width: Theme.navRailWidth
     color: Theme.surfaceColor
-    radius: 11
+    radius: Theme.squareWindowCorners ? 0 : 11
 
     // Square off all corners except bottom-left
     Rectangle {
@@ -49,7 +50,7 @@ Rectangle {
         // Navigation buttons
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "🏠"
+            iconSource: "qrc:/icons/home.svg"
             text: qsTr("Home")
             checked: root.currentIndex === 0
             onClicked: root.navigate(0)
@@ -57,7 +58,7 @@ Rectangle {
 
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "🎮"
+            iconSource: "qrc:/icons/gamepad.svg"
             text: qsTr("Games")
             checked: root.currentIndex === 1
             onClicked: root.navigate(1)
@@ -71,7 +72,7 @@ Rectangle {
         // Settings at bottom
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "⚙️"
+            iconSource: "qrc:/icons/settings.svg"
             text: qsTr("Settings")
             checked: root.currentIndex === 2
             onClicked: root.navigate(2)
@@ -79,7 +80,7 @@ Rectangle {
 
         NavigationButton {
             Layout.fillWidth: true
-            iconText: "ℹ️"
+            iconSource: "qrc:/icons/info.svg"
             text: qsTr("Info")
             checked: root.currentIndex === 3
             onClicked: root.navigate(3)
@@ -90,7 +91,7 @@ Rectangle {
     component NavigationButton: AbstractButton {
         id: navButton
 
-        property string iconText: ""
+        property url iconSource
 
         implicitHeight: 56
         leftPadding: Theme.spacingMedium
@@ -102,10 +103,10 @@ Rectangle {
             anchors.topMargin: 8
             anchors.bottomMargin: 8
 
-            Label {
+            TrophyIcon {
                 Layout.alignment: Qt.AlignHCenter
-                text: navButton.iconText
-                font.pixelSize: 20
+                source: navButton.iconSource
+                color: navButton.checked ? Theme.primaryColor : Theme.textSecondaryColor
                 opacity: navButton.checked ? 1 : 0.7
             }
 

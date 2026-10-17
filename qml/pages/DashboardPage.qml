@@ -6,14 +6,37 @@
  */
 
 import "../components"
+import "../controls"
 import "../styles"
 import "../views"
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import QtQuick.Layouts
 
 Page {
     id: root
+
+    property bool libraryListView: false
+
+    HoverPreview {
+        id: libraryPreview
+        objectName: "libraryHoverPreview"
+        parkingItem: root.contentItem
+    }
+
+    // The library layout persists in settings so the dashboard reopens
+    // in the user's last-used mode (grid default).
+    Component.onCompleted: {
+        if (typeof settingsManager !== "undefined" && settingsManager)
+            libraryListView = settingsManager.libraryListView
+    }
+
+    onLibraryListViewChanged: {
+        if (typeof settingsManager !== "undefined" && settingsManager
+                && settingsManager.libraryListView !== root.libraryListView)
+            settingsManager.libraryListView = root.libraryListView
+    }
 
     // Session-persistent activity event feed (clip saves, deletions,
     // storage warnings). Library entries are derived, so transient events
@@ -71,9 +94,10 @@ Page {
     }
 
     function scrollToRecording(index) {
-        // Index is into the library; offset past the live card when recording.
+        // The grid prepends a live cell; the list uses a separate header.
         var offset = (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0;
-        recordingsGrid.positionViewAtIndex(index + offset, GridView.Beginning);
+        if (libraryView.item)
+            libraryView.item.positionViewAtIndex(index + offset, ListView.Beginning);
     }
 
     RowLayout {
@@ -127,13 +151,258 @@ Page {
                             spacing: Theme.spacingMedium
 
                             Label {
-                                text: qsTr("Recent Captures")
+                                text: qsTr("Library")
                                 font.pixelSize: Theme.fontSizeMedium
                                 font.weight: Font.Medium
                                 color: Theme.textColor
                             }
 
                             Item { Layout.fillWidth: true }
+
+                            RowLayout {
+                                spacing: 4
+
+                                TrophyButton {
+                                    objectName: "libraryGridButton"
+                                    implicitWidth: 32
+                                    implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    icon.source: "qrc:/icons/view-grid.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    outlined: true
+                                    checked: !root.libraryListView
+                                    Accessible.name: qsTr("Grid view")
+                                    ToolTip.text: qsTr("Grid view")
+                                    ToolTip.visible: hovered
+                                    onClicked: root.libraryListView = false
+                                }
+
+                                TrophyButton {
+                                    objectName: "libraryListButton"
+                                    implicitWidth: 32
+                                    implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    icon.source: "qrc:/icons/view-list.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    outlined: true
+                                    checked: root.libraryListView
+                                    Accessible.name: qsTr("List view")
+                                    ToolTip.text: qsTr("List view")
+                                    ToolTip.visible: hovered
+                                    onClicked: root.libraryListView = true
+                                }
+
+                                Rectangle {
+                                    Layout.leftMargin: Theme.spacingSmall
+                                    Layout.rightMargin: Theme.spacingSmall
+                                    Layout.preferredWidth: 1
+                                    Layout.preferredHeight: 18
+                                    color: Theme.borderColor
+                                }
+
+                                TrophyButton {
+                                    id: filterButton
+                                    objectName: "libraryFilterButton"
+                                    implicitWidth: 32
+                                    implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    icon.source: "qrc:/icons/filter.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    outlined: true
+                                    checked: filterPopup.opened || (recordingLibrary &&
+                                        (recordingLibrary.kindFilter !== 0 || recordingLibrary.sortOrder !== 0))
+                                    Accessible.name: qsTr("Filter and sort captures")
+                                    ToolTip.text: qsTr("Filter and sort captures")
+                                    ToolTip.visible: hovered
+                                    onClicked: filterPopup.opened ? filterPopup.close() : filterPopup.open()
+
+                                    Popup {
+                                        id: filterPopup
+                                        objectName: "libraryFilterPopup"
+                                        x: filterButton.width - width
+                                        y: filterButton.height + Theme.spacingNormal
+                                        width: 260
+                                        padding: 20
+                                        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+                                        enter: Transition {
+                                            NumberAnimation {
+                                                property: "opacity"
+                                                from: 0
+                                                to: 1
+                                                duration: Theme.animationFast
+                                            }
+                                        }
+                                        exit: Transition {
+                                            NumberAnimation {
+                                                property: "opacity"
+                                                from: 1
+                                                to: 0
+                                                duration: Theme.animationFast
+                                            }
+                                        }
+
+                                        function setKindVisible(kind, enabled) {
+                                            var current = recordingLibrary.kindFilter
+                                            var recordings = current === 0 || current === 1
+                                            var clips = current === 0 || current === 2
+                                            if (kind === 1)
+                                                recordings = enabled
+                                            else
+                                                clips = enabled
+                                            window.clearSelection()
+                                            recordingLibrary.kindFilter = recordings
+                                                ? (clips ? 0 : 1) : (clips ? 2 : 3)
+                                        }
+
+                                        background: Rectangle {
+                                            radius: Theme.radiusMedium
+                                            gradient: Gradient {
+                                                GradientStop { position: 0; color: Qt.lighter(Theme.cardColor, 1.12) }
+                                                GradientStop { position: 1; color: Theme.cardColor }
+                                            }
+                                            border.width: 1
+                                            border.color: Qt.lighter(Theme.borderColor, 1.25)
+                                            layer.enabled: filterPopup.visible
+                                            layer.effect: MultiEffect {
+                                                shadowEnabled: true
+                                                shadowColor: "#80000000"
+                                                shadowBlur: 0.7
+                                                shadowVerticalOffset: 6
+                                                blurMax: 32
+                                            }
+                                        }
+
+                                        contentItem: ColumnLayout {
+                                            spacing: Theme.spacingSmall
+
+                                            Label {
+                                                text: qsTr("Show")
+                                                color: Theme.textSecondaryColor
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.weight: Font.Medium
+                                                font.capitalization: Font.AllUppercase
+                                                font.letterSpacing: 1
+                                            }
+
+                                            Repeater {
+                                                model: [qsTr("Recordings"), qsTr("Clips")]
+                                                delegate: CheckBox {
+                                                    id: kindCheck
+                                                    required property int index
+                                                    required property string modelData
+                                                    objectName: index === 0 ? "libraryShowRecordings" : "libraryShowClips"
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: 28
+                                                    text: modelData
+                                                    padding: 0
+                                                    spacing: Theme.spacingSmall
+                                                    checked: recordingLibrary && (recordingLibrary.kindFilter === 0
+                                                        || recordingLibrary.kindFilter === index + 1)
+                                                    onToggled: filterPopup.setKindVisible(index + 1, checked)
+
+                                                    indicator: Rectangle {
+                                                        implicitWidth: 18
+                                                        implicitHeight: 18
+                                                        y: (kindCheck.height - height) / 2
+                                                        radius: 4
+                                                        color: kindCheck.checked ? Theme.accentColor : "transparent"
+                                                        border.color: kindCheck.checked ? Theme.accentColor : Theme.textMutedColor
+                                                        Label {
+                                                            anchors.centerIn: parent
+                                                            text: "✓"
+                                                            color: "white"
+                                                            visible: kindCheck.checked
+                                                        }
+                                                    }
+
+                                                    contentItem: Label {
+                                                        text: kindCheck.text
+                                                        leftPadding: kindCheck.indicator.width + kindCheck.spacing
+                                                        color: Theme.textColor
+                                                        font.pixelSize: Theme.fontSizeSmall
+                                                        verticalAlignment: Text.AlignVCenter
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                Layout.fillWidth: true
+                                                Layout.topMargin: Theme.spacingSmall
+                                                Layout.bottomMargin: Theme.spacingSmall
+                                                implicitHeight: 1
+                                                color: Theme.borderColor
+                                            }
+
+                                            Label {
+                                                text: qsTr("Sort by")
+                                                color: Theme.textSecondaryColor
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.weight: Font.Medium
+                                                font.capitalization: Font.AllUppercase
+                                                font.letterSpacing: 1
+                                            }
+
+                                            RowLayout {
+                                                id: sortControls
+                                                Layout.fillWidth: true
+                                                spacing: Theme.spacingSmall
+                                                // Date, size, length, name: map both directions to
+                                                // the existing backend enum without changing its API.
+                                                readonly property var ascendingOrders: [1, 4, 6, 3]
+                                                readonly property var descendingOrders: [0, 2, 5, 7]
+                                                readonly property int order: recordingLibrary ? recordingLibrary.sortOrder : 0
+                                                readonly property bool descending: descendingOrders.indexOf(order) >= 0
+                                                readonly property int fieldIndex: descending
+                                                    ? descendingOrders.indexOf(order) : ascendingOrders.indexOf(order)
+
+                                                TrophyComboBox {
+                                                    objectName: "librarySortOrder"
+                                                    Layout.fillWidth: true
+                                                    model: [qsTr("Date"), qsTr("Size"), qsTr("Length"), qsTr("Name")]
+                                                    currentIndex: sortControls.fieldIndex
+                                                    Accessible.name: qsTr("Sort captures")
+                                                    onActivated: {
+                                                        window.clearSelection()
+                                                        recordingLibrary.sortOrder = sortControls.descending
+                                                            ? sortControls.descendingOrders[currentIndex]
+                                                            : sortControls.ascendingOrders[currentIndex]
+                                                    }
+                                                }
+
+                                                TrophyButton {
+                                                    objectName: "librarySortDirection"
+                                                    implicitWidth: 32
+                                                    implicitHeight: 32
+                                                    padding: 0
+                                                    horizontalPadding: 0
+                                                    text: sortControls.descending ? "↓" : "↑"
+                                                    outlined: true
+                                                    Accessible.name: sortControls.descending
+                                                        ? qsTr("Descending; switch to ascending")
+                                                        : qsTr("Ascending; switch to descending")
+                                                    ToolTip.text: sortControls.descending
+                                                        ? qsTr("Descending; click for ascending")
+                                                        : qsTr("Ascending; click for descending")
+                                                    ToolTip.visible: hovered
+                                                    onClicked: {
+                                                        window.clearSelection()
+                                                        recordingLibrary.sortOrder = sortControls.descending
+                                                            ? sortControls.ascendingOrders[sortControls.fieldIndex]
+                                                            : sortControls.descendingOrders[sortControls.fieldIndex]
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             RowLayout {
                                 spacing: Theme.spacingSmall
@@ -174,42 +443,54 @@ Page {
                             }
                         }
 
-                        RecordingGridView {
-                            id: recordingsGrid
+                        Loader {
+                            id: libraryView
+                            objectName: "libraryView"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            clip: true
-                            
-                            skip: 0
-                            leftMargin: Theme.spacingSmall
-                            topMargin: Theme.spacingSmall
-                            bottomMargin: Theme.spacingSmall
-                            
-                            // Add margin on the right so your grid content doesn't get covered by the scrollbar
-                            rightMargin: Theme.spacingSmall
+                            sourceComponent: root.libraryListView ? listComponent : gridComponent
 
-                            // Attach the custom scrollbar directly to the GridView
-                            ScrollBar.vertical: ScrollBar {
-                                id: customVBar
-                                active: hovered || pressed
-                                width: 8
-                                
-                                // The handle
-                                contentItem: Rectangle {
-                                    implicitWidth: 4
-                                    implicitHeight: 40 // Minimum height of the thumb
-                                    radius: 16
-                                    color: customVBar.pressed ? Theme.highlightedColor : (customVBar.hovered ? Theme.highlightedColor : Theme.secondaryColor)
-
-                                    // Optional: fade out when not interacting
-                                    opacity: customVBar.active ? 1.0 : 0.2
-                                    Behavior on opacity { NumberAnimation { duration: 200 } }
-                                
+                            Rectangle {
+                                id: libraryBottomFade
+                                // The grid surface is translucent; fade to its opaque
+                                // composite so cards actually disappear at the edge.
+                                readonly property color fadeColor: Qt.tint(Theme.backgroundColor, Theme.recordingGridBackgroundColor)
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.bottom: parent.bottom
+                                height: Theme.spacingLarge * 2
+                                z: 1
+                                opacity: libraryView.item ? Math.max(0, Math.min(1, (libraryView.item.originY + libraryView.item.contentHeight + libraryView.item.bottomMargin - libraryView.item.height - libraryView.item.contentY) / height)) : 0
+                                visible: opacity > 0
+                                gradient: Gradient {
+                                    GradientStop { position: 0; color: Qt.alpha(libraryBottomFade.fadeColor, 0) }
+                                    GradientStop { position: 1; color: libraryBottomFade.fadeColor }
                                 }
+                            }
+                        }
 
-                                background: Rectangle {
-                                    color: "transparent"
-                                }
+                        Component {
+                            id: listComponent
+                            RecordingListView {
+                                previewController: libraryPreview
+                                leftMargin: Theme.spacingSmall
+                                rightMargin: Theme.spacingSmall
+                                topMargin: Theme.spacingSmall
+                                bottomMargin: Theme.spacingSmall
+                            }
+                        }
+
+                        Component {
+                            id: gridComponent
+                            RecordingGridView {
+                                previewController: libraryPreview
+                                clip: true
+                                leftMargin: Theme.spacingSmall
+                                topMargin: Theme.spacingSmall
+                                bottomMargin: Theme.spacingSmall
+                                rightMargin: Theme.spacingSmall
+
                             }
                         }
                     }
@@ -479,6 +760,7 @@ Page {
                         // Long clip filenames must truncate (labels elide),
                         // never widen the content and summon a h-bar.
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ScrollBar.vertical: TrophyScrollBar {}
                         clip: true
                         ColumnLayout {
                             width: activityScroll.availableWidth; spacing: 0
@@ -671,5 +953,5 @@ Page {
         }
     }
 
-    background: Rectangle { color: Theme.backgroundColor; bottomRightRadius: 12; topLeftRadius: 26 }
+    background: Rectangle { color: Theme.backgroundColor; bottomRightRadius: Theme.windowRadius; topLeftRadius: 26 }
 }

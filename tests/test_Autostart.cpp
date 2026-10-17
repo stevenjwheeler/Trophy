@@ -110,14 +110,6 @@ TEST_F(AutostartTest, AppImageLauncherUsesPersistentImagePath) {
             QStringLiteral("\"/home/user/My Games/Trophy.AppImage\" --minimized"));
 }
 
-TEST_F(AutostartTest, FlatpakLauncherUsesHostCommandAndTakesPrecedence) {
-  EXPECT_EQ(AutostartManager::launchCommand(
-                "/app/bin/trophy", "/ignored/Trophy.AppImage",
-                "io.github.stevenjwheeler.Trophy"),
-            QStringLiteral(
-                "flatpak run io.github.stevenjwheeler.Trophy --minimized"));
-}
-
 TEST_F(AutostartTest, ExecEscapesFieldCodesAndBothQuotingLayers) {
   EXPECT_EQ(AutostartManager::launchCommand(
                 "/unused", QString::fromUtf8(R"(/home/user/My "$`\100%.AppImage)")),
@@ -140,22 +132,6 @@ TEST_F(AutostartTest, AppImageEntryRefreshesOldMountedPath) {
   EXPECT_TRUE(mgr.isEnabled());
 }
 
-TEST_F(AutostartTest, FlatpakEntryRefreshesOldSandboxPath) {
-  AutostartManager mgr(tempDir.path());
-  ASSERT_TRUE(mgr.setEnabled(true, "/app/bin/trophy"));
-  ASSERT_TRUE(mgr.setEnabled(true, "/app/bin/trophy", QString(),
-                             "io.github.stevenjwheeler.Trophy"));
-  QFile f(mgr.filePath());
-  ASSERT_TRUE(f.open(QIODevice::ReadOnly | QIODevice::Text));
-  const QString content = QString::fromUtf8(f.readAll());
-  EXPECT_TRUE(content.contains(
-      "Exec=flatpak run io.github.stevenjwheeler.Trophy --minimized\n"));
-  EXPECT_FALSE(content.contains("/app/bin"));
-  EXPECT_TRUE(mgr.setEnabled(false, "/app/bin/trophy", QString(),
-                              "io.github.stevenjwheeler.Trophy"));
-  EXPECT_FALSE(QFile::exists(mgr.filePath()));
-}
-
 TEST_F(AutostartTest, EnableLeavesForeignEntryAlone) {
   AutostartManager mgr(tempDir.path());
   ASSERT_TRUE(QDir().mkpath(QFileInfo(mgr.filePath()).absolutePath()));
@@ -165,8 +141,7 @@ TEST_F(AutostartTest, EnableLeavesForeignEntryAlone) {
   ASSERT_EQ(f.write(original), original.size());
   f.close();
 
-  EXPECT_FALSE(mgr.setEnabled(true, "/app/bin/trophy", QString(),
-                              "io.github.stevenjwheeler.Trophy"));
+  EXPECT_FALSE(mgr.setEnabled(true, "/usr/bin/trophy"));
   ASSERT_TRUE(f.open(QIODevice::ReadOnly));
   EXPECT_EQ(f.readAll(), original);
   EXPECT_FALSE(mgr.isEnabled());

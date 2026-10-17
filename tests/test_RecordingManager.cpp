@@ -30,6 +30,8 @@
 #include "encoding/IEncoder.h"
 #include "audio/AudioMixer.h"
 #include "audio/IAudioSource.h"
+#include "detection/GameDetectionService.h"
+#include "detection/WaylandWindowMonitor.h"
 
 using namespace TrophyBackend;
 
@@ -450,6 +452,7 @@ protected:
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
     QSignalSpy states(&recorder, &RecordingManager::stateChanged);
+    QSignalSpy selection(&recorder, &RecordingManager::captureSelectionFinished);
     QSignalSpy names(&recorder, &RecordingManager::currentGameNameChanged);
 
     recorder.startRecording("Old Game", 11);
@@ -481,6 +484,7 @@ protected:
     EXPECT_EQ(capture.data(), replacementSource.data());
     EXPECT_EQ(recorder.m_captureSource.get(), replacementSource.data());
     EXPECT_FALSE(recorder.m_session); // Old ready cannot build a new session.
+    EXPECT_EQ(selection.count(), 0); // Nor dismiss the replacement's guidance.
     EXPECT_EQ(replacementSource->resolutionQueries, 0);
     EXPECT_EQ(replacementSource->config.windowId, 22u);
     EXPECT_EQ(recorder.currentGameName(), "Replacement Game");
@@ -724,6 +728,49 @@ TEST_F(RecordingManagerTest, StaleRestoreSettlesBeforeReauthorizationAndRetry) {
   EXPECT_EQ(started.count(), 0);
   EXPECT_EQ(errors.count(), 0);
   recorder.stopRecording();
+}
+
+TEST_F(RecordingManagerTest, RestoreTokenCallbacksKeepOriginatingIdentity) {
+  SettingsManager settings;
+  settings.setRecordingsPath(tempDir.path());
+  settings.setRestoreTokenForIdentity("first", "Game.exe", "first-token");
+  StorageManager storage(tempDir.path());
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor); // No listener/backend starts.
+  detector.addToWhitelist("first", "Game.exe");
+  detector.addToWhitelist("second", "Game.exe");
+  WindowInfo window;
+  window.pid = 61010;
+  window.appId = "first";
+  window.focused = true;
+  window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameKey(), "first");
+  QPointer<PendingCapture> capture;
+  RecordingManager recorder;
+  recorder.setSettingsManager(&settings);
+  recorder.setStorageManager(&storage);
+  recorder.setGameDetectionService(&detector);
+  installPendingCapture(recorder, capture);
+  recorder.startRecording("Game.exe");
+  ASSERT_FALSE(capture.isNull());
+  ASSERT_EQ(capture->config.waylandRestoreToken, "first-token");
+  detector.addToBlacklist("first");
+  window.pid = 61011;
+  window.appId = "second";
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameName(), "Game.exe");
+  ASSERT_EQ(detector.currentGameKey(), "second");
+  emit capture->restoreTokenUpdated("updated-first-token");
+  EXPECT_EQ(settings.getRestoreToken("first"), "updated-first-token");
+  EXPECT_TRUE(settings.getRestoreToken("second").isEmpty());
+  QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
+  emit capture->restoreTokenStale("updated-first-token");
+  if (auth.isEmpty())
+    ASSERT_TRUE(auth.wait(3000));
+  ASSERT_EQ(auth.count(), 1);
+  EXPECT_EQ(auth.at(0).at(1).toString(), "first");
 }
 
 TEST_F(RecordingManagerTest, QueuedStartupErrorReleasesOutputAndStorageExclusion) {

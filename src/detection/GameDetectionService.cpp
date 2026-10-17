@@ -1,4 +1,5 @@
 #include "GameDetectionService.h"
+#include "DefaultAppCatalog.h"
 #include "GameWhitelist.h"
 #include "WaylandWindowMonitor.h"
 #include "WindowInfo.h"
@@ -253,13 +254,128 @@ bool GameDetectionService::isBlacklistedIdentity(
          (!displayName.isEmpty() && m_whitelist->isBlacklisted(displayName));
 }
 
+GameDetectionService::ReporterIdentity
+GameDetectionService::resolveReporterIdentity(const QString &reporter,
+                                              const QString &exe,
+                                              const QStringList &argv,
+                                              uint steamAppId,
+                                              const QString &winePrefix) {
+  const auto basename = [](QString path) {
+    path.replace('\\', '/');
+    return path.section('/', -1);
+  };
+  const auto wrapper = [](const QString &name) {
+    return QStringList{"wine", "wine64", "wine-preloader", "wine64-preloader",
+                       "wineserver", "proton"}.contains(name.toLower());
+  };
+  const auto helper = [](const QString &name) {
+    const QString key = GameWhitelist::normalizeKey(name);
+    return QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
+                       "steam-runtime-launcher-service", "pressure-vessel-wrap",
+                       "d3ddriverquery", "d3ddriverquery64", "steam gpu query",
+                       "wineopenxr test instance", "hellovr_vulkan", "xalia",
+                       "wineboot", "winecfg", "winedevice", "services", "explorer",
+                       "rundll32", "crashpad_handler", "unitycrashhandler64",
+                       "unitycrashhandler32", "crashreportclient"}.contains(key);
+  };
+  ReporterIdentity result;
+  result.name = reporter.trimmed();
+  QString executablePath = exe;
+  QString executable = basename(exe);
+  // Wine may rewrite argv[0] to the Windows executable, or keep the Wine
+  // loader followed by it. Never search arbitrary arguments: an installer
+  // or launcher can mention another executable without running it.
+  if (wrapper(executable)) {
+    executable.clear();
+    executablePath.clear();
+    if (!argv.isEmpty()) {
+      QString candidate = argv.first();
+      if (wrapper(basename(candidate)) && argv.size() > 1)
+        candidate = argv.at(1);
+      if (candidate.endsWith(".exe", Qt::CaseInsensitive)) {
+        executable = basename(candidate);
+        candidate.replace('\\', '/');
+        executablePath = QStringLiteral("wine:") + winePrefix + ":" + candidate;
+      }
+    }
+  }
+  result.executable = executable;
+  result.ignored = helper(basename(reporter)) || helper(executable) ||
+                   (wrapper(basename(exe)) && executable.isEmpty());
+  if (result.ignored)
+    return result;
+  const bool generic = GameWhitelist::isPlaceholderReporterKey(reporter) ||
+                       QStringList{"unity", "unreal engine", "godot", "sdl_app"}
+                           .contains(reporter.trimmed().toLower());
+  if (steamAppId > 0)
+    result.key = QStringLiteral("steam_app_%1").arg(steamAppId);
+  else if (!executable.isEmpty())
+    result.key = GameWhitelist::normalizeKey(
+        executablePath.startsWith("wine:") ? executablePath : "exe:" + executablePath);
+  else if (!generic)
+    result.key = GameWhitelist::normalizeKey(reporter);
+  if (generic && !executable.isEmpty())
+    result.name = executable;
+  // An unresolved null-name event has no identity. Even Steam evidence
+  // must not turn the shared placeholder into a display-name/token key.
+  if (generic && executable.isEmpty())
+    result.name.clear();
+  return result;
+}
+
+GameDetectionService::ReporterIdentity GameDetectionService::reporterIdentity(
+    qint64 pid, const QString &reporter, uint steamAppId) {
+  const QString exe = QFileInfo(QString("/proc/%1/exe").arg(pid)).symLinkTarget();
+  QFile command(QString("/proc/%1/cmdline").arg(pid));
+  QStringList argv;
+  if (command.open(QIODevice::ReadOnly)) {
+    const QByteArray bytes = command.read(65537);
+    if (bytes.size() <= 65536) {
+      for (const QByteArray &arg : bytes.split('\0'))
+        argv.append(QString::fromLocal8Bit(arg));
+    }
+  }
+  const QString loader = QFileInfo(exe).fileName().toLower();
+  if ((loader == "wine" || loader == "wine64" || loader.endsWith("-preloader")) &&
+      !argv.isEmpty()) {
+    int index = 0;
+    if ((argv.first() == "wine" || argv.first() == "wine64" ||
+         QFileInfo(argv.first()).fileName().endsWith("-preloader")) && argv.size() > 1)
+      index = 1;
+    QString candidate = argv.at(index);
+    candidate.replace('\\', '/');
+    static const QRegularExpression drive("^[A-Za-z]:");
+    if (candidate.endsWith(".exe", Qt::CaseInsensitive) &&
+        QDir::isRelativePath(candidate) && !drive.match(candidate).hasMatch()) {
+      const QString cwd = QFileInfo(QString("/proc/%1/cwd").arg(pid)).symLinkTarget();
+      if (!cwd.isEmpty())
+        argv[index] = QDir::cleanPath(cwd + "/" + candidate);
+    }
+  }
+  QString winePrefix;
+  QFile environment(QString("/proc/%1/environ").arg(pid));
+  if (environment.open(QIODevice::ReadOnly)) {
+    const QByteArray bytes = environment.read(65537);
+    if (bytes.size() <= 65536) {
+      for (const QByteArray &entry : bytes.split('\0')) {
+        if (entry.startsWith("WINEPREFIX="))
+          winePrefix = QString::fromLocal8Bit(entry.mid(11));
+      }
+    }
+  }
+  if (winePrefix.isEmpty())
+    winePrefix = QDir::homePath() + "/.wine";
+  return resolveReporterIdentity(reporter, exe, argv, steamAppId, winePrefix);
+}
+
 void GameDetectionService::trackGame(qint64 pid, const QString &gameName,
                                      const QString &rawKey) {
   // Show the user's display name when one is registered; fall back to
   // the raw reporter class either way so dedup stays consistent.
   QString displayName = gameName;
-  if (m_whitelist->isWhitelisted(gameName)) {
-    const QString mapped = m_whitelist->getWhitelistName(gameName);
+  const QString matchKey = m_whitelist->isWhitelisted(rawKey) ? rawKey : gameName;
+  if (m_whitelist->isWhitelisted(matchKey)) {
+    const QString mapped = m_whitelist->getWhitelistName(matchKey);
     if (!mapped.isEmpty())
       displayName = mapped;
   }
@@ -280,8 +396,8 @@ void GameDetectionService::trackGame(qint64 pid, const QString &gameName,
 
   if (isBetterName) {
     bool isNewName = true;
-    for (const QString &name : m_pidToGameName.values()) {
-      if (name == displayName && m_pidToGameName.key(name) != pid) {
+    for (auto it = m_pidToRawKey.constBegin(); it != m_pidToRawKey.constEnd(); ++it) {
+      if (it.value() == key && it.key() != pid) {
         isNewName = false;
         break;
       }
@@ -292,7 +408,13 @@ void GameDetectionService::trackGame(qint64 pid, const QString &gameName,
 
     if (isNewName) {
       qDebug() << "Game detected:" << displayName << "(PID:" << pid << ")";
-      updateCurrentGame(displayName, pid, key);
+      // A background graphics initialization must not steal a game with
+      // a live visible window. Keep the candidate tracked; focus changes
+      // below can select it once its actual window is in use.
+      const WindowInfo incoming = m_monitor ? m_monitor->windowForPid(pid) : WindowInfo{};
+      if (m_currentGameName.isEmpty() || !hasVisibleWindow() ||
+          (!incoming.minimized && incoming.focused))
+        updateCurrentGame(displayName, pid, key);
     } else {
       qDebug() << "Additional process for existing game detected:"
                << displayName << "(PID:" << pid << ")";
@@ -315,7 +437,7 @@ void GameDetectionService::recheckCandidates() {
       m_pendingRawKeys.remove(pid);
       continue;
     }
-    if (isConfidentGame(pid, name, 0)) {
+    if (m_whitelist->isWhitelisted(rawKey) || isConfidentGame(pid, name, 0)) {
       m_pendingCandidates.remove(pid);
       m_pendingRawKeys.remove(pid);
       qDebug() << "Pending game confirmed by window state:" << name
@@ -327,6 +449,17 @@ void GameDetectionService::recheckCandidates() {
 
 void GameDetectionService::onMonitorWindowsChanged() {
   recheckCandidates();
+  if (m_monitor) {
+    // Only already-reported games participate: a focused desktop/browser
+    // is context, never independent process discovery.
+    for (const WindowInfo &w : m_monitor->windows()) {
+      if (!w.minimized && w.focused && m_pidToGameName.contains(w.pid)) {
+        updateCurrentGame(m_pidToGameName.value(w.pid), w.pid,
+                          m_pidToRawKey.value(w.pid));
+        break;
+      }
+    }
+  }
   // Reconcile on every snapshot while no game is tracked — not just the
   // first. The first emission can be empty (startMonitoring re-emits before
   // the backend's first real snapshot) or unfocused (user just clicked
@@ -369,34 +502,31 @@ void GameDetectionService::reconcileRunningGames() {
     uint sid = steamAppIdForPid(w.pid);
     if (sid == 0)
       sid = steamAppIdFromAppId(rawKey);
+    const ReporterIdentity identity = reporterIdentity(w.pid, name, sid);
+    if (identity.ignored)
+      continue;
+    const QString key = sid > 0 ? QStringLiteral("steam_app_%1").arg(sid)
+                               : (identity.key.isEmpty() ? rawKey : identity.key);
     if (sid > 0) {
       const QString steamName = getSteamAppName(sid);
       if (!steamName.isEmpty())
         display = steamName;
     }
-    if (isBlacklistedIdentity(rawKey, display))
+    if (isBlacklistedIdentity(rawKey, display) ||
+        isBlacklistedIdentity(key, identity.executable))
       continue;
-    // Resolve the candidate exactly as trackGame() does before dedup:
-    // the raw window key (appId/title) and the Steam-resolved display
-    // name are different spellings of the same game.
-    QString resolved = display;
-    if (m_whitelist->isWhitelisted(display)) {
-      const QString mapped = m_whitelist->getWhitelistName(display);
-      if (!mapped.isEmpty())
-        resolved = mapped;
-    }
+    // Deduplicate identities, never display labels: two unrelated games
+    // may both report Game.exe (or the same engine name).
     if (m_pidToGameName.contains(w.pid))
       continue; // same process already tracked under another spelling
-    if (m_pidToGameName.key(resolved, 0) != 0)
+    if (m_pidToRawKey.key(key, 0) != 0)
       continue; // already tracked
     // Same bar as live detection: whitelist or Steam evidence only.
-    if (m_whitelist->isWhitelisted(name) || processLooksLikeSteamGame(w.pid)) {
+    if (m_whitelist->isWhitelisted(name) || m_whitelist->isWhitelisted(key) ||
+        processLooksLikeSteamGame(w.pid)) {
       qDebug() << "Reconciled already-running game:" << display
                << "(PID:" << w.pid << ")";
-      trackGame(w.pid, display, rawKey);
-    } else {
-      qDebug() << "Reconcile: focused/fullscreen window is not game evidence:"
-               << name << "(PID:" << w.pid << ")";
+      trackGame(w.pid, display, key);
     }
   }
 }
@@ -442,6 +572,11 @@ void GameDetectionService::onSocketReadyRead() {
     }
 
     if (command == "START") {
+      // A reporter connection belongs to one process. Do not strand old
+      // per-PID state if malformed traffic changes its claimed identity.
+      if (m_activeConnections.contains(socket) &&
+          m_activeConnections.value(socket) != pid)
+        continue;
       // Split only the fixed prefix. Game names may contain colons; the
       // optional Steam app id is the final numeric field.
       QString gameName = line.mid(pidEnd + 1);
@@ -458,7 +593,14 @@ void GameDetectionService::onSocketReadyRead() {
       if (gameName.isEmpty())
         continue;
       const QString reporterName = gameName;
-
+      if (steamAppId == 0)
+        steamAppId = steamAppIdForPid(pid);
+      const ReporterIdentity identity = reporterIdentity(pid, reporterName, steamAppId);
+      if (identity.ignored) {
+        qDebug() << "Ignoring helper reporter:" << reporterName << "PID:" << pid;
+        continue;
+      }
+      gameName = identity.name;
       if (steamAppId > 0) {
         QString steamName = getSteamAppName(steamAppId);
         if (!steamName.isEmpty()) {
@@ -466,26 +608,45 @@ void GameDetectionService::onSocketReadyRead() {
         }
       }
 
-      if (isBlacklistedIdentity(reporterName, gameName)) {
+      // Resolve the placeholder BEFORE applying exclusions. Its built-in
+      // veto must not discard a positively identified Steam/native game.
+      // Explicit real reporter/executable/game vetoes remain authoritative.
+      const QString reporterVeto = GameWhitelist::isPlaceholderReporterKey(reporterName)
+                                       ? QString() : reporterName;
+      if (identity.key.isEmpty() || gameName.isEmpty() ||
+          isBlacklistedIdentity(reporterVeto, gameName) ||
+          isBlacklistedIdentity(identity.key, identity.executable)) {
         qDebug() << "Ignoring blacklisted process:" << gameName
                  << "(PID:" << pid << ")";
         continue;
       }
+
+      const QString rawKey = identity.key;
+      if (GameWhitelist::isPlaceholderReporterKey(reporterName) &&
+          gameName == identity.name && m_pidToRawKey.value(pid) == rawKey &&
+          m_pidToGameName.contains(pid))
+        gameName = m_pidToGameName.value(pid);
 
       m_activeConnections[socket] = pid;
 
       // Confidence fusion: instant detect on whitelist / Steam markers,
       // or focused + fullscreen via the window monitor. Anything else
       // waits as a candidate until window state confirms it.
-      if (isConfidentGame(pid, gameName, steamAppId)) {
-        trackGame(pid, gameName, reporterName);
+      if (m_whitelist->isWhitelisted(rawKey) ||
+          isConfidentGame(pid, gameName, steamAppId)) {
+        m_pendingCandidates.remove(pid);
+        m_pendingRawKeys.remove(pid);
+        trackGame(pid, gameName, rawKey);
       } else {
         qDebug() << "Low-confidence reporter, watching:" << gameName
                  << "(PID:" << pid << ")";
         m_pendingCandidates[pid] = gameName;
-        m_pendingRawKeys[pid] = reporterName;
+        m_pendingRawKeys[pid] = rawKey;
       }
     } else if (command == "STOP") {
+      if (!m_activeConnections.contains(socket) ||
+          m_activeConnections.value(socket) != pid)
+        continue;
       m_activeConnections.remove(socket);
 
       // Only remove the PID if this was the last connection for it
@@ -558,15 +719,28 @@ bool GameDetectionService::processExists(qint64 pid) {
 }
 
 qint64 GameDetectionService::lowestLiveTrackedPid() const {
-  // QMap iterates keys ascending: the first live entry is the lowest
-  // (oldest) tracked PID. One kill(pid, 0) probe per candidate — the
-  // same targeted check as the liveness watchdog, not a scan.
+  // Stable tie-break by PID, but prefer an actual focused window, then a
+  // successor belonging to the same game, then another visible game.
+  qint64 bestPid = 0;
+  int bestScore = -1;
   for (auto it = m_pidToGameName.constBegin();
        it != m_pidToGameName.constEnd(); ++it) {
-    if (processExists(it.key()))
-      return it.key();
+    if (!processExists(it.key()) ||
+        isBlacklistedIdentity(m_pidToRawKey.value(it.key()), it.value()))
+      continue;
+    const WindowInfo w = m_monitor ? m_monitor->windowForPid(it.key()) : WindowInfo{};
+    const bool visible = w.pid > 0 && !w.minimized;
+    int score = visible ? 2 : 0;
+    if (!m_currentGameKey.isEmpty() && m_pidToRawKey.value(it.key()) == m_currentGameKey)
+      score += 4;
+    if (visible && w.focused)
+      score += 8;
+    if (score > bestScore) {
+      bestPid = it.key();
+      bestScore = score;
+    }
   }
-  return 0;
+  return bestPid;
 }
 
 void GameDetectionService::promoteNextTrackedGame() {
@@ -579,7 +753,8 @@ void GameDetectionService::promoteNextTrackedGame() {
   // No tracked process is still alive: drop the proven-dead entries so
   // a later START for the same name detects fresh, then go idle.
   for (const qint64 pid : m_pidToGameName.keys()) {
-    if (!processExists(pid)) {
+    if (!processExists(pid) ||
+        isBlacklistedIdentity(m_pidToRawKey.value(pid), m_pidToGameName.value(pid))) {
       m_pidToGameName.remove(pid);
       m_pidToRawKey.remove(pid);
       m_pendingCandidates.remove(pid);
@@ -716,10 +891,13 @@ bool GameDetectionService::hasVisibleWindow() const {
 void GameDetectionService::updateCurrentGame(const QString &gameName,
                                              qint64 pid,
                                              const QString &rawKey) {
-  if (gameName == m_currentGameName && pid == m_currentGamePid)
+  const QString nextKey = gameName.isEmpty() ? QString() :
+                         (rawKey.isEmpty() ? gameName : rawKey);
+  if (gameName == m_currentGameName && pid == m_currentGamePid && nextKey == m_currentGameKey)
     return;
 
   QString oldGame = m_currentGameName;
+  const QString oldKey = m_currentGameKey;
   m_currentGameName = gameName;
   m_currentGamePid = pid;
   m_currentGameKey =
@@ -735,9 +913,10 @@ void GameDetectionService::updateCurrentGame(const QString &gameName,
 
   emit currentGameChanged();
 
-  if (!oldGame.isEmpty() && oldGame != gameName)
+  const bool changedIdentity = oldGame != gameName || oldKey != nextKey;
+  if (!oldGame.isEmpty() && changedIdentity)
     emit gameClosed(oldGame);
-  if (!gameName.isEmpty() && oldGame != gameName) {
+  if (!gameName.isEmpty() && changedIdentity) {
     addToRecentGames(gameName, rawKey.isEmpty() ? gameName : rawKey);
     emit gameDetected(gameName, pid);
   }
@@ -766,7 +945,7 @@ void GameDetectionService::addToRecentGames(const QString &gameName,
 bool GameDetectionService::addToWhitelist(const QString &wc,
                                           const QString &dn) {
   const QString key = wc.trimmed();
-  if (key.isEmpty())
+  if (key.isEmpty() || GameWhitelist::isPlaceholderReporterKey(key))
     return false;
   const bool changed = !m_whitelist->isWhitelisted(key) ||
                        m_whitelist->getWhitelistName(key) != dn.trimmed();
@@ -807,7 +986,7 @@ bool GameDetectionService::removeFromBlacklist(const QString &wc) {
 bool GameDetectionService::moveToWhitelist(const QString &key,
                                            const QString &display) {
   const QString k = GameWhitelist::normalizeKey(key);
-  if (k.isEmpty())
+  if (k.isEmpty() || GameWhitelist::isPlaceholderReporterKey(k))
     return false;
   const bool changed = !m_whitelist->isWhitelisted(k);
   m_whitelist->addToWhitelist(k, display.trimmed());
@@ -848,10 +1027,38 @@ bool GameDetectionService::isBlocked(const QString &keyOrName) const {
 }
 
 void GameDetectionService::retireBlockedGame(const QString &canonicalKey) {
-  if (canonicalKey.isEmpty() || m_currentGameName.isEmpty())
+  if (canonicalKey.isEmpty())
     return;
-  if (GameWhitelist::normalizeKey(m_currentGameKey) != canonicalKey &&
-      GameWhitelist::normalizeKey(m_currentGameName) != canonicalKey)
+  const QString vetoKey =
+      defaultExclusionKey(GameWhitelist::normalizeKey(canonicalKey));
+  const auto matchesVeto = [&vetoKey](const QString &identity) {
+    if (defaultExclusionKey(GameWhitelist::normalizeKey(identity)) == vetoKey)
+      return true;
+    // Native reporters retain full executable identities. Apply the same
+    // known executable-name veto used at START without changing that identity
+    // or looking up any process. Arbitrary custom path vetoes stay exact.
+    return defaultAppInfo(vetoKey) && identity.startsWith("exe:") &&
+           defaultExclusionKey(GameWhitelist::normalizeKey(
+               QFileInfo(identity.mid(4)).fileName())) == vetoKey;
+  };
+  // Retire every process of the identity, not just the representative
+  // PID: otherwise a helper/second renderer can resurrect a blocked game
+  // through focus selection or failover.
+  for (qint64 pid : m_pidToGameName.keys()) {
+    if (matchesVeto(m_pidToRawKey.value(pid)) ||
+        matchesVeto(m_pidToGameName.value(pid))) {
+      m_pidToGameName.remove(pid);
+      m_pidToRawKey.remove(pid);
+    }
+  }
+  for (qint64 pid : m_pendingCandidates.keys()) {
+    if (matchesVeto(m_pendingRawKeys.value(pid)) ||
+        matchesVeto(m_pendingCandidates.value(pid))) {
+      m_pendingCandidates.remove(pid);
+      m_pendingRawKeys.remove(pid);
+    }
+  }
+  if (!matchesVeto(m_currentGameKey) && !matchesVeto(m_currentGameName))
     return;
   qInfo() << "Blocked live game" << m_currentGameName << "- retiring tracking";
   m_pidToGameName.remove(m_currentGamePid);
@@ -867,7 +1074,7 @@ void GameDetectionService::retireBlockedGame(const QString &canonicalKey) {
 bool GameDetectionService::addCustomGame(const QString &key,
                                          const QString &display, bool block) {
   const QString k = GameWhitelist::normalizeKey(key);
-  if (k.isEmpty())
+  if (k.isEmpty() || (!block && GameWhitelist::isPlaceholderReporterKey(k)))
     return false;
   m_whitelist->noteCustomKey(k);
   bool changed;
@@ -963,23 +1170,39 @@ void GameDetectionService::setTokenGames(const QStringList &games) {
   emit tokenGamesChanged();
 }
 
+QUrl GameDetectionService::iconSourceForGame(const QString &name) const {
+  if (name.trimmed().isEmpty())
+    return {};
+  QUrl source;
+  for (int row = 0; row < m_gamesModel->rowCount(); ++row) {
+    const auto index = m_gamesModel->index(row);
+    if (m_gamesModel->data(index, GameListModel::DisplayRole).toString()
+            .compare(name, Qt::CaseInsensitive) != 0)
+      continue;
+    const auto candidate =
+        m_gamesModel->data(index, GameListModel::IconSourceRole).toUrl();
+    if (!source.isEmpty() && source != candidate)
+      return {};
+    source = candidate;
+  }
+  return source.isEmpty() ? gameIconSource(name) : source;
+}
+
 void GameDetectionService::rebuildModels() {
   if (!m_gamesModel)
     return;
   // Sections: the live game pins first ("Now playing"); token holders
   // ("Ready to capture") prove silent capture — the only approved state;
-  // everything else shares one pool ("Games") carrying per-row
+  // everything else shares one pool ("Apps") carrying per-row
   // Prompt/Block state. Within a section rows sort alphabetically (the
   // live game excepted) so taps never teleport a row.
   QList<GameListEntry> rows;
   QSet<QString> claimed;
-  const auto claim = [&](const QString &key, const QString &display) {
-    if (key.isEmpty() || claimed.contains(key) ||
-        (!display.isEmpty() && claimed.contains(display)))
+  QSet<QString> claimedTokens;
+  const auto claim = [&](const QString &key, const QString &) {
+    if (key.isEmpty() || claimed.contains(key))
       return false;
     claimed.insert(key);
-    if (!display.isEmpty())
-      claimed.insert(display);
     return true;
   };
   const auto listedFlag = [this](const QString &key, const QString &display) {
@@ -1013,6 +1236,8 @@ void GameDetectionService::rebuildModels() {
     live.listed = listedFlag(live.key, live.display);
     live.tokenKey = tokenFor(live.key, live.display);
     live.hasToken = !live.tokenKey.isEmpty();
+    if (live.hasToken)
+      claimedTokens.insert(live.tokenKey);
     live.section = QStringLiteral("Now playing");
     rows.push_back(live);
     claim(live.key, live.display);
@@ -1024,11 +1249,12 @@ void GameDetectionService::rebuildModels() {
   const auto considerApproved = [&](const QString &key,
                                     const QString &display) {
     const QString tk = tokenFor(key, display);
-    if (tk.isEmpty())
+    if (tk.isEmpty() || claimedTokens.contains(tk))
       return;
     QString name = display.isEmpty() ? key : display;
     if (!claim(key, name))
       return;
+    claimedTokens.insert(tk);
     GameListEntry e;
     e.key = key;
     e.display = name;
@@ -1062,7 +1288,7 @@ void GameDetectionService::rebuildModels() {
   std::sort(approved.begin(), approved.end(), byDisplay);
   rows.append(approved);
 
-  // Pool ("Games"): every non-live, non-approved identity in one
+  // Pool ("Apps"): every non-live, non-approved identity in one
   // alphabetical run, so taps never teleport a row.
   QList<GameListEntry> pool;
   for (const QString &key : m_whitelist->whitelistEntries()) {
@@ -1084,7 +1310,7 @@ void GameDetectionService::rebuildModels() {
     e.display = display;
     e.steamAppId = sid;
     e.listed = listedFlag(key, display);
-    e.section = QStringLiteral("Games");
+    e.section = QStringLiteral("Apps");
     pool.push_back(e);
   }
 
@@ -1103,7 +1329,7 @@ void GameDetectionService::rebuildModels() {
     e.running = false;
     e.steamAppId = steamAppIdFromAppId(e.key);
     e.listed = listedFlag(e.key, e.display);
-    e.section = QStringLiteral("Games");
+    e.section = QStringLiteral("Apps");
     pool.push_back(e);
   }
 
@@ -1120,7 +1346,7 @@ void GameDetectionService::rebuildModels() {
     e.listed = 2;
     e.isDefault = systemKeys.contains(key);
     e.display = e.isDefault ? GameWhitelist::prettySystemName(key) : key;
-    e.section = QStringLiteral("Games");
+    e.section = QStringLiteral("Apps");
     pushBlocked(e);
   }
   for (const QString &key : m_whitelist->removedDefaults()) {
@@ -1129,7 +1355,7 @@ void GameDetectionService::rebuildModels() {
     e.display = GameWhitelist::prettySystemName(key);
     e.listed = 0;
     e.isDefault = true;
-    e.section = QStringLiteral("Games");
+    e.section = QStringLiteral("Apps");
     pushBlocked(e);
   }
   for (const QString &key : m_whitelist->customKeys()) {
@@ -1140,7 +1366,7 @@ void GameDetectionService::rebuildModels() {
       e.display = key;
     e.steamAppId = steamAppIdFromAppId(key);
     e.listed = listedFlag(key, e.display);
-    e.section = QStringLiteral("Games");
+    e.section = QStringLiteral("Apps");
     if (!claim(e.key, e.display))
       continue;
     pool.push_back(e);

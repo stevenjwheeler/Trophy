@@ -6,6 +6,7 @@
  */
 
 #include "ThumbnailGenerator.h"
+#include "RecordingSidecars.h"
 
 #include <QDebug>
 #include <QDir>
@@ -100,7 +101,11 @@ void ThumbnailGenerator::processQueue() {
 
     QString thumbnailPath = getThumbnailPath(videoPath);
 
-    if (generateThumbnailSync(videoPath, thumbnailPath)) {
+    const bool generated = generateThumbnailSync(videoPath, thumbnailPath);
+    if (!QFileInfo::exists(videoPath)) {
+      RecordingSidecars::removeForVideo(videoPath);
+      emit thumbnailFailed(videoPath, "Recording no longer exists");
+    } else if (generated) {
       emit thumbnailReady(videoPath, thumbnailPath);
     } else {
       emit thumbnailFailed(videoPath, "Failed to generate thumbnail");

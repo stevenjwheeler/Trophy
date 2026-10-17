@@ -12,12 +12,14 @@
  *
  * Design constraints (preload hot path):
  *  - C only, no C++ / malloc / printf in swap path after first notify.
- *  - notify exactly once per process (atomic CAS), then straight through.
+ *  - report once per connection, with rate-limited nonblocking reconnects.
  *  - never call GL from inside the shim (no recursion).
  *  - DISABLE_TROPHY_DETECTION=1 opts out; Trophy itself is skipped.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -47,6 +49,9 @@ static int g_disabled = -1; /* -1 unknown, 0 no, 1 yes; __atomic_* only */
 static pid_t g_report_pid = 0; /* PID owning g_sock/g_notified; fork guard */
 static long g_last_health_check = 0; /* monotonic seconds */
 static long g_last_connect_attempt = 0; /* monotonic seconds */
+/* Never wait for another render thread. The PID-valued guard is recoverable
+ * after fork, even when the parent forked during a notification. */
+static pid_t g_notify_owner = 0;
 
 static int claim_second(long *last, long now) {
     long observed = __atomic_load_n(last, __ATOMIC_RELAXED);
@@ -129,7 +134,7 @@ static void app_basename(char *buf, size_t cap) {
         snprintf(buf, cap, "%s", "Unknown GL Game");
 }
 
-static void notify_start(void) {
+static void notify_start_locked(void) {
     /* Fork safety: g_sock/g_notified are inherited across fork(). A forked
      * child (new PID) must re-report with its own PID, never reuse the
      * parent's connection or stay silent on an inherited "live" flag.
@@ -141,6 +146,8 @@ static void notify_start(void) {
         if (inherited >= 0)
             close(inherited);
         __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_last_health_check, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_last_connect_attempt, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&g_report_pid, self, __ATOMIC_RELEASE);
     }
     int state = __atomic_load_n(&g_notified, __ATOMIC_ACQUIRE);
@@ -169,12 +176,14 @@ static void notify_start(void) {
     // opening a socket on every swap while Trophy is not running.
     if (!claim_second(&g_last_connect_attempt, ts.tv_sec))
         return;
-    if (__atomic_exchange_n(&g_notified, 1, __ATOMIC_ACQ_REL) != 0)
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&g_notified, &expected, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
     if (is_disabled())
         return;
 
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) {
         __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
         return;
@@ -195,9 +204,18 @@ static void notify_start(void) {
 
     char app[128];
     app_basename(app, sizeof(app));
+    for (char *p = app; *p; ++p)
+        if (*p == '\n' || *p == '\r')
+            *p = ' ';
 
     const char *appid = getenv("SteamAppId");
     if (!appid || !*appid)
+        appid = "0";
+    /* Never let inherited environment data inject another protocol line. */
+    size_t appid_len = strnlen(appid, 11);
+    if (appid_len == 0 || appid_len > 10 ||
+        strspn(appid, "0123456789") != appid_len ||
+        strtoull(appid, NULL, 10) > UINT32_MAX)
         appid = "0";
 
     /* Single stack buffer, single send: "START:<pid>:<app>:<appid>\n" */
@@ -209,9 +227,9 @@ static void notify_start(void) {
             len = (int)sizeof(msg) - 1;
             /* Clamping cut the trailing '\n'; the server only fires on full
              * lines, so restore it or notify-once never retries. */
-            msg[sizeof(msg) - 1] = '\n';
+            msg[len - 1] = '\n';
         }
-        if (send(fd, msg, (size_t)len, MSG_NOSIGNAL) < 0) {
+        if (send(fd, msg, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) {
             close(fd);
             __atomic_store_n(&g_sock, -1, __ATOMIC_RELEASE);
             __atomic_store_n(&g_notified, 0, __ATOMIC_RELEASE);
@@ -219,6 +237,19 @@ static void notify_start(void) {
         }
     }
     __atomic_store_n(&g_notified, 2, __ATOMIC_RELEASE);
+}
+
+static void notify_start(void) {
+    const int saved_errno = errno;
+    const pid_t self = getpid();
+    pid_t owner = __atomic_load_n(&g_notify_owner, __ATOMIC_ACQUIRE);
+    if (owner != self &&
+        __atomic_compare_exchange_n(&g_notify_owner, &owner, self, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        notify_start_locked();
+        __atomic_store_n(&g_notify_owner, 0, __ATOMIC_RELEASE);
+    }
+    errno = saved_errno;
 }
 
 __attribute__((destructor)) static void trophy_gl_unload(void) {
@@ -240,7 +271,7 @@ __attribute__((destructor)) static void trophy_gl_unload(void) {
     if (len > 0) {
         if ((size_t)len >= sizeof(msg))
             len = (int)sizeof(msg) - 1;
-        (void)send(sock, msg, (size_t)len, MSG_NOSIGNAL);
+        (void)send(sock, msg, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT);
     }
     close(sock);
 }
@@ -248,35 +279,44 @@ __attribute__((destructor)) static void trophy_gl_unload(void) {
 /* --- interposed entry points (ABI-compatible, header-free) --- */
 
 void glXSwapBuffers(void *dpy, unsigned long drawable) {
+    const int saved_errno = errno;
     glx_swap_fn real_fn = __atomic_load_n(&g_real_glx_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
         real_fn = (glx_swap_fn)dlsym(RTLD_NEXT, "glXSwapBuffers");
     if (real_fn)
         __atomic_store_n(&g_real_glx_swap, real_fn, __ATOMIC_RELEASE);
-    notify_start();
+    errno = saved_errno;
+    if (real_fn)
+        notify_start();
     if (real_fn)
         real_fn(dpy, drawable);
 }
 
 int eglSwapBuffers(void *dpy, void *surf) {
+    const int saved_errno = errno;
     egl_swap_fn real_fn = __atomic_load_n(&g_real_egl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
         real_fn = (egl_swap_fn)dlsym(RTLD_NEXT, "eglSwapBuffers");
     if (real_fn)
         __atomic_store_n(&g_real_egl_swap, real_fn, __ATOMIC_RELEASE);
-    notify_start();
+    errno = saved_errno;
+    if (real_fn)
+        notify_start();
     if (real_fn)
         return real_fn(dpy, surf);
-    return 1; /* EGL_TRUE fallback when no real EGL present (tests) */
+    return 0; /* EGL_FALSE: never claim a swap happened without EGL. */
 }
 
 void SDL_GL_SwapWindow(void *window) {
+    const int saved_errno = errno;
     sdl_swap_fn real_fn = __atomic_load_n(&g_real_sdl_swap, __ATOMIC_ACQUIRE);
     if (!real_fn)
         real_fn = (sdl_swap_fn)dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
     if (real_fn)
         __atomic_store_n(&g_real_sdl_swap, real_fn, __ATOMIC_RELEASE);
-    notify_start();
+    errno = saved_errno;
+    if (real_fn)
+        notify_start();
     if (real_fn)
         real_fn(window);
 }

@@ -111,14 +111,17 @@ Page {
 
         }
 
-        // Unified list: Now playing / Ready to capture / Games
+        // Unified list: Now playing / Ready to capture / Apps
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: Theme.cardColor
             radius: Theme.radiusMedium
+            border.width: 1
+            border.color: Theme.borderColor
 
             ColumnLayout {
+                id: gamesContent
                 anchors.fill: parent
                 anchors.margins: Theme.spacingMedium
 
@@ -138,10 +141,11 @@ Page {
                     spacing: Theme.spacingSmall
                     visible: count > 0
                     model: gameDetector ? gameDetector.gamesModel : null
+                    ScrollBar.vertical: TrophyScrollBar { id: gamesScrollBar }
 
                     section.property: "section"
                     section.delegate: Label {
-                        width: gamesList.width
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         text: section
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
@@ -154,7 +158,7 @@ Page {
                     }
 
                     delegate: GameListItem {
-                        width: gamesList.width
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         entryKey: model.key || ""
                         entryDisplay: model.display || ""
                         entryRunning: model.running || false
@@ -163,6 +167,8 @@ Page {
                         entryDefault: model.isDefault || false
                         entryHasToken: model.hasToken || false
                         entryTokenKey: model.tokenKey || ""
+                        entryIconSource: model.iconSource || ""
+                        entryIdentifiers: model.identifiers || []
                         onNotice: function(text) {
                             root.statusMessage = text
                             statusTimer.restart()
@@ -173,6 +179,19 @@ Page {
 
             }
 
+            Rectangle {
+                anchors.left: gamesContent.left
+                anchors.right: gamesContent.right
+                anchors.bottom: gamesContent.bottom
+                height: Theme.spacingLarge * 2
+                opacity: Math.max(0, Math.min(1, (gamesList.originY + gamesList.contentHeight - gamesList.height - gamesList.contentY) / height))
+                visible: gamesList.visible && opacity > 0
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Qt.alpha(Theme.cardColor, 0) }
+                    GradientStop { position: 1; color: Theme.cardColor }
+                }
+            }
+
         }
 
     }
@@ -180,6 +199,7 @@ Page {
     // Add game: pick a running window (themed like WindowPickerDialog)
     Dialog {
         id: addGameDialog
+        objectName: "addGameDialog"
 
         property var allWindows: []
         property string searchQuery: ""
@@ -312,9 +332,23 @@ Page {
 
                             Label {
                                 anchors.centerIn: parent
+                                objectName: "pickerIconFallback"
+                                visible: pickerIcon.status !== Image.Ready
                                 text: ((modelData.title || modelData.class) || "?").charAt(0).toUpperCase()
                                 font.pixelSize: Theme.fontSizeNormal
                                 color: Theme.primaryColor
+                            }
+
+                            Image {
+                                id: pickerIcon
+                                objectName: "pickerIcon"
+                                anchors.fill: parent
+                                anchors.margins: 2
+                                source: modelData.iconSource || ""
+                                sourceSize: Qt.size(36, 36)
+                                fillMode: Image.PreserveAspectFit
+                                asynchronous: true
+                                visible: status === Image.Ready
                             }
 
                         }
@@ -352,8 +386,7 @@ Page {
 
                 }
 
-                ScrollIndicator.vertical: ScrollIndicator {
-                }
+                ScrollBar.vertical: TrophyScrollBar {}
 
             }
 
@@ -361,7 +394,7 @@ Page {
                 Layout.fillWidth: true
                 Layout.margins: Theme.spacingLarge
                 visible: processList.count === 0
-                text: (typeof windowService !== "undefined" && windowService) ? qsTr("No running windows found.") : qsTr("Window tracking is off — enable it in Settings to pick a process.")
+                text: (typeof windowService !== "undefined" && windowService) ? qsTr("No running windows found.") : qsTr("The Game Window Helper is unavailable — check its status in Settings.")
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
                 wrapMode: Text.WordWrap
@@ -440,7 +473,7 @@ Page {
 
     background: Rectangle {
         color: Theme.backgroundColor
-        bottomRightRadius: 12
+        bottomRightRadius: Theme.windowRadius
         topLeftRadius: 26
     }
 
@@ -526,6 +559,8 @@ Page {
         property bool entryDefault: false
         property bool entryHasToken: false
         property string entryTokenKey: ""
+        property url entryIconSource: ""
+        property var entryIdentifiers: []
 
         signal notice(string text)
 
@@ -570,8 +605,22 @@ Page {
                 Label {
                     anchors.centerIn: parent
                     text: gameItem.entryDisplay.charAt(0).toUpperCase()
+                    objectName: "gameIconFallback"
+                    visible: gameIcon.status !== Image.Ready
                     font.pixelSize: Theme.fontSizeLarge
                     color: gameItem.entryRunning ? Theme.successColor : Theme.primaryColor
+                }
+
+                Image {
+                    id: gameIcon
+                    objectName: "gameIcon"
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    source: gameItem.entryIconSource
+                    sourceSize: Qt.size(40, 40)
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    visible: status === Image.Ready
                 }
 
             }
@@ -593,7 +642,13 @@ Page {
                 }
 
                 Label {
+                    objectName: "gameEntrySubtitle"
                     text: {
+                        if (gameItem.entryDefault) {
+                            const count = gameItem.entryIdentifiers.length
+                            return count === 1 ? qsTr("Default exclusion · 1 identifier")
+                                               : qsTr("Default exclusion · %1 identifiers").arg(count)
+                        }
                         let sub = gameItem.entryKey
                         if (gameItem.entrySteamAppId > 0 && gameItem.entryKey.indexOf("steam_app_") !== 0)
                             sub += " • AppID " + gameItem.entrySteamAppId
@@ -603,7 +658,14 @@ Page {
                     font.pixelSize: Theme.fontSizeSmall
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    visible: text !== "" && text !== gameItem.entryDisplay
+                    visible: gameItem.entryDefault || (text !== "" && text !== gameItem.entryDisplay)
+                    ToolTip.visible: gameItem.entryDefault && identifierHover.hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: gameItem.entryIdentifiers.join("\n")
+
+                    HoverHandler {
+                        id: identifierHover
+                    }
                 }
 
             }

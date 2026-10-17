@@ -1,21 +1,48 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
   <qresource prefix="/">
+    <file>gnome/metadata.json</file>
+    <file>gnome/extension.js</file>
     <file>icons/trophy.svg</file>
     <file>icons/record.svg</file>
     <file>icons/stop.svg</file>
     <file>icons/view-list.svg</file>
     <file>icons/view-grid.svg</file>
+    <file>icons/filter.svg</file>
     <file>icons/github.svg</file>
     <file>icons/folder.svg</file>
     <file>icons/play.svg</file>
     <file>icons/pause.svg</file>
+    <file>icons/seek-back-10.svg</file>
+    <file>icons/seek-forward-10.svg</file>
     <file>icons/fullscreen.svg</file>
     <file>icons/volume-high.svg</file>
+    <file>icons/audio-recording.svg</file>
     <file>icons/volume-muted.svg</file>
     <file>icons/trash.svg</file>
     <file>icons/search.svg</file>
     <file>icons/video.svg</file>
+    <file>icons/manual-recording.svg</file>
+    <file>icons/home.svg</file>
+    <file>icons/gamepad.svg</file>
+    <file>icons/settings.svg</file>
+    <file>icons/paintbrush.svg</file>
+    <file>icons/info.svg</file>
+    <file>icons/storage.svg</file>
+    <file>icons/bell.svg</file>
+    <file>icons/puzzle.svg</file>
+    <file>icons/tray.svg</file>
+    <file>icons/keyboard.svg</file>
+    <file>icons/headphones.svg</file>
+    <file>icons/microphone.svg</file>
+    <file>icons/warning.svg</file>
+    <file>icons/sparkles.svg</file>
+    <file>icons/heart.svg</file>
+    <file>icons/file-text.svg</file>
+    <file>icons/code.svg</file>
+    <file>icons/refresh.svg</file>
+    <file>icons/lightbulb.svg</file>
+    <file>icons/check.svg</file>
     <file>icons/edit.svg</file>
     <file>icons/scissors.svg</file>
     <file>icons/camera.svg</file>
@@ -23,6 +50,49 @@
     <file>icons/gpu-nvidia.svg</file>
     <file>icons/gpu-amd.svg</file>
     <file>icons/gpu-intel.svg</file>
+    <file>icons/window-bug.svg</file>
+    <file>icons/window-minimize.svg</file>
+    <file>icons/window-maximize.svg</file>
+    <file>icons/window-restore.svg</file>
+    <file>icons/window-close.svg</file>
+    <file>icons/default-apps/steam.svg</file>
+    <file>icons/default-apps/discord.svg</file>
+    <file>icons/default-apps/obs.svg</file>
+    <file>icons/default-apps/firefox.svg</file>
+    <file>icons/default-apps/google-chrome.svg</file>
+    <file>icons/default-apps/chromium.svg</file>
+    <file>icons/default-apps/brave.svg</file>
+    <file>icons/default-apps/microsoft-edge.svg</file>
+    <file>icons/default-apps/opera.svg</file>
+    <file>icons/default-apps/vivaldi.svg</file>
+    <file>icons/default-apps/librewolf.svg</file>
+    <file>icons/default-apps/thunderbird.svg</file>
+    <file>icons/default-apps/slack.svg</file>
+    <file>icons/default-apps/telegram.svg</file>
+    <file>icons/default-apps/signal-desktop.svg</file>
+    <file>icons/default-apps/element.svg</file>
+    <file>icons/default-apps/zoom.svg</file>
+    <file>icons/default-apps/spotify.svg</file>
+    <file>icons/default-apps/vlc.svg</file>
+    <file>icons/default-apps/mpv.svg</file>
+    <file>icons/default-apps/gimp.svg</file>
+    <file>icons/default-apps/krita.svg</file>
+    <file>icons/default-apps/inkscape.svg</file>
+    <file>icons/default-apps/blender.svg</file>
+    <file>icons/default-apps/visual-studio-code.svg</file>
+    <file>icons/default-apps/konsole.svg</file>
+    <file>icons/default-apps/gnome-terminal.svg</file>
+    <file>icons/default-apps/alacritty.svg</file>
+    <file>icons/default-apps/kitty.svg</file>
+    <file>icons/default-apps/foot.svg</file>
+    <file>icons/default-apps/wezterm.svg</file>
+    <file>icons/default-apps/dolphin.svg</file>
+    <file>icons/default-apps/nautilus.svg</file>
+    <file>icons/default-apps/thunar.svg</file>
+    <file>icons/default-apps/generic-game.svg</file>
+    <file>icons/default-apps/generic-cube.svg</file>
+    <file>icons/default-apps/README.md</file>
+    <file alias="icons/default-apps/LICENSE">../LICENSE</file>
     <file>sounds/clip-saved.wav</file>
     <file>sounds/recording-stopped.wav</file>
   </qresource>

@@ -24,6 +24,7 @@ class RecordingLibrary;
 class ActivityFeed;
 class WaveformCache;
 class FilmstripCache;
+class PreviewCache;
 class GameDetectionService;
 class NotificationService;
 class AudioMixer;
@@ -136,6 +137,10 @@ public:
   Q_INVOKABLE void playRecordingStoppedPing(bool preview);
   // Global-shortcut record toggle (mirrors F9, with feedback).
   Q_INVOKABLE void requestToggleRecording();
+  // Opens a pre-filled GitHub bug report in the browser. Browsers cannot
+  // accept a file attachment via URL, so the issue body embeds the app
+  // version plus the tail of trophy.log (see BugReport.h) instead.
+  Q_INVOKABLE void reportBug();
   // --minimized CLI flag: behave like startMinimized for this launch.
   void setForceMinimized(bool minimized) { m_forceMinimized = minimized; }
 
@@ -159,6 +164,10 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  // Only successful, finalized outputs are warmed (never active recordings or
+  // DVR segments). Reuses the player's cache instances and in-flight jobs.
+  void preparePlayerCaches(const QString &filePath);
+  friend class ApplicationMediaCacheTest;
   // Registers the Vulkan implicit layer; true when the layer JSON is in
   // place (result cached in m_vulkanLayerRegistered at startup).
   bool ensureVulkanLayerRegistered();
@@ -186,20 +195,24 @@ private:
   std::unique_ptr<UpdateChecker> m_updateChecker;
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
+  std::unique_ptr<PreviewCache> m_previewCache;
   
   QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;
   QString m_pendingDvrGame;
+  bool m_captureSelectionForRecording = true;
   QTimer *m_detectionDebounceTimer = nullptr;
   // Window-gated capture: a portal restore references concrete windows, so
   // a token-armed capture waits for the game's window before requesting.
-  // Rule: a picker only ever follows an explicit user action — the wait
-  // timing out falls back to the authorize prompt, never a bare picker.
+  // Approved games keep waiting on snapshots after the initial timeout;
+  // a picker only ever follows explicit user action.
   QTimer *m_windowWaitTimer = nullptr;
   QString m_pendingWindowGame;
+  QString m_pendingCaptureKey;
   bool m_pendingWindowIsRecord = false;
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
+  void resumePendingCapture();
   // Audio-settled capture: auto-armed recording/DVR waits for the
   // game's PipeWire node to exist (stable across two polls) before
   // starting, so launch sessions don't open on monitor fallback and
@@ -245,6 +258,15 @@ private:
   // the game, else the pending name). Both forms normalize, so exe-case
   // variants match.
   bool isGameBlocked(const QString &game) const;
+  // Prompt gate shared by the debounce fire and the window-wait fallback:
+  // blocked games and token-approved games never prompt (approval is
+  // token-derived; the silent path already owns approved games).
+  bool shouldShowAuthorizePrompt(const QString &game) const;
+  bool isCurrentCaptureGame(const QString &game) const;
+  QString restoreTokenForGame(const QString &game) const;
+  void onWindowWaitTimeout();
+  void onAuthorizeDebounceFired();
+  friend class ApplicationAuthorizePromptTest;
   bool m_suppressNextStorageNotification = false;
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;

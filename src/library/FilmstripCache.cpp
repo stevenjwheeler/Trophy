@@ -6,6 +6,7 @@
  */
 
 #include "FilmstripCache.h"
+#include "RecordingSidecars.h"
 
 #include <QDebug>
 #include <QDir>
@@ -255,6 +256,12 @@ void FilmstripCache::requestThumbs(const QString &filePath, int count) {
       }
       avcodec_free_context(&dec);
       avformat_close_input(&ctx);
+    }
+
+    // A delete/rename may have happened while this worker held the video open.
+    if (!QFileInfo::exists(filePath)) {
+      RecordingSidecars::removeForVideo(filePath);
+      paths.clear();
     }
 
     QMetaObject::invokeMethod(

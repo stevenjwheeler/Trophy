@@ -243,6 +243,7 @@ configure_file(
 # Source files
 set(CORE_SOURCES
     src/core/Application.cpp
+    src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
     src/core/RecordingSession.cpp
@@ -255,6 +256,7 @@ set(CORE_SOURCES
     src/core/ReplayManager.cpp
     src/core/UpdateChecker.cpp
     src/core/WindowService.cpp
+    src/core/WindowChrome.cpp
     src/core/FrameDispatcher.cpp
     src/core/CircularFrameBuffer.cpp
     src/core/FrameTypes.cpp
@@ -288,6 +290,7 @@ set(MUXING_SOURCES
 )
 
 set(DETECTION_SOURCES
+    src/detection/GameIconProvider.cpp
     src/detection/GameDetectionService.cpp
     src/detection/GameWhitelist.cpp
 )
@@ -302,6 +305,7 @@ set(LIBRARY_SOURCES
     src/library/ActivityFeed.cpp
     src/library/WaveformCache.cpp
     src/library/FilmstripCache.cpp
+    src/library/PreviewCache.cpp
 )
 
 set(SETTINGS_SOURCES
@@ -323,6 +327,7 @@ set(CORE_HEADERS
     src/core/ReplayManager.h
     src/core/UpdateChecker.h
     src/core/WindowService.h
+    src/core/WindowChrome.h
 )
 
 set(CAPTURE_HEADERS
@@ -358,6 +363,9 @@ set(MUXING_HEADERS
 )
 
 set(DETECTION_HEADERS
+    src/detection/DefaultAppCatalog.h
+    src/detection/GameIconProvider.h
+    src/detection/GameIconSource.h
     src/detection/GameDetectionService.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
@@ -373,6 +381,7 @@ set(LIBRARY_HEADERS
     src/library/ActivityFeed.h
     src/library/WaveformCache.h
     src/library/FilmstripCache.h
+    src/library/PreviewCache.h
 )
 
 set(SETTINGS_HEADERS
@@ -434,11 +443,17 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/RecordingListView.qml
         qml/views/RecordingListItem.qml
         qml/views/RecordingCard.qml
+        qml/views/HoverPreview.qml
+        qml/views/RecordingGameIcon.qml
         qml/views/ActiveRecordingCard.qml
         qml/views/VideoPlayer.qml
         qml/controls/TrophyButton.qml
+        qml/controls/AccentColorPicker.qml
+        qml/controls/SettingsSectionCard.qml
+        qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
         qml/controls/TrophySlider.qml
+        qml/controls/TrophyScrollBar.qml
         qml/controls/TrophyRadioButton.qml
         qml/controls/TrophySwitch.qml
         qml/controls/TrophyTextField.qml
@@ -475,6 +490,8 @@ set_target_properties(${PROJECT_NAME}App PROPERTIES
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # qmltyperegistrar includes exported native types by header basename.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${AVCODEC_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
@@ -577,6 +594,10 @@ install(FILES resources/icons/trophy.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
 )
 
+install(FILES resources/icons/default-apps/README.md LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
+)
+
 install(TARGETS trophy_layer trophy_gl_shim
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
 )
@@ -586,9 +607,8 @@ install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
 )
-# Native/AppImage desktop file is trophy.desktop; Flatpak post-install
-# copies the source metadata alongside its renamed app-id desktop entry.
-# Keep the launchable association truthful in each installed layout.
+# The native/AppImage desktop file is trophy.desktop; keep the installed
+# metainfo's launchable association truthful.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.stevenjwheeler.Trophy.metainfo.xml"
     TROPHY_NATIVE_METAINFO)
 string(REPLACE "io.github.stevenjwheeler.Trophy.desktop" "trophy.desktop"

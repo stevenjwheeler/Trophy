@@ -371,6 +371,7 @@ protected:
       return result;
     };
     int builds = 0;
+    QSignalSpy selection(&mgr, &ReplayManager::captureSelectionFinished);
     mgr.m_segmentBuilder = [&] {
       ++builds;
       EXPECT_EQ(mgr.m_lookupCache.voiceNodeName, "new-voice");
@@ -378,6 +379,7 @@ protected:
       return true;
     };
     mgr.onCaptureReady();
+    EXPECT_EQ(selection.count(), 1); // Picker guidance ends before audio setup.
     ASSERT_TRUE(gate->waitForEntry());
     EXPECT_EQ(gate->firstVoice, "old-voice");
     bool heartbeat = false;
@@ -490,6 +492,24 @@ protected:
     EXPECT_EQ(voiceTrack, 2);
     EXPECT_EQ(mgr.m_micTrack, 1);
     EXPECT_TRUE(voiceFound);
+  }
+  void expectFallbackRouting(ReplayManager &mgr, bool separate) {
+    mgr.m_lookupCacheValid = true;
+    mgr.m_lookupAudioKey = mgr.audioSetupKey();
+    mgr.m_lookupCache.gameNodeId = 0xFFFFFFFFu;
+    mgr.m_lookupCache.voiceNodeId = 43;
+    int count = -1, voiceTrack = -1, micTrack = -1;
+    bool gameFound = false, voiceFound = false;
+    QStringList hints;
+    uint32_t pid = 0;
+    mgr.setupAudioSources(count, hints, pid, gameFound, voiceTrack, voiceFound,
+                          micTrack, false);
+    EXPECT_FALSE(gameFound);
+    EXPECT_FALSE(voiceFound); // Voice is already present in the desktop mix.
+    EXPECT_EQ(voiceTrack, separate ? 1 : -1);
+    EXPECT_EQ(micTrack, separate ? 2 : 1);
+    EXPECT_EQ(count, 2); // Fallback + mic; separate stream count is set by session.
+    EXPECT_EQ(mgr.m_settings->separateAudioTracks(), separate);
   }
   void addLateVoiceSource(ReplayManager &mgr, bool &destroyed) {
     mgr.m_audioMixer->addSource(
@@ -805,6 +825,7 @@ TEST_F(ReplayManagerTest, SupersededLookupCannotOverwriteNewerCache) {
 TEST_F(ReplayManagerTest, QueuedOldCaptureEventsCannotStopReplacement) {
   for (bool ready : {false, true}) {
     ReplayManager mgr;
+    QSignalSpy selection(&mgr, &ReplayManager::captureSelectionFinished);
     auto *old = replaceCapture(mgr);
     if (ready)
       emit old->ready();
@@ -813,6 +834,7 @@ TEST_F(ReplayManagerTest, QueuedOldCaptureEventsCannotStopReplacement) {
     replaceCapture(mgr); // destroys sender, but already queued calls survive
     QCoreApplication::processEvents();
     EXPECT_TRUE(isStarting(mgr));
+    EXPECT_EQ(selection.count(), 0);
     EXPECT_EQ(mgr.currentGame(), "Replacement");
   }
 }
@@ -854,6 +876,28 @@ TEST_F(ReplayManagerTest, RotationKeepsLateVoiceAndMicSlotsDespiteCachedAvailabi
     prepareLateVoiceRouting(mgr, settings);
     expectRetainedRouting(mgr, true);
     expectRetainedRouting(mgr, false);
+  }
+  if (oldConfig.isNull())
+    qunsetenv("XDG_CONFIG_HOME");
+  else
+    qputenv("XDG_CONFIG_HOME", oldConfig);
+}
+
+TEST_F(ReplayManagerTest, MissingGameKeepsDesktopFallbackWithoutDoublingVoice) {
+  QTemporaryDir config;
+  ASSERT_TRUE(config.isValid());
+  const QByteArray oldConfig = qgetenv("XDG_CONFIG_HOME");
+  qputenv("XDG_CONFIG_HOME", config.path().toUtf8());
+  {
+    SettingsManager settings;
+    settings.setAudioMode("game");
+    settings.setVoiceChatApp("voice");
+    for (bool separate : {false, true}) {
+      settings.setSeparateAudioTracks(separate);
+      ReplayManager mgr;
+      mgr.setSettingsManager(&settings);
+      expectFallbackRouting(mgr, separate);
+    }
   }
   if (oldConfig.isNull())
     qunsetenv("XDG_CONFIG_HOME");

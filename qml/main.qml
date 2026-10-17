@@ -23,14 +23,53 @@ ApplicationWindow {
     required property var gameDetector
     required property var settingsManager
 
+    Binding {
+        target: Theme
+        property: "settings"
+        value: window.settingsManager
+    }
+
+    WindowChrome {
+        id: windowChrome
+        targetWindow: window
+    }
+
+    Binding {
+        target: Theme
+        property: "squareWindowCorners"
+        value: windowChrome.squareCorners || playerPage.playerFullscreen
+    }
+
     // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
+    readonly property bool hoverPreviewsAllowed: window.active && !playerPage.visible
     property bool skipDeleteConfirmation: false
     property var selectedRecordings: []
     property int lastSelectedIndex: -1
     // Maximization the player fullscreen interrupts, so
     // exiting fullscreen restores it (not a plain window).
     property bool wasMaximizedBeforeFullscreen: false
+
+    function requestAttention(reason) {
+        // Popups live inside this window; opening one must never restore or
+        // activate the window behind a fullscreen game.
+        if (!window.active)
+            notificationService.showAttention(reason);
+    }
+
+    onActiveChanged: {
+        if (window.active)
+            notificationService.clearAttention();
+    }
+
+    Connections {
+        target: notificationService
+        function onAttentionRequested() {
+            if (window.visibility === Window.Minimized)
+                window.showNormal();
+            window.app.showMainWindow();
+        }
+    }
 
     onVisibilityChanged: {
         // The compositor may leave fullscreen on its own
@@ -269,12 +308,14 @@ ApplicationWindow {
 
         // Search settings (names must match SettingsPage sections)
         var settings = [
+            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
             { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "zero-copy", "dma-buf"] },
             { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
-            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "window tracking", "vulkan", "opengl", "shim", "auto", "record", "launch", "game"] },
+            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
+            { name: "Detection Helpers", section: "Detection Helpers", keywords: ["helpers", "integration", "status", "enrolled", "game window helper", "window tracking", "vulkan", "opengl", "shim", "repair"] },
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
@@ -377,7 +418,7 @@ ApplicationWindow {
         anchors.fill: parent
         // Square and borderless in player fullscreen so
         // the video runs edge-to-edge.
-        radius: playerPage.playerFullscreen ? 0 : 12
+        radius: Theme.windowRadius
         color: Theme.surfaceColor
         border.width: playerPage.playerFullscreen ? 0 : 1
         border.color: Theme.borderColor
@@ -395,7 +436,7 @@ ApplicationWindow {
                 // fills the window).
                 visible: !playerPage.playerFullscreen
                 color: Theme.surfaceColor
-                radius: 12
+                radius: Theme.windowRadius
 
                 MouseArea {
                     anchors.fill: parent
@@ -442,11 +483,12 @@ ApplicationWindow {
                     onResultSelected: function(result) { navigateToResult(result); }
                 }
 
-                // Right section: Recording Pill and Window Controls
+                // Keep the recording pill in the space below the window controls.
                 RowLayout {
                     anchors.right: parent.right
-                    anchors.rightMargin: windowButtons.width + Theme.spacingMedium
-                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Theme.spacingSmall
+                    anchors.top: windowButtons.bottom
+                    anchors.bottom: parent.bottom
                     spacing: Theme.spacingMedium
 
                     Rectangle {
@@ -527,13 +569,21 @@ ApplicationWindow {
                     anchors.top: parent.top
 
                     TrophyWindowButton {
-                        symbol: "—"
+                        iconSource: "qrc:/icons/window-bug.svg"
+                        hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
+                        ToolTip.text: qsTr("Report a bug")
+                        ToolTip.visible: hovered
+                        onClicked: window.app.reportBug()
+                    }
+
+                    TrophyWindowButton {
+                        iconSource: "qrc:/icons/window-minimize.svg"
                         hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                         onClicked: window.showMinimized()
                     }
 
                     TrophyWindowButton {
-                        symbol: window.visibility === Window.Maximized ? "❐" : "▢"
+                        iconSource: window.visibility === Window.Maximized ? "qrc:/icons/window-restore.svg" : "qrc:/icons/window-maximize.svg"
                         hoverColor: Theme.withOpacity(Theme.textColor, 0.1)
                         onClicked: {
                             if (window.visibility === Window.Maximized)
@@ -544,7 +594,7 @@ ApplicationWindow {
                     }
 
                     TrophyWindowButton {
-                        symbol: "✕"
+                        iconSource: "qrc:/icons/window-close.svg"
                         hoverColor: Theme.errorColor
                         hoverIconColor: "white"
                         isCloseButton: true
@@ -589,7 +639,10 @@ ApplicationWindow {
                         DashboardPage { id: dashboardPage }
                         GameListPage { id: gameListPage }
                         SettingsPage { id: settingsPage }
-                        InfoPage { id: infoPage }
+                        InfoPage {
+                            id: infoPage
+                            onReportBugRequested: window.app.reportBug()
+                        }
                     }
 
                     // In-app player: overlays the content area only,
@@ -616,20 +669,52 @@ ApplicationWindow {
                         }
                         onFullscreenRequested: playerFullscreen = !playerFullscreen
                     }
+
+                    // Pure black removes the usual page/shell contrast. Draw
+                    // the page's existing silhouette above its contents, with
+                    // no input handlers and no chrome in fullscreen playback.
+                    Rectangle {
+                        anchors.fill: parent
+                        z: 1
+                        visible: Theme.amoled && !playerPage.playerFullscreen
+                        color: "transparent"
+                        topLeftRadius: 26
+                        bottomRightRadius: Theme.windowRadius
+                        border.width: 1
+                        border.color: Theme.borderColor
+                    }
                 }
             }
         }
     }
 
-    MouseArea {
-        id: resizeGrip
-        width: 15
-        height: 15
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        cursorShape: Qt.SizeFDiagCursor
-        visible: !playerPage.playerFullscreen
-        onPressed: window.startSystemResize(Qt.RightEdge | Qt.BottomEdge)
+    // Non-overlapping edge strips and larger corner targets sit above the
+    // content so title-bar dragging cannot swallow a resize press.
+    Repeater {
+        model: [Qt.LeftEdge, Qt.RightEdge, Qt.TopEdge, Qt.BottomEdge,
+                Qt.TopEdge | Qt.LeftEdge, Qt.TopEdge | Qt.RightEdge,
+                Qt.BottomEdge | Qt.LeftEdge, Qt.BottomEdge | Qt.RightEdge]
+
+        delegate: MouseArea {
+            required property int modelData
+            readonly property bool leftEdge: (modelData & Qt.LeftEdge) !== 0
+            readonly property bool rightEdge: (modelData & Qt.RightEdge) !== 0
+            readonly property bool topEdge: (modelData & Qt.TopEdge) !== 0
+            readonly property bool bottomEdge: (modelData & Qt.BottomEdge) !== 0
+            readonly property bool corner: (leftEdge || rightEdge) && (topEdge || bottomEdge)
+            readonly property int cornerSize: 15
+            readonly property int edgeSize: 6
+
+            x: leftEdge ? 0 : rightEdge ? parent.width - width : cornerSize
+            y: topEdge ? 0 : bottomEdge ? parent.height - height : cornerSize
+            width: corner ? cornerSize : (leftEdge || rightEdge) ? edgeSize : parent.width - 2 * cornerSize
+            height: corner ? cornerSize : (topEdge || bottomEdge) ? edgeSize : parent.height - 2 * cornerSize
+            cursorShape: corner ? (leftEdge === topEdge ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor)
+                                : (leftEdge || rightEdge) ? Qt.SizeHorCursor : Qt.SizeVerCursor
+            visible: window.visibility === Window.Windowed && !playerPage.playerFullscreen
+            acceptedButtons: Qt.LeftButton
+            onPressed: window.startSystemResize(modelData)
+        }
     }
 
     Shortcut {
@@ -654,6 +739,7 @@ ApplicationWindow {
         function onRecordingError(error) {
             errorDialog.message = error;
             errorDialog.open();
+            window.requestAttention(qsTr("Recording error: %1\nOpen Trophy when you're ready.").arg(error));
         }
     }
 
@@ -669,6 +755,10 @@ ApplicationWindow {
         title: qsTr("Recording Error")
         confirmText: qsTr("OK")
         cancelText: ""
+        onClosed: {
+            if (!trackingRepairDialog.visible)
+                notificationService.clearAttention();
+        }
     }
 
     WindowPickerDialog {
@@ -865,6 +955,51 @@ ApplicationWindow {
             }
             window.clearSelection();
             window.openFolder(destDir);
+        }
+    }
+
+    // One warning per failure, re-armed once tracking works again. First-run
+    // setup handles its own check; allow initialization/repair time to finish.
+    QtObject {
+        id: trackingStartupCheck
+        property bool prompted: false
+        function check() {
+            if (!windowMonitor)
+                return;
+            if (windowMonitor.trackingReady) {
+                prompted = false;
+                return;
+            }
+            if (prompted || windowMonitor.trackingChecking || !window.settingsManager ||
+                !window.settingsManager.setupCompleted)
+                return;
+            prompted = true;
+            trackingRepairDialog.open();
+            window.requestAttention(qsTr("The Game Window Helper needs repair. Open Trophy when you're ready."));
+        }
+        Component.onCompleted: Qt.callLater(check)
+    }
+
+    Connections {
+        target: windowMonitor
+        function onWindowsChanged() {
+            trackingStartupCheck.check();
+            if (windowMonitor.trackingReady)
+                trackingRepairDialog.close();
+        }
+    }
+
+    TrophyDialog {
+        id: trackingRepairDialog
+        title: qsTr("Game Window Helper Needs Attention")
+        message: qsTr("The Game Window Helper is not responding. Trophy needs window identity, focus and fullscreen information to identify games and restore capture to the correct window. Repair will reinstall or restart the compositor integration. Your recordings are still available.")
+                 + (windowMonitor && windowMonitor.compositorName === "gnome" ? "\n\n" + windowMonitor.gnomeHelperStatus : "")
+        confirmText: qsTr("Repair")
+        cancelText: qsTr("Later")
+        onAccepted: if (windowMonitor) windowMonitor.repairTracking()
+        onClosed: {
+            if (!errorDialog.visible)
+                notificationService.clearAttention();
         }
     }
 

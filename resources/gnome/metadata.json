@@ -1,0 +1,7 @@
+{
+  "uuid": "trophy-monitor@trophy",
+  "name": "Trophy Window Helper",
+  "description": "Read-only window identity, focus and fullscreen snapshots for Trophy. Does not capture the screen.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "version": 1
+}

@@ -12,7 +12,6 @@
 #include "core/ControlServer.h"
 #include <QApplication>
 #include <QCommandLineParser>
-#include <QFile>
 #include <QIcon>
 #include <QLockFile>
 #include <QQmlApplicationEngine>
@@ -52,19 +51,8 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setOrganizationName("Trophy");
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
-  // In a Flatpak sandbox the desktop file is renamed to the app id, and
-  // notifications/tray/portal associations key on the desktop id: resolve
-  // it at runtime instead of hardcoding "trophy".
-  {
-    const QString flatpakId =
-        QString::fromUtf8(qgetenv("FLATPAK_ID"));
-    if (!flatpakId.isEmpty() || QFile::exists(QStringLiteral("/.flatpak-info")))
-      QApplication::setDesktopFileName(
-          !flatpakId.isEmpty() ? flatpakId
-                               : QStringLiteral("io.github.stevenjwheeler.Trophy"));
-    else
-      QApplication::setDesktopFileName(QStringLiteral("trophy"));
-  }
+  // Notifications/tray/portal associations key on the desktop id.
+  QApplication::setDesktopFileName(QStringLiteral("trophy"));
 
   // Create application
   TrophyBackend::Application app(argc, argv);

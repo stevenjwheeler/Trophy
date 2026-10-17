@@ -113,6 +113,12 @@ class SettingsManager : public QObject {
   // needed).
   Q_PROPERTY(bool completionSoundEnabled READ completionSoundEnabled WRITE setCompletionSoundEnabled
                  NOTIFY completionSoundEnabledChanged)
+  // Dashboard library layout: false = grid, true = list. Persisted so the
+  // dashboard reopens in the user's last-used mode.
+  Q_PROPERTY(bool libraryListView READ libraryListView WRITE setLibraryListView
+                  NOTIFY libraryListViewChanged)
+  Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
+  Q_PROPERTY(QString accentColor READ accentColor WRITE setAccentColor NOTIFY accentColorChanged)
   
   // Wayland Restore Tokens
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
@@ -238,6 +244,15 @@ public:
   bool completionSoundEnabled() const { return m_completionSoundEnabled; }
   void setCompletionSoundEnabled(bool enabled);
 
+  // Dashboard library layout (false = grid, true = list).
+  bool libraryListView() const { return m_libraryListView; }
+  void setLibraryListView(bool enabled);
+
+  QString themeMode() const { return m_themeMode; }
+  void setThemeMode(const QString &mode);
+  QString accentColor() const { return m_accentColor; }
+  void setAccentColor(const QString &color);
+
   // Replay cache dir for DVR segments; empty = /tmp/trophy/replay (RAM-backed).
   // Point it at /tmp (tmpfs) to hold the rolling buffer in RAM.
   QString replayCachePath() const { return m_replayCachePath; }
@@ -245,6 +260,9 @@ public:
 
   QVariantMap waylandRestoreTokens() const { return m_waylandRestoreTokens; }
   Q_INVOKABLE QString getRestoreToken(const QString &key) const;
+  QString getRestoreTokenForIdentity(const QString &key, const QString &legacyName) const;
+  void setRestoreTokenForIdentity(const QString &key, const QString &legacyName,
+                                 const QString &token);
   Q_INVOKABLE void setRestoreToken(const QString &key, const QString &token);
   Q_INVOKABLE void removeRestoreToken(const QString &key);
 
@@ -294,6 +312,9 @@ signals:
   void notifyClipsChanged();
   void notifyStorageChanged();
   void completionSoundEnabledChanged();
+  void libraryListViewChanged();
+  void themeModeChanged();
+  void accentColorChanged();
   void replayCachePathChanged();
   void waylandRestoreTokensChanged();
 
@@ -363,6 +384,10 @@ private:
   bool m_notifyClips = true;
   bool m_notifyStorage = true;
   bool m_completionSoundEnabled = true;
+  // Dashboard library layout (false = grid, true = list).
+  bool m_libraryListView = false;
+  QString m_themeMode = "dark";
+  QString m_accentColor = "rose";
   
   // Wayland Restore Tokens
   QVariantMap m_waylandRestoreTokens;

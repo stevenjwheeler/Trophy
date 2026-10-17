@@ -37,18 +37,18 @@ class FakeScreenCast : public QObject, protected QDBusContext {
   Q_OBJECT
   Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.ScreenCast")
 public slots:
-  QDBusObjectPath CreateSession(const QVariantMap &) { return request("CreateSession"); }
-  QDBusObjectPath SelectSources(const QDBusObjectPath &, const QVariantMap &) {
-    return request("SelectSources");
+  QDBusObjectPath CreateSession(const QVariantMap &options) { return request("CreateSession", options); }
+  QDBusObjectPath SelectSources(const QDBusObjectPath &, const QVariantMap &options) {
+    return request("SelectSources", options);
   }
-  QDBusObjectPath Start(const QDBusObjectPath &, const QString &, const QVariantMap &) {
-    return request("Start");
+  QDBusObjectPath Start(const QDBusObjectPath &, const QString &, const QVariantMap &options) {
+    return request("Start", options);
   }
   void Configure(const QString &mode) { m_mode = mode; }
   void ReleaseHeld() {
     if (m_held.type() == QDBusMessage::MethodCallMessage) {
       connection().send(m_held.createReply(QVariantList{
-          QVariant::fromValue(QDBusObjectPath("/org/freedesktop/portal/desktop/request/test/held"))}));
+          QVariant::fromValue(QDBusObjectPath(m_heldPath))}));
       m_held = QDBusMessage();
     }
   }
@@ -60,10 +60,21 @@ public slots:
     QDBusConnection::sessionBus().send(msg);
   }
 private:
-  QDBusObjectPath request(const QString &stage) {
-    if (m_mode == stage + "Hold") {
+  QDBusObjectPath request(const QString &stage, const QVariantMap &options) {
+    QString sender = message().service();
+    sender.remove(':');
+    sender.replace('.', '_');
+    const QString path = "/org/freedesktop/portal/desktop/request/" + sender + '/' +
+                         options.value("handle_token").toString();
+    if (m_mode == stage + "Hold" || m_mode == stage + "EarlyHold") {
       setDelayedReply(true);
       m_held = message();
+      m_heldPath = path;
+      if (m_mode.endsWith("EarlyHold")) {
+        QVariantMap results;
+        if (stage == "CreateSession") results["session_handle"] = "/test/session";
+        Respond(path, 0u, results);
+      }
       return QDBusObjectPath("/");
     }
     if (m_mode == stage + "Error") {
@@ -75,12 +86,11 @@ private:
       connection().send(message().createReply());
       return QDBusObjectPath("/");
     }
-    return QDBusObjectPath(QString("/org/freedesktop/portal/desktop/request/test/r%1")
-                              .arg(++m_counter));
+    return QDBusObjectPath(path);
   }
   QString m_mode;
   QDBusMessage m_held;
-  int m_counter = 0;
+  QString m_heldPath;
 };
 
 int main(int argc, char **argv) {
@@ -183,6 +193,12 @@ protected:
 
   static QString pendingPath(const WaylandPortalCapture &capture) {
     return capture.m_pendingRequestPath;
+  }
+  static bool captureStageIsSelect(const WaylandPortalCapture &capture) {
+    return capture.m_pendingStage == WaylandPortalCapture::PendingStage::Select;
+  }
+  static bool captureStageIsStart(const WaylandPortalCapture &capture) {
+    return capture.m_pendingStage == WaylandPortalCapture::PendingStage::Start;
   }
 
   static bool responseSubscribed(const WaylandPortalCapture &capture) {
@@ -396,6 +412,39 @@ TEST_F(WaylandPortalCaptureTest, RealBusResponsesAdvanceCreateSelectAndStart) {
   EXPECT_TRUE(errors.first()[0].toString().contains("No PipeWire streams"));
   EXPECT_FALSE(starting(capture));
   EXPECT_FALSE(watchdogActive(capture));
+}
+
+TEST_F(WaylandPortalCaptureTest, ResponseBeforeMethodReplyAdvancesEveryStage) {
+  if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
+  for (const QString &stage : {QString("CreateSession"), QString("SelectSources"), QString("Start")}) {
+    SCOPED_TRACE(stage.toStdString());
+    control("Configure", {stage + "EarlyHold"});
+    WaylandPortalCapture capture;
+    QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+    capture.requestScreenShare();
+    if (stage != "CreateSession") {
+      const QString create = pendingPath(capture);
+      control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+      ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
+      if (stage == "Start")
+        control("Respond", {pendingPath(capture), 0u, QVariantMap{}});
+    }
+    ASSERT_TRUE(waitUntil([] { return control("HasHeld", {}).arguments().value(0).toBool(); }));
+    if (stage == "Start") {
+      ASSERT_TRUE(waitUntil([&] { return errors.count() == 1; }));
+      EXPECT_TRUE(errors.first()[0].toString().contains("No PipeWire streams"));
+    } else {
+      ASSERT_TRUE(waitUntil([&] {
+        return stage == "CreateSession" ? captureStageIsSelect(capture) : captureStageIsStart(capture);
+      }));
+    }
+    const QString advanced = pendingPath(capture);
+    control("ReleaseHeld", {});
+    control("HasHeld", {});
+    QCoreApplication::processEvents();
+    EXPECT_EQ(pendingPath(capture), advanced); // Late reply cannot roll back the stage.
+    capture.stopCapture();
+  }
 }
 
 TEST_F(WaylandPortalCaptureTest, TimedOutRequestResponseCannotConsumeRetry) {

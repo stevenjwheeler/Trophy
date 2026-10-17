@@ -49,19 +49,105 @@ static auto *env =
 
 class SettingsManagerTest : public ::testing::Test {
 protected:
-  void SetUp() override { mgr = std::make_unique<SettingsManager>(); }
+  QTemporaryDir configHome;
+  QByteArray oldConfigHome;
+  void SetUp() override {
+    ASSERT_TRUE(configHome.isValid());
+    oldConfigHome = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
+    mgr = std::make_unique<SettingsManager>();
+  }
 
   void TearDown() override {
     // Clean up settings file if created
     QString path = mgr->settingsFilePath();
     QFile::remove(path);
     mgr.reset();
+    if (oldConfigHome.isNull())
+      qunsetenv("XDG_CONFIG_HOME");
+    else
+      qputenv("XDG_CONFIG_HOME", oldConfigHome);
   }
 
   std::unique_ptr<SettingsManager> mgr;
 };
 
 // --- Default Values ---
+
+TEST_F(SettingsManagerTest, CustomizationDefaultsAndRoundTrip) {
+  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->accentColor(), "rose");
+  QSignalSpy modeChanged(mgr.get(), &SettingsManager::themeModeChanged);
+  QSignalSpy accentChanged(mgr.get(), &SettingsManager::accentColorChanged);
+  for (const QString &mode : {QString("charcoal"), QString("amoled"), QString("dark")}) {
+    mgr->setThemeMode(mode);
+    for (const QString &accent : {QString("blue"), QString("purple"), QString("teal"),
+                                 QString("orange"), QString("cyan"), QString("pink"), QString("rose")}) {
+      mgr->setAccentColor(accent);
+      SettingsManager reloaded;
+      reloaded.load();
+      EXPECT_EQ(reloaded.themeMode(), mode);
+      EXPECT_EQ(reloaded.accentColor(), accent);
+    }
+  }
+  EXPECT_EQ(modeChanged.count(), 3);
+  EXPECT_EQ(accentChanged.count(), 21);
+  mgr->setThemeMode("dark");
+  mgr->setAccentColor("rose");
+  mgr->setThemeMode("invalid");
+  mgr->setAccentColor("#ffffff");
+  EXPECT_EQ(modeChanged.count(), 3);
+  EXPECT_EQ(accentChanged.count(), 21);
+}
+
+TEST_F(SettingsManagerTest, CustomizationLoadFallbacksAndResetNotify) {
+  mgr->setThemeMode("amoled");
+  mgr->setAccentColor("teal");
+  QSignalSpy modeChanged(mgr.get(), &SettingsManager::themeModeChanged);
+  QSignalSpy accentChanged(mgr.get(), &SettingsManager::accentColorChanged);
+  for (const auto &customization : {QJsonObject{}, QJsonObject{{"themeMode", "bad"},
+                                                             {"accentColor", 42}}}) {
+    QFile file(mgr->settingsFilePath());
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    file.write(QJsonDocument(QJsonObject{{"customization", customization}}).toJson());
+    file.close();
+    mgr->load();
+    EXPECT_EQ(mgr->themeMode(), "dark");
+    EXPECT_EQ(mgr->accentColor(), "rose");
+  }
+  EXPECT_EQ(modeChanged.count(), 2);
+  EXPECT_EQ(accentChanged.count(), 2);
+  mgr->setThemeMode("amoled");
+  mgr->setAccentColor("purple");
+  modeChanged.clear();
+  accentChanged.clear();
+  mgr->resetToDefaults();
+  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->accentColor(), "rose");
+  EXPECT_EQ(modeChanged.count(), 1);
+  EXPECT_EQ(accentChanged.count(), 1);
+  EXPECT_TRUE(mgr->metaObject()->property(mgr->metaObject()->indexOfProperty("themeMode")).hasNotifySignal());
+  EXPECT_TRUE(mgr->metaObject()->property(mgr->metaObject()->indexOfProperty("accentColor")).isWritable());
+}
+
+TEST_F(SettingsManagerTest, IdentityTokenMigrationAndRenameKeepApproval) {
+  mgr->setRestoreToken("Game.exe", "legacy-token");
+  const QString first = "exe:/games/first/game";
+  const QString second = "exe:/games/second/game";
+  EXPECT_EQ(mgr->getRestoreTokenForIdentity(first, "Game.exe"), "legacy-token");
+  QSignalSpy changed(mgr.get(), &SettingsManager::waylandRestoreTokensChanged);
+  mgr->setRestoreTokenForIdentity(first, "Game.exe", "legacy-token");
+  EXPECT_EQ(changed.count(), 1);
+  EXPECT_TRUE(mgr->getRestoreToken("Game.exe").isEmpty());
+  EXPECT_EQ(mgr->getRestoreTokenForIdentity(first, "Renamed Game"), "legacy-token");
+  EXPECT_TRUE(mgr->getRestoreTokenForIdentity(second, "Game.exe").isEmpty());
+  mgr->setRestoreTokenForIdentity(first, "Game.exe", "legacy-token");
+  EXPECT_EQ(changed.count(), 1);
+  SettingsManager reloaded;
+  reloaded.load();
+  EXPECT_EQ(reloaded.getRestoreToken(first), "legacy-token");
+  EXPECT_TRUE(reloaded.getRestoreToken("Game.exe").isEmpty());
+}
 
 TEST_F(SettingsManagerTest, DefaultVideoBitrate) {
   EXPECT_EQ(mgr->videoBitrate(), 15000);
@@ -428,6 +514,42 @@ TEST_F(SettingsManagerTest, ReplayCachePathIsQmlExposed) {
   EXPECT_TRUE(mgr->setProperty("replayCachePath", "/tmp/qml-probe"));
   EXPECT_EQ(mgr->replayCachePath(), "/tmp/qml-probe");
   EXPECT_EQ(mgr->property("replayCachePath").toString(), "/tmp/qml-probe");
+}
+
+TEST_F(SettingsManagerTest, LibraryListViewDefaultsToGrid) {
+  EXPECT_FALSE(mgr->libraryListView());
+}
+
+TEST_F(SettingsManagerTest, SetLibraryListViewEmitsSignal) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::libraryListViewChanged);
+  mgr->setLibraryListView(true);
+  EXPECT_TRUE(mgr->libraryListView());
+  EXPECT_EQ(spy.count(), 1);
+  mgr->setLibraryListView(true);
+  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
+}
+
+TEST_F(SettingsManagerTest, LibraryListViewPersistsRoundTrip) {
+  mgr->setLibraryListView(true);
+  mgr->save();
+
+  auto mgr2 = std::make_unique<SettingsManager>();
+  mgr2->load();
+  EXPECT_TRUE(mgr2->libraryListView());
+}
+
+TEST_F(SettingsManagerTest, LibraryListViewIsQmlExposed) {
+  // Same regression class as replayCachePath: without Q_PROPERTY, QML
+  // writes land on a dynamic property and reads get `undefined`.
+  const QMetaObject *mo = mgr->metaObject();
+  const int idx = mo->indexOfProperty("libraryListView");
+  ASSERT_GE(idx, 0) << "libraryListView missing from metaobject";
+  const QMetaProperty prop = mo->property(idx);
+  EXPECT_TRUE(prop.isWritable());
+  EXPECT_TRUE(prop.hasNotifySignal());
+  EXPECT_TRUE(mgr->setProperty("libraryListView", true));
+  EXPECT_TRUE(mgr->libraryListView());
+  EXPECT_TRUE(mgr->property("libraryListView").toBool());
 }
 
 TEST_F(SettingsManagerTest, LegacySingularTokenKeyNotPersisted) {

@@ -151,6 +151,38 @@ TEST_F(IsolatedVulkanReporterTest, FailedCreateDoesNotTrackOrReport) {
   EXPECT_STREQ(result.messages, "");
 }
 
+TEST_F(IsolatedVulkanReporterTest, SharedDispatchTableDoesNotMergeInstanceOwnership) {
+  ASSERT_EQ(createInstance("First"), VK_SUCCESS);
+  const VkInstance first = liveInstance;
+  liveInstance = VK_NULL_HANDLE;
+  ASSERT_EQ(createInstance("Second"), VK_SUCCESS);
+  const VkInstance second = liveInstance;
+  EXPECT_NE(first, second);
+  destroy(first, nullptr);
+  EXPECT_EQ(snapshot().closeCalls, 1u);
+  destroy(second, nullptr);
+  liveInstance = VK_NULL_HANDLE;
+  const auto result = snapshot();
+  EXPECT_EQ(result.destroyCalls, 2u);
+  EXPECT_EQ(result.closeCalls, 2u);
+  EXPECT_EQ(result.sendCalls, 4u);
+}
+
+TEST_F(IsolatedVulkanReporterTest, InvalidCreateAndLookupInputsAreRejected) {
+  VkInstance instance = VK_NULL_HANDLE;
+  EXPECT_EQ(create(nullptr, nullptr, &instance), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(gipa(VK_NULL_HANDLE, nullptr), nullptr);
+  EXPECT_EQ(snapshot().createCalls, 0u);
+}
+
+TEST_F(IsolatedVulkanReporterTest, ApplicationNameCannotInjectProtocolLines) {
+  ASSERT_EQ(createInstance("Game\nSTOP:123\r"), VK_SUCCESS);
+  const std::string messages = snapshot().messages;
+  EXPECT_EQ(messages.find(":Game STOP:123 :"), messages.find("START:") +
+      std::string("START:").size() + std::to_string(getpid()).size());
+  EXPECT_EQ(messages.find('\n'), messages.size() - 1);
+}
+
 TEST_F(IsolatedVulkanReporterTest, TrackedInstanceReportsStartAndStopAndForwards) {
   ASSERT_EQ(createInstance("Game: With Colon"), VK_SUCCESS);
   ASSERT_NE(liveInstance, VK_NULL_HANDLE);

@@ -6,12 +6,15 @@
  */
 
 import TrophyBackend
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Page {
     id: root
+
+    signal reportBugRequested()
 
     // Update-check state (fed by updateChecker.checkFinished).
     // updateNewer tints the status; the notice action carries
@@ -54,9 +57,17 @@ Page {
     }
 
     ScrollView {
+        id: infoScroll
         anchors.fill: parent
         contentWidth: availableWidth
-        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+        ScrollBar.vertical: TrophyScrollBar {
+            // A custom ScrollView bar needs viewport parenting/geometry;
+            // otherwise it can end up inside the scrolling content.
+            parent: infoScroll
+            x: infoScroll.width - width
+            y: infoScroll.topPadding
+            height: infoScroll.availableHeight
+        }
         clip: true
 
         ColumnLayout {
@@ -184,6 +195,8 @@ Page {
                 Layout.preferredHeight: descLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: descLayout
@@ -211,6 +224,8 @@ Page {
                 Layout.preferredHeight: featuresLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: featuresLayout
@@ -219,11 +234,9 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
 
-                    Label {
-                        text: qsTr("✨ Key Features")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Key Features")
+                        iconSource: "qrc:/icons/sparkles.svg"
                     }
 
                     GridLayout {
@@ -233,37 +246,37 @@ Page {
                         rowSpacing: Theme.spacingSmall
 
                         FeatureItem {
-                            icon: "🎬"
+                            iconSource: "qrc:/icons/gpu.svg"
                             title: qsTr("Hardware Acceleration")
                             description: qsTr("NVIDIA NVENC and AMD/Intel VA-API support")
                         }
 
                         FeatureItem {
-                            icon: "🎵"
+                            iconSource: "qrc:/icons/volume-high.svg"
                             title: qsTr("Multi-Track Audio")
                             description: qsTr("Separate game, voice chat, and mic tracks")
                         }
 
                         FeatureItem {
-                            icon: "🎮"
+                            iconSource: "qrc:/icons/gamepad.svg"
                             title: qsTr("Auto Game Detection")
                             description: qsTr("Steam, Proton, and custom game support with automatic detection")
                         }
 
                         FeatureItem {
-                            icon: "💾"
+                            iconSource: "qrc:/icons/storage.svg"
                             title: qsTr("Smart Storage")
                             description: qsTr("Auto-cleanup and crash-resilient formats")
                         }
 
                         FeatureItem {
-                            icon: "⏪"
+                            iconSource: "qrc:/icons/scissors.svg"
                             title: qsTr("Instant Clips")
                             description: qsTr("Background DVR — save recent moments anytime, buffer length adjustable")
                         }
 
                         FeatureItem {
-                            icon: "🔄"
+                            iconSource: "qrc:/icons/refresh.svg"
                             title: qsTr("Automatic Updates")
                             description: qsTr("Daily release check with a one-click download page")
                         }
@@ -280,6 +293,8 @@ Page {
                 Layout.preferredHeight: ackLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: ackLayout
@@ -288,11 +303,9 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingMedium
 
-                    Label {
-                        text: qsTr("🙏 Acknowledgments")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Acknowledgments")
+                        iconSource: "qrc:/icons/heart.svg"
                     }
 
                     Label {
@@ -307,54 +320,62 @@ Page {
                         Layout.fillWidth: true
                         spacing: Theme.spacingTiny
 
-                        Label {
-                            text: qsTr("• The FFmpeg project for multimedia processing")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://ffmpeg.org/">FFmpeg</a> for multimedia processing (<a href="https://ffmpeg.org/legal.html">LGPL/GPL, build-dependent</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• The Qt project for the application framework")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://www.qt.io/">Qt</a> for the application framework (<a href="https://doc.qt.io/qt-6/licensing.html">LGPLv3/GPLv3 and other licensing options</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• The Wayland compositor teams (KWin, Hyprland, Sway, GNOME) for modern Linux compositing")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://invent.kde.org/plasma/kwin">KDE KWin</a> for Wayland compositing (<a href="https://invent.kde.org/plasma/kwin/-/tree/master/LICENSES">component licenses</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• The xdg-desktop-portal contributors for secure screen capture")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://hypr.land/">Hyprland</a> for Wayland compositing (<a href="https://github.com/hyprwm/Hyprland/blob/main/LICENSE">BSD-3-Clause</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• The Khronos Group for the open Vulkan graphics standard")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://swaywm.org/">Sway</a> for Wayland compositing (<a href="https://github.com/swaywm/sway/blob/master/LICENSE">MIT</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• LinuxDeploy for AppImage distribution")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://gitlab.gnome.org/GNOME/mutter">GNOME / Mutter</a> for Wayland compositing (<a href="https://gitlab.gnome.org/GNOME/mutter/-/blob/main/COPYING">GPL license</a>)')
                         }
 
-                        Label {
-                            text: qsTr("• The PipeWire team for modern Linux audio")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
+                        CreditLabel {
+                            text: qsTr('• <a href="https://flatpak.github.io/xdg-desktop-portal/">xdg-desktop-portal</a> for secure screen capture (<a href="https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES">LGPLv2.1+ and component licenses</a>)')
                         }
 
-                        Label {
+                        CreditLabel {
+                            text: qsTr('• <a href="https://www.khronos.org/vulkan/">The Khronos Group</a> for Vulkan and its headers (<a href="https://github.com/KhronosGroup/Vulkan-Headers/blob/main/LICENSE.md">Vulkan-Headers: Apache-2.0 / MIT</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/linuxdeploy/linuxdeploy">linuxdeploy</a> for AppImage distribution (<a href="https://github.com/linuxdeploy/linuxdeploy/blob/master/LICENSE.txt">MIT</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://pipewire.org/">PipeWire</a> for Linux audio and video transport (<a href="https://github.com/PipeWire/pipewire/blob/master/COPYING">MIT</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
                             text: qsTr("• The open-source community for inspiration and support")
-                            color: Theme.textColor
-                            font.pixelSize: Theme.fontSizeNormal
                         }
 
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("License links describe the upstream projects; terms can vary by component and build. Desktop compositors and portals are system integrations, not bundled components.")
+                        wrapMode: Text.WordWrap
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
                     }
 
                 }
@@ -367,6 +388,8 @@ Page {
                 Layout.preferredHeight: licenseLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: licenseLayout
@@ -379,11 +402,9 @@ Page {
                         Layout.fillWidth: true
                         spacing: Theme.spacingSmall
 
-                        Label {
-                            text: qsTr("📜 License")
-                            font.pixelSize: Theme.fontSizeLarge
-                            font.weight: Font.Medium
-                            color: Theme.textColor
+                        SectionHeading {
+                            text: qsTr("License")
+                            iconSource: "qrc:/icons/file-text.svg"
                         }
 
                         Item { Layout.fillWidth: true }
@@ -413,6 +434,8 @@ Page {
                 Layout.preferredHeight: disclaimerLayout.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
                 color: Theme.cardColor
+                border.width: 1
+                border.color: Theme.borderColor
 
                 ColumnLayout {
                     id: disclaimerLayout
@@ -421,16 +444,15 @@ Page {
                     anchors.margins: Theme.spacingMedium
                     spacing: Theme.spacingSmall
 
-                    Label {
-                        text: qsTr("🤖 Development Disclosure")
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
+                    SectionHeading {
+                        text: qsTr("Development Disclosure")
+                        iconSource: "qrc:/icons/code.svg"
                     }
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("This project has been developed in part with AI assistance (Claude by Anthropic). Any and all generated code has been reviewed and verified for correctness, security, and adherence to best practices. Any and all architecture, design decisions, and implementation details have been validated by the project maintainer.")
+                        text: qsTr("<b>Trophy is designed and maintained by a trained software developer.</b> AI tools assist with parts of development; they do not replace the developer’s engineering judgment. Architecture, implementation decisions, code review, and testing remain developer-led, with the developer retaining responsibility for the project.")
+                        textFormat: Text.RichText
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeSmall
@@ -453,7 +475,7 @@ Page {
 
                 FooterLink {
                     text: qsTr("Report an Issue")
-                    url: "https://github.com/OasisLab-Software/Trophy/issues/new"
+                    onActivated: root.reportBugRequested()
                 }
 
                 FooterLink {
@@ -471,34 +493,114 @@ Page {
 
     }
 
+    Rectangle {
+        anchors.left: infoScroll.left
+        anchors.right: infoScroll.right
+        anchors.rightMargin: infoScroll.ScrollBar.vertical.width
+        anchors.bottom: infoScroll.bottom
+        height: Theme.spacingLarge * 2
+        opacity: Math.max(0, Math.min(1, (infoScroll.contentItem.contentHeight - infoScroll.contentItem.height - infoScroll.contentItem.contentY) / height))
+        visible: opacity > 0
+        gradient: Gradient {
+            GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }
+            GradientStop { position: 1; color: Theme.backgroundColor }
+        }
+    }
+
     background: Rectangle {
         color: Theme.backgroundColor
-        bottomRightRadius: 12
+        bottomRightRadius: Theme.windowRadius
         topLeftRadius: 26
     }
 
+    component SectionHeading: RowLayout {
+        id: heading
+
+        property alias text: headingLabel.text
+        property url iconSource
+
+        spacing: Theme.spacingSmall
+
+        TrophyIcon {
+            source: heading.iconSource
+            color: Theme.textSecondaryColor
+        }
+
+        Label {
+            id: headingLabel
+            font.pixelSize: Theme.fontSizeLarge
+            font.weight: Font.Medium
+            color: Theme.textColor
+        }
+    }
+
+    // Shared rich-text credit style keeps project/license links usable and
+    // wraps long acknowledgments without widening the scroll view.
+    component CreditLabel: Label {
+        Layout.fillWidth: true
+        textFormat: Text.RichText
+        wrapMode: Text.WordWrap
+        color: Theme.textColor
+        linkColor: Theme.highlightedColor
+        font.pixelSize: Theme.fontSizeNormal
+        onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+
+        HoverHandler {
+            cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
+        }
+    }
+
     // Feature Item Component
-    component FeatureItem: ColumnLayout {
-        property string icon: ""
+    component FeatureItem: Item {
+        id: featureItem
+
+        property url iconSource
         property string title: ""
         property string description: ""
 
         Layout.fillWidth: true
-        spacing: Theme.spacingTiny
+        Layout.minimumWidth: 0
+        Layout.preferredWidth: 1
+        Layout.alignment: Qt.AlignTop
+        implicitHeight: featureText.implicitHeight
+        objectName: "infoFeature"
 
-        Label {
-            text: icon + " " + title
-            font.pixelSize: Theme.fontSizeNormal
-            font.weight: Font.Medium
-            color: Theme.textColor
-        }
+        // Equal width hints on plain items keep the two grid columns equal,
+        // regardless of copy length (also works on the Qt 6.5 minimum).
+        ColumnLayout {
+            id: featureText
 
-        Label {
-            Layout.fillWidth: true
-            text: description
-            wrapMode: Text.WordWrap
-            color: Theme.textMutedColor
-            font.pixelSize: Theme.fontSizeSmall
+            width: parent.width
+            spacing: Theme.spacingTiny
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingSmall
+
+                TrophyIcon {
+                    source: featureItem.iconSource
+                    color: Theme.textSecondaryColor
+                    Layout.alignment: Qt.AlignTop
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: featureItem.title
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.weight: Font.Medium
+                    color: Theme.textColor
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: featureItem.description
+                wrapMode: Text.WordWrap
+                color: Theme.textMutedColor
+                font.pixelSize: Theme.fontSizeSmall
+            }
         }
 
     }
@@ -509,9 +611,18 @@ Page {
     // non-visual handlers: an anchored MouseArea inside a
     // layout child is undefined behavior (engine warning).
     component FooterLink: RowLayout {
+        id: footerLink
+
         property string text: ""
         property string url: ""
         property string iconSource: ""
+
+        signal activated()
+
+        onActivated: {
+            if (url !== "")
+                Qt.openUrlExternally(url)
+        }
 
         spacing: 4
 
@@ -542,7 +653,7 @@ Page {
         }
 
         TapHandler {
-            onTapped: Qt.openUrlExternally(parent.url)
+            onTapped: footerLink.activated()
         }
     }
 

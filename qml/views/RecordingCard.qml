@@ -18,6 +18,37 @@ Rectangle {
     property bool isAdaptive: true
     property int cardIndex: -1
     readonly property bool hovered: hoverHandler.hovered
+    property HoverPreview previewController: null
+    property HoverPreview requestedController: null
+    property bool previewAllowed: true
+    readonly property string previewPath: recording ? recording.filePath : ""
+    readonly property bool previewEligible: hovered && visible && previewAllowed
+        && !isSelectionModeActive && previewPath.length > 0
+    readonly property bool previewArmed: currentPreview !== null
+    readonly property bool previewFailed: previewController !== null && previewController.failedTarget === previewSurface
+    readonly property HoverPreview currentPreview: previewController !== null && previewController.target === previewSurface ? previewController : null
+    readonly property bool previewVisible: currentPreview !== null && currentPreview.frameReady
+
+    function resetPreview() {
+        if (requestedController && requestedController !== previewController)
+            requestedController.release(previewSurface)
+        requestedController = previewController
+        if (!previewController)
+            return
+        if (previewEligible)
+            previewController.request(previewSurface, recordingLibrary.localFileUrl(previewPath))
+        else
+            previewController.release(previewSurface)
+    }
+    onPreviewControllerChanged: resetPreview()
+    onPreviewEligibleChanged: resetPreview()
+    onPreviewPathChanged: resetPreview()
+    onRecordingChanged: resetPreview()
+
+    Component.onDestruction: {
+        if (requestedController)
+            requestedController.release(previewSurface)
+    }
     property bool isSelected: window.selectedRecordings && recording && window.selectedRecordings.indexOf(recording.filePath) !== -1
     property bool isSelectionModeActive: window.selectedRecordings && window.selectedRecordings.length > 0
     // Clips read as "<game> Clip" with a badge; full recordings show
@@ -26,7 +57,7 @@ Rectangle {
     // first paint before the background probe lands.
     readonly property bool isClip: root.recording && (root.recording.isClip || (root.recording.fileName || "").endsWith("_Replay.mkv"))
     
-    height: 180
+    height: Theme.recordingCardHeight
     radius: Theme.radiusMedium
     color: Theme.cardColor
     clip: true
@@ -88,24 +119,34 @@ Rectangle {
         // --- THUMBNAIL SECTION ---
         Item {
             id: thumbnailContainer
+            objectName: "gridThumbnail"
             Layout.fillWidth: true
-            Layout.preferredHeight: 125
+            Layout.preferredHeight: 180
             
             // This keeps the bottom edge razor sharp where it meets the info section
             clip: true
 
-            // 1. The Source Image
-            Image {
-                id: sourceImage
-                width: parent.width
-                height: parent.height
-                source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
-                fillMode: Image.PreserveAspectCrop
-                opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
-                visible: false 
-                
-                scale: root.hovered ? 1.05 : 1.0
-                Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+            // Mask both the fallback thumbnail and the first decoded frame
+            // together, preserving the card's existing corner treatment.
+            Item {
+                id: previewSurface
+                anchors.fill: parent
+                // VideoOutput needs a visible scene-graph subtree to update
+                // its texture. Mask the live layer rather than hiding its
+                // ancestor and sampling it through a separate effect.
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: sourceMask
+                }
+                Image {
+                    anchors.fill: parent
+                    source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
+                    fillMode: Image.PreserveAspectCrop
+                    opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
+                    scale: root.hovered ? 1.05 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                }
             }
 
             // 2. The Shape Mask
@@ -123,14 +164,6 @@ Rectangle {
                 layer.enabled: true 
             }
 
-            // 3. The Masking Engine
-            MultiEffect {
-                anchors.fill: parent
-                source: sourceImage
-                maskEnabled: true
-                maskSource: sourceMask
-            }
-
             // 4. Hover Buttons Overlay
             Item {
                 anchors.fill: parent
@@ -140,7 +173,8 @@ Rectangle {
                     width: parent.width
                     height: parent.height + root.radius
                     radius: root.radius
-                    color: "#99000000"
+                    color: root.previewVisible ? "#33000000" : "#99000000"
+                    Behavior on color { ColorAnimation { duration: 180 } }
                 }
 
                 Row {
@@ -240,36 +274,50 @@ Rectangle {
         }
 
         // --- INFO SECTION ---
-        ColumnLayout {
+        RowLayout {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.margins: Theme.spacingSmall; spacing: 2
-            Label {
-                text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
-                font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
-            }
-            Label {
-                text: root.recording ? formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
-                font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
-            }
-            Item { Layout.fillHeight: true }
-            RowLayout {
+            ColumnLayout {
                 Layout.fillWidth: true
-                spacing: Theme.spacingSmall
+                spacing: 2
                 Label {
-                    text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
-                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor; Layout.fillWidth: true; Layout.alignment: Qt.AlignBottom
+                    objectName: "gridTitle"
+                    text: root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : ""
+                    font.pixelSize: Theme.fontSizeSmall; font.weight: Font.Bold; color: Theme.textColor; elide: Text.ElideRight; Layout.fillWidth: true
                 }
-                Rectangle {
-                    Layout.alignment: Qt.AlignBottom
-                    width: badgeLabel.width + 12; height: badgeLabel.height + 6
-                    radius: 4
-                    color: root.isClip ? Theme.withOpacity(Theme.highlightedColor, 0.2) : Theme.withOpacity(Theme.errorColor, 0.2)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
                     Label {
-                        id: badgeLabel; anchors.centerIn: parent
+                        objectName: "gridType"
                         text: root.isClip ? qsTr("Clip") : qsTr("Recording")
-                        color: root.isClip ? Theme.highlightedColor : Theme.errorColor
-                        font.pixelSize: Theme.fontSizeTiny; font.weight: Font.Medium
+                        color: root.isClip ? Theme.highlightedColor : Theme.primaryColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        font.weight: Font.Medium
+                    }
+
+                    Label {
+                        objectName: "gridMetadata"
+                        text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                        font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
+                        elide: Text.ElideRight; Layout.fillWidth: true
                     }
                 }
+                Label {
+                    objectName: "gridDate"
+                    Layout.fillWidth: true
+                    text: root.recording ? Qt.formatDateTime(new Date(root.recording.date), "MMM d, yyyy HH:mm") : ""
+                    font.pixelSize: Theme.fontSizeTiny; color: Theme.textMutedColor
+                    elide: Text.ElideRight
+                }
+            }
+            RecordingGameIcon {
+                objectName: "gridGameIcon"
+                gameName: root.recording ? root.recording.gameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.leftMargin: Theme.spacingSmall
+                Layout.alignment: Qt.AlignVCenter
             }
         }
     }

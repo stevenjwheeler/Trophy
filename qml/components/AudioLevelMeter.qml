@@ -6,6 +6,7 @@
  */
 
 import "../styles"
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -30,15 +31,15 @@ Item {
     function getIcon() {
         var labelLower = label.toLowerCase();
         if (labelLower.includes("game"))
-            return "🎮";
+            return "qrc:/icons/gamepad.svg";
 
         if (labelLower.includes("comm") || labelLower.includes("voice"))
-            return "🎧";
+            return "qrc:/icons/headphones.svg";
 
         if (labelLower.includes("mic"))
-            return "🎤";
+            return "qrc:/icons/microphone.svg";
 
-        return "🔊";
+        return "qrc:/icons/volume-high.svg";
     }
 
     implicitWidth: 60
@@ -109,28 +110,30 @@ Item {
         // Icon label at bottom - clickable to mute
         AbstractButton {
             Layout.alignment: Qt.AlignHCenter
-            implicitWidth: iconLabel.implicitWidth + 4
-            implicitHeight: iconLabel.implicitHeight + 4
+            implicitWidth: 24
+            implicitHeight: 24
             onClicked: root.toggleMute()
 
-            contentItem: Label {
-                id: iconLabel
+            Accessible.name: root.label
+            Accessible.checkable: true
+            Accessible.checked: root.muted
+            ToolTip.visible: hovered
+            ToolTip.text: root.muted ? qsTr("Unmute %1").arg(root.label) : qsTr("Mute %1").arg(root.label)
 
-                // Emoji glyphs ignore text color, so muted state swaps the
-                // glyph itself (a red recolor would never render).
-                text: root.muted ? "🔇" : getIcon()
-                color: root.muted ? Theme.errorColor : Theme.textColor
-                font.pixelSize: Theme.fontSizeNormal
-                horizontalAlignment: Text.AlignHCenter
-                opacity: parent.hovered ? 1 : 0.8
+            contentItem: Item {
+                TrophyIcon {
+                    anchors.centerIn: parent
+                    width: 14
+                    height: 14
+                    source: root.muted ? "qrc:/icons/volume-muted.svg" : root.getIcon()
+                    color: root.muted ? Theme.errorColor : Theme.textSecondaryColor
 
-                Behavior on color {
-                    ColorAnimation {
-                        duration: 150
+                    Behavior on color {
+                        ColorAnimation {
+                            duration: 150
+                        }
                     }
-
                 }
-
             }
 
             background: Rectangle {
@@ -151,26 +154,30 @@ Item {
 
         AbstractButton {
             Layout.alignment: Qt.AlignVCenter
-            implicitWidth: iconLabelH.implicitWidth + 4
-            implicitHeight: iconLabelH.implicitHeight + 4
+            implicitWidth: 24
+            implicitHeight: 24
             onClicked: root.toggleMute()
 
-            contentItem: Label {
-                id: iconLabelH
+            Accessible.name: root.label
+            Accessible.checkable: true
+            Accessible.checked: root.muted
+            ToolTip.visible: hovered
+            ToolTip.text: root.muted ? qsTr("Unmute %1").arg(root.label) : qsTr("Mute %1").arg(root.label)
 
-                text: root.muted ? "🔇" : getIcon()
-                color: root.muted ? Theme.errorColor : Theme.textColor
-                font.pixelSize: Theme.fontSizeNormal
-                horizontalAlignment: Text.AlignHCenter
-                opacity: parent.hovered ? 1 : 0.8
+            contentItem: Item {
+                TrophyIcon {
+                    anchors.centerIn: parent
+                    width: 14
+                    height: 14
+                    source: root.muted ? "qrc:/icons/volume-muted.svg" : root.getIcon()
+                    color: root.muted ? Theme.errorColor : Theme.textSecondaryColor
 
-                Behavior on color {
-                    ColorAnimation {
-                        duration: 150
+                    Behavior on color {
+                        ColorAnimation {
+                            duration: 150
+                        }
                     }
-
                 }
-
             }
 
             background: Rectangle {

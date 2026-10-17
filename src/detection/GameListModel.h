@@ -11,6 +11,9 @@
 #include <QList>
 #include <QSortFilterProxyModel>
 #include <QString>
+#include <QUrl>
+#include "DefaultAppCatalog.h"
+#include "GameIconSource.h"
 
 namespace TrophyBackend {
 
@@ -29,7 +32,7 @@ struct GameListEntry {
                          // prompt. This is the only "approved" state.
   QString tokenKey;      // exact settings-map key for withdrawal
   QString section;      // list grouping: Now playing / Ready to capture
-                        // / Games
+                        // / Apps
 };
 
 /**
@@ -53,6 +56,8 @@ public:
     HasTokenRole,
     TokenKeyRole,
     SectionRole,
+    IconSourceRole,
+    IdentifiersRole,
   };
   Q_ENUM(Roles)
 
@@ -95,6 +100,14 @@ public:
       return e.tokenKey;
     case SectionRole:
       return e.section;
+    case IconSourceRole:
+      return gameIconSource(e.key, e.steamAppId);
+    case IdentifiersRole:
+      if (e.isDefault) {
+        if (const auto *app = defaultAppInfo(e.key))
+          return QStringList{app->key} + app->aliases;
+      }
+      return QStringList{};
     default:
       return {};
     }
@@ -112,6 +125,8 @@ public:
         {HasTokenRole, "hasToken"},
         {TokenKeyRole, "tokenKey"},
         {SectionRole, "section"},
+        {IconSourceRole, "iconSource"},
+        {IdentifiersRole, "identifiers"},
     };
   }
 
@@ -120,7 +135,7 @@ private:
 };
 
 /**
- * @brief Case-insensitive substring filter over display + key roles.
+ * @brief Case-insensitive substring filter over display, key and default aliases.
  * One instance fronts each GameListModel so the page search field filters
  * all tabs through a single service-level filter string.
  */
@@ -172,8 +187,12 @@ protected:
         sourceModel()->data(idx, GameListModel::DisplayRole).toString();
     const QString key =
         sourceModel()->data(idx, GameListModel::KeyRole).toString();
+    const QString aliases = sourceModel()
+                                ->data(idx, GameListModel::IdentifiersRole)
+                                .toStringList().join(' ');
     return display.contains(m_text, Qt::CaseInsensitive) ||
-           key.contains(m_text, Qt::CaseInsensitive);
+           key.contains(m_text, Qt::CaseInsensitive) ||
+           aliases.contains(m_text, Qt::CaseInsensitive);
   }
 
 private:

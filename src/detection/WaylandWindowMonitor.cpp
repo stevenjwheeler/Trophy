@@ -38,10 +38,12 @@ quint64 stableKeyHash(const QString &key) {
 } // namespace
 
 WaylandWindowMonitor::WaylandWindowMonitor(QObject *parent) : QObject(parent) {
-  // Detect eagerly so UI (wizard, settings) can name the compositor even
-  // when tracking is opted out and startMonitoring() never runs.
+  // Detect eagerly so UI can name the compositor before tracking starts.
   m_compositor = detectCompositor();
   m_pollTimer = new QTimer(this);
+  m_healthTimer.setSingleShot(true);
+  m_healthTimer.setInterval(30000);
+  connect(&m_healthTimer, &QTimer::timeout, this, &WaylandWindowMonitor::windowsChanged);
   m_pollTimer->setInterval(1000);
   connect(m_pollTimer, &QTimer::timeout, this,
           &WaylandWindowMonitor::checkFocusedApp);
@@ -57,7 +59,7 @@ WaylandWindowMonitor::~WaylandWindowMonitor() {
   m_retired.clear();
 }
 
-void WaylandWindowMonitor::startMonitoring() {
+void WaylandWindowMonitor::startMonitoring(bool repairBackend) {
   if (m_monitoring) {
     return;
   }
@@ -66,9 +68,10 @@ void WaylandWindowMonitor::startMonitoring() {
   ++m_generation;
   qDebug() << "Wayland compositor detected:" << m_compositor;
 
-  setupCompositorTracking();
+  setupCompositorTracking(repairBackend);
 
   m_monitoring = true;
+  m_healthTimer.start();
   m_pollTimer->start();
 
   qDebug() << "Wayland window monitoring started (" << m_compositor << ")";
@@ -85,6 +88,8 @@ void WaylandWindowMonitor::stopMonitoring() {
   }
 
   m_monitoring = false;
+  m_healthTimer.stop();
+  m_lastTrackingReady = false;
   ++m_generation;
   std::shared_ptr<QObject> polling;
   if (m_gnome) polling = m_gnome;
@@ -142,6 +147,29 @@ bool WaylandWindowMonitor::kwinScriptEnabled() const {
 
 bool WaylandWindowMonitor::kwinActive() const {
   return m_kwin && m_kwin->isActive();
+}
+
+QString WaylandWindowMonitor::gnomeHelperStatus() const {
+  return m_gnome ? m_gnome->status() : QString();
+}
+
+bool WaylandWindowMonitor::gnomeHelperInstalled() const {
+  return GnomeBackend::isInstalled();
+}
+
+bool WaylandWindowMonitor::trackingReady() const {
+  if (!m_monitoring) return false;
+  if (m_kwin)
+    return m_kwin->isActive() && m_kwin->hasSnapshot() &&
+           kwinScriptInstalled() && kwinScriptEnabled();
+  return (m_gnome && m_gnome->isActive()) ||
+         (m_hyprland && m_hyprland->isActive()) ||
+         (m_sway && m_sway->isActive());
+}
+
+void WaylandWindowMonitor::repairTracking() {
+  stopMonitoring();
+  startMonitoring(true);
 }
 
 void WaylandWindowMonitor::uninstallBackend() {
@@ -227,6 +255,15 @@ void WaylandWindowMonitor::checkFocusedApp() {
   // window changes); CLI polling backends refresh here.
   if (!m_monitoring)
     return;
+  if (m_kwin) m_kwin->refreshStatus();
+  // Polling backends may accept an unchanged/empty first snapshot without
+  // emitting windowsUpdated. Still settle readiness (and notice a removed
+  // KWin package) without rebuilding window consumers on every timer tick.
+  const bool ready = trackingReady();
+  if (ready != m_lastTrackingReady) {
+    m_lastTrackingReady = ready;
+    emit windowsChanged();
+  }
   if (!m_gnome && !m_hyprland && !m_sway && !m_pollOverride)
     return; // KWin is push-only; housekeeping needs no polling worker.
   if (m_pollFuture.valid()) {
@@ -258,7 +295,8 @@ void WaylandWindowMonitor::collectRetired() {
     if (retired.poll.valid() && retired.poll.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
       return false;
     const auto kwin = std::dynamic_pointer_cast<KWinBackend>(retired.backend);
-    return !kwin || !kwin->hasPendingWork();
+    const auto gnome = std::dynamic_pointer_cast<GnomeBackend>(retired.backend);
+    return (!kwin || !kwin->hasPendingWork()) && (!gnome || !gnome->hasPendingWork());
   });
   const auto before = m_removals.size();
   std::erase_if(m_removals, [](const auto &future) {
@@ -281,7 +319,7 @@ void WaylandWindowMonitor::onBackendWindowsUpdated() {
     ingestSnapshot(m_sway->windows());
 }
 
-void WaylandWindowMonitor::setupCompositorTracking() {
+void WaylandWindowMonitor::setupCompositorTracking(bool repairBackend) {
   if (m_compositor.contains("kwin", Qt::CaseInsensitive)) {
     if (!m_kwin) {
       m_kwin = std::make_shared<KWinBackend>();
@@ -289,7 +327,7 @@ void WaylandWindowMonitor::setupCompositorTracking() {
       connect(m_kwin.get(), &KWinBackend::windowsUpdated, this,
               [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
-    if (!m_kwin->start())
+    if (!m_kwin->start(repairBackend))
       qWarning() << "KWin backend failed to start; window data unavailable";
   } else if (m_compositor.contains("gnome", Qt::CaseInsensitive) ||
              m_compositor.contains("mutter", Qt::CaseInsensitive)) {
@@ -299,7 +337,7 @@ void WaylandWindowMonitor::setupCompositorTracking() {
       connect(m_gnome.get(), &GnomeBackend::windowsUpdated, this,
               [this, generation] { if (generation == m_generation) onBackendWindowsUpdated(); });
     }
-    if (!m_gnome->start())
+    if (!m_gnome->start(repairBackend))
       qWarning() << "GNOME backend failed to start; window data unavailable";
   } else if (m_compositor.contains("hyprland", Qt::CaseInsensitive)) {
     if (!m_hyprland) {

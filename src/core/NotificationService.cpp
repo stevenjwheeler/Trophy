@@ -56,9 +56,10 @@ QVariantMap
 NotificationService::notificationHints(int urgency, bool authorizeAction) {
   QVariantMap hints;
   hints["urgency"] = QVariant::fromValue<uchar>(static_cast<uchar>(urgency));
-  // Resident (stay in the notification center) is for the authorize prompt
-  // only. Transient notices must expire fully — with resident set, Plasma
-  // keeps every clip/recording notice until manually dismissed.
+  // The authorize prompt is resident; sendNotification also makes explicitly
+  // persistent (timeout 0) guidance resident. Transient notices must expire
+  // fully — with resident set, Plasma keeps every clip/recording notice until
+  // manually dismissed.
   if (authorizeAction)
     hints["resident"] = true;
   return hints;
@@ -88,6 +89,22 @@ void NotificationService::closeAuthorizePrompt(const QString &game) {
   }
   closeNotificationById(m_lastNotificationId);
   m_lastNotificationId = 0;
+}
+
+void NotificationService::showCaptureSelectionHint(const QString &game) {
+  // Replace the authorize prompt in place, without carrying its actions over.
+  // Escape markup: notification bodies may be rendered as rich text.
+  showNotification(QStringLiteral("Select capture: ") + game,
+                   QStringLiteral("Select the “%1” game window in the screen-sharing dialog, then confirm sharing.")
+                       .arg(game.toHtmlEscaped()),
+                   QStringLiteral("trophy"), 0, 2);
+}
+
+void NotificationService::closeCaptureSelectionHint() {
+  // Also handles completion before the asynchronous Notify reply arrives.
+  // Never withdraw an error/recording notice that has replaced the hint.
+  if (m_lastTitle.startsWith(QStringLiteral("Select capture: ")))
+    closeLastNotification();
 }
 
 void NotificationService::closeNotificationById(uint id) {
@@ -239,7 +256,9 @@ void NotificationService::sendNotification(const QString &title,
 
   QString appIcon = resolveNotificationIcon(icon, notificationIconPath());
 
-  const QVariantMap hints = notificationHints(urgency, authorizeAction);
+  QVariantMap hints = notificationHints(urgency, authorizeAction);
+  if (timeout == 0)
+    hints["resident"] = true;
 
   QStringList actions;
   // Action buttons belong only to the authorize prompt — they used to
@@ -256,13 +275,13 @@ void NotificationService::sendNotification(const QString &title,
     actions << "authorize" << "Authorize Capture" << "block" << "Block"
             << "default" << "";
   }
-  // A single caller-supplied button (e.g. the update notice's
-  // "View Release"). Never combined with the authorize prompt —
-  // those two flows are the only action-bearing notices, and
-  // they never coexist.
+  // A caller-supplied button (e.g. "View Release" or "Open Trophy").
+  // Attention also supports body clicks, without capture authorization.
   if (!authorizeAction && !actionId.isEmpty() &&
       !actionLabel.isEmpty()) {
     actions << actionId << actionLabel;
+    if (actionId == QStringLiteral("show-attention"))
+      actions << "default" << "";
   }
 
   // Fire-and-forget: a blocking Notify call here would freeze the GUI thread
@@ -303,8 +322,8 @@ void NotificationService::sendNotification(const QString &title,
               }
             }
             // Self-dismiss transient notices per id: timeout 0 means "stay
-            // until acted on" (the authorize prompt). Withdrawing an
-            // already-replaced id is a daemon-side no-op, so each notice
+            // until acted on" (authorize prompt / capture guidance). Withdrawing
+            // an already-replaced id is a daemon-side no-op, so each notice
             // owns its own countdown instead of sharing one timer. The
             // countdown also marks the end of the on-screen window that
             // queued notices wait for.
@@ -392,6 +411,34 @@ QString NotificationService::formatDuration(qint64 ms) {
 
 void NotificationService::showError(const QString &message) {
   showNotification("Recording Error", message, "dialog-error", 5000, 2);
+}
+
+void NotificationService::showAttention(const QString &reason) {
+  if (!m_enabled)
+    return;
+  if (!m_attentionService) {
+    m_attentionService = new NotificationService(this);
+    connect(m_attentionService, &NotificationService::notificationClicked,
+            this, [this](const QString &action) {
+              if (action == QStringLiteral("show-attention") ||
+                  action == QStringLiteral("default")) {
+                clearAttention();
+                emit attentionRequested();
+              }
+            });
+  }
+  m_attentionService->showNotification(
+      tr("Trophy needs your attention"), reason.toHtmlEscaped(),
+      QStringLiteral("trophy"), 0, 1, false,
+      QStringLiteral("show-attention"), tr("Open Trophy"));
+}
+
+void NotificationService::clearAttention() {
+  if (!m_attentionService)
+    return;
+  m_attentionService->closeLastNotification();
+  // A resolved problem followed by the same failure is a new notice.
+  m_attentionService->m_lastSentMs = -1;
 }
 
 } // namespace TrophyBackend

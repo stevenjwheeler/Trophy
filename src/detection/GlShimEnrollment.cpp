@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QSaveFile>
+#include <QRegularExpression>
 
 #include "detection/ShippedLibDirs.h"
 #include "detection/PersistentReporterLib.h"
@@ -97,10 +98,37 @@ bool GlShimEnrollment::refreshEnrolledBundle() {
 bool GlShimEnrollment::setEnrolled(bool enrolled) {
   const QString path = confFilePath();
   if (!enrolled) {
-    // Opt-out: drop our conf file entirely (it only ever holds LD_PRELOAD).
     if (!QFile::exists(path))
       return true;
-    return QFile::remove(path);
+    QFile existing(path);
+    if (!existing.open(QIODevice::ReadOnly | QIODevice::Text))
+      return false;
+    const QString source = libraryPath();
+    QStringList kept;
+    for (const QString &line : QString::fromUtf8(existing.readAll()).split('\n')) {
+      const QString trimmed = line.trimmed();
+      if (trimmed.startsWith("LD_PRELOAD=")) {
+        QStringList foreign;
+        for (const QString &entry : trimmed.mid(11).split(
+                 QRegularExpression("[:\\s]+"), Qt::SkipEmptyParts)) {
+          if (entry != source && QFileInfo(entry).fileName() != kLibName &&
+              !PersistentReporterLib::isOwned(entry, "libtrophy_gl_shim"))
+            foreign.append(entry);
+        }
+        if (!foreign.isEmpty())
+          kept.append("LD_PRELOAD=" + foreign.join(':'));
+      } else if (!trimmed.isEmpty() && !trimmed.startsWith('#')) {
+        kept.append(line);
+      }
+    }
+    existing.close();
+    if (kept.isEmpty())
+      return QFile::remove(path);
+    QSaveFile output(path);
+    if (!output.open(QIODevice::WriteOnly | QIODevice::Text))
+      return false;
+    const QByteArray content = (kept.join('\n') + '\n').toUtf8();
+    return output.write(content) == content.size() && output.commit();
   }
 
   const QString source = libraryPath();
@@ -109,6 +137,11 @@ bool GlShimEnrollment::setEnrolled(bool enrolled) {
           ? QString()
           : PersistentReporterLib::install(source, "libtrophy_gl_shim");
   if (lib.isEmpty())
+    return false;
+  // LD_PRELOAD tokenizes spaces/colons regardless of shell quoting, and
+  // environment.d expands variables. Fail closed rather than emitting a
+  // path that could load different libraries from the requested one.
+  if (lib.contains(QRegularExpression("[\\s:$\\\"'\\\\]")))
     return false;
 
   // Merge with any foreign LD_PRELOAD already present in our file.

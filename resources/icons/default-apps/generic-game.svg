@@ -1,0 +1,7 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later; original Trophy artwork -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect x="3" y="3" width="42" height="42" rx="12" fill="#536581"/>
+  <path d="M16 17h16c4 0 6 3 7 8l1 6c1 5-4 7-7 3l-4-4H19l-4 4c-3 4-8 2-7-3l1-6c1-5 3-8 7-8Z" fill="#e5eaf3"/>
+  <path d="M17 21v8m-4-4h8" stroke="#536581" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="31" cy="23" r="2" fill="#536581"/><circle cx="35" cy="27" r="2" fill="#536581"/>
+</svg>

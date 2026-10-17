@@ -43,6 +43,13 @@ extern "C" {
 
 namespace TrophyBackend {
 
+static QString portalRequestPath(const QString &token) {
+  QString sender = QDBusConnection::sessionBus().baseService();
+  sender.remove(':');
+  sender.replace('.', '_');
+  return QStringLiteral("/org/freedesktop/portal/desktop/request/") + sender + '/' + token;
+}
+
 struct WaylandStream {
   uint32_t nodeId;
   QVariantMap options;
@@ -418,6 +425,11 @@ void WaylandPortalCapture::clearStartGuard() {
 void WaylandPortalCapture::onStartWatchdogTimeout() {
   if (!m_starting || m_attemptGeneration != m_startGeneration)
     return;
+  qWarning() << "Wayland Portal: startup timeout at stage"
+             << (m_pendingStage == PendingStage::Create ? "CreateSession" :
+                 m_pendingStage == PendingStage::Select ? "SelectSources" :
+                 m_pendingStage == PendingStage::Start ? "Start" : "PipeWire setup")
+             << "request:" << m_pendingRequestPath;
   // No terminal portal/stream signal arrived in time: drop the pending
   // attempt so a later start is not blocked. Late portal responses are
   // ignored via the generation checks in the response handlers.
@@ -513,6 +525,11 @@ void WaylandPortalCapture::requestScreenShare() {
   options["session_handle_token"] = token;
   options["handle_token"] = token;
 
+  // Response can precede the method reply. Publish the spec-defined path
+  // before dispatch, not in the pending-call watcher.
+  m_pendingRequestPath = portalRequestPath(token);
+  m_pendingStage = PendingStage::Create;
+
   // Async: the method reply arrives in onCreateSessionCallFinished on the
   // GUI thread. m_starting + the watchdog already bound the wait; late
   // replies after watchdog/stopCapture are ignored there via m_starting.
@@ -534,7 +551,8 @@ void WaylandPortalCapture::onCreateSessionCallFinished(
     QDBusPendingCallWatcher *watcher, quint64 generation) {
   watcher->deleteLater();
 
-  if (!m_starting || generation != m_startGeneration)
+  if (!m_starting || generation != m_startGeneration ||
+      m_pendingStage != PendingStage::Create)
     return; // Stale reply after timeout/cancel; session already dropped.
 
   const QDBusMessage msg = watcher->reply();
@@ -555,9 +573,9 @@ void WaylandPortalCapture::onCreateSessionCallFinished(
     return;
   }
 
-  // No per-reply connect: the permanent subscription from
-  // ensureResponseSubscription() already covers this path. Just publish
-  // the dispatch key the Response slot matches on.
+  // The predicted path was armed before dispatch. Honor a different path
+  // returned by older portals, provided an early Response hasn't already
+  // advanced the stage (checked above).
   m_pendingRequestPath = requestPath.path();
   m_pendingStage = PendingStage::Create;
 }
@@ -600,6 +618,8 @@ void WaylandPortalCapture::requestSelectSources() {
   QVariantMap options;
   options["handle_token"] = token;
   options["multiple"] = false;
+  m_pendingRequestPath = portalRequestPath(token);
+  m_pendingStage = PendingStage::Select;
   // Game approvals list windows only (shorter picker); manual recordings
   // keep monitors as well. 1 = Monitor, 2 = Window.
   const unsigned int sourceTypes =
@@ -639,7 +659,8 @@ void WaylandPortalCapture::onSelectSourcesCallFinished(
     QDBusPendingCallWatcher *watcher, quint64 generation) {
   watcher->deleteLater();
 
-  if (!m_starting || generation != m_startGeneration)
+  if (!m_starting || generation != m_startGeneration ||
+      m_pendingStage != PendingStage::Select)
     return; // Stale reply after timeout/cancel; session already dropped.
 
   const QDBusMessage msg = watcher->reply();
@@ -661,8 +682,7 @@ void WaylandPortalCapture::onSelectSourcesCallFinished(
     return;
   }
 
-  // Permanent subscription already covers this path (see
-  // ensureResponseSubscription); publish the dispatch key only.
+  // Retain compatibility with portals returning a non-predicted path.
   m_pendingRequestPath = requestPath.path();
   m_pendingStage = PendingStage::Select;
 }
@@ -704,6 +724,9 @@ void WaylandPortalCapture::onSourcesSelected(unsigned int response,
   QVariantMap options;
   options["handle_token"] = token;
 
+  m_pendingRequestPath = portalRequestPath(token);
+  m_pendingStage = PendingStage::Start;
+
   // Async: the method reply arrives in onStartCallFinished on the GUI
   // thread (same m_starting staleness rule as the earlier legs).
   auto call = QDBusMessage::createMethodCall(
@@ -723,7 +746,8 @@ void WaylandPortalCapture::onStartCallFinished(
     QDBusPendingCallWatcher *watcher, quint64 generation) {
   watcher->deleteLater();
 
-  if (!m_starting || generation != m_startGeneration)
+  if (!m_starting || generation != m_startGeneration ||
+      m_pendingStage != PendingStage::Start)
     return; // Stale reply after timeout/cancel; session already dropped.
 
   const QDBusMessage msg = watcher->reply();
@@ -745,8 +769,7 @@ void WaylandPortalCapture::onStartCallFinished(
     return;
   }
 
-  // Permanent subscription already covers this path (see
-  // ensureResponseSubscription); publish the dispatch key only.
+  // Retain compatibility with portals returning a non-predicted path.
   m_pendingRequestPath = requestPath.path();
   m_pendingStage = PendingStage::Start;
 }

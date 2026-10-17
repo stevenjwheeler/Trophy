@@ -46,8 +46,10 @@ std::shared_future<void> KWinBackend::enqueueOperation(std::function<void()> ope
 }
 
 bool KWinBackend::hasPendingWork() const {
-  return m_setupFuture.valid() &&
-      m_setupFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+  return (m_setupFuture.valid() &&
+          m_setupFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) ||
+         (m_statusFuture.valid() &&
+          m_statusFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
 }
 
 std::shared_future<void> KWinBackend::removeInstalledScriptAsync() {
@@ -59,14 +61,56 @@ KWinBackend::KWinBackend(QObject *parent) : QObject(parent) {}
 KWinBackend::~KWinBackend() {
   stop();
   if (m_setupFuture.valid()) m_setupFuture.wait();
+  if (m_statusFuture.valid()) m_statusFuture.wait();
 }
 
-QList<WindowInfo> KWinBackend::parseSnapshot(const QByteArray &json) {
+void KWinBackend::refreshStatus() {
+  if (!m_active) return;
+  if (m_setupTimer && m_setupTimer->isActive()) return;
+  // Do not read midway through the install/enable sequence, or stack queries
+  // when kreadconfig is slow. Workers return data only; publication is owned
+  // by this backend and a stop/restart supersedes the result.
+  if (m_setupFuture.valid() &&
+      m_setupFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    return;
+  if (m_statusFuture.valid()) {
+    if (m_statusFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+      return;
+    bool enabled = false;
+    try { enabled = m_statusFuture.get(); }
+    catch (...) { return; }
+    if (m_statusGeneration != m_setupGeneration) return;
+    const int previous = s_enabledCache.exchange(enabled ? 1 : 0);
+    if (previous != (enabled ? 1 : 0)) {
+      if (!enabled) {
+        // Old snapshots must not keep the picker/restore gate looking live,
+        // nor prove health after an external disable/re-enable cycle.
+        m_hasSnapshot = false;
+        QMutexLocker lock(&m_mutex);
+        m_windows.clear();
+      }
+      emit windowsUpdated();
+    }
+    return;
+  }
+  m_statusGeneration = m_setupGeneration;
+  try {
+    m_statusFuture = std::async(std::launch::async, [] {
+      return queryScriptEnabledLive();
+    });
+  } catch (const std::exception &error) {
+    qWarning() << "KWin backend: cannot refresh script status:" << error.what();
+  }
+}
+
+QList<WindowInfo> KWinBackend::parseSnapshot(const QByteArray &json, bool *valid) {
+  if (valid) *valid = false;
   QList<WindowInfo> out;
   QJsonParseError err;
   const QJsonDocument doc = QJsonDocument::fromJson(json, &err);
   if (err.error != QJsonParseError::NoError || !doc.isArray())
     return out;
+  if (valid) *valid = true;
 
   for (const QJsonValue &v : doc.array()) {
     if (!v.isObject())
@@ -94,8 +138,11 @@ void KWinBackend::ReportWindows(const QString &json) {
                << json.size() << "chars)";
     return;
   }
-  const QList<WindowInfo> parsed =
-      parseSnapshot(json.toUtf8());
+  bool valid = false;
+  const QList<WindowInfo> parsed = parseSnapshot(json.toUtf8(), &valid);
+  if (!valid)
+    return;
+  m_hasSnapshot = true;
   {
     QMutexLocker lg(&m_mutex);
     m_windows = parsed;
@@ -360,7 +407,7 @@ bool KWinBackend::ensureScriptEnabled(bool *changed) {
   return true;
 }
 
-bool KWinBackend::start() {
+bool KWinBackend::start(bool allowRepair) {
   if (m_active)
     return true;
 
@@ -394,11 +441,11 @@ bool KWinBackend::start() {
   // only static helpers that touch the filesystem and spawn tools — never
   // member state. The owned future settles before destruction, and the
   // owner-thread timer generation-checks delivery without worker QObject use.
-  queueSetup();
+  queueSetup(allowRepair);
   return true;
 }
 
-void KWinBackend::queueSetup() {
+void KWinBackend::queueSetup(bool allowRepair) {
   quint64 generation = 0;
   {
     QMutexLocker lg(&m_mutex);
@@ -406,11 +453,24 @@ void KWinBackend::queueSetup() {
     generation = m_setupGeneration;
   }
   auto result = std::make_shared<std::pair<bool, bool>>(false, false);
-  m_setupFuture = enqueueOperation([result]() {
+  m_setupFuture = enqueueOperation([result, allowRepair]() {
+    if (!allowRepair) {
+      const bool installed = isScriptInstalled();
+      const bool enabled = queryScriptEnabledLive();
+      s_enabledCache.store(enabled ? 1 : 0, std::memory_order_release);
+      if (!installed || !enabled) {
+        // Existing setups need an explicit Repair when removed/disabled
+        // externally. Do not silently undo that change at the next launch.
+        *result = {installed, enabled};
+        return;
+      }
+    }
     bool scriptChanged = false;
     const bool scriptOk = KWinBackend::installScript(&scriptChanged);
     bool enableChanged = false;
-    const bool enabledOk = KWinBackend::ensureScriptEnabled(&enableChanged);
+    const bool enabledOk = allowRepair
+                               ? KWinBackend::ensureScriptEnabled(&enableChanged)
+                               : KWinBackend::queryScriptEnabledLive();
     s_enabledCache.store(enabledOk ? 1 : 0, std::memory_order_release);
     if (scriptOk && enabledOk) {
       if (s_restartOverride) s_restartOverride();
@@ -449,6 +509,7 @@ void KWinBackend::queueSetup() {
 }
 
 void KWinBackend::stop() {
+  m_hasSnapshot = false;
   if (!m_active && !m_dbusRegistered)
     return;
   {

@@ -174,6 +174,30 @@ TEST_F(GlShimEnrollmentTest, ForeignPreloadEntryPreserved) {
   EXPECT_TRUE(GlShimEnrollment::isEnrolled());
 }
 
+TEST_F(GlShimEnrollmentTest, DisablePreservesForeignPreloadsAndSettings) {
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  QFile conf(GlShimEnrollment::confFilePath());
+  ASSERT_TRUE(conf.open(QIODevice::WriteOnly | QIODevice::Text));
+  conf.write("LD_PRELOAD=" + fakeLib.toUtf8() + ":/foreign.so /another.so\nOTHER=value\n");
+  conf.close();
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(false));
+  EXPECT_FALSE(GlShimEnrollment::isEnrolled());
+  ASSERT_TRUE(conf.open(QIODevice::ReadOnly));
+  EXPECT_EQ(conf.readAll(), "LD_PRELOAD=/foreign.so:/another.so\nOTHER=value\n");
+}
+
+TEST_F(GlShimEnrollmentTest, UnsafeLoaderPathIsNotWritten) {
+  for (const QString &name : {QString("space shim.so"), QString("colon:shim.so"),
+                             QString("dollar$shim.so"), QString("quote\"shim.so"),
+                             QString("back\\slash.so")}) {
+    const QString path = libDir.path() + '/' + name;
+    ASSERT_TRUE(QFile::copy(fakeLib, path));
+    qputenv("TROPHY_GL_SHIM_LIB", path.toUtf8());
+    EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+    EXPECT_FALSE(QFile::exists(GlShimEnrollment::confFilePath()));
+  }
+}
+
 TEST_F(GlShimEnrollmentTest, FallsBackToCustomPrefixLibDir) {
   // No override: the lookup must find <prefix>/lib/trophy next to a
   // <prefix>/bin executable, which is where --prefix ~/.local installs it.

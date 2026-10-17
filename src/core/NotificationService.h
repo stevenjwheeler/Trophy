@@ -55,12 +55,22 @@ public:
   Q_INVOKABLE void showRecordingStopped(const QString &summary);
   Q_INVOKABLE void showError(const QString &message);
 
+  // Separate ownership: attention must not replace capture authorization or
+  // lose its click action when a recording/clip notice arrives.
+  Q_INVOKABLE void showAttention(const QString &reason);
+  Q_INVOKABLE void clearAttention();
+
   /**
    * Withdraw the most recently sent notification, if any. Used for the
    * DVR authorize prompt, which would otherwise linger after the click
    * already armed the capture.
    */
   Q_INVOKABLE void closeLastNotification();
+
+  // Persistent, action-free replacement for the authorize prompt. Completion
+  // is title-scoped and safe even before the asynchronous Notify reply.
+  void showCaptureSelectionHint(const QString &game);
+  void closeCaptureSelectionHint();
 
   /**
    * Withdraw one notification by id (no-op when already gone). Used with a
@@ -100,6 +110,7 @@ public:
 signals:
   void enabledChanged();
   void notificationClicked(const QString &action);
+  void attentionRequested();
 
 private slots:
   void onActionInvoked(uint id, const QString &action);
@@ -117,6 +128,7 @@ public:
 
 private:
   bool m_enabled = true;
+  NotificationService *m_attentionService = nullptr; // QObject-owned child
   uint m_lastNotificationId = 0;
   quint64 m_notificationGeneration = 0;
   uint m_replaceTargetId = 0;

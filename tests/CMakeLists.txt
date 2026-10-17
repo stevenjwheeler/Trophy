@@ -4,6 +4,26 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_Theme test_Theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.h)
+target_include_directories(test_Theme PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_Theme PRIVATE
+    THEME_STYLES_DIR="${CMAKE_SOURCE_DIR}/qml/styles")
+target_link_libraries(test_Theme PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_Theme)
+
+add_executable(test_GameIconProvider test_GameIconProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameIconProvider.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+target_include_directories(test_GameIconProvider PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_GameIconProvider PRIVATE
+    GAMES_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/GameListPage.qml")
+target_link_libraries(test_GameIconProvider PRIVATE
+    GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_GameIconProvider)
+
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME AppImageSmokeTest.Harness
@@ -19,10 +39,68 @@ target_compile_definitions(test_PlayerProbe PRIVATE
 target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_PlayerProbe)
 
+# Background low-resolution preview generation and cache lifecycle.
+add_executable(test_PreviewCache test_PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.h)
+target_include_directories(test_PreviewCache PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWSCALE_INCLUDE_DIRS})
+target_link_libraries(test_PreviewCache PRIVATE GTest::GTest Qt6::Core Qt6::Concurrent Qt6::Test Qt6::Quick
+    ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+gtest_discover_tests(test_PreviewCache)
+
+# Headless engine load of the real library card (rename rebind keeps
+# thumbnail). Views never polish offscreen here, so this covers the card
+# bindings only; the model side is covered in test_RecordingLibrary.
+add_executable(test_RecordingCardBinding test_RecordingCardBinding.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.h
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.h
+    ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/Recording.h
+    ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ThumbnailGenerator.h
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.cpp
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.h
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.h
+)
+target_compile_definitions(test_RecordingCardBinding PRIVATE
+    CARD_QML_FILE="${CMAKE_SOURCE_DIR}/qml/views/RecordingCard.qml")
+target_include_directories(test_RecordingCardBinding PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+target_link_libraries(test_RecordingCardBinding PRIVATE
+    GTest::GTest
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Quick
+    Qt6::Qml
+    Qt6::Test
+    Qt6::Concurrent
+    ${AVFORMAT_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWSCALE_LIBRARIES}
+)
+gtest_discover_tests(test_RecordingCardBinding)
+qt_add_resources(test_RecordingCardBinding "recording_icon_test_resources"
+    PREFIX "/icons"
+    BASE "${CMAKE_SOURCE_DIR}/resources/icons"
+    FILES "${CMAKE_SOURCE_DIR}/resources/icons/manual-recording.svg"
+)
+
 # Optional script API fixture: Node is test tooling only, never a runtime
 # dependency for Trophy or for builds without it.
 find_program(TROPHY_NODE_EXECUTABLE node)
 if(TROPHY_NODE_EXECUTABLE)
+    add_test(NAME GnomeExtensionTest.ReadOnlySnapshots
+        COMMAND "${TROPHY_NODE_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/test_GnomeExtension.js"
+            "${CMAKE_SOURCE_DIR}/resources/gnome/extension.js")
     add_test(NAME KWinScriptTest.WindowEventsAndFiltering
         COMMAND "${TROPHY_NODE_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/test_KWinScript.js"
@@ -49,11 +127,18 @@ set(TEST_LINK_LIBS
     Qt6::Test
 )
 
-add_executable(test_ApplicationAudioProbe test_ApplicationAudioProbe.cpp)
+add_executable(test_ApplicationAudioProbe test_ApplicationAudioProbe.cpp
+    test_ApplicationMediaCache.cpp)
 target_include_directories(test_ApplicationAudioProbe PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ApplicationAudioProbe PRIVATE
     ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_ApplicationAudioProbe)
+
+add_executable(test_ApplicationAuthorizePrompt test_ApplicationAuthorizePrompt.cpp)
+target_include_directories(test_ApplicationAuthorizePrompt PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ApplicationAuthorizePrompt PRIVATE
+    ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ApplicationAuthorizePrompt)
 
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
@@ -109,6 +194,15 @@ add_executable(test_GlobalShortcuts test_GlobalShortcuts.cpp ${CMAKE_SOURCE_DIR}
 target_include_directories(test_GlobalShortcuts PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_GlobalShortcuts PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
 gtest_discover_tests(test_GlobalShortcuts)
+
+# --- BugReport (prefilled GitHub issue URL + log tail; no daemon needed) ---
+add_executable(test_BugReport test_BugReport.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/BugReport.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/BugReport.h
+)
+target_include_directories(test_BugReport PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_BugReport PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_BugReport)
 
 # --- ControlServer (isolated socket path; no GUI needed) ---
 add_executable(test_ControlServer test_ControlServer.cpp ${CMAKE_SOURCE_DIR}/src/core/ControlServer.cpp)
@@ -246,7 +340,7 @@ endif()
 
 add_executable(test_RecordingManager test_RecordingManager.cpp)
 target_include_directories(test_RecordingManager PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
+target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
 gtest_discover_tests(test_RecordingManager)
 
 add_executable(test_WaylandPortalCapture test_WaylandPortalCapture.cpp)
@@ -305,6 +399,17 @@ target_include_directories(test_PipeWireAudioSource PRIVATE ${TEST_INCLUDE_DIRS}
 target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 gtest_discover_tests(test_PipeWireAudioSource)
 
+if(Python3_Interpreter_FOUND)
+    add_executable(test_AppAudioGroup test_AppAudioGroup.cpp)
+    target_include_directories(test_AppAudioGroup PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_AppAudioGroup PRIVATE Trophy GTest::GTest GTest::Main Qt6::Test PkgConfig::PIPEWIRE)
+    add_test(NAME AppAudioGroupTest.PrivatePipeWire
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
+            $<TARGET_FILE:test_AppAudioGroup>)
+    set_tests_properties(AppAudioGroupTest.PrivatePipeWire PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 45)
+endif()
+
 add_executable(test_ReplayManager test_ReplayManager.cpp)
 target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
@@ -325,7 +430,9 @@ add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_S
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
 target_compile_definitions(test_GameDetectionService PRIVATE TROPHY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS} Qt6::Network Qt6::DBus)
-gtest_discover_tests(test_GameDetectionService)
+# Every case uses the frozen reporter endpoint. Parallel CTest processes
+# must not mistake another test's listener for the user's live app.
+gtest_discover_tests(test_GameDetectionService PROPERTIES RESOURCE_LOCK trophy_detection_socket)
 
 # --- test_EncoderTest (The New Matrix Test) ---
 add_executable(test_EncoderTest
@@ -568,6 +675,7 @@ endif()
 # --- WindowMonitor (KWin snapshot parsing + focus + WindowService delegation;
 # no compositor or D-Bus session needed) ---
 add_executable(test_WindowMonitor test_WindowMonitor.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
     ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h
     ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp
@@ -587,6 +695,21 @@ target_include_directories(test_WindowMonitor PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_WindowMonitor PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
 gtest_discover_tests(test_WindowMonitor)
 
+# Never let the fake Shell own a name on the user's real session bus.
+find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
+if(TROPHY_DBUS_RUN_SESSION)
+    add_executable(test_GnomeBackend test_GnomeBackend.cpp
+        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp
+        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h
+        ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
+        ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+    target_include_directories(test_GnomeBackend PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_GnomeBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
+    add_test(NAME GnomeBackendTest.PrivateBus
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- ${CMAKE_COMMAND} -E env
+            TROPHY_PRIVATE_GNOME_TEST=1 $<TARGET_FILE:test_GnomeBackend>)
+endif()
+
 # --- GlShimEnrollment (conf-file round-trip; hermetic via env overrides) ---
 add_executable(test_GlShimEnrollment test_GlShimEnrollment.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GlShimEnrollment.cpp
@@ -595,6 +718,10 @@ add_executable(test_GlShimEnrollment test_GlShimEnrollment.cpp
 target_include_directories(test_GlShimEnrollment PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_GlShimEnrollment PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_GlShimEnrollment)
+
+add_executable(test_GlShimReporter test_GlShimReporter.cpp)
+target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
+gtest_discover_tests(test_GlShimReporter)
 
 # --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
 add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp

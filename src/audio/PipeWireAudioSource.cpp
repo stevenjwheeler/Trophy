@@ -6,6 +6,7 @@
  */
 
 #include "PipeWireAudioSource.h"
+#include "AppAudioGroup.h"
 
 #include <QDebug>
 #include <QList>
@@ -54,6 +55,7 @@ struct PipeWireAudioSource::Private {
   struct pw_stream *stream = nullptr;
   struct spa_hook stream_listener = {};
   struct spa_hook core_listener = {};
+  std::unique_ptr<AppAudioGroup> appGroup;
   // Set on the loop thread, checked during start while the loop is locked.
   // Failed native resources remain owned until stop/reinitialize; never tear
   // them down from a listener (which would invert the lifecycle/loop locks).
@@ -113,6 +115,10 @@ struct PipeWireAudioSource::Private {
       qWarning() << "PipeWire stream error:" << (error ? error : "unknown");
       self->fail(QString::fromUtf8(error ? error : "PipeWire error"));
     }
+
+    if (self->appGroup && (state == PW_STREAM_STATE_PAUSED ||
+                           state == PW_STREAM_STATE_STREAMING))
+      self->appGroup->refresh();
 
     if (state == PW_STREAM_STATE_STREAMING) {
       // Read back the properties WirePlumber set on the stream after routing.
@@ -1196,7 +1202,12 @@ PipeWireAudioSource::Operations PipeWireAudioSource::realOperations() {
       [](pw_core *core, spa_hook *hook, const pw_core_events *events, void *data) {
         pw_core_add_listener(core, hook, events, data);
       },
-      pw_stream_dequeue_buffer, pw_stream_queue_buffer, pw_stream_get_properties};
+      pw_stream_dequeue_buffer, pw_stream_queue_buffer, pw_stream_get_properties,
+      [](PipeWireAudioSource *source) {
+        source->d->appGroup = std::make_unique<AppAudioGroup>(
+            source->d->core, source->d->stream, source->m_targetNodeId,
+            source->m_targetSerial);
+      }};
 }
 
 bool PipeWireAudioSource::initialize(const AudioConfig &config) {
@@ -1442,6 +1453,10 @@ bool PipeWireAudioSource::start() {
     return false;
   }
 
+  if (m_type == SourceType::ApplicationAudio && m_targetNodeId != PW_ID_ANY &&
+      m_operations.attachAppGroup)
+    m_operations.attachAppGroup(this);
+
   // Publish before releasing the loop: an immediately dispatched error must
   // not be overwritten by start setting capturing back to true.
   m_capturing = true;
@@ -1474,6 +1489,7 @@ bool PipeWireAudioSource::stopLocked() {
       d->loopLocked = true;
     }
 
+    d->appGroup.reset();
     if (d->stream) {
       m_operations.destroyStream(d->stream);
       d->stream = nullptr;

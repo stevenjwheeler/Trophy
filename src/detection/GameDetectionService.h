@@ -61,6 +61,10 @@ public:
   qint64 currentGamePid() const { return m_currentGamePid; }
   // Raw match key for the live game (reporter class / steam_app_<id>).
   QString currentGameKey() const { return m_currentGameKey; }
+  QString captureKeyForGame(const QString &name) const {
+    return name == m_currentGameName && !m_currentGameKey.isEmpty()
+               ? m_currentGameKey : name;
+  }
   QStringList recentGames() const { return m_recentGames; }
 
   /**
@@ -108,6 +112,9 @@ public:
   QStringList blacklist() const;
 
   QAbstractItemModel *gamesModel() const { return m_gamesFilter; }
+  // Presentation-only lookup for older recordings that carry a title, not
+  // an app identity. Ambiguous titles must not borrow another game's icon.
+  Q_INVOKABLE QUrl iconSourceForGame(const QString &name) const;
   QString gameFilterText() const;
   void setGameFilterText(const QString &text);
   // Portal restore-token games (silent capture). Pushed by Application
@@ -159,9 +166,25 @@ private slots:
 private:
   // Grant the test class access to private members (fixes your build errors)
   friend class GameDetectionServiceTest;
+  friend class ApplicationAuthorizePromptTest;
 
   // Internal identification helpers
   QString getSteamAppName(uint appId);
+  struct ReporterIdentity {
+    QString key;
+    QString name;
+    QString executable;
+    bool ignored = false;
+  };
+  // Pure resolver, also used by daemon-free fixtures. Inputs come only
+  // from the PID named in a START event, never a process scan.
+  static ReporterIdentity resolveReporterIdentity(const QString &reporter,
+                                                  const QString &exe,
+                                                  const QStringList &argv,
+                                                  uint steamAppId,
+                                                  const QString &winePrefix = {});
+  ReporterIdentity reporterIdentity(qint64 pid, const QString &reporter,
+                                    uint steamAppId);
 
   /**
    * @brief Decide whether a shim event is confident enough to report.
@@ -200,17 +223,13 @@ private:
   void updateCurrentGame(const QString &gameName, qint64 pid,
                          const QString &rawKey = QString());
   /**
-   * @brief Lowest still-running tracked PID (failover promotion target).
-   *
-   * QMap keys sort ascending, so the first live entry is the oldest game
-   * process. Each candidate costs one kill(pid, 0) probe — the same
-   * targeted check as the liveness watchdog, not a scan. Returns 0 when
-   * no tracked process is still alive.
+   * @brief Failover target, preferring focus, same identity, then visibility.
+   * PID order breaks ties. Only reported PIDs are probed; never a scan.
    */
   qint64 lowestLiveTrackedPid() const;
   /**
    * @brief Failover after the tracked PID went away (STOP / disconnect /
-   * liveness). Promotes the lowest still-running tracked PID; when none
+   * liveness). Promotes the best still-running tracked PID; when none
    * is alive, drops the proven-dead entries (so a later START for the
    * same name detects fresh) and goes idle.
    */
@@ -220,13 +239,13 @@ private:
   bool m_running = false;
   QString m_currentGameName;
   qint64 m_currentGamePid = 0;
-  // Raw match key for the live game (reporter class / steam_app_<id>);
-  // display names alone don't always re-match (Steam resolution).
+  // Stable match key: steam_app_<id>, executable path, Wine prefix +
+  // game path, or a legacy reporter key when executable info is absent.
   QString m_currentGameKey;
   QStringList m_recentGames;
   // Raw keys parallel to m_recentGames (same order, capped together).
   QStringList m_recentKeys;
-  // Display-name-keyed restore tokens (SettingsManager map keys).
+  // Restore-token keys (stable identities, or legacy display names).
   QSet<QString> m_tokenGames;
 
   QLocalServer *m_server;

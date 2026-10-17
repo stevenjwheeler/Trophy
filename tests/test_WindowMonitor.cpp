@@ -13,6 +13,7 @@
 #include <QJsonDocument>
 #include <QSet>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
@@ -60,6 +61,15 @@ protected:
   }
   static void collect(WaylandWindowMonitor &monitor) { monitor.collectRetired(); }
   static bool retired(WaylandWindowMonitor &monitor) { return !monitor.m_retired.empty(); }
+  static std::shared_ptr<std::atomic_bool> attachPendingGnomeSetup(WaylandWindowMonitor &monitor) {
+    monitor.m_monitoring = true;
+    monitor.m_gnome = std::make_shared<GnomeBackend>();
+    monitor.m_gnome->m_setupPending->store(true);
+    return monitor.m_gnome->m_setupPending;
+  }
+  static void beginHealthCheck(WaylandWindowMonitor &monitor) {
+    monitor.m_healthTimer.start(0);
+  }
   static std::shared_ptr<HyprlandBackend> attach(WaylandWindowMonitor &monitor) {
     monitor.m_hyprland = std::make_shared<HyprlandBackend>();
     const auto generation = monitor.m_generation;
@@ -70,6 +80,57 @@ protected:
     return monitor.m_hyprland;
   }
 };
+
+TEST_F(WindowMonitorWorkerTest, HealthCheckSettlesWithoutCallingTrackingWorking) {
+  WaylandWindowMonitor monitor;
+  EXPECT_FALSE(monitor.trackingReady());
+  EXPECT_FALSE(monitor.trackingChecking());
+  QSignalSpy changed(&monitor, &WaylandWindowMonitor::windowsChanged);
+  beginHealthCheck(monitor);
+  EXPECT_TRUE(monitor.trackingChecking());
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(monitor.trackingChecking());
+  EXPECT_FALSE(monitor.trackingReady());
+  EXPECT_GT(changed.count(), 0);
+}
+
+TEST_F(WindowMonitorWorkerTest, PendingGnomeSetupIsRetainedUntilSettled) {
+  WaylandWindowMonitor monitor;
+  const auto pending = attachPendingGnomeSetup(monitor);
+  monitor.stopMonitoring();
+  EXPECT_TRUE(retired(monitor));
+  collect(monitor);
+  EXPECT_TRUE(retired(monitor));
+  pending->store(false);
+  collect(monitor);
+  EXPECT_FALSE(retired(monitor));
+}
+
+TEST_F(WindowMonitorWorkerTest, StopClearsHealthCheckAndReadiness) {
+  WaylandWindowMonitor monitor;
+  arm(monitor, [] {});
+  // A running monitoring loop alone is not evidence of a working backend.
+  EXPECT_TRUE(monitor.isMonitoring());
+  EXPECT_FALSE(monitor.trackingReady());
+  beginHealthCheck(monitor);
+  monitor.stopMonitoring();
+  EXPECT_FALSE(monitor.trackingChecking());
+  EXPECT_FALSE(monitor.trackingReady());
+}
+
+TEST(KWinBackendHealthTest, ValidEmptySnapshotProvesReportingButMalformedDoesNot) {
+  KWinBackend backend;
+  EXPECT_FALSE(backend.hasSnapshot());
+  backend.ReportWindows("not json");
+  EXPECT_FALSE(backend.hasSnapshot());
+  backend.ReportWindows("{}");
+  EXPECT_FALSE(backend.hasSnapshot());
+  backend.ReportWindows("[]");
+  EXPECT_TRUE(backend.hasSnapshot());
+  EXPECT_TRUE(backend.windows().isEmpty());
+  backend.stop();
+  EXPECT_FALSE(backend.hasSnapshot());
+}
 
 TEST_F(WindowMonitorWorkerTest, GatedStopRestartKeepsGuiResponsiveAndRejectsOldDelivery) {
   WaylandWindowMonitor monitor;
@@ -114,14 +175,188 @@ TEST_F(WindowMonitorWorkerTest, GatedStopRestartKeepsGuiResponsiveAndRejectsOldD
 
 class KWinWorkerTest : public ::testing::Test {
 protected:
-  static void setup(KWinBackend &backend) { backend.m_active = true; backend.queueSetup(); }
+  static void setup(KWinBackend &backend, bool allowRepair = true) {
+    backend.m_active = true;
+    backend.queueSetup(allowRepair);
+  }
   static void mock(std::function<bool(const QString &, const QStringList &, QString *)> tool) {
     KWinBackend::s_toolOverride = std::move(tool);
     KWinBackend::s_restartOverride = [] {};
   }
   static void reset() { KWinBackend::s_toolOverride = {}; KWinBackend::s_restartOverride = {}; }
   static std::shared_future<void> fence() { return KWinBackend::enqueueOperation([] {}); }
+  static void onRestart(std::function<void()> callback) { KWinBackend::s_restartOverride = std::move(callback); }
+  static void armStatus(KWinBackend &backend) {
+    backend.m_active = true;
+    ++backend.m_setupGeneration;
+    KWinBackend::s_enabledCache.store(1);
+  }
+  static bool statusSettled(KWinBackend &backend) {
+    return backend.m_statusFuture.valid() &&
+           backend.m_statusFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  }
 };
+
+TEST_F(KWinWorkerTest, StartupDoesNotRepairMissingOrDisabledScriptWithoutConsent) {
+  const auto oldData = qgetenv("XDG_DATA_HOME");
+  const auto restore = qScopeGuard([&] { qputenv("XDG_DATA_HOME", oldData); reset(); });
+  for (const bool installed : {false, true}) {
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    qputenv("XDG_DATA_HOME", temp.path().toUtf8());
+    if (installed) {
+      QDir().mkpath(KWinBackend::installedScriptDir());
+      QFile metadata(KWinBackend::installedScriptDir() + "/metadata.json");
+      ASSERT_TRUE(metadata.open(QIODevice::WriteOnly));
+      metadata.write("existing");
+    }
+    std::atomic<int> writes{0}, restarts{0};
+    mock([&](const QString &tool, const QStringList &, QString *output) {
+      if (tool.startsWith("kreadconfig")) {
+        if (output) *output = installed ? "false" : "true";
+        return true;
+      }
+      ++writes;
+      return false;
+    });
+    onRestart([&] { ++restarts; });
+    {
+      KWinBackend backend;
+      setup(backend, false);
+      EXPECT_EQ(fence().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+      EXPECT_EQ(KWinBackend::isScriptInstalled(), installed);
+      EXPECT_EQ(KWinBackend::isScriptEnabled(), !installed);
+      EXPECT_FALSE(backend.hasSnapshot());
+      EXPECT_EQ(writes.load(), 0);
+      EXPECT_EQ(restarts.load(), 0);
+    }
+  }
+}
+
+TEST_F(KWinWorkerTest, ExplicitRepairStillInstallsAndEnablesAfterStartupRefusal) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const auto oldData = qgetenv("XDG_DATA_HOME");
+  const auto oldSource = qgetenv("TROPHY_KWIN_SCRIPT_DIR");
+  const auto oldPath = qgetenv("PATH");
+  const auto restore = qScopeGuard([&] {
+    qputenv("XDG_DATA_HOME", oldData);
+    qputenv("TROPHY_KWIN_SCRIPT_DIR", oldSource);
+    qputenv("PATH", oldPath);
+    reset();
+  });
+  qputenv("XDG_DATA_HOME", (temp.path() + "/data").toUtf8());
+  qputenv("TROPHY_KWIN_SCRIPT_DIR", (temp.path() + "/source").toUtf8());
+  qputenv("PATH", "");
+  QDir().mkpath(temp.path() + "/source/contents/code");
+  for (const auto &name : {QString("metadata.json"), QString("contents/code/main.js")}) {
+    QFile file(temp.path() + "/source/" + name);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    file.write("test helper");
+  }
+  std::atomic<int> writes{0}, restarts{0};
+  mock([&](const QString &tool, const QStringList &, QString *output) {
+    if (tool.startsWith("kreadconfig")) {
+      if (output) *output = "false";
+      return true;
+    }
+    if (tool.startsWith("kwriteconfig")) { ++writes; return true; }
+    return false;
+  });
+  onRestart([&] { ++restarts; });
+  KWinBackend backend;
+  setup(backend, false);
+  EXPECT_EQ(fence().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_FALSE(KWinBackend::isScriptInstalled());
+  EXPECT_EQ(writes.load(), 0);
+  backend.stop();
+  setup(backend, true);
+  EXPECT_EQ(fence().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_TRUE(KWinBackend::isScriptInstalled());
+  EXPECT_TRUE(KWinBackend::isScriptEnabled());
+  EXPECT_EQ(writes.load(), 1);
+  EXPECT_EQ(restarts.load(), 1);
+}
+
+TEST_F(KWinWorkerTest, ExternalDisableClearsCachedHealthAndWindowsWithoutGuiWait) {
+  std::promise<void> entered, release;
+  auto gate = release.get_future().share();
+  std::atomic<int> calls{0};
+  std::atomic<bool> enabled{false};
+  mock([&](const QString &, const QStringList &, QString *output) {
+    if (++calls == 1) entered.set_value();
+    gate.wait();
+    if (output) *output = enabled.load() ? "true" : "false";
+    return true;
+  });
+  {
+    KWinBackend backend;
+    armStatus(backend);
+    backend.ReportWindows(R"([{"id":7,"appId":"game","focused":true}])");
+    QSignalSpy changed(&backend, &KWinBackend::windowsUpdated);
+    backend.refreshStatus();
+    EXPECT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    for (int i = 0; i < 20; ++i) backend.refreshStatus();
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_TRUE(backend.hasSnapshot());
+    int heartbeat = 0;
+    QTimer::singleShot(0, &backend, [&] { ++heartbeat; });
+    QCoreApplication::processEvents();
+    EXPECT_EQ(heartbeat, 1);
+    release.set_value();
+    QElapsedTimer timeout;
+    timeout.start();
+    while (!statusSettled(backend) && timeout.elapsed() < 2000) QThread::yieldCurrentThread();
+    EXPECT_TRUE(statusSettled(backend));
+    backend.refreshStatus();
+    EXPECT_FALSE(KWinBackend::isScriptEnabled());
+    EXPECT_FALSE(backend.hasSnapshot());
+    EXPECT_TRUE(backend.windows().isEmpty());
+    EXPECT_EQ(changed.count(), 1);
+    enabled = true;
+    backend.refreshStatus();
+    timeout.restart();
+    while (!statusSettled(backend) && timeout.elapsed() < 2000) QThread::yieldCurrentThread();
+    EXPECT_TRUE(statusSettled(backend));
+    backend.refreshStatus();
+    EXPECT_TRUE(KWinBackend::isScriptEnabled());
+    EXPECT_FALSE(backend.hasSnapshot()); // needs a NEW report, not the old cache
+    EXPECT_EQ(changed.count(), 2);
+    backend.ReportWindows("[]");
+    EXPECT_TRUE(backend.hasSnapshot());
+  }
+  reset();
+}
+
+TEST_F(KWinWorkerTest, StatusReplyFromBeforeRestartCannotDisableReplacement) {
+  std::promise<void> entered, release;
+  auto gate = release.get_future().share();
+  std::atomic<bool> first{true};
+  mock([&](const QString &, const QStringList &, QString *output) {
+    if (first.exchange(false)) entered.set_value();
+    gate.wait();
+    if (output) *output = "false";
+    return true;
+  });
+  {
+    KWinBackend backend;
+    armStatus(backend);
+    backend.refreshStatus();
+    EXPECT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    backend.stop();
+    armStatus(backend);
+    backend.ReportWindows("[]");
+    release.set_value();
+    QElapsedTimer timeout;
+    timeout.start();
+    while (!statusSettled(backend) && timeout.elapsed() < 2000) QThread::yieldCurrentThread();
+    EXPECT_TRUE(statusSettled(backend));
+    backend.refreshStatus();
+    EXPECT_TRUE(KWinBackend::isScriptEnabled());
+    EXPECT_TRUE(backend.hasSnapshot());
+  }
+  reset();
+}
 
 TEST_F(KWinWorkerTest, SetupThenOffSettlesInOrderWithoutGuiWait) {
   QTemporaryDir temp;

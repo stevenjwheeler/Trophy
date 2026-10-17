@@ -1,191 +1,228 @@
-/*
- * Trophy - Game recording and clipping
- * Copyright (C) 2026
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "GnomeBackend.h"
 
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
+#include <QSaveFile>
+#include <QScopeGuard>
+#include <QStandardPaths>
+#include <mutex>
 
 namespace TrophyBackend {
+namespace {
+// Serializes explicit repairs across monitor stop/restart generations.
+std::mutex setupMutex;
+constexpr qsizetype maxSnapshotBytes = 1024 * 1024;
+}
 
 GnomeBackend::GnomeBackend(QObject *parent) : QObject(parent) {}
 
-bool GnomeBackend::start() {
-  if (m_active)
-    return true;
+GnomeBackend::~GnomeBackend() {
+  stop();
+  if (m_setup.valid()) m_setup.wait();
+}
+
+void GnomeBackend::stop() {
+  QMutexLocker lock(&m_mutex);
+  ++m_generation;
+  m_running = false;
+  m_active = false;
+  m_windows.clear();
+  m_lastSignature.clear();
+  m_status.clear();
+}
+
+QString GnomeBackend::extensionDirectory() {
+  return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+         "/gnome-shell/extensions/" + kUuid;
+}
+
+bool GnomeBackend::isInstalled() {
+  const QDir dir(extensionDirectory());
+  return QFileInfo::exists(dir.filePath("metadata.json")) &&
+         QFileInfo::exists(dir.filePath("extension.js"));
+}
+
+QString GnomeBackend::installHelper(const QString &directory) {
+  std::lock_guard lock(setupMutex);
+  const QFileInfo destination(directory);
+  if (destination.isSymLink() || (destination.exists() && !destination.isDir()))
+    return tr("Cannot install the GNOME helper: destination is not a regular directory.");
+  // Never overwrite an unrelated extension or follow a replaced file symlink.
+  if (destination.exists() && !QDir(directory).isEmpty()) {
+    QFile metadata(QDir(directory).filePath("metadata.json"));
+    if (!metadata.open(QIODevice::ReadOnly) ||
+        QJsonDocument::fromJson(metadata.readAll()).object().value("uuid").toString() != kUuid)
+      return tr("Cannot install the GNOME helper: an unrecognized extension occupies its directory.");
+  }
+  if (!QDir().mkpath(directory))
+    return tr("Cannot create the GNOME helper directory.");
+  // Metadata last: a new incomplete directory is not advertised to the shell.
+  for (const QString &name : {QStringLiteral("extension.js"), QStringLiteral("metadata.json")}) {
+    QFile source(":/gnome/" + name);
+    const QString path = QDir(directory).filePath(name);
+    if (QFileInfo(path).isSymLink() || !source.open(QIODevice::ReadOnly))
+      return tr("Cannot read or safely install the bundled GNOME helper.");
+    const QByteArray bytes = source.readAll();
+    QSaveFile output(path);
+    if (bytes.isEmpty() || !output.open(QIODevice::WriteOnly) ||
+        output.write(bytes) != bytes.size() || !output.commit())
+      return tr("Cannot write the GNOME helper files.");
+  }
+
+  const QString exe = QStandardPaths::findExecutable("gnome-extensions");
+  if (exe.isEmpty())
+    return tr("Helper installed. Log out and back in, then enable Trophy Window Helper in GNOME Extensions.");
+  QProcess process;
+  process.start(exe, {"enable", kUuid});
+  if (!process.waitForFinished(3000)) {
+    process.kill();
+    process.waitForFinished(1000);
+    return tr("Helper installed, but enabling timed out. Check GNOME Extensions; logout/login may be required.");
+  }
+  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    return tr("Helper installed. Log out and back in, then enable Trophy Window Helper in GNOME Extensions. Check that your GNOME version is supported.");
+  return tr("Helper enabled. Waiting for GNOME to report windows. If it does not, check GNOME Extensions for errors or log out and back in.");
+}
+
+bool GnomeBackend::start(bool repair) {
+  if (m_running.exchange(true)) return true;
+  ++m_generation;
   if (!QDBusConnection::sessionBus().isConnected()) {
-    qWarning() << "GNOME backend: no D-Bus session bus";
+    m_running = false;
     return false;
   }
-  // Activation is lazy: the first refresh() probes Eval. Mark the backend
-  // present so the monitor ticks it; refresh() flips m_active on success.
-  qInfo() << "GNOME window tracking armed (Shell.Eval polling)";
+  if (repair) {
+    const QString directory = extensionDirectory();
+    m_setupPending->store(true);
+    try {
+      m_setup = std::async(std::launch::async, [directory, pending = m_setupPending] {
+        const auto settled = qScopeGuard([&] { pending->store(false); });
+        return installHelper(directory);
+      });
+    } catch (const std::exception &e) {
+      m_setupPending->store(false);
+      qWarning() << "Cannot start GNOME helper setup:" << e.what();
+      QMutexLocker lock(&m_mutex);
+      m_status = tr("Cannot start GNOME helper installation. Please retry Repair.");
+    }
+  }
+  qInfo() << "GNOME window tracking armed (Trophy Shell extension)";
   return true;
 }
 
-QString GnomeBackend::snapshotScript() {
-  // Runs inside GNOME Shell. Guards everywhere: API shapes differ across
-  // Shell versions, and a throwing script would kill our whole snapshot.
-  return QStringLiteral(
-      "(() => {"
-      "  try {"
-      "    var out = [];"
-      "    var focus = null;"
-      "    try { focus = global.display.focus_window; } catch (e) {}"
-      "    var actors = [];"
-      "    try { actors = global.get_window_actors(); } catch (e) {}"
-      "    for (var i = 0; i < actors.length; i++) {"
-      "      try {"
-      "        var w = actors[i].get_meta_window();"
-      "        if (!w) continue;"
-      "        var skip = false;"
-      "        try { skip = w.is_skip_taskbar(); } catch (e) {}"
-      "        var focused = false;"
-      "        try { focused = (w === focus) || w.has_focus(); } catch (e) {}"
-      "        if (skip && !focused) continue;"
-      "        var id = 0;"
-      "        try { id = w.get_stable_sequence(); } catch (e) {}"
-      "        if (!id) { try { id = w.get_id(); } catch (e) {} }"
-      "        var cls = '';"
-      "        try { cls = w.get_wm_class() || ''; } catch (e) {}"
-      "        var title = '';"
-      "        try { title = w.get_title() || ''; } catch (e) {}"
-      "        var pid = 0;"
-      "        try { pid = w.get_pid() || 0; } catch (e) {}"
-      "        var fs = false;"
-      "        try { fs = !!(w.is_fullscreen ? w.is_fullscreen() : w.fullscreen); } catch (e) {}"
-      "        var gx = 0, gy = 0, gw = 0, gh = 0, ow = 0, oh = 0;"
-      "        try {"
-      "          var r = w.get_frame_rect();"
-      "          if (r) { gx = r.x || 0; gy = r.y || 0;"
-      "                   gw = r.width || 0; gh = r.height || 0; }"
-      "          var geo = global.display.get_monitor_geometry(w.get_monitor());"
-      "          if (geo) { ow = geo.width || 0; oh = geo.height || 0; }"
-      "        } catch (e) { /* geometry optional */ }"
-      "        if (!id && !cls && !title) continue;"
-      "        out.push({id: id, appId: String(cls), title: String(title),"
-      "                  pid: pid, fullscreen: fs, focused: focused,"
-      "                  x: gx, y: gy, width: gw, height: gh,"
-      "                  outputWidth: ow, outputHeight: oh});"
-      "      } catch (e) { /* per-window failure: skip it */ }"
-      "    }"
-      "    return JSON.stringify(out);"
-      "  } catch (e) { return 'null'; }"
-      "})()");
-}
-
-QList<WindowInfo> GnomeBackend::parseEvalResult(const QString &result) {
+QList<WindowInfo> GnomeBackend::parseSnapshot(const QString &result) {
   QList<WindowInfo> out;
-  const QString trimmed = result.trimmed();
-  if (trimmed.isEmpty() || trimmed == "null")
-    return out;
-
-  // GNOME may return the string with surrounding quotes when the script
-  // result passes through an extra stringification layer. The outer value
-  // is JSON, so parse it as a JSON string (handles all escapes: \", \\,
-  // \n, \uXXXX — a hand-rolled unescape gets the order wrong and misses
-  // the latter two).
-  QString json = trimmed;
+  if (result.size() > maxSnapshotBytes) return out;
+  QString json = result.trimmed();
+  // Retain compatibility with old, double-stringified parser fixtures.
   if (json.startsWith('"')) {
-    // QJsonDocument only holds arrays/objects, so parse the outer
-    // string layer via a single-element wrapper.
-    QJsonParseError strErr;
-    const QJsonDocument strDoc =
-        QJsonDocument::fromJson(("[" + json + "]").toUtf8(), &strErr);
-    if (strErr.error == QJsonParseError::NoError && strDoc.isArray() &&
-        !strDoc.array().isEmpty() && strDoc.array().first().isString())
-      json = strDoc.array().first().toString();
+    const auto wrapper = QJsonDocument::fromJson(("[" + json + "]").toUtf8());
+    if (wrapper.isArray() && wrapper.array().size() == 1 && wrapper.array().first().isString())
+      json = wrapper.array().first().toString();
   }
-
-  QJsonParseError err;
-  const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8(), &err);
-  if (err.error != QJsonParseError::NoError || !doc.isArray())
-    return out;
-
-  for (const QJsonValue &v : doc.array()) {
-    if (!v.isObject())
-      continue;
-    const WindowInfo w = WindowInfo::fromJson(v.toObject());
-    if (w.id == 0 && w.appId.isEmpty() && w.title.isEmpty())
-      continue;
-    out.append(w);
+  const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+  if (!doc.isArray()) return out;
+  for (const auto &value : doc.array()) {
+    if (!value.isObject()) continue;
+    const WindowInfo w = WindowInfo::fromJson(value.toObject());
+    if (w.id || !w.appId.isEmpty() || !w.title.isEmpty()) out.append(w);
   }
   return out;
 }
 
 QList<WindowInfo> GnomeBackend::windows() const {
-  QMutexLocker lg(&m_mutex);
+  QMutexLocker lock(&m_mutex);
   return m_windows;
 }
 
+QString GnomeBackend::status() const {
+  QMutexLocker lock(&m_mutex);
+  return m_status;
+}
+
 QString GnomeBackend::signatureFor(const QList<WindowInfo> &windows) {
-  QString sig;
-  sig.reserve(windows.size() * 48);
-  for (const WindowInfo &w : windows) {
-    sig += QString::number(w.id);
-    sig += '|';
-    sig += w.appId;
-    sig += '|';
-    sig += w.title;
-    sig += '|';
-    sig += QString::number(w.pid);
-    sig += w.fullscreen ? "|F" : "|f";
-    sig += w.focused ? "|A|" : "|a|";
-    // Geometry matters too: a borderless game growing to >=90% output
-    // coverage (no focus/fullscreen change) must still emit so pending
-    // candidates confirm via the coverage rule.
-    sig += '|';
-    sig += QString::number(w.width);
-    sig += 'x';
-    sig += QString::number(w.height);
-    sig += '@';
-    sig += QString::number(w.outputWidth);
-    sig += 'x';
-    sig += QString::number(w.outputHeight);
-    sig += ';';
+  if (windows.isEmpty()) return {};
+  // Use structured serialization: titles/app ids can themselves contain separators.
+  QJsonArray rows;
+  for (const auto &w : windows)
+    rows.append(QJsonArray{QString::number(w.id), w.appId, w.title,
+        QString::number(w.pid), w.fullscreen, w.focused, w.minimized,
+        w.x, w.y, w.width, w.height, w.outputWidth, w.outputHeight});
+  return QString::fromUtf8(QJsonDocument(rows).toJson(QJsonDocument::Compact));
+}
+
+void GnomeBackend::unavailable(const QString &reason, quint64 generation) {
+  bool changed;
+  {
+    QMutexLocker lock(&m_mutex);
+    if (!m_running || generation != m_generation) return;
+    changed = m_active.exchange(false) || !m_windows.isEmpty() || m_status != reason;
+    m_windows.clear();
+    m_lastSignature.clear();
+    m_status = reason;
   }
-  return sig;
+  if (changed) emit windowsUpdated();
 }
 
 void GnomeBackend::refresh() {
-  // Eval(script) -> (bool success, QString result).
-  auto request = QDBusMessage::createMethodCall(kService, kPath, kInterface, "Eval");
-  request.setArguments({snapshotScript()});
-  const QDBusMessage reply = QDBusConnection::sessionBus().call(request, QDBus::Block, 2000);
-  m_probed = true;
-  if (reply.type() == QDBusMessage::ErrorMessage)
-    return;
-
-  // Reply packs (success, result) as two arguments.
-  const QList<QVariant> args = reply.arguments();
-  if (args.size() < 2 || !args.at(0).toBool())
-    return;
-
-  const QList<WindowInfo> parsed = parseEvalResult(args.at(1).toString());
-  // Snapshots rarely change between ticks; skip the emit (and the QML
-  // refresh churn behind it) when nothing did. The 1s cadence itself
-  // costs one local D-Bus round-trip — negligible next to a recording.
-  const QString sig = signatureFor(parsed);
-  {
-    QMutexLocker lg(&m_mutex);
-    // A successful poll means the backend is alive even when the
-    // snapshot is unchanged (and empty-first snapshots must not read
-    // inactive): mark active before the dedup early-return.
-    m_active = true;
-    if (sig == m_lastSignature)
-      return;
-    m_lastSignature = sig;
-    m_windows = parsed;
+  if (!m_running) return;
+  const quint64 generation = m_generation.load();
+  if (m_setup.valid()) {
+    const QString result = m_setup.get();
+    if (!m_running || generation != m_generation) return;
+    {
+      QMutexLocker lock(&m_mutex);
+      m_status = result;
+    }
+    emit windowsUpdated();
   }
-  emit windowsUpdated();
+  auto request = QDBusMessage::createMethodCall(kService, kPath, kInterface, "GetWindows");
+  const QDBusMessage reply = QDBusConnection::sessionBus().call(request, QDBus::Block, 2000);
+  if (!m_running || generation != m_generation) return;
+  const auto args = reply.arguments();
+  const QString json = args.size() == 1 && args.first().metaType().id() == QMetaType::QString
+      ? args.first().toString() : QString();
+  const QJsonDocument document = json.toUtf8().size() <= maxSnapshotBytes
+      ? QJsonDocument::fromJson(json.toUtf8()) : QJsonDocument();
+  bool valid = document.isArray();
+  if (valid) {
+    for (const auto &entry : document.array()) {
+      if (!entry.isObject() || entry.toObject().isEmpty()) {
+        valid = false;
+        break;
+      }
+    }
+  }
+  if (reply.type() == QDBusMessage::ErrorMessage || json.toUtf8().size() > maxSnapshotBytes ||
+      !valid) {
+    QString reason = status();
+    if (reason.isEmpty() || m_active)
+      reason = isInstalled()
+          ? tr("GNOME helper is not responding. Enable Trophy Window Helper in GNOME Extensions; logout/login may be required. Repair retries installation and enabling.")
+          : tr("GNOME helper is not installed. Choose Install helper. A logout/login may be required after installation.");
+    unavailable(reason, generation);
+    return;
+  }
+  const auto parsed = parseSnapshot(json);
+  const QString signature = signatureFor(parsed);
+  bool changed;
+  {
+    QMutexLocker lock(&m_mutex);
+    if (!m_running || generation != m_generation) return;
+    changed = !m_active.exchange(true) || signature != m_lastSignature;
+    m_windows = parsed;
+    m_lastSignature = signature;
+    m_status = tr("Working");
+  }
+  if (changed) emit windowsUpdated();
 }
-
 } // namespace TrophyBackend

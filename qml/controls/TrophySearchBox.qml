@@ -199,10 +199,7 @@ Item {
 
             }
 
-            ScrollBar.vertical: ScrollBar {
-                policy: ScrollBar.AsNeeded
-                width: 6
-            }
+            ScrollBar.vertical: TrophyScrollBar {}
 
         }
 

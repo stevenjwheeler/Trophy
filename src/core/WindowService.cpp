@@ -1,6 +1,7 @@
 #include "WindowService.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "detection/WindowInfo.h"
+#include "detection/GameIconSource.h"
 
 #include <QDebug>
 #include <QFile>
@@ -89,6 +90,7 @@ QVariantList WindowService::getVisibleWindows() {
     m["id"] = QVariant::fromValue<quint64>(w.id);
     m["title"] = w.title;
     m["class"] = w.appId;
+    m["iconSource"] = gameIconSource(w.appId);
     m["pid"] = QVariant::fromValue<qint64>(w.pid);
     out.append(m);
   }

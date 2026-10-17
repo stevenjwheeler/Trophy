@@ -785,6 +785,42 @@ TEST_F(StorageManagerTest, RenameMovesThumbnail) {
                              "/.thumbnails/Old_Game_2026-01-15_20-30-00.jpg"));
 }
 
+TEST_F(StorageManagerTest, RenameAndDeleteAllRecordingCaches) {
+  createDummyFile("Game [1].mkv", 1024);
+  createDummyFile("Game 1.mkv", 1024);
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".thumbnails"));
+  const QStringList suffixes = {".jpg", ".peaks", ".strip-0.jpg",
+                                ".strip-32-0.jpg", ".strip-64-63.jpg"};
+  for (const QString &suffix : suffixes) {
+    createDummyFile(".thumbnails/Game [1]" + suffix, 32);
+    createDummyFile(".thumbnails/Game 1" + suffix, 32);
+  }
+  StorageManager mgr(tempDir.path());
+  const QString renamed = mgr.renameRecording(tempDir.filePath("Game [1].mkv"), "New");
+  ASSERT_FALSE(renamed.isEmpty());
+  for (const QString &suffix : suffixes) {
+    EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/Game [1]" + suffix)));
+    EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/New" + suffix)));
+  }
+  ASSERT_TRUE(mgr.deleteRecording(renamed));
+  for (const QString &suffix : suffixes) {
+    EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/New" + suffix)));
+    EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/Game 1" + suffix)));
+  }
+}
+
+TEST_F(StorageManagerTest, DeletePreservesCachesSharedByAnotherExtension) {
+  createDummyFile("Game.mkv", 1024);
+  createDummyFile("Game.mp4", 1024);
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".thumbnails"));
+  createDummyFile(".thumbnails/Game.strip-32-0.jpg", 32);
+  StorageManager mgr(tempDir.path());
+  ASSERT_TRUE(mgr.deleteRecording(tempDir.filePath("Game.mkv")));
+  EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/Game.strip-32-0.jpg")));
+  ASSERT_TRUE(mgr.deleteRecording(tempDir.filePath("Game.mp4")));
+  EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/Game.strip-32-0.jpg")));
+}
+
 TEST_F(StorageManagerTest, RenameRejectsEmptyTitle) {
   createDummyFile("Old_Game_2026-01-15_20-30-00.mkv", 1024);
   StorageManager mgr(tempDir.path());
@@ -856,6 +892,8 @@ TEST_F(StorageManagerTest, AutoCleanupRemovesSidecarThumbnails) {
     ASSERT_TRUE(thumb.open(QIODevice::WriteOnly));
     thumb.write(QByteArray(512, 't'));
     thumb.close();
+    createDummyFile(QString(".thumbnails/%1.strip-32-0.jpg").arg(base), 32);
+    createDummyFile(QString(".thumbnails/%1.peaks").arg(base), 32);
   }
 
   StorageManager mgr(tempDir.path());
@@ -865,11 +903,16 @@ TEST_F(StorageManagerTest, AutoCleanupRemovesSidecarThumbnails) {
 
   QDir dir(tempDir.path());
   EXPECT_LE(dir.entryList({"*.mkv"}, QDir::Files).size(), 1);
-  // At most one thumbnail may survive — the one for the surviving video.
+  // At most one thumbnail + one strip frame survive, for the remaining video.
   EXPECT_LE(QDir(tempDir.path() + "/.thumbnails")
                 .entryList({"*.jpg"}, QDir::Files)
                 .size(),
-            1);
+            2);
+  for (const QString &base : {QString("old"), QString("new")}) {
+    const bool videoExists = QFile::exists(tempDir.filePath(base + ".mkv"));
+    EXPECT_EQ(QFile::exists(tempDir.filePath(".thumbnails/" + base + ".strip-32-0.jpg")), videoExists);
+    EXPECT_EQ(QFile::exists(tempDir.filePath(".thumbnails/" + base + ".peaks")), videoExists);
+  }
 }
 
 TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
@@ -884,6 +927,9 @@ TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
   ASSERT_TRUE(thumb.open(QIODevice::WriteOnly));
   thumb.write(QByteArray(512, 't'));
   thumb.close();
+  createDummyFile(".thumbnails/bulk_0.strip-32-0.jpg", 32);
+  createDummyFile(".thumbnails/bulk_0.strip-0.jpg", 32);
+  createDummyFile(".thumbnails/bulk_0.peaks", 32);
 
   StorageManager mgr(tempDir.path());
   QSignalSpy startedSpy(&mgr, &StorageManager::bulkDeleteStarted);
@@ -910,6 +956,9 @@ TEST_F(StorageManagerTest, BulkDeleteRemovesFilesInBackground) {
     EXPECT_FALSE(QFile::exists(p));
   }
   EXPECT_FALSE(QFile::exists(tempDir.path() + "/.thumbnails/bulk_0.jpg"));
+  EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/bulk_0.strip-32-0.jpg")));
+  EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/bulk_0.strip-0.jpg")));
+  EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/bulk_0.peaks")));
   // Single refresh on completion: size settled back to zero.
   EXPECT_EQ(mgr.usedSize(), 0);
 }

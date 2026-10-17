@@ -111,6 +111,8 @@ public:
   static bool sourceLabelsAgree(const QString &a, const QString &b);
 
 signals:
+  // The capture source is ready; portal selection no longer needs guidance.
+  void captureSelectionFinished();
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);
@@ -124,7 +126,7 @@ signals:
    * The portal rejected our saved restore token. The app deletes it and
    * re-authorizes through the New Game prompt — never a bare picker.
    */
-  void restoreAuthNeeded(const QString &gameName);
+  void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
   void detectedEncoderNameChanged();
@@ -167,6 +169,7 @@ private:
   bool m_stopFinalizationSucceeded = true;
   bool m_cancelInitializing = false;
   QString m_pendingRestoreAuthorization;
+  QString m_pendingRestoreIdentity;
   std::function<AudioPreparation(AudioPreparation)> m_audioPreparationLookup =
       lookupAudioPreparation;
   AudioPreparation m_preparedAudio;

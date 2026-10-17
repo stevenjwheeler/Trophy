@@ -22,22 +22,26 @@ Page {
         if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
     }
 
-    // Scroll-spy also moves the active pill: keep it on screen.
-    onActiveSectionChanged: ensurePillVisible(activeSection)
+    property var scrollTargetCard: null
 
-    // Section navigation (titles must match main.qml global search mapping)
-    property string activeSection: qsTr("Video Recording")
-    property bool scrollingProgrammatically: false
-    property var sections: [
-        { title: qsTr("Video Recording"), icon: "🎥" },
-        { title: qsTr("Background Clips"), icon: "✂️" },
-        { title: qsTr("Audio Recording"), icon: "🔊" },
-        { title: qsTr("Storage Management"), icon: "💾" },
-        { title: qsTr("Notifications"), icon: "🔔" },
-        { title: qsTr("Game Detection"), icon: "🎮" },
-        { title: qsTr("System Tray"), icon: "📌" },
-        { title: qsTr("Keyboard Shortcuts"), icon: "⌨️" }
-    ]
+    function scrollSectionIntoView(card) {
+        var target = Math.max(0, card.y - Theme.spacingSmall);
+        var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
+        settingsFlick.contentY = Math.min(target, maxY);
+    }
+
+    Connections {
+        target: root.scrollTargetCard
+        function onExpansionFinished() {
+            var card = root.scrollTargetCard;
+            Qt.callLater(function() {
+                if (root.scrollTargetCard !== card)
+                    return;
+                root.scrollSectionIntoView(card);
+                root.scrollTargetCard = null;
+            });
+        }
+    }
 
     function scrollToSection(sectionTitle) {
         var card = null;
@@ -53,67 +57,25 @@ Page {
             card = notificationsCard;
         else if (sectionTitle === "Game Detection")
             card = detectionCard;
+        else if (sectionTitle === "Detection Helpers")
+            card = detectionHelpersCard;
         else if (sectionTitle === "System Tray")
             card = trayCard;
         else if (sectionTitle === "Keyboard Shortcuts")
             card = shortcutsCard;
+        else if (sectionTitle === "Customization")
+            card = customizationCard;
 
         if (!card)
             return;
 
-        activeSection = sectionTitle;
-        scrollingProgrammatically = true;
-        scrollClearTimer.restart();
-        var target = Math.max(0, card.y - Theme.spacingSmall);
-        var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
-        settingsFlick.contentY = Math.min(target, maxY);
-        ensurePillVisible(sectionTitle);
-    }
-
-    // Keep the active pill on screen: the strip scrolls horizontally on
-    // narrow windows, and without this the current section's pill can
-    // sit cut off out of view.
-    function ensurePillVisible(sectionTitle) {
-        var idx = -1;
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].title === sectionTitle) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx < 0 || idx >= pillsRow.children.length)
-            return;
-        var item = pillsRow.children[idx];
-        if (!item)
-            return;
-        if (item.x < pillsFlick.contentX) {
-            pillsFlick.contentX = Math.max(0, item.x - Theme.spacingSmall);
-        } else if (item.x + item.width > pillsFlick.contentX + pillsFlick.width) {
-            pillsFlick.contentX = Math.max(0, Math.min(pillsFlick.contentWidth - pillsFlick.width,
-                                                      item.x + item.width - pillsFlick.width + Theme.spacingSmall));
-        }
-    }
-
-    function updateActiveSectionFromScroll() {
-        if (scrollingProgrammatically)
-            return;
-
-        var y = settingsFlick.contentY + 140;
-        var current = "Video Recording";
-        if (shortcutsCard && y >= shortcutsCard.y)
-            current = "Keyboard Shortcuts";
-        else if (trayCard && y >= trayCard.y)
-            current = "System Tray";
-        else if (detectionCard && y >= detectionCard.y)
-            current = "Game Detection";
-        else if (storageCard && y >= storageCard.y)
-            current = "Storage Management";
-        else if (audioCard && y >= audioCard.y)
-            current = "Audio Recording";
-        else if (clipsCard && y >= clipsCard.y)
-            current = "Background Clips";
-
-        activeSection = current;
+        scrollTargetCard = card;
+        card.expanded = true;
+        Qt.callLater(function() {
+            root.scrollSectionIntoView(card);
+            if (card.expansionProgress === 1 && root.scrollTargetCard === card)
+                root.scrollTargetCard = null;
+        });
     }
 
     function formatSize(bytes) {
@@ -227,17 +189,14 @@ Page {
         }
     }
 
-    Timer {
-        id: scrollClearTimer
-        interval: 400
-        repeat: false
-        onTriggered: scrollingProgrammatically = false
-    }
-
     ColumnLayout {
+        id: settingsLayout
         anchors.fill: parent
         anchors.margins: Theme.spacingLarge
-        anchors.bottomMargin: Theme.spacingMedium
+        // Let the viewport and its fade reach the page edge, as on Info.
+        // The scrolling content already supplies its own bottom padding.
+        anchors.bottomMargin: 0
+        anchors.rightMargin: 0
         spacing: Theme.spacingMedium
 
         // --- HEADER ---
@@ -253,128 +212,9 @@ Page {
             }
 
             Label {
-                text: qsTr("Tune capture quality, audio, storage and detection.")
+                text: qsTr("Tune capture quality, audio, storage, detection and appearance.")
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.textSecondaryColor
-            }
-        }
-
-        // --- SECTION PILLS ---
-        // Single-line strip: chevrons make the horizontal scroll explicit
-        // (dragging works but is undiscoverable), and only appear when
-        // there is overflow in that direction.
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.spacingSmall
-
-            Rectangle {
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
-                radius: 16
-                visible: pillsFlick.contentX > 1
-                color: pillLeftHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
-                border.width: 1
-                border.color: Theme.withOpacity(Theme.textColor, 0.12)
-
-                Label {
-                    anchors.centerIn: parent
-                    text: "‹"
-                    font.pixelSize: 18
-                    color: Theme.textSecondaryColor
-                }
-
-                MouseArea {
-                    id: pillLeftHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: pillsFlick.contentX = Math.max(0, pillsFlick.contentX - pillsFlick.width * 0.8)
-                }
-            }
-
-            Flickable {
-                id: pillsFlick
-                Layout.fillWidth: true
-                Layout.preferredHeight: 36
-                contentWidth: pillsRow.implicitWidth
-                contentHeight: 36
-                flickableDirection: Flickable.HorizontalFlick
-                clip: true
-
-                Row {
-                    id: pillsRow
-                    height: 36
-                    spacing: Theme.spacingSmall
-
-                    Repeater {
-                        model: root.sections
-
-                        Rectangle {
-                            property bool isActive: root.activeSection === modelData.title
-
-                            height: 32
-                            width: pillContent.implicitWidth + Theme.spacingMedium * 2
-                            radius: 16
-                            color: isActive ? Theme.withOpacity(Theme.primaryColor, 0.15) : Theme.withOpacity(Theme.textColor, 0.05)
-                            border.width: 1
-                            border.color: isActive ? Theme.primaryColor : Theme.withOpacity(Theme.textColor, 0.12)
-
-                            Row {
-                                id: pillContent
-                                anchors.centerIn: parent
-                                spacing: 6
-
-                                Label {
-                                    text: modelData.icon
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Label {
-                                    text: modelData.title
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.weight: isActive ? Font.Medium : Font.Normal
-                                    color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.scrollToSection(modelData.title)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
-                radius: 16
-                visible: pillsFlick.contentX < pillsFlick.contentWidth - pillsFlick.width - 1
-                color: pillRightHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
-                border.width: 1
-                border.color: Theme.withOpacity(Theme.textColor, 0.12)
-
-                Label {
-                    anchors.centerIn: parent
-                    text: "›"
-                    font.pixelSize: 18
-                    color: Theme.textSecondaryColor
-                }
-
-                MouseArea {
-                    id: pillRightHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: pillsFlick.contentX = Math.min(Math.max(0, pillsFlick.contentWidth - pillsFlick.width),
-                                                             pillsFlick.contentX + pillsFlick.width * 0.8)
-                }
             }
         }
 
@@ -383,10 +223,10 @@ Page {
             id: settingsFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.topMargin: Theme.spacingMedium
             contentWidth: width
             contentHeight: contentCol.implicitHeight + Theme.spacingLarge
             clip: true
-            onContentYChanged: root.updateActiveSectionFromScroll()
 
             Behavior on contentY {
                 NumberAnimation {
@@ -395,24 +235,7 @@ Page {
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                id: settingsVBar
-                active: hovered || pressed
-                width: 8
-
-                contentItem: Rectangle {
-                    implicitWidth: 4
-                    implicitHeight: 40
-                    radius: 16
-                    color: settingsVBar.pressed ? Theme.highlightedColor : (settingsVBar.hovered ? Theme.highlightedColor : Theme.secondaryColor)
-                    opacity: settingsVBar.active ? 1.0 : 0.2
-                    Behavior on opacity { NumberAnimation { duration: 200 } }
-                }
-
-                background: Rectangle {
-                    color: "transparent"
-                }
-            }
+            ScrollBar.vertical: TrophyScrollBar {}
 
             ColumnLayout {
                 id: contentCol
@@ -420,11 +243,47 @@ Page {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: Theme.spacingLarge
 
+                // ================= CUSTOMIZATION =================
+                SectionCard {
+                    id: customizationCard
+                    sectionTitle: qsTr("Customization")
+                    iconSource: "qrc:/icons/paintbrush.svg"
+                    description: qsTr("Choose a theme and accent color. Changes apply immediately.")
+
+                    SettingRow {
+                        label: qsTr("Theme")
+                        help: qsTr("Default keeps the classic navy palette. Charcoal is neutral gray. AMOLED uses a pure-black background.")
+
+                        TrophyComboBox {
+                            id: themeModeBox
+                            objectName: "themeModeBox"
+                            Layout.preferredWidth: 200
+                            property var values: ["dark", "charcoal", "amoled"]
+                            model: [qsTr("Default"), qsTr("Charcoal"), qsTr("AMOLED")]
+                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 0
+                            onActivated: settingsManager.themeMode = values[currentIndex]
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Accent color")
+                        help: qsTr("Used for buttons, switches and selections. Recording and warning colors stay distinct.")
+
+                        AccentColorPicker {
+                            selectedKey: settingsManager ? settingsManager.accentColor : "rose"
+                            onColorSelected: function(key) {
+                                if (settingsManager)
+                                    settingsManager.accentColor = key;
+                            }
+                        }
+                    }
+                }
+
                 // ================= VIDEO =================
                 SectionCard {
                     id: videoCard
                     sectionTitle: qsTr("Video Recording")
-                    iconText: "🎥"
+                    iconSource: "qrc:/icons/video.svg"
                     description: qsTr("Encoder, quality and output format. Changes apply to the next recording.")
 
                     WarnBanner {
@@ -719,7 +578,7 @@ Page {
                 SectionCard {
                     id: clipsCard
                     sectionTitle: qsTr("Background Clips")
-                    iconText: "✂️"
+                    iconSource: "qrc:/icons/scissors.svg"
                     description: qsTr("Quiet background buffering for instant clips. Changes take effect within a minute.")
 
                     SettingRow {
@@ -809,7 +668,7 @@ Page {
                 SectionCard {
                     id: audioCard
                     sectionTitle: qsTr("Audio Recording")
-                    iconText: "🔊"
+                    iconSource: "qrc:/icons/audio-recording.svg"
                     description: qsTr("What gets heard in your recordings, and how tracks are stored.")
 
                     WarnBanner {
@@ -1035,7 +894,7 @@ Page {
                 SectionCard {
                     id: storageCard
                     sectionTitle: qsTr("Storage Management")
-                    iconText: "💾"
+                    iconSource: "qrc:/icons/storage.svg"
                     description: qsTr("Where recordings live and what happens when space runs out.")
 
                     WarnBanner {
@@ -1178,7 +1037,7 @@ Page {
                 SectionCard {
                     id: notificationsCard
                     sectionTitle: qsTr("Notifications")
-                    iconText: "🔔"
+                    iconSource: "qrc:/icons/bell.svg"
                     description: qsTr("Which popups Trophy may show. Errors, the capture-authorize prompt and direct keypress feedback always show.")
 
                     SettingRow {
@@ -1270,8 +1129,8 @@ Page {
                 SectionCard {
                     id: detectionCard
                     sectionTitle: qsTr("Game Detection")
-                    iconText: "🎮"
-                    description: qsTr("How Trophy notices your games and when it records them.")
+                    iconSource: "qrc:/icons/gamepad.svg"
+                    description: qsTr("Choose whether Trophy detects games and records sessions automatically.")
 
                     SettingRow {
                         label: qsTr("Auto-detect Games")
@@ -1288,53 +1147,8 @@ Page {
                     }
 
                     SettingRow {
-                        label: qsTr("Window tracking")
-                        help: qsTr("See window titles, focus and fullscreen state to name your games. On KDE this installs a read-only helper script (removable in System Settings → KWin Scripts).")
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.windowTrackingEnabled : false
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.windowTrackingEnabled = checked;
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("Vulkan detection layer")
-                        help: qsTr("Standard Vulkan implicit layer that notices games at startup, including Proton titles. Install or remove it here.")
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: settingsManager ? settingsManager.vulkanLayerEnabled : false
-                            onToggled: {
-                                if (settingsManager)
-                                    settingsManager.vulkanLayerEnabled = checked;
-                                if (app)
-                                    app.setVulkanLayerEnabled(checked);
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("OpenGL detection shim")
-                        help: (app && app.glShimAvailable) ? qsTr("Same idea for older OpenGL games. Takes effect after next login via LD_PRELOAD. Leave off for games with strict anti-cheat — some flag any injected library.") : qsTr("Shim library not found in this install.")
-                        rowEnabled: app ? app.glShimAvailable : false
-
-                        TrophySwitch {
-                            Layout.alignment: Qt.AlignVCenter
-                            checked: app ? app.glShimEnrolled : false
-                            onToggled: {
-                                if (app)
-                                    app.setGlShimEnrolled(checked);
-                            }
-                        }
-                    }
-
-                    SettingRow {
                         label: qsTr("Auto-record")
-                        help: qsTr("Start recording the full game session the moment a game is detected. Never miss a moment!")
+                        help: qsTr("Automatically record the full session when an authorized game is detected.")
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1347,11 +1161,115 @@ Page {
                     }
                 }
 
+                SectionCard {
+                    id: detectionHelpersCard
+                    objectName: "detectionHelpersCard"
+                    sectionTitle: qsTr("Detection Helpers")
+                    iconSource: "qrc:/icons/puzzle.svg"
+                    description: qsTr("Integration status at a glance. Graphics helpers are optional.")
+                    readonly property real statusWidth: Math.max(vulkanControls.badgeWidth, glControls.badgeWidth)
+                    readonly property real actionWidth: Math.max(vulkanHelperSwitch.implicitWidth, glHelperSwitch.implicitWidth)
+
+                    SettingRow {
+                        label: qsTr("Game Window Helper (required)")
+                        help: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
+                              .arg(windowMonitor && windowMonitor.compositorName === "kwin"
+                                   ? qsTr(" On KDE this uses a read-only KWin script.")
+                                   : (windowMonitor && windowMonitor.compositorName === "gnome"
+                                      ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation. %1").arg(windowMonitor.gnomeHelperStatus) : ""))
+
+                        HelperControls {
+                            id: windowHelperControls
+                            objectName: "gameWindowHelperStatus"
+                            statusWidth: badgeWidth
+                            actionWidth: helperRepair.implicitWidth
+                            showAction: windowMonitor && !windowMonitor.trackingReady
+                            healthy: windowMonitor && windowMonitor.trackingReady
+                            attention: !healthy && !(windowMonitor && windowMonitor.trackingChecking)
+                            text: windowMonitor && windowMonitor.trackingReady
+                                  ? (windowMonitor.compositorName === "kwin" ? qsTr("Installed · Working") : qsTr("Working"))
+                                  : (windowMonitor && windowMonitor.trackingChecking ? qsTr("Checking…")
+                                     : (windowMonitor && windowMonitor.compositorName === "kwin"
+                                         ? (windowMonitor.kwinScriptInstalled
+                                            ? (windowMonitor.kwinScriptEnabled ? qsTr("Installed · Not reporting") : qsTr("Installed · Disabled"))
+                                            : qsTr("Not installed"))
+                                        : (windowMonitor && windowMonitor.compositorName === "gnome"
+                                           ? (windowMonitor.gnomeHelperInstalled ? qsTr("Installed · Not reporting") : qsTr("Not installed"))
+                                           : qsTr("Unavailable"))))
+                            TrophyButton {
+                                id: helperRepair
+                                anchors.right: parent.right
+                                visible: windowHelperControls.showAction
+                                text: qsTr("Repair")
+                                enabled: windowMonitor && !windowMonitor.trackingChecking
+                                onClicked: if (windowMonitor) windowMonitor.repairTracking()
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Vulkan Detection")
+                        help: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles.")
+
+                        HelperControls {
+                            id: vulkanControls
+                            statusWidth: detectionHelpersCard.statusWidth
+                            actionWidth: detectionHelpersCard.actionWidth
+                            healthy: app && app.vulkanLayerRegistered
+                            text: healthy ? qsTr("Enrolled") : qsTr("Not enrolled")
+
+                            TrophySwitch {
+                                id: vulkanHelperSwitch
+                                anchors.right: parent.right
+                                checked: settingsManager ? settingsManager.vulkanLayerEnabled : false
+                                onToggled: {
+                                    if (settingsManager)
+                                        settingsManager.vulkanLayerEnabled = checked;
+                                    if (app)
+                                        app.setVulkanLayerEnabled(checked);
+                                }
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("OpenGL Detection")
+                        helpTextFormat: Text.StyledText
+                        help: (app && app.glShimAvailable)
+                              ? qsTr("Notices games starting OpenGL graphics and notifies Trophy to start recording. Loads into any OpenGL app and %1. Changes require logging out and back in.")
+                                .arg(app.glShimEnrolled
+                                     ? '<font color="' + Theme.cautionColor + '">' + qsTr("may cause issues with anti-cheat games") + '</font>'
+                                     : qsTr("may cause issues with anti-cheat games"))
+                              : qsTr("OpenGL detection helper not found in this install.")
+                        rowEnabled: app ? app.glShimAvailable : false
+
+                        HelperControls {
+                            id: glControls
+                            statusWidth: detectionHelpersCard.statusWidth
+                            actionWidth: detectionHelpersCard.actionWidth
+                            attention: !app || !app.glShimAvailable
+                            enrolled: app && app.glShimEnrolled
+                            text: attention ? qsTr("Unavailable") : (app.glShimEnrolled ? qsTr("Enrolled") : qsTr("Not enrolled"))
+
+                            TrophySwitch {
+                                id: glHelperSwitch
+                                anchors.right: parent.right
+                                checked: app ? app.glShimEnrolled : false
+                                onToggled: {
+                                    if (app)
+                                        app.setGlShimEnrolled(checked);
+                                }
+                            }
+                        }
+                    }
+
+                }
+
                 // ================= TRAY =================
                 SectionCard {
                     id: trayCard
                     sectionTitle: qsTr("System Tray")
-                    iconText: "📌"
+                    iconSource: "qrc:/icons/tray.svg"
                     description: qsTr("How Trophy behaves when you close it or log in.")
 
                     SettingRow {
@@ -1404,7 +1322,7 @@ Page {
                 SectionCard {
                     id: shortcutsCard
                     sectionTitle: qsTr("Keyboard Shortcuts")
-                    iconText: "⌨️"
+                    iconSource: "qrc:/icons/keyboard.svg"
                     description: qsTr("System-wide keys that work even while you're in-game.")
 
                     SettingRow {
@@ -1488,6 +1406,21 @@ Page {
         }
     }
 
+    // Keep the fade outside the Flickable so it stays fixed over scrolling content.
+    Rectangle {
+        anchors.left: settingsLayout.left
+        anchors.right: settingsLayout.right
+        anchors.rightMargin: settingsFlick.ScrollBar.vertical.width
+        anchors.bottom: settingsLayout.bottom
+        height: Theme.spacingLarge * 2
+        opacity: Math.max(0, Math.min(1, (settingsFlick.contentHeight - settingsFlick.height - settingsFlick.contentY) / height))
+        visible: opacity > 0
+        gradient: Gradient {
+            GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }
+            GradientStop { position: 1; color: Theme.backgroundColor }
+        }
+    }
+
     // --- DIALOGS ---
     FolderDialog {
         id: folderDialog
@@ -1540,73 +1473,84 @@ Page {
 
     background: Rectangle {
         color: Theme.backgroundColor
-        bottomRightRadius: 12
+        bottomRightRadius: Theme.windowRadius
         topLeftRadius: 26
     }
 
     // ============ REUSABLE CONTROLS (visual only, no logic changes) ============
 
-    component SectionCard: Rectangle {
-        property string sectionTitle: ""
-        property string iconText: ""
-        property string description: ""
-        default property alias content: body.data
+    component SectionCard: SettingsSectionCard {}
 
-        Layout.fillWidth: true
-        implicitHeight: cardCol.implicitHeight + Theme.spacingMedium * 2
-        radius: Theme.radiusMedium
-        color: Theme.cardColor
+    // Optional helpers share compact status/action columns. A status-only
+    // helper collapses its action slot entirely rather than leaving a gap.
+    // A plain Item honors its implicit width without stretching the label column.
+    component HelperControls: Item {
+        id: helperControls
+        property real statusWidth: 0
+        property real actionWidth: 0
+        property bool showAction: true
+        property alias text: helperBadge.text
+        property alias healthy: helperBadge.healthy
+        property alias attention: helperBadge.attention
+        property alias enrolled: helperBadge.enrolled
+        readonly property real badgeWidth: helperBadge.implicitWidth
+        default property alias action: actionSlot.data
+
+        Layout.leftMargin: Theme.spacingLarge
+        implicitWidth: statusWidth + (showAction ? Theme.spacingMedium + actionWidth : 0)
+        implicitHeight: Math.max(helperBadge.implicitHeight, showAction ? actionSlot.childrenRect.height : 0)
+
+        HelperStatusBadge {
+            id: helperBadge
+            anchors.right: actionSlot.left
+            anchors.rightMargin: helperControls.showAction ? Theme.spacingMedium : 0
+            anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Item {
+            id: actionSlot
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: helperControls.showAction
+            width: helperControls.showAction ? helperControls.actionWidth : 0
+            height: childrenRect.height
+        }
+    }
+
+    component HelperStatusBadge: Rectangle {
+        id: badge
+        property string text: ""
+        property bool healthy: false
+        property bool attention: false
+        property bool enrolled: false
+        readonly property color statusColor: healthy ? Theme.successColor
+                                                   : (enrolled ? Theme.cautionColor : (attention ? Theme.warningColor : Theme.textSecondaryColor))
+
+        implicitWidth: statusRow.implicitWidth + Theme.spacingSmall * 2
+        implicitHeight: statusRow.implicitHeight + Theme.spacingTiny * 2
+        radius: Theme.radiusSmall
+        color: Theme.withOpacity(statusColor, 0.1)
         border.width: 1
-        border.color: Theme.borderColor
-        clip: true
+        border.color: Theme.withOpacity(statusColor, 0.3)
 
-        ColumnLayout {
-            id: cardCol
-            anchors.fill: parent
-            anchors.margins: Theme.spacingMedium
+        Row {
+            id: statusRow
+            anchors.centerIn: parent
             spacing: Theme.spacingSmall
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                Label {
-                    text: iconText
-                    font.pixelSize: Theme.fontSizeLarge
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 2
-
-                    Label {
-                        text: sectionTitle
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    Label {
-                        Layout.fillWidth: true
-                        text: description
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.textSecondaryColor
-                        wrapMode: Text.WordWrap
-                        visible: description.length > 0
-                    }
-                }
-            }
-
             Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
-                color: Theme.dividerColor
+                width: 6
+                height: 6
+                radius: 3
+                anchors.verticalCenter: parent.verticalCenter
+                color: badge.statusColor
             }
 
-            ColumnLayout {
-                id: body
-                Layout.fillWidth: true
-                spacing: Theme.spacingMedium
+            Label {
+                text: badge.text
+                color: badge.statusColor
+                font.pixelSize: Theme.fontSizeSmall
+                font.weight: Font.Medium
             }
         }
     }
@@ -1627,8 +1571,9 @@ Page {
             anchors.margins: Theme.spacingSmall
             spacing: Theme.spacingSmall
 
-            Label {
-                text: "⚠️"
+            TrophyIcon {
+                source: "qrc:/icons/warning.svg"
+                color: Theme.warningColor
             }
 
             Label {
@@ -1645,6 +1590,7 @@ Page {
     component SettingRow: ColumnLayout {
         property string label: ""
         property string help: ""
+        property int helpTextFormat: Text.AutoText
         property bool rowEnabled: true
         default property alias control: controlHolder.data
 
@@ -1673,6 +1619,7 @@ Page {
                 Label {
                     Layout.fillWidth: true
                     text: help
+                    textFormat: helpTextFormat
                     color: Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap

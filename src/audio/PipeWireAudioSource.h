@@ -177,6 +177,7 @@ private:
     pw_buffer *(*dequeueBuffer)(pw_stream *);
     int (*queueBuffer)(pw_stream *, pw_buffer *);
     const pw_properties *(*getProperties)(pw_stream *);
+    void (*attachAppGroup)(PipeWireAudioSource *) = nullptr;
   };
   static Operations realOperations();
   Operations m_operations = realOperations();
