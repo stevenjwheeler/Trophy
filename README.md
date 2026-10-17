@@ -45,7 +45,7 @@ see [packaging status](packaging/README.md).
 ### Game Detection
 - **Vulkan Detection Layer** - High-fidelity detection using a custom Vulkan implicit layer
 - **Instant Response** - Games are detected the moment `vkCreateInstance` is called
-- **Zero-Config** - Trophy automatically registers its detection layer on first launch
+- **Guided Setup** - Choose the detection layer (Vulkan and/or OpenGL shim) during setup; Trophy registers it for you and it can be changed anytime in Settings
 - **Steam & Proton Support** - Definitively identifies Windows games running through Proton
 - **Whitelist/Blacklist** - User-defined rules for custom game recognition
 - **Auto-Record Option** - Automatically start recording when a game launches
@@ -62,16 +62,16 @@ see [packaging status](packaging/README.md).
 
 ### Planned Features
 - Stream integration (Twitch, YouTube)
-- Post-recording editing (trim, cut)
-- Integrated video player
-- Detection for OpenGL and other games
 
 ### Keyboard Shortcuts
 
-F9 toggles recording and F10 saves a clip. On KDE and Hyprland these
-work globally (even in-game) via the system shortcuts portal — accept
-the approval dialog on first launch, and remap them anytime in
-Settings → Keyboard Shortcuts.
+Trophy asks to bind its recording toggle and Save Clip shortcuts during
+setup (the wizard's Keyboard Shortcuts step) through the system Global
+Shortcuts portal. The portal suggests **F9** (toggle recording) and
+**F10** (save clip) as defaults, but the keys are yours to assign —
+accept the dialog to bind them, and remap them anytime in
+Settings → Keyboard Shortcuts or in the portal's own shortcut dialog.
+On KDE and Hyprland they work globally, even in-game.
 
 Where the portal can't reach (GNOME, Sway), bind Trophy's commands
 with your compositor's native key system instead:
@@ -179,8 +179,8 @@ sudo apt install cmake qt6-base-dev qt6-declarative-dev \
 
 1. Launch Trophy
 2. Start your game - it will be automatically detected
-3. Click **Record** or press **F9** to start recording
-4. Press **F9** again or click **Stop** to end recording
+3. Click **Record** or press your recording shortcut (F9 by default) to start recording
+4. Press the shortcut again or click **Stop** to end recording
 5. Find your recordings in the **Recordings** tab
 
 ### Configuration
@@ -196,8 +196,12 @@ Access **Settings** to configure:
 
 | Shortcut | Action |
 |----------|--------|
-| F9 | Start/Stop recording |
+| Recording toggle (F9 by default) | Start/Stop recording |
+| Save Clip (F10 by default) | Save the trailing clip |
 | Ctrl+Q | Quit application |
+
+The recording-toggle and Save-Clip keys are user-assigned through the
+Global Shortcuts portal; F9/F10 are only the suggested defaults.
 
 ## Checksum verification
 

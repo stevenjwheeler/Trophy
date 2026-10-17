@@ -19,6 +19,12 @@ Page {
 
     property bool libraryListView: false
 
+    HoverPreview {
+        id: libraryPreview
+        objectName: "libraryHoverPreview"
+        parkingItem: root.contentItem
+    }
+
     // The library layout persists in settings so the dashboard reopens
     // in the user's last-used mode (grid default).
     Component.onCompleted: {
@@ -467,6 +473,7 @@ Page {
                         Component {
                             id: listComponent
                             RecordingListView {
+                                previewController: libraryPreview
                                 leftMargin: Theme.spacingSmall
                                 rightMargin: Theme.spacingSmall
                                 topMargin: Theme.spacingSmall
@@ -477,6 +484,7 @@ Page {
                         Component {
                             id: gridComponent
                             RecordingGridView {
+                                previewController: libraryPreview
                                 clip: true
                                 leftMargin: Theme.spacingSmall
                                 topMargin: Theme.spacingSmall

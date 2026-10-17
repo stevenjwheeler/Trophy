@@ -15,6 +15,7 @@ ListView {
     id: root
 
     property int skip: 0
+    property HoverPreview previewController: null
 
     spacing: Theme.spacingSmall
     clip: true
@@ -31,6 +32,9 @@ ListView {
     }
 
     delegate: RecordingListItem {
+        previewController: root.previewController
+        previewAllowed: !root.moving && root.visible
+            && (typeof window.hoverPreviewsAllowed === "undefined" || window.hoverPreviewsAllowed)
         live: modelData && modelData.__live === true
         objectName: live ? "liveListRow" : "savedListRow"
         recording: live ? null : modelData

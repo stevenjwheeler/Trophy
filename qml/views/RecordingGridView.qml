@@ -15,6 +15,7 @@ GridView {
     id: root
 
     property int skip: 0
+    property HoverPreview previewController: null
 
     property int minCellWidth: 340
     cellWidth: {
@@ -75,6 +76,9 @@ GridView {
         id: recordingCardComponent
         RecordingCard {
             anchors.fill: parent
+            previewController: root.previewController
+            previewAllowed: !root.moving && root.visible
+                && (typeof window.hoverPreviewsAllowed === "undefined" || window.hoverPreviewsAllowed)
             recording: parent.recData
             // Delegate index includes the live sentinel while recording
             // (scrollToRecording adds the same offset in reverse): subtract

@@ -42,6 +42,7 @@ ApplicationWindow {
 
     // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
+    readonly property bool hoverPreviewsAllowed: window.active && !playerPage.visible
     property bool skipDeleteConfirmation: false
     property var selectedRecordings: []
     property int lastSelectedIndex: -1

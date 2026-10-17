@@ -17,6 +17,37 @@ ItemDelegate {
     property var recording: null
     property bool live: false
     property int cardIndex: -1
+    property HoverPreview previewController: null
+    property HoverPreview requestedController: null
+    property bool previewAllowed: true
+    readonly property string previewPath: recording ? recording.filePath : ""
+    readonly property bool previewEligible: !live && hovered && visible && previewAllowed
+        && !isSelectionModeActive && previewPath.length > 0
+    readonly property bool previewArmed: currentPreview !== null
+    readonly property bool previewFailed: previewController !== null && previewController.failedTarget === previewSurface
+    readonly property HoverPreview currentPreview: previewController !== null && previewController.target === previewSurface ? previewController : null
+    readonly property bool previewVisible: currentPreview !== null && currentPreview.frameReady
+
+    function resetPreview() {
+        if (requestedController && requestedController !== previewController)
+            requestedController.release(previewSurface)
+        requestedController = previewController
+        if (!previewController)
+            return
+        if (previewEligible)
+            previewController.request(previewSurface, recordingLibrary.localFileUrl(previewPath))
+        else
+            previewController.release(previewSurface)
+    }
+    onPreviewControllerChanged: resetPreview()
+    onPreviewEligibleChanged: resetPreview()
+    onPreviewPathChanged: resetPreview()
+    onRecordingChanged: resetPreview()
+
+    Component.onDestruction: {
+        if (requestedController)
+            requestedController.release(previewSurface)
+    }
     readonly property bool isSelected: !!(root.recording && window.selectedRecordings && window.selectedRecordings.indexOf(root.recording.filePath) !== -1)
     readonly property bool isSelectionModeActive: !!(window.selectedRecordings && window.selectedRecordings.length > 0)
     readonly property bool showSelection: !root.live && (root.hovered || root.isSelectionModeActive)
@@ -162,13 +193,23 @@ ItemDelegate {
             color: root.live ? Theme.surfaceColor : "black"
             clip: true
 
-            Image {
-                id: sourceImage
+            // Keep VideoOutput's ancestors visible; mask the live layer,
+            // just like grid cards, rather than sampling a hidden subtree.
+            Item {
+                id: previewSurface
                 anchors.fill: parent
-                source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
-                fillMode: Image.PreserveAspectCrop
-                opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
-                visible: false
+                visible: !root.live
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: sourceMask
+                }
+                Image {
+                    anchors.fill: parent
+                    source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
+                    fillMode: Image.PreserveAspectCrop
+                    opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
+                }
             }
 
             Rectangle {
@@ -178,14 +219,6 @@ ItemDelegate {
                 color: "black"
                 visible: false
                 layer.enabled: true
-            }
-
-            MultiEffect {
-                anchors.fill: parent
-                visible: !root.live
-                source: sourceImage
-                maskEnabled: true
-                maskSource: sourceMask
             }
 
             RecordingGameIcon {

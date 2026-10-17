@@ -39,10 +39,22 @@ target_compile_definitions(test_PlayerProbe PRIVATE
 target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_PlayerProbe)
 
+# Background low-resolution preview generation and cache lifecycle.
+add_executable(test_PreviewCache test_PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.h)
+target_include_directories(test_PreviewCache PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${AVFORMAT_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWSCALE_INCLUDE_DIRS})
+target_link_libraries(test_PreviewCache PRIVATE GTest::GTest Qt6::Core Qt6::Concurrent Qt6::Test Qt6::Quick
+    ${AVFORMAT_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+gtest_discover_tests(test_PreviewCache)
+
 # Headless engine load of the real library card (rename rebind keeps
 # thumbnail). Views never polish offscreen here, so this covers the card
 # bindings only; the model side is covered in test_RecordingLibrary.
 add_executable(test_RecordingCardBinding test_RecordingCardBinding.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.h
     ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.cpp
     ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.h
     ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp

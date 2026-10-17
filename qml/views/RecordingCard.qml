@@ -18,6 +18,37 @@ Rectangle {
     property bool isAdaptive: true
     property int cardIndex: -1
     readonly property bool hovered: hoverHandler.hovered
+    property HoverPreview previewController: null
+    property HoverPreview requestedController: null
+    property bool previewAllowed: true
+    readonly property string previewPath: recording ? recording.filePath : ""
+    readonly property bool previewEligible: hovered && visible && previewAllowed
+        && !isSelectionModeActive && previewPath.length > 0
+    readonly property bool previewArmed: currentPreview !== null
+    readonly property bool previewFailed: previewController !== null && previewController.failedTarget === previewSurface
+    readonly property HoverPreview currentPreview: previewController !== null && previewController.target === previewSurface ? previewController : null
+    readonly property bool previewVisible: currentPreview !== null && currentPreview.frameReady
+
+    function resetPreview() {
+        if (requestedController && requestedController !== previewController)
+            requestedController.release(previewSurface)
+        requestedController = previewController
+        if (!previewController)
+            return
+        if (previewEligible)
+            previewController.request(previewSurface, recordingLibrary.localFileUrl(previewPath))
+        else
+            previewController.release(previewSurface)
+    }
+    onPreviewControllerChanged: resetPreview()
+    onPreviewEligibleChanged: resetPreview()
+    onPreviewPathChanged: resetPreview()
+    onRecordingChanged: resetPreview()
+
+    Component.onDestruction: {
+        if (requestedController)
+            requestedController.release(previewSurface)
+    }
     property bool isSelected: window.selectedRecordings && recording && window.selectedRecordings.indexOf(recording.filePath) !== -1
     property bool isSelectionModeActive: window.selectedRecordings && window.selectedRecordings.length > 0
     // Clips read as "<game> Clip" with a badge; full recordings show
@@ -95,18 +126,27 @@ Rectangle {
             // This keeps the bottom edge razor sharp where it meets the info section
             clip: true
 
-            // 1. The Source Image
-            Image {
-                id: sourceImage
-                width: parent.width
-                height: parent.height
-                source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
-                fillMode: Image.PreserveAspectCrop
-                opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
-                visible: false 
-                
-                scale: root.hovered ? 1.05 : 1.0
-                Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+            // Mask both the fallback thumbnail and the first decoded frame
+            // together, preserving the card's existing corner treatment.
+            Item {
+                id: previewSurface
+                anchors.fill: parent
+                // VideoOutput needs a visible scene-graph subtree to update
+                // its texture. Mask the live layer rather than hiding its
+                // ancestor and sampling it through a separate effect.
+                layer.enabled: true
+                layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: sourceMask
+                }
+                Image {
+                    anchors.fill: parent
+                    source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
+                    fillMode: Image.PreserveAspectCrop
+                    opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
+                    scale: root.hovered ? 1.05 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+                }
             }
 
             // 2. The Shape Mask
@@ -124,14 +164,6 @@ Rectangle {
                 layer.enabled: true 
             }
 
-            // 3. The Masking Engine
-            MultiEffect {
-                anchors.fill: parent
-                source: sourceImage
-                maskEnabled: true
-                maskSource: sourceMask
-            }
-
             // 4. Hover Buttons Overlay
             Item {
                 anchors.fill: parent
@@ -141,7 +173,8 @@ Rectangle {
                     width: parent.width
                     height: parent.height + root.radius
                     radius: root.radius
-                    color: "#99000000"
+                    color: root.previewVisible ? "#33000000" : "#99000000"
+                    Behavior on color { ColorAnimation { duration: 180 } }
                 }
 
                 Row {

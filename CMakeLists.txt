@@ -305,6 +305,7 @@ set(LIBRARY_SOURCES
     src/library/ActivityFeed.cpp
     src/library/WaveformCache.cpp
     src/library/FilmstripCache.cpp
+    src/library/PreviewCache.cpp
 )
 
 set(SETTINGS_SOURCES
@@ -380,6 +381,7 @@ set(LIBRARY_HEADERS
     src/library/ActivityFeed.h
     src/library/WaveformCache.h
     src/library/FilmstripCache.h
+    src/library/PreviewCache.h
 )
 
 set(SETTINGS_HEADERS
@@ -441,6 +443,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/RecordingListView.qml
         qml/views/RecordingListItem.qml
         qml/views/RecordingCard.qml
+        qml/views/HoverPreview.qml
         qml/views/RecordingGameIcon.qml
         qml/views/ActiveRecordingCard.qml
         qml/views/VideoPlayer.qml

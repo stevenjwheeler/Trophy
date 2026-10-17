@@ -38,6 +38,7 @@
 #include "library/RecordingLibrary.h"
 #include "library/WaveformCache.h"
 #include "library/FilmstripCache.h"
+#include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
 #include "UpdateChecker.h"
 
@@ -201,6 +202,7 @@ bool Application::initialize() {
 
   m_engine = std::make_unique<QQmlApplicationEngine>();
   m_engine->addImageProvider("gameicon", new GameIconProvider);
+  m_engine->addImageProvider("hoverpreview", m_previewCache->createImageProvider());
   m_engine->rootContext()->setContextProperty("AppVersion", versionStr);
 
   exposeServicesToQml();
@@ -312,6 +314,7 @@ void Application::initializeServices() {
   m_activityFeed = std::make_unique<ActivityFeed>(this);
   m_waveformCache = std::make_unique<WaveformCache>(this);
   m_filmstripCache = std::make_unique<FilmstripCache>(this);
+  m_previewCache = std::make_unique<PreviewCache>(this);
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
@@ -443,6 +446,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("activityFeed", m_activityFeed.get());
   context->setContextProperty("waveformCache", m_waveformCache.get());
   context->setContextProperty("filmstripCache", m_filmstripCache.get());
+  context->setContextProperty("previewCache", m_previewCache.get());
   context->setContextProperty("gameDetector", m_gameDetector.get());
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());
@@ -464,6 +468,8 @@ void Application::preparePlayerCaches(const QString &filePath) {
     m_waveformCache->requestPeaks(filePath, 0);
   if (m_filmstripCache)
     m_filmstripCache->requestThumbs(filePath, 32); // PlayerPage.stripCount
+  if (m_previewCache)
+    m_previewCache->preparePreview(filePath);
 }
 
 void Application::connectSignals() {

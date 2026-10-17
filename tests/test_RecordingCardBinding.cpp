@@ -13,18 +13,62 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QQuickImageProvider>
+#include <QProcess>
+#include <QPointer>
+#include <QSignalSpy>
+#include <QStandardPaths>
 #include <QStandardItemModel>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThreadPool>
+#include <QTimer>
 #include <gtest/gtest.h>
 #include <memory>
 
 #include "core/StorageManager.h"
 #include "library/Recording.h"
 #include "library/RecordingLibrary.h"
+#include "library/PreviewCache.h"
 
 using namespace TrophyBackend;
+
+// UI tests use their already-small fixture as the cached result. Held replies
+// exercise cancellation/staleness without transcoding or touching host files.
+class CardPreviewCacheFake : public QObject {
+  Q_OBJECT
+public:
+  bool hold = false;
+  QList<QPair<QUrl, int>> requests;
+  QList<int> cancelled;
+  QHash<QUrl, QUrl> results;
+  void deliver(const QUrl &source, int ticket, const QUrl &preview) {
+    emit previewFramesReady(source, ticket, preview, preview.isEmpty() ? QString() : QString("fixture"),
+                            preview.isEmpty() ? 0 : 270, 15);
+  }
+  Q_INVOKABLE void retainFrames(const QString &) {}
+  Q_INVOKABLE void releaseFrames(const QString &) {}
+  Q_INVOKABLE void requestPreview(const QUrl &source, int ticket) {
+    requests.append({source, ticket});
+    if (!hold) QTimer::singleShot(0, this, [this, source, ticket] {
+      deliver(source, ticket, results.value(source, source));
+    });
+  }
+  Q_INVOKABLE void cancelPreview(int ticket) { cancelled.append(ticket); }
+signals:
+  void previewFramesReady(const QUrl &source, int ticket, const QUrl &preview, const QString &key, int count, int fps);
+};
+
+class CardFrameProvider : public QQuickImageProvider {
+public:
+  CardFrameProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+  QImage requestImage(const QString &id, QSize *size, const QSize &) override {
+    QImage image(160, 90, QImage::Format_RGB32);
+    image.fill(QColor::fromHsv((id.section('/', -1).toInt() * 10) % 360, 200, 200));
+    if (size) *size = image.size();
+    return image;
+  }
+};
 
 class CardManagerFake : public QObject {
   Q_OBJECT
@@ -102,9 +146,11 @@ protected:
   QTemporaryDir tempDir;
   CardManagerFake manager;
   CardWindowFake windowFake;
+  CardPreviewCacheFake previewFake;
   QQmlEngine engine;
   QQuickWindow window;
   QStringList scriptErrors;
+  std::unique_ptr<QObject> previewService;
 
   void SetUp() override {
     ASSERT_TRUE(tempDir.isValid());
@@ -119,6 +165,8 @@ protected:
         });
     engine.rootContext()->setContextProperty("recordingManager", &manager);
     engine.rootContext()->setContextProperty("window", &windowFake);
+    engine.rootContext()->setContextProperty("previewCache", &previewFake);
+    engine.addImageProvider("hoverpreview", new CardFrameProvider);
     window.resize(1024, 768);
     window.show();
     EXPECT_TRUE(QTest::qWaitForWindowExposed(&window, 5000));
@@ -151,6 +199,18 @@ protected:
   void waitForProbes() {
     QThreadPool::globalInstance()->waitForDone(10000);
     QCoreApplication::processEvents();
+  }
+  void exerciseHoverPreview(bool list);
+  void exerciseFailedPreview(bool list);
+  void createPreviewService() {
+    QString qmlPath = CARD_QML_FILE;
+    qmlPath.replace("RecordingCard.qml", "HoverPreview.qml");
+    QQmlComponent component(&engine, QUrl::fromLocalFile(qmlPath));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    previewService.reset(component.createWithInitialProperties(
+        {{"parkingItem", QVariant::fromValue(window.contentItem())}}));
+    ASSERT_NE(previewService, nullptr);
+    qobject_cast<QQuickItem *>(previewService.get())->setParentItem(window.contentItem());
   }
 };
 
@@ -249,6 +309,358 @@ TEST_F(RecordingCardBindingTest, GridDetailsStayCompactWithoutShrinkingThumbnail
   EXPECT_TRUE(metadata->property("text").toString().startsWith("• "));
   card.reset();
   waitForProbes();
+}
+
+void RecordingCardBindingTest::exerciseHoverPreview(bool list) {
+  createPreviewService();
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP() << "ffmpeg CLI unavailable";
+  const QString path = tempDir.filePath("Hover # % Game.mkv");
+  QProcess generator;
+  generator.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+                          "testsrc2=size=160x90:rate=12", "-f", "lavfi", "-i",
+                          "sine=frequency=440:sample_rate=48000", "-t", "18",
+                          "-c:v", "mpeg4", "-c:a", "pcm_s16le", "-g", "12", path});
+  ASSERT_TRUE(generator.waitForFinished(15000));
+  ASSERT_EQ(generator.exitCode(), 0) << generator.readAllStandardError().toStdString();
+  RecordingLibrary lib(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  QString qmlPath = CARD_QML_FILE;
+  if (list) qmlPath.replace("RecordingCard.qml", "RecordingListItem.qml");
+  QQmlComponent component(&engine, QUrl::fromLocalFile(qmlPath));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> card(component.create());
+  ASSERT_NE(card, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(card.get());
+  item->setParentItem(window.contentItem());
+  item->setWidth(list ? 720 : 320);
+  card->setProperty("previewController", QVariant::fromValue(previewService.get()));
+  card->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+  QTest::mouseMove(&window, QPoint(700, 500));
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("hovered").toBool(); }));
+  QObject *startTimer = previewService->findChild<QObject *>("hoverPreviewStart");
+  ASSERT_NE(startTimer, nullptr);
+  EXPECT_EQ(startTimer->property("interval").toInt(), 50);
+  QObject *sharedPlayer = previewService.get();
+  ASSERT_NE(sharedPlayer, nullptr);
+  EXPECT_EQ(previewService->findChild<QObject *>("hoverPreviewPlayer"), nullptr);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return sharedPlayer->property("source").toUrl().toLocalFile() == path; }));
+  QTest::mouseMove(&window, QPoint(700, 500));
+  QTest::qWait(200);
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  QObject *preview = card->property("currentPreview").value<QObject *>();
+  ASSERT_NE(preview, nullptr);
+  EXPECT_TRUE(preview->property("visible").toBool())
+      << "Decoded frames must have a visible scene-graph subtree, not just a live sink";
+  ASSERT_TRUE(QTest::qWaitFor([&] { return preview->property("opacity").toDouble() > 0.99; }, 1000));
+  EXPECT_GT(preview->property("loopStart").toInt(), 0);
+  EXPECT_LE(preview->property("loopStart").toInt(), 12000);
+  // Boundary checks avoid a flaky probabilistic assertion about two random
+  // hovers choosing different positions.
+  auto chooseStart = [&](int duration, double fraction) {
+    QVariant result;
+    EXPECT_TRUE(QMetaObject::invokeMethod(preview, "chooseStart",
+        Q_RETURN_ARG(QVariant, result), Q_ARG(QVariant, QVariant(duration)),
+        Q_ARG(QVariant, QVariant(fraction))));
+    return result.toInt();
+  };
+  EXPECT_EQ(chooseStart(0, 0.5), 0);
+  EXPECT_EQ(chooseStart(2000, 0), 1);
+  EXPECT_EQ(chooseStart(2000, 0.999999), 1000);
+  EXPECT_EQ(chooseStart(60000, 0), 1);
+  EXPECT_EQ(chooseStart(60000, 0.999999), 54000);
+  QObject *player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  EXPECT_EQ(player, sharedPlayer);
+  EXPECT_NE(previewService->findChild<QObject *>("hoverPreviewImage"), nullptr);
+  EXPECT_EQ(player->property("source").toUrl().toLocalFile(), path);
+  // Keep EOF beyond the observation window: a short source could hide a
+  // broken range seek by looping at EndOfMedia instead.
+  preview->setProperty("loopStart", 1000);
+  ASSERT_TRUE(QMetaObject::invokeMethod(player, "seek", Q_ARG(QVariant, QVariant(1000))));
+  // Observe the six-second section wrap, not a full-file endless play.
+  bool wrapped = false;
+  qint64 previous = player->property("position").toLongLong();
+  ASSERT_TRUE(QTest::qWaitFor([&] {
+    const qint64 position = player->property("position").toLongLong();
+    wrapped = wrapped || previous - position > 3000;
+    previous = position;
+    return wrapped;
+  }, 10000));
+  if (list) {
+    card->setProperty("live", true);
+    EXPECT_FALSE(card->property("previewArmed").toBool());
+    EXPECT_FALSE(player->property("playing").toBool());
+    EXPECT_FALSE(card->property("previewEligible").toBool());
+    card->setProperty("live", false);
+    QTest::mouseMove(&window, QPoint(700, 500));
+    QTest::mouseMove(&window, QPoint(100, 80));
+    ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  }
+  card->setProperty("previewAllowed", false); // scrolling/navigation/full player
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  EXPECT_FALSE(player->property("playing").toBool());
+  EXPECT_FALSE(card->property("previewVisible").toBool());
+  card->setProperty("previewAllowed", true);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  windowFake.toggleSelection(path);
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  windowFake.clearSelection();
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  card->setProperty("recording", QVariant());
+  EXPECT_FALSE(card->property("previewVisible").toBool());
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  card->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  item->setVisible(false);
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  item->setVisible(true);
+  QTest::mouseMove(&window, QPoint(700, 500));
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewVisible").toBool(); }, 10000));
+  QTest::mouseMove(&window, QPoint(700, 500));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !card->property("hovered").toBool(); }));
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  EXPECT_EQ(previewService.get(), sharedPlayer);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return sharedPlayer->property("source").toUrl().isEmpty(); }, 3000));
+  card.reset();
+  waitForProbes();
+}
+
+TEST_F(RecordingCardBindingTest, HoverPreviewIsShortDelayedSharedRandomSilentAndRetired) {
+  exerciseHoverPreview(false);
+}
+
+TEST_F(RecordingCardBindingTest, ListHoverPreviewIsShortDelayedSharedRandomSilentAndRetired) {
+  exerciseHoverPreview(true);
+}
+
+TEST_F(RecordingCardBindingTest, RapidGridListHandoffsReuseOneAnimationAndIgnoreOldReleases) {
+  createPreviewService();
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP() << "ffmpeg CLI unavailable";
+  const QString first = tempDir.filePath("First.mkv");
+  const QString second = tempDir.filePath("Second.mkv");
+  QProcess generator;
+  generator.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=12", "-t", "3", "-c:v", "mpeg4", first});
+  ASSERT_TRUE(generator.waitForFinished(15000));
+  ASSERT_EQ(generator.exitCode(), 0);
+  ASSERT_TRUE(QFile::copy(first, second));
+  RecordingLibrary lib(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  auto createCard = [&](bool list, const QString &path) {
+    QString qmlPath = CARD_QML_FILE;
+    if (list) qmlPath.replace("RecordingCard.qml", "RecordingListItem.qml");
+    QQmlComponent component(&engine, QUrl::fromLocalFile(qmlPath));
+    std::unique_ptr<QObject> object(component.create());
+    if (object) {
+      auto *item = qobject_cast<QQuickItem *>(object.get());
+      item->setParentItem(window.contentItem());
+      item->setWidth(list ? 720 : 320);
+      item->setY(list ? 320 : 0);
+      object->setProperty("previewController", QVariant::fromValue(previewService.get()));
+      object->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+    }
+    return object;
+  };
+  auto grid = createCard(false, first);
+  auto row = createCard(true, second);
+  ASSERT_NE(grid, nullptr);
+  ASSERT_NE(row, nullptr);
+  QTest::mouseMove(&window, QPoint(900, 700));
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return grid->property("previewVisible").toBool(); }, 10000));
+  auto *oldHost = previewService->property("target").value<QQuickItem *>();
+  ASSERT_NE(oldHost, nullptr);
+  QPointer<QObject> player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  QSignalSpy sourceChanges(player, SIGNAL(sourceChanged()));
+  ASSERT_TRUE(sourceChanges.isValid());
+  for (int i = 0; i < 8; ++i) {
+    QTest::mouseMove(&window, i % 2 ? QPoint(100, 80) : QPoint(100, 360));
+    QTest::qWait(20);
+  }
+  EXPECT_EQ(sourceChanges.count(), 0); // 20ms passes must not load another video
+  EXPECT_EQ(previewService.get(), player.data());
+  EXPECT_EQ(player->property("source").toUrl().toLocalFile(), first);
+  QTest::mouseMove(&window, QPoint(100, 360));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return row->property("previewVisible").toBool(); }, 10000));
+  EXPECT_EQ(player->property("source").toUrl().toLocalFile(), second);
+  EXPECT_EQ(previewService.get(), player.data());
+  auto *sharedSurface = qobject_cast<QQuickItem *>(previewService.get());
+  EXPECT_EQ(sharedSurface->width(), 128);
+  EXPECT_EQ(sharedSurface->height(), 72);
+  EXPECT_FALSE(grid->property("previewVisible").toBool());
+  ASSERT_TRUE(QMetaObject::invokeMethod(previewService.get(), "release",
+      Q_ARG(QVariant, QVariant::fromValue(oldHost))));
+  EXPECT_TRUE(row->property("previewVisible").toBool());
+  grid.reset();
+  EXPECT_TRUE(row->property("previewVisible").toBool());
+  row.reset(); // active visual parent can die without destroying the player
+  EXPECT_FALSE(player.isNull());
+  EXPECT_EQ(previewService->property("target").value<QQuickItem *>(), nullptr);
+  EXPECT_EQ(qobject_cast<QQuickItem *>(previewService.get())->parentItem(), window.contentItem());
+  EXPECT_FALSE(player->property("playing").toBool());
+  auto pending = createCard(true, first);
+  ASSERT_NE(pending, nullptr);
+  QTest::mouseMove(&window, QPoint(900, 700));
+  QTest::mouseMove(&window, QPoint(100, 360));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return pending->property("hovered").toBool(); }));
+  pending.reset();
+  const int changesAfterDeletion = sourceChanges.count();
+  QTest::qWait(200);
+  EXPECT_EQ(sourceChanges.count(), changesAfterDeletion); // no delayed load after deletion
+  ASSERT_TRUE(QTest::qWaitFor([&] { return player->property("source").toUrl().isEmpty(); }, 3000));
+  EXPECT_EQ(previewService.get(), player.data());
+  waitForProbes();
+}
+
+TEST_F(RecordingCardBindingTest, CachedPreviewRejectsLateResultsAndNeverOpensOriginal) {
+  createPreviewService();
+  previewFake.hold = true;
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP();
+  const QString cached = tempDir.filePath("Cached.mp4");
+  QProcess generator;
+  generator.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=15", "-t", "2", "-c:v", "mpeg4", cached});
+  ASSERT_TRUE(generator.waitForFinished(10000));
+  ASSERT_EQ(generator.exitCode(), 0);
+  QQuickItem first(window.contentItem()), second(window.contentItem());
+  first.setSize(QSizeF(320, 180)); second.setSize(QSizeF(320, 180));
+  const QUrl oldSource = QUrl::fromLocalFile(tempDir.filePath("Original 1.mkv"));
+  const QUrl newSource = QUrl::fromLocalFile(tempDir.filePath("Original 2.mkv"));
+  auto request = [&](QQuickItem *host, const QUrl &url) {
+    EXPECT_TRUE(QMetaObject::invokeMethod(previewService.get(), "request",
+        Q_ARG(QVariant, QVariant::fromValue(host)), Q_ARG(QVariant, QVariant(url))));
+  };
+  QObject *player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  request(&first, oldSource);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return previewFake.requests.size() == 1; }));
+  const int staleTicket = previewFake.requests.first().second;
+  EXPECT_TRUE(player->property("source").toUrl().isEmpty());
+  request(&second, newSource);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return previewFake.requests.size() == 2; }));
+  const int currentTicket = previewFake.requests.last().second;
+  EXPECT_TRUE(previewFake.cancelled.contains(staleTicket));
+  previewFake.deliver(oldSource, staleTicket, QUrl::fromLocalFile(cached));
+  previewFake.deliver(oldSource, currentTicket, QUrl::fromLocalFile(cached));
+  EXPECT_TRUE(player->property("source").toUrl().isEmpty());
+  EXPECT_FALSE(previewService->property("frameReady").toBool());
+  previewFake.deliver(newSource, currentTicket, QUrl::fromLocalFile(cached));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return previewService->property("frameReady").toBool(); }, 10000));
+  EXPECT_EQ(player->property("source").toUrl().toLocalFile(), cached);
+  EXPECT_EQ(previewService->property("target").value<QQuickItem *>(), &second);
+  EXPECT_EQ(previewService->property("fadeDuration").toInt(), 180);
+  EXPECT_LT(previewService->property("opacity").toDouble(), 0.99);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return previewService->property("opacity").toDouble() > 0.99; }, 1000));
+  ASSERT_TRUE(QMetaObject::invokeMethod(previewService.get(), "release",
+      Q_ARG(QVariant, QVariant::fromValue(&second))));
+  EXPECT_FALSE(previewService->property("visible").toBool());
+  EXPECT_DOUBLE_EQ(previewService->property("opacity").toDouble(), 0);
+}
+
+TEST_F(RecordingCardBindingTest, RealCacheRendersPreparedFramesRatherThanOpeningOriginal) {
+  createPreviewService();
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP();
+  const QString original = tempDir.filePath("Original # % Video.mkv");
+  QProcess generator;
+  generator.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=640x360:rate=30", "-t", "9", "-c:v", "mpeg4", original});
+  ASSERT_TRUE(generator.waitForFinished(10000));
+  ASSERT_EQ(generator.exitCode(), 0);
+  PreviewCache realCache;
+  engine.removeImageProvider("hoverpreview");
+  engine.addImageProvider("hoverpreview", realCache.createImageProvider());
+  previewService->setProperty("cache", QVariant::fromValue(&realCache));
+  QQuickItem host(window.contentItem());
+  host.setSize(QSizeF(320, 180));
+  ASSERT_TRUE(QMetaObject::invokeMethod(previewService.get(), "request",
+      Q_ARG(QVariant, QVariant::fromValue(&host)),
+      Q_ARG(QVariant, QVariant(QUrl::fromLocalFile(original)))));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return previewService->property("frameReady").toBool(); }, 15000));
+  QObject *player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  const QString loaded = player->property("source").toUrl().toLocalFile();
+  EXPECT_NE(loaded, original);
+  EXPECT_EQ(QFileInfo(loaded).absolutePath(), tempDir.filePath(".thumbnails"));
+  EXPECT_TRUE(QFileInfo(loaded).fileName().contains(".preview-v1-"));
+  EXPECT_EQ(player->findChild<QObject *>("hoverPreviewPlayer"), nullptr);
+  EXPECT_EQ(previewService->property("targetSource").toUrl().toLocalFile(), original);
+  ASSERT_TRUE(QMetaObject::invokeMethod(previewService.get(), "release",
+      Q_ARG(QVariant, QVariant::fromValue(&host))));
+}
+
+TEST_F(RecordingCardBindingTest, MissingCachedPreviewKeepsThumbnailWithoutOpeningOriginal) {
+  createPreviewService();
+  const QUrl original = QUrl::fromLocalFile(tempDir.filePath("No preview # %.mkv"));
+  previewFake.results.insert(original, QUrl());
+  QQuickItem host(window.contentItem());
+  host.setSize(QSizeF(320, 180));
+  ASSERT_TRUE(QMetaObject::invokeMethod(previewService.get(), "request",
+      Q_ARG(QVariant, QVariant::fromValue(&host)), Q_ARG(QVariant, QVariant(original))));
+  ASSERT_TRUE(QTest::qWaitFor([&] {
+    return previewService->property("failedTarget").value<QQuickItem *>() == &host;
+  }));
+  QObject *player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  EXPECT_TRUE(player->property("source").toUrl().isEmpty());
+  EXPECT_FALSE(previewService->property("visible").toBool());
+  EXPECT_DOUBLE_EQ(previewService->property("opacity").toDouble(), 0);
+}
+
+void RecordingCardBindingTest::exerciseFailedPreview(bool list) {
+  createPreviewService();
+  const QString path = createVideo("Broken.mkv");
+  previewFake.results.insert(QUrl::fromLocalFile(path), QUrl());
+  RecordingLibrary lib(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  QString qmlPath = CARD_QML_FILE;
+  if (list) qmlPath.replace("RecordingCard.qml", "RecordingListItem.qml");
+  QQmlComponent component(&engine, QUrl::fromLocalFile(qmlPath));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> card(component.create());
+  ASSERT_NE(card, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(card.get());
+  item->setParentItem(window.contentItem());
+  item->setWidth(list ? 720 : 320);
+  card->setProperty("previewController", QVariant::fromValue(previewService.get()));
+  card->setProperty("recording", QVariant::fromValue(lib.getRecording(path)));
+  QTest::mouseMove(&window, QPoint(700, 500));
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewFailed").toBool(); }, 10000));
+  EXPECT_FALSE(card->property("previewVisible").toBool());
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  QObject *player = previewService.get();
+  ASSERT_NE(player, nullptr);
+  const int requestsBeforeRetry = previewFake.requests.size();
+  QTest::qWait(200);
+  EXPECT_EQ(previewFake.requests.size(), requestsBeforeRetry); // no retry storm
+  QTest::mouseMove(&window, QPoint(700, 500));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !card->property("previewFailed").toBool(); }));
+  QTest::mouseMove(&window, QPoint(100, 80));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return card->property("previewFailed").toBool(); }, 10000));
+  EXPECT_EQ(previewFake.requests.size(), requestsBeforeRetry + 1);
+  // Changing the delegate's source retires its old attempt even while hovered.
+  card->setProperty("recording", QVariant());
+  EXPECT_FALSE(card->property("previewArmed").toBool());
+  EXPECT_FALSE(card->property("previewFailed").toBool());
+  card.reset();
+  waitForProbes();
+}
+
+TEST_F(RecordingCardBindingTest, FailedPreviewFallsBackUntilNextHover) {
+  exerciseFailedPreview(false);
+}
+
+TEST_F(RecordingCardBindingTest, FailedListPreviewFallsBackUntilNextHover) {
+  exerciseFailedPreview(true);
 }
 
 TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
@@ -351,14 +763,22 @@ TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelect
   ASSERT_NE(activeView(), nullptr);
   EXPECT_EQ(activeView()->property("count").toInt(), 1);
 
+  QPointer<QObject> sharedPreview = page->findChild<QObject *>("libraryHoverPreview");
+  ASSERT_NE(sharedPreview, nullptr);
+  QPointer<QObject> sharedPlayer = sharedPreview->findChild<QObject *>("hoverPreviewImage");
+  ASSERT_NE(sharedPlayer, nullptr);
+  EXPECT_EQ(activeView()->property("previewController").value<QObject *>(), sharedPreview.data());
+
   windowFake.toggleSelection(path);
   auto *listButton = page->findChild<QObject *>("libraryListButton");
   ASSERT_NE(listButton, nullptr);
   ASSERT_TRUE(QMetaObject::invokeMethod(listButton, "clicked"));
   QTest::qWait(100);
   EXPECT_TRUE(page->property("libraryListView").toBool());
+  EXPECT_EQ(page->findChild<QObject *>("hoverPreviewImage"), sharedPlayer.data());
   ASSERT_NE(activeView(), nullptr);
   EXPECT_EQ(activeView()->property("count").toInt(), 1);
+  EXPECT_EQ(activeView()->property("previewController").value<QObject *>(), sharedPreview.data());
   EXPECT_TRUE(windowFake.selectedRecordings().contains(path));
   EXPECT_TRUE(QMetaObject::invokeMethod(page.get(), "scrollToRecording", Q_ARG(QVariant, 0)));
 
@@ -367,6 +787,9 @@ TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelect
   ASSERT_TRUE(QMetaObject::invokeMethod(gridButton, "clicked"));
   QTest::qWait(100);
   EXPECT_FALSE(page->property("libraryListView").toBool());
+  EXPECT_EQ(page->findChildren<QObject *>("hoverPreviewImage").size(), 1);
+  EXPECT_EQ(page->findChild<QObject *>("hoverPreviewImage"), sharedPlayer.data());
+  EXPECT_EQ(page->findChild<QObject *>("hoverPreviewPlayer"), nullptr);
   EXPECT_EQ(activeView()->property("count").toInt(), 1);
   EXPECT_TRUE(windowFake.selectedRecordings().contains(path));
   auto *filterButton = page->findChild<QObject *>("libraryFilterButton");

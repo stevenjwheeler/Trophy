@@ -15,6 +15,10 @@ inline QDir directory(const QString &videoPath) {
 }
 
 inline QStringList owners(const QString &name) {
+  static const QRegularExpression preview("^(.+)\\.preview-v1-(?:mkv|mp4|webm)-[0-9a-f]{16}\\.mp4$");
+  const auto previewMatch = preview.match(name);
+  if (previewMatch.hasMatch())
+    return {previewMatch.captured(1)};
   if (name.endsWith(".peaks"))
     return {name.chopped(6)};
   if (!name.endsWith(".jpg"))

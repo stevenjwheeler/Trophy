@@ -3,6 +3,7 @@
  */
 #include "core/Application.h"
 #include "library/FilmstripCache.h"
+#include "library/PreviewCache.h"
 #include "library/WaveformCache.h"
 
 #include <QDir>
@@ -13,6 +14,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThreadPool>
+#include <QTest>
 #include <gtest/gtest.h>
 
 namespace TrophyBackend {
@@ -57,15 +59,18 @@ protected:
     ASSERT_TRUE(tempDir.isValid());
     app.m_waveformCache = std::make_unique<WaveformCache>();
     app.m_filmstripCache = std::make_unique<FilmstripCache>();
+    app.m_previewCache = std::make_unique<PreviewCache>();
   }
   void TearDown() override {
     QThreadPool::globalInstance()->waitForDone();
     QCoreApplication::processEvents();
     app.m_waveformCache.reset();
     app.m_filmstripCache.reset();
+    app.m_previewCache.reset();
   }
   WaveformCache *waveforms() { return app.m_waveformCache.get(); }
   FilmstripCache *filmstrip() { return app.m_filmstripCache.get(); }
+  PreviewCache *previews() { return app.m_previewCache.get(); }
   void prepare(const QString &path) { app.preparePlayerCaches(path); }
   void settle() {
     ASSERT_TRUE(QThreadPool::globalInstance()->waitForDone(10000));
@@ -97,11 +102,13 @@ TEST_F(ApplicationMediaCacheTest, PreparesAllTracksAndPlayerJoinsPendingJobs) {
     GTEST_SKIP() << "ffmpeg fixture unavailable";
   QSignalSpy peaks(waveforms(), &WaveformCache::peaksReady);
   QSignalSpy strip(filmstrip(), &FilmstripCache::filmstripReady);
+  QSignalSpy preview(previews(), &PreviewCache::previewReady);
   WorkerGate gate;
   prepare(path);
   prepare(path); // Duplicate completion must not start another decode.
   waveforms()->requestPeaks(path, 1); // Player opens before delivery.
   filmstrip()->requestThumbs(path, 32);
+  previews()->requestPreview(QUrl::fromLocalFile(path), 1);
   EXPECT_TRUE(peaks.isEmpty());
   EXPECT_TRUE(strip.isEmpty());
   gate.release();
@@ -111,6 +118,11 @@ TEST_F(ApplicationMediaCacheTest, PreparesAllTracksAndPlayerJoinsPendingJobs) {
     EXPECT_EQ(result.at(2).toList().size(), WaveformCache::kBuckets);
   ASSERT_EQ(strip.count(), 1);
   EXPECT_EQ(strip.first().at(1).toStringList().size(), 32);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return preview.count() == 3; }, 10000));
+  const QUrl cachedPreview = preview.first().at(2).toUrl();
+  ASSERT_FALSE(cachedPreview.isEmpty());
+  for (const auto &entry : preview) EXPECT_EQ(entry.at(2).toUrl(), cachedPreview);
+  EXPECT_TRUE(QFileInfo::exists(cachedPreview.toLocalFile()));
   EXPECT_TRUE(QFileInfo::exists(tempDir.filePath(".thumbnails/Game Clip.peaks")));
   for (const QString &thumb : strip.first().at(1).toStringList())
     EXPECT_GT(QFileInfo(thumb).size(), 0);
