@@ -7,7 +7,7 @@ include(GoogleTest)
 add_executable(test_Theme test_Theme.cpp)
 target_compile_definitions(test_Theme PRIVATE
     THEME_STYLES_DIR="${CMAKE_SOURCE_DIR}/qml/styles")
-target_link_libraries(test_Theme PRIVATE GTest::GTest Qt6::Quick Qt6::Qml)
+target_link_libraries(test_Theme PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_Theme)
 
 add_executable(test_GameIconProvider test_GameIconProvider.cpp

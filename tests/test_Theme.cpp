@@ -5,6 +5,9 @@
 #include <QQmlEngine>
 #include <QQmlPropertyMap>
 #include <QQuickItem>
+#include <QQuickWindow>
+#include <QElapsedTimer>
+#include <QTest>
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -115,6 +118,74 @@ Item {
   EXPECT_EQ(color("background"), QColor("#1a1a2e"));
   EXPECT_EQ(color("accent"), QColor("#e94560"));
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST(ThemeTest, SettingsSectionsAnimateAndReverseWithoutLayoutJumps) {
+  QQmlEngine engine;
+  QQmlComponent component(&engine);
+  component.setData(R"(
+import QtQuick
+import QtQuick.Layouts
+import "../controls" as Controls
+Item {
+    id: root
+    width: 600; height: 800
+    property bool sawIntermediate: false
+    ColumnLayout {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        Controls.SettingsSectionCard {
+            id: panel
+            objectName: "panel"
+            sectionTitle: "Animated settings"
+            description: "A test panel"
+            Rectangle { implicitHeight: 180; Layout.fillWidth: true }
+            onRevealProgressChanged: {
+                if (revealProgress > 0 && revealProgress < 1)
+                    root.sawIntermediate = true;
+            }
+        }
+        Rectangle { objectName: "nextPanel"; implicitHeight: 50; Layout.fillWidth: true }
+    }
+}
+)", QUrl::fromLocalFile(QString(THEME_STYLES_DIR) + "/PanelProbe.qml"));
+  std::unique_ptr<QObject> probe(component.create());
+  ASSERT_NE(probe, nullptr) << component.errorString().toStdString();
+  QQuickWindow window;
+  window.resize(640, 800);
+  qobject_cast<QQuickItem *>(probe.get())->setParentItem(window.contentItem());
+  window.show();
+  QTest::qWait(30);
+  auto *panel = probe->findChild<QQuickItem *>("panel");
+  auto *next = probe->findChild<QQuickItem *>("nextPanel");
+  ASSERT_NE(panel, nullptr);
+  ASSERT_NE(next, nullptr);
+  const qreal collapsedHeight = panel->height();
+  const qreal collapsedNextY = next->y();
+  auto settled = [&](double target) {
+    QElapsedTimer timer;
+    timer.start();
+    while (qAbs(panel->property("revealProgress").toDouble() - target) > 0.001 && timer.elapsed() < 2000)
+      QTest::qWait(10);
+    QTest::qWait(20); // Allow the layout to polish its final geometry.
+    return qAbs(panel->property("revealProgress").toDouble() - target) < 0.001;
+  };
+  panel->setProperty("expanded", true);
+  EXPECT_LT(panel->property("revealProgress").toDouble(), 1);
+  EXPECT_TRUE(settled(1));
+  EXPECT_TRUE(probe->property("sawIntermediate").toBool());
+  EXPECT_GT(panel->height(), collapsedHeight + 170);
+  EXPECT_GT(next->y(), collapsedNextY + 170);
+  panel->setProperty("expanded", false);
+  EXPECT_GT(panel->property("revealProgress").toDouble(), 0);
+  EXPECT_TRUE(settled(0));
+  EXPECT_NEAR(panel->height(), collapsedHeight, 1);
+  EXPECT_NEAR(next->y(), collapsedNextY, 1);
+  panel->setProperty("expanded", true);
+  QTest::qWait(50);
+  panel->setProperty("expanded", false);
+  EXPECT_TRUE(settled(0));
+  EXPECT_NEAR(panel->height(), collapsedHeight, 1);
 }
 
 int main(int argc, char **argv) {

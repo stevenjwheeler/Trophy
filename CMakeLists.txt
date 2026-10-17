@@ -444,6 +444,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/views/VideoPlayer.qml
         qml/controls/TrophyButton.qml
         qml/controls/AccentColorPicker.qml
+        qml/controls/SettingsSectionCard.qml
         qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
         qml/controls/TrophySlider.qml

@@ -22,6 +22,27 @@ Page {
         if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
     }
 
+    property var scrollTargetCard: null
+
+    function scrollSectionIntoView(card) {
+        var target = Math.max(0, card.y - Theme.spacingSmall);
+        var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
+        settingsFlick.contentY = Math.min(target, maxY);
+    }
+
+    Connections {
+        target: root.scrollTargetCard
+        function onExpansionFinished() {
+            var card = root.scrollTargetCard;
+            Qt.callLater(function() {
+                if (root.scrollTargetCard !== card)
+                    return;
+                root.scrollSectionIntoView(card);
+                root.scrollTargetCard = null;
+            });
+        }
+    }
+
     function scrollToSection(sectionTitle) {
         var card = null;
         if (sectionTitle === "Video Recording")
@@ -48,11 +69,12 @@ Page {
         if (!card)
             return;
 
+        scrollTargetCard = card;
         card.expanded = true;
         Qt.callLater(function() {
-            var target = Math.max(0, card.y - Theme.spacingSmall);
-            var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
-            settingsFlick.contentY = Math.min(target, maxY);
+            root.scrollSectionIntoView(card);
+            if (card.expansionProgress === 1 && root.scrollTargetCard === card)
+                root.scrollTargetCard = null;
         });
     }
 
@@ -1457,96 +1479,7 @@ Page {
 
     // ============ REUSABLE CONTROLS (visual only, no logic changes) ============
 
-    component SectionCard: Rectangle {
-        id: sectionCard
-        property string sectionTitle: ""
-        property url iconSource
-        property string description: ""
-        property bool expanded: false
-        default property alias content: body.data
-
-        Layout.fillWidth: true
-        implicitHeight: cardCol.implicitHeight + Theme.spacingMedium * 2
-        radius: Theme.radiusMedium
-        color: Theme.cardColor
-        border.width: 1
-        border.color: Theme.borderColor
-        clip: true
-
-        // Cover the entire collapsed card, including its padding. When open,
-        // only the header toggles, leaving the settings controls untouched.
-        MouseArea {
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
-            height: sectionCard.expanded ? cardCol.y + sectionHeader.height : parent.height
-            cursorShape: Qt.PointingHandCursor
-            onClicked: sectionCard.expanded = !sectionCard.expanded
-        }
-
-        ColumnLayout {
-            id: cardCol
-            anchors.fill: parent
-            anchors.margins: Theme.spacingMedium
-            spacing: Theme.spacingSmall
-
-            RowLayout {
-                id: sectionHeader
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                TrophyIcon {
-                    source: sectionCard.iconSource
-                    color: Theme.textSecondaryColor
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 2
-
-                    Label {
-                        text: sectionCard.sectionTitle
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.textColor
-                    }
-
-                    Label {
-                        Layout.fillWidth: true
-                        text: sectionCard.description
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.textSecondaryColor
-                        wrapMode: Text.WordWrap
-                        visible: sectionCard.description.length > 0
-                    }
-                }
-
-                Label {
-                    text: "›"
-                    font.pixelSize: 26
-                    color: Theme.textSecondaryColor
-                    rotation: sectionCard.expanded ? 90 : 0
-                    Behavior on rotation {
-                        NumberAnimation { duration: 160; easing.type: Easing.InOutQuad }
-                    }
-                }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
-                color: Theme.dividerColor
-                visible: sectionCard.expanded
-            }
-
-            ColumnLayout {
-                id: body
-                visible: sectionCard.expanded
-                Layout.fillWidth: true
-                spacing: Theme.spacingMedium
-            }
-        }
-    }
+    component SectionCard: SettingsSectionCard {}
 
     // Optional helpers share compact status/action columns. A status-only
     // helper collapses its action slot entirely rather than leaving a gap.
