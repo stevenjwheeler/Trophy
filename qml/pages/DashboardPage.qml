@@ -945,5 +945,5 @@ Page {
         }
     }
 
-    background: Rectangle { color: Theme.backgroundColor; bottomRightRadius: 12; topLeftRadius: 26 }
+    background: Rectangle { color: Theme.backgroundColor; bottomRightRadius: Theme.windowRadius; topLeftRadius: 26 }
 }

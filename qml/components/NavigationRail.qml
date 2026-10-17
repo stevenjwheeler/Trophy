@@ -20,7 +20,7 @@ Rectangle {
 
     width: Theme.navRailWidth
     color: Theme.surfaceColor
-    radius: 11
+    radius: Theme.squareWindowCorners ? 0 : 11
 
     // Square off all corners except bottom-left
     Rectangle {

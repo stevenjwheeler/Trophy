@@ -8,6 +8,8 @@
 #include <QQuickWindow>
 #include <QElapsedTimer>
 #include <QTest>
+#include <QSignalSpy>
+#include "core/WindowChrome.h"
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -186,6 +188,88 @@ Item {
   panel->setProperty("expanded", false);
   EXPECT_TRUE(settled(0));
   EXPECT_NEAR(panel->height(), collapsedHeight, 1);
+}
+
+TEST(ThemeTest, WindowCornersFollowStateAndFullSpanSizes) {
+  using TrophyBackend::WindowChrome;
+  const QSize screen(1920, 1080);
+  const QSize available(1920, 1040);
+  EXPECT_FALSE(WindowChrome::shouldSquare(Qt::WindowNoState, {1200, 800}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowMaximized, {1200, 800}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowFullScreen, {1200, 800}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowNoState, {960, 1040}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowNoState, {960, 1080}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowNoState, {1920, 520}, screen, available));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowNoState, {960, 1038}, screen, available));
+  EXPECT_FALSE(WindowChrome::shouldSquare(Qt::WindowNoState, {960, 1000}, screen, available));
+  // Do not invent a tiled state for a floating window sized like a quarter tile.
+  EXPECT_FALSE(WindowChrome::shouldSquare(Qt::WindowNoState, {960, 520}, screen, available));
+  EXPECT_FALSE(WindowChrome::shouldSquare(Qt::WindowNoState, {1200, 800}, {}, {}));
+  EXPECT_TRUE(WindowChrome::shouldSquare(Qt::WindowNoState, {1280, 1000}, {1280, 1440}, {1280, 1400}));
+}
+
+TEST(ThemeTest, WindowCornersRestoreAndDetachFromOldWindows) {
+  using TrophyBackend::WindowChrome;
+  QWindow first;
+  first.resize(400, 300);
+  WindowChrome chrome;
+  QSignalSpy changed(&chrome, &WindowChrome::squareCornersChanged);
+  chrome.setWindow(&first);
+  EXPECT_FALSE(chrome.squareCorners());
+  first.setWindowState(Qt::WindowMaximized);
+  EXPECT_TRUE(chrome.squareCorners());
+  first.setWindowState(Qt::WindowFullScreen);
+  EXPECT_EQ(changed.count(), 1);
+  first.setWindowState(Qt::WindowNoState);
+  EXPECT_FALSE(chrome.squareCorners());
+  EXPECT_EQ(changed.count(), 2);
+  auto second = std::make_unique<QWindow>();
+  second->resize(400, 300);
+  chrome.setWindow(second.get());
+  first.setWindowState(Qt::WindowMaximized);
+  EXPECT_FALSE(chrome.squareCorners());
+  second->setWindowState(Qt::WindowMaximized);
+  EXPECT_TRUE(chrome.squareCorners());
+  second.reset();
+  EXPECT_EQ(chrome.window(), nullptr);
+  EXPECT_FALSE(chrome.squareCorners());
+  chrome.setWindow(&first);
+  EXPECT_TRUE(chrome.squareCorners());
+  chrome.setWindow(nullptr);
+  EXPECT_FALSE(chrome.squareCorners());
+}
+
+TEST(ThemeTest, WindowCornerStateReachesQmlThemeAndRestores) {
+  qmlRegisterType<TrophyBackend::WindowChrome>("ChromeTest", 1, 0, "WindowChrome");
+  QQmlEngine engine;
+  QQmlComponent component(&engine);
+  component.setData(R"(
+import QtQuick
+import ChromeTest 1.0
+import "." as Styles
+Window {
+    id: host
+    width: 400; height: 300
+    property int frameRadius: Styles.Theme.windowRadius
+    WindowChrome { id: chrome; targetWindow: host }
+    Binding {
+        target: Styles.Theme
+        property: "squareWindowCorners"
+        value: chrome.squareCorners
+    }
+}
+)", QUrl::fromLocalFile(QString(THEME_STYLES_DIR) + "/ChromeProbe.qml"));
+  std::unique_ptr<QObject> probe(component.create());
+  ASSERT_NE(probe, nullptr) << component.errorString().toStdString();
+  auto *window = qobject_cast<QWindow *>(probe.get());
+  ASSERT_NE(window, nullptr);
+  EXPECT_EQ(probe->property("frameRadius").toInt(), 12);
+  window->setWindowState(Qt::WindowMaximized);
+  EXPECT_EQ(probe->property("frameRadius").toInt(), 0);
+  window->setWindowState(Qt::WindowFullScreen);
+  EXPECT_EQ(probe->property("frameRadius").toInt(), 0);
+  window->setWindowState(Qt::WindowNoState);
+  EXPECT_EQ(probe->property("frameRadius").toInt(), 12);
 }
 
 int main(int argc, char **argv) {

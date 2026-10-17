@@ -29,6 +29,17 @@ ApplicationWindow {
         value: window.settingsManager
     }
 
+    WindowChrome {
+        id: windowChrome
+        targetWindow: window
+    }
+
+    Binding {
+        target: Theme
+        property: "squareWindowCorners"
+        value: windowChrome.squareCorners || playerPage.playerFullscreen
+    }
+
     // --- QML-DEFINED PROPERTIES ---
     property int currentPage: 0
     property bool skipDeleteConfirmation: false
@@ -406,7 +417,7 @@ ApplicationWindow {
         anchors.fill: parent
         // Square and borderless in player fullscreen so
         // the video runs edge-to-edge.
-        radius: playerPage.playerFullscreen ? 0 : 12
+        radius: Theme.windowRadius
         color: Theme.surfaceColor
         border.width: playerPage.playerFullscreen ? 0 : 1
         border.color: Theme.borderColor
@@ -424,7 +435,7 @@ ApplicationWindow {
                 // fills the window).
                 visible: !playerPage.playerFullscreen
                 color: Theme.surfaceColor
-                radius: 12
+                radius: Theme.windowRadius
 
                 MouseArea {
                     anchors.fill: parent
@@ -667,7 +678,7 @@ ApplicationWindow {
                         visible: Theme.amoled && !playerPage.playerFullscreen
                         color: "transparent"
                         topLeftRadius: 26
-                        bottomRightRadius: 12
+                        bottomRightRadius: Theme.windowRadius
                         border.width: 1
                         border.color: Theme.borderColor
                     }

@@ -10,6 +10,8 @@ pragma Singleton
 
 QtObject {
     id: theme
+    property bool squareWindowCorners: false
+    readonly property int windowRadius: squareWindowCorners ? 0 : 12
     // The app publishes settings on the engine context as well as the window.
     // This also covers Theme imports through local component directories.
     // Standalone components/tests without a settings context keep defaults.

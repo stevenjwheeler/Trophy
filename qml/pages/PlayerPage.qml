@@ -480,7 +480,7 @@ Page {
         // Same page chrome as the other pages: the top
         // tucks under the title bar and the bottom-right
         // rounds into the window corner.
-        bottomRightRadius: 12
+        bottomRightRadius: Theme.windowRadius
         topLeftRadius: 26
     }
 

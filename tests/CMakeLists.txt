@@ -4,7 +4,10 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
-add_executable(test_Theme test_Theme.cpp)
+add_executable(test_Theme test_Theme.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.h)
+target_include_directories(test_Theme PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_Theme PRIVATE
     THEME_STYLES_DIR="${CMAKE_SOURCE_DIR}/qml/styles")
 target_link_libraries(test_Theme PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)

@@ -256,6 +256,7 @@ set(CORE_SOURCES
     src/core/ReplayManager.cpp
     src/core/UpdateChecker.cpp
     src/core/WindowService.cpp
+    src/core/WindowChrome.cpp
     src/core/FrameDispatcher.cpp
     src/core/CircularFrameBuffer.cpp
     src/core/FrameTypes.cpp
@@ -325,6 +326,7 @@ set(CORE_HEADERS
     src/core/ReplayManager.h
     src/core/UpdateChecker.h
     src/core/WindowService.h
+    src/core/WindowChrome.h
 )
 
 set(CAPTURE_HEADERS
@@ -485,6 +487,8 @@ set_target_properties(${PROJECT_NAME}App PROPERTIES
 # Include directories
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # qmltyperegistrar includes exported native types by header basename.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${AVCODEC_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
