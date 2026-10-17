@@ -6,6 +6,7 @@
  */
 
 #include "StorageManager.h"
+#include "library/RecordingSidecars.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -387,15 +388,7 @@ bool StorageManager::deleteRecordingNoRefresh(const QString &filePath) {
   QFile file(filePath);
   if (file.remove()) {
     qDebug() << "Deleted recording:" << filePath;
-    // Remove the sidecar thumbnail too, so auto-cleanup doesn't orphan
-    // .thumbnails/<basename>.jpg. Kept idempotent with
-    // RecordingLibrary::removeRecording (which does the same when the
-    // recordingDeleted signal is wired up in Application).
-    const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
-                              info.completeBaseName() + ".jpg";
-    if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
-      qWarning() << "Failed to delete thumbnail:" << thumbPath;
-    }
+    RecordingSidecars::removeForVideo(filePath);
     emit recordingDeleted(filePath);
     return true;
   }
@@ -464,11 +457,7 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
       } else if (!info.exists()) {
         qWarning() << "File does not exist:" << filePath;
       } else if (QFile::remove(filePath)) {
-        const QString thumbPath = info.absolutePath() + "/.thumbnails/" +
-                                  info.completeBaseName() + ".jpg";
-        if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
-          qWarning() << "Failed to delete thumbnail:" << thumbPath;
-        }
+        RecordingSidecars::removeForVideo(filePath);
         deleted.append(filePath);
       } else {
         qWarning() << "Failed to delete recording:" << filePath;
@@ -616,19 +605,7 @@ QString StorageManager::renameRecording(const QString &filePath,
     return QString();
   }
 
-  // Move the sidecar thumbnail alongside the video so the library picks it
-  // up instead of regenerating it.
-  const QString thumbDir = info.absolutePath() + "/.thumbnails";
-  const QString oldThumb = thumbDir + "/" + oldBase + ".jpg";
-  if (QFile::exists(oldThumb)) {
-    const QString newThumb =
-        thumbDir + "/" + QFileInfo(newAbsolute).completeBaseName() + ".jpg";
-    if (!QFile::exists(newThumb)) {
-      QFile::rename(oldThumb, newThumb);
-    } else {
-      QFile::remove(oldThumb);
-    }
-  }
+  RecordingSidecars::renameForVideo(oldAbsolute, newAbsolute);
 
   qDebug() << "Renamed recording:" << oldAbsolute << "->" << newAbsolute;
   emit recordingRenamed(oldAbsolute, newAbsolute);

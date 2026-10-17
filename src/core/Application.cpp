@@ -455,6 +455,17 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("updateChecker", m_updateChecker.get());
 }
 
+void Application::preparePlayerCaches(const QString &filePath) {
+  if (filePath.isEmpty() || !QFileInfo(filePath).isFile())
+    return;
+  // A single peaks request decodes/caches every audio track in one pass.
+  // Opening the player during preparation joins these same pending jobs.
+  if (m_waveformCache)
+    m_waveformCache->requestPeaks(filePath, 0);
+  if (m_filmstripCache)
+    m_filmstripCache->requestThumbs(filePath, 32); // PlayerPage.stripCount
+}
+
 void Application::connectSignals() {
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
@@ -895,7 +906,8 @@ void Application::connectSignals() {
                   m_recordingManager->currentGameName());
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
-          [this](const QString &, qint64 durationMs, qint64 sizeBytes) {
+          [this](const QString &filePath, qint64 durationMs, qint64 sizeBytes) {
+            preparePlayerCaches(filePath);
             playRecordingStoppedPing(false);
             if (!m_settingsManager->notifyRecordings())
               return;
@@ -959,6 +971,7 @@ void Application::connectSignals() {
           });
   connect(m_replayManager.get(), &ReplayManager::replaySaved, this,
           [this](const QString &filePath, double seconds) {
+            preparePlayerCaches(filePath);
             playClipPing(false);
             if (m_settingsManager->notifyClips()) {
               const QString game = m_replayManager->currentGame();
@@ -987,6 +1000,7 @@ void Application::connectSignals() {
   connect(m_recordingLibrary.get(), &RecordingLibrary::clipSaved, this,
           [this](const QString &filePath, const QString &gameName,
                  double seconds) {
+            preparePlayerCaches(filePath);
             playClipPing(false);
             if (m_settingsManager->notifyClips()) {
               const qint64 secs = std::max<qint64>(1, llround(seconds));

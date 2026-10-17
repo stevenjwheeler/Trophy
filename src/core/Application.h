@@ -163,6 +163,10 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  // Only successful, finalized outputs are warmed (never active recordings or
+  // DVR segments). Reuses the player's cache instances and in-flight jobs.
+  void preparePlayerCaches(const QString &filePath);
+  friend class ApplicationMediaCacheTest;
   // Registers the Vulkan implicit layer; true when the layer JSON is in
   // place (result cached in m_vulkanLayerRegistered at startup).
   bool ensureVulkanLayerRegistered();

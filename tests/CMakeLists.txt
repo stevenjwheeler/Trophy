@@ -115,7 +115,8 @@ set(TEST_LINK_LIBS
     Qt6::Test
 )
 
-add_executable(test_ApplicationAudioProbe test_ApplicationAudioProbe.cpp)
+add_executable(test_ApplicationAudioProbe test_ApplicationAudioProbe.cpp
+    test_ApplicationMediaCache.cpp)
 target_include_directories(test_ApplicationAudioProbe PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ApplicationAudioProbe PRIVATE
     ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)

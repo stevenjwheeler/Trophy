@@ -6,6 +6,7 @@
  */
 
 #include "WaveformCache.h"
+#include "RecordingSidecars.h"
 
 #include <QDataStream>
 #include <QDebug>
@@ -335,6 +336,8 @@ void writeCache(const QString &filePath,
       return;
   }
   const QFileInfo info(filePath);
+  if (!info.isFile())
+    return;
   QDir dir(info.absolutePath() + "/.thumbnails");
   if (!dir.exists() && !dir.mkpath("."))
     return;
@@ -352,6 +355,9 @@ void writeCache(const QString &filePath,
     for (int b = 0; b < WaveformCache::kBuckets && b < track.size(); ++b)
       out << track[b];
   }
+  f.close();
+  if (!QFileInfo::exists(filePath))
+    RecordingSidecars::removeForVideo(filePath);
 }
 
 QVariantList toVariant(const QVector<float> &peaks) {

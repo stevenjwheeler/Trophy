@@ -93,6 +93,49 @@ protected:
   }
 };
 
+TEST_F(RecordingLibraryTest, ScanRemovesOrphanCachesButKeepsLiveAndUnknownFiles) {
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".thumbnails"));
+  const QStringList suffixes = {".jpg", ".peaks", ".strip-0.jpg", ".strip-32-0.jpg"};
+  createFile("Live.mkv");
+  for (const QString &suffix : suffixes) {
+    createFile(".thumbnails/Live" + suffix);
+    createFile(".thumbnails/Deleted" + suffix);
+  }
+  createFile(".thumbnails/notes.txt");
+  createFile(".thumbnails/Deleted.strip-oops.jpg.bak");
+  RecordingLibrary lib(tempDir.path());
+  for (const QString &suffix : suffixes) {
+    EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/Live" + suffix)));
+    EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/Deleted" + suffix)));
+  }
+  EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/notes.txt")));
+  EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/Deleted.strip-oops.jpg.bak")));
+  ASSERT_TRUE(QFile::remove(tempDir.filePath("Live.mkv")));
+  lib.refresh();
+  for (const QString &suffix : suffixes)
+    EXPECT_FALSE(QFile::exists(tempDir.filePath(".thumbnails/Live" + suffix)));
+}
+
+TEST_F(RecordingLibraryTest, OrphanSweepDoesNotFollowSymlinkedCacheDirectory) {
+  QTemporaryDir outside;
+  ASSERT_TRUE(outside.isValid());
+  QFile file(outside.filePath("Deleted.strip-32-0.jpg"));
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write("cache");
+  file.close();
+  ASSERT_TRUE(QFile::link(outside.path(), tempDir.filePath(".thumbnails")));
+  RecordingLibrary lib(tempDir.path());
+  EXPECT_TRUE(QFile::exists(file.fileName()));
+}
+
+TEST_F(RecordingLibraryTest, OrphanSweepPreservesAmbiguousStripNamedVideoThumbnail) {
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".thumbnails"));
+  createFile("Game.strip-32-0.mkv");
+  createFile(".thumbnails/Game.strip-32-0.jpg");
+  RecordingLibrary lib(tempDir.path());
+  EXPECT_TRUE(QFile::exists(tempDir.filePath(".thumbnails/Game.strip-32-0.jpg")));
+}
+
 TEST_F(RecordingLibraryTest, ScansDirectoryForVideos) {
   createFile("GameA_2026-01-15_20-30-00.mkv");
   createFile("GameB_2026-01-16_20-30-00.mp4");

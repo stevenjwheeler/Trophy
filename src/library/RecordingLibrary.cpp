@@ -7,6 +7,7 @@
 
 #include "RecordingLibrary.h"
 #include "Recording.h"
+#include "RecordingSidecars.h"
 #include "ThumbnailGenerator.h"
 #include "core/StorageManager.h"
 #include "muxing/ReplayClipper.h"
@@ -452,6 +453,9 @@ void RecordingLibrary::scanDirectory() {
   QStringList filters = {"*.mkv", "*.mp4", "*.webm"};
   QFileInfoList files = dir.entryInfoList(filters, QDir::Files, QDir::Time);
 
+  // Also reclaim caches left by older versions or deletions while not running.
+  RecordingSidecars::removeOrphans(m_libraryPath);
+
   // Identify files to remove
   QStringList currentFiles;
   for (const QFileInfo &fileInfo : files) {
@@ -517,18 +521,7 @@ void RecordingLibrary::removeRecording(const QString &filePath) {
     saveCustomTitles();
   }
 
-  // Delete thumbnail
-  QFileInfo videoInfo(filePath);
-  QString thumbDir = videoInfo.absolutePath() + "/.thumbnails";
-  QString thumbPath = thumbDir + "/" + videoInfo.completeBaseName() + ".jpg";
-  QFile thumbFile(thumbPath);
-  if (thumbFile.exists()) {
-    if (thumbFile.remove()) {
-      qDebug() << "Deleted thumbnail:" << thumbPath;
-    } else {
-      qWarning() << "Failed to delete thumbnail:" << thumbPath;
-    }
-  }
+  RecordingSidecars::removeForVideo(filePath);
 
   auto it = std::remove_if(m_recordings.begin(), m_recordings.end(),
                            [&filePath](const std::unique_ptr<Recording> &rec) {
@@ -592,12 +585,7 @@ void RecordingLibrary::removeRecordings(const QStringList &filePaths) {
       prefsChanged = true;
     }
     // Best-effort sidecar cleanup, mirroring removeRecording.
-    const QFileInfo videoInfo(path);
-    const QString thumbPath = videoInfo.absolutePath() + "/.thumbnails/" +
-                              videoInfo.completeBaseName() + ".jpg";
-    if (QFile::exists(thumbPath) && !QFile::remove(thumbPath)) {
-      qWarning() << "Failed to delete thumbnail:" << thumbPath;
-    }
+    RecordingSidecars::removeForVideo(path);
   }
   if (prefsChanged) {
     saveCustomTitles();
