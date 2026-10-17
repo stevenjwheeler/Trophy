@@ -22,24 +22,6 @@ Page {
         if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
     }
 
-    // Scroll-spy also moves the active pill: keep it on screen.
-    onActiveSectionChanged: ensurePillVisible(activeSection)
-
-    // Section navigation (titles must match main.qml global search mapping)
-    property string activeSection: qsTr("Video Recording")
-    property bool scrollingProgrammatically: false
-    property var sections: [
-        { title: qsTr("Video Recording"), icon: "qrc:/icons/video.svg" },
-        { title: qsTr("Background Clips"), icon: "qrc:/icons/scissors.svg" },
-        { title: qsTr("Audio Recording"), icon: "qrc:/icons/volume-high.svg" },
-        { title: qsTr("Storage Management"), icon: "qrc:/icons/storage.svg" },
-        { title: qsTr("Notifications"), icon: "qrc:/icons/bell.svg" },
-        { title: qsTr("Game Detection"), icon: "qrc:/icons/gamepad.svg" },
-        { title: qsTr("Detection Helpers"), icon: "qrc:/icons/puzzle.svg" },
-        { title: qsTr("System Tray"), icon: "qrc:/icons/tray.svg" },
-        { title: qsTr("Keyboard Shortcuts"), icon: "qrc:/icons/keyboard.svg" }
-    ]
-
     function scrollToSection(sectionTitle) {
         var card = null;
         if (sectionTitle === "Video Recording")
@@ -64,61 +46,12 @@ Page {
         if (!card)
             return;
 
-        activeSection = sectionTitle;
-        scrollingProgrammatically = true;
-        scrollClearTimer.restart();
-        var target = Math.max(0, card.y - Theme.spacingSmall);
-        var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
-        settingsFlick.contentY = Math.min(target, maxY);
-        ensurePillVisible(sectionTitle);
-    }
-
-    // Keep the active pill on screen: the strip scrolls horizontally on
-    // narrow windows, and without this the current section's pill can
-    // sit cut off out of view.
-    function ensurePillVisible(sectionTitle) {
-        var idx = -1;
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].title === sectionTitle) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx < 0 || idx >= pillsRow.children.length)
-            return;
-        var item = pillsRow.children[idx];
-        if (!item)
-            return;
-        if (item.x < pillsFlick.contentX) {
-            pillsFlick.contentX = Math.max(0, item.x - Theme.spacingSmall);
-        } else if (item.x + item.width > pillsFlick.contentX + pillsFlick.width) {
-            pillsFlick.contentX = Math.max(0, Math.min(pillsFlick.contentWidth - pillsFlick.width,
-                                                      item.x + item.width - pillsFlick.width + Theme.spacingSmall));
-        }
-    }
-
-    function updateActiveSectionFromScroll() {
-        if (scrollingProgrammatically)
-            return;
-
-        var y = settingsFlick.contentY + 140;
-        var current = "Video Recording";
-        if (shortcutsCard && y >= shortcutsCard.y)
-            current = "Keyboard Shortcuts";
-        else if (trayCard && y >= trayCard.y)
-            current = "System Tray";
-        else if (detectionHelpersCard && y >= detectionHelpersCard.y)
-            current = "Detection Helpers";
-        else if (detectionCard && y >= detectionCard.y)
-            current = "Game Detection";
-        else if (storageCard && y >= storageCard.y)
-            current = "Storage Management";
-        else if (audioCard && y >= audioCard.y)
-            current = "Audio Recording";
-        else if (clipsCard && y >= clipsCard.y)
-            current = "Background Clips";
-
-        activeSection = current;
+        card.expanded = true;
+        Qt.callLater(function() {
+            var target = Math.max(0, card.y - Theme.spacingSmall);
+            var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
+            settingsFlick.contentY = Math.min(target, maxY);
+        });
     }
 
     function formatSize(bytes) {
@@ -232,13 +165,6 @@ Page {
         }
     }
 
-    Timer {
-        id: scrollClearTimer
-        interval: 400
-        repeat: false
-        onTriggered: scrollingProgrammatically = false
-    }
-
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacingLarge
@@ -264,127 +190,6 @@ Page {
             }
         }
 
-        // --- SECTION PILLS ---
-        // Single-line strip: chevrons make the horizontal scroll explicit
-        // (dragging works but is undiscoverable), and only appear when
-        // there is overflow in that direction.
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.spacingSmall
-
-            Rectangle {
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
-                radius: 16
-                visible: pillsFlick.contentX > 1
-                color: pillLeftHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
-                border.width: 1
-                border.color: Theme.withOpacity(Theme.textColor, 0.12)
-
-                Label {
-                    anchors.centerIn: parent
-                    text: "‹"
-                    font.pixelSize: 18
-                    color: Theme.textSecondaryColor
-                }
-
-                MouseArea {
-                    id: pillLeftHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: pillsFlick.contentX = Math.max(0, pillsFlick.contentX - pillsFlick.width * 0.8)
-                }
-            }
-
-            Flickable {
-                id: pillsFlick
-                Layout.fillWidth: true
-                Layout.preferredHeight: 36
-                contentWidth: pillsRow.implicitWidth
-                contentHeight: 36
-                flickableDirection: Flickable.HorizontalFlick
-                clip: true
-
-                Row {
-                    id: pillsRow
-                    height: 36
-                    spacing: Theme.spacingSmall
-
-                    Repeater {
-                        model: root.sections
-
-                        Rectangle {
-                            property bool isActive: root.activeSection === modelData.title
-
-                            height: 32
-                            width: pillContent.implicitWidth + Theme.spacingMedium * 2
-                            radius: 16
-                            color: isActive ? Theme.withOpacity(Theme.primaryColor, 0.15) : Theme.withOpacity(Theme.textColor, 0.05)
-                            border.width: 1
-                            border.color: isActive ? Theme.primaryColor : Theme.withOpacity(Theme.textColor, 0.12)
-
-                            Row {
-                                id: pillContent
-                                anchors.centerIn: parent
-                                spacing: 6
-
-                                TrophyIcon {
-                                    source: modelData.icon
-                                    width: 16
-                                    height: 16
-                                    color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Label {
-                                    text: modelData.title
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.weight: isActive ? Font.Medium : Font.Normal
-                                    color: isActive ? Theme.primaryColor : Theme.textSecondaryColor
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.scrollToSection(modelData.title)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
-                radius: 16
-                visible: pillsFlick.contentX < pillsFlick.contentWidth - pillsFlick.width - 1
-                color: pillRightHover.containsMouse ? Theme.withOpacity(Theme.textColor, 0.12) : Theme.withOpacity(Theme.textColor, 0.05)
-                border.width: 1
-                border.color: Theme.withOpacity(Theme.textColor, 0.12)
-
-                Label {
-                    anchors.centerIn: parent
-                    text: "›"
-                    font.pixelSize: 18
-                    color: Theme.textSecondaryColor
-                }
-
-                MouseArea {
-                    id: pillRightHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: pillsFlick.contentX = Math.min(Math.max(0, pillsFlick.contentWidth - pillsFlick.width),
-                                                             pillsFlick.contentX + pillsFlick.width * 0.8)
-                }
-            }
-        }
-
         // --- CONTENT ---
         Flickable {
             id: settingsFlick
@@ -393,7 +198,6 @@ Page {
             contentWidth: width
             contentHeight: contentCol.implicitHeight + Theme.spacingLarge
             clip: true
-            onContentYChanged: root.updateActiveSectionFromScroll()
 
             Behavior on contentY {
                 NumberAnimation {
@@ -1613,6 +1417,7 @@ Page {
         property string sectionTitle: ""
         property url iconSource
         property string description: ""
+        property bool expanded: false
         default property alias content: body.data
 
         Layout.fillWidth: true
@@ -1623,6 +1428,17 @@ Page {
         border.color: Theme.borderColor
         clip: true
 
+        // Cover the entire collapsed card, including its padding. When open,
+        // only the header toggles, leaving the settings controls untouched.
+        MouseArea {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: sectionCard.expanded ? cardCol.y + sectionHeader.height : parent.height
+            cursorShape: Qt.PointingHandCursor
+            onClicked: sectionCard.expanded = !sectionCard.expanded
+        }
+
         ColumnLayout {
             id: cardCol
             anchors.fill: parent
@@ -1630,6 +1446,7 @@ Page {
             spacing: Theme.spacingSmall
 
             RowLayout {
+                id: sectionHeader
                 Layout.fillWidth: true
                 spacing: Theme.spacingSmall
 
@@ -1643,7 +1460,7 @@ Page {
                     spacing: 2
 
                     Label {
-                        text: sectionTitle
+                        text: sectionCard.sectionTitle
                         font.pixelSize: Theme.fontSizeLarge
                         font.weight: Font.Medium
                         color: Theme.textColor
@@ -1651,11 +1468,21 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: description
+                        text: sectionCard.description
                         font.pixelSize: Theme.fontSizeSmall
                         color: Theme.textSecondaryColor
                         wrapMode: Text.WordWrap
-                        visible: description.length > 0
+                        visible: sectionCard.description.length > 0
+                    }
+                }
+
+                Label {
+                    text: "›"
+                    font.pixelSize: 26
+                    color: Theme.textSecondaryColor
+                    rotation: sectionCard.expanded ? 90 : 0
+                    Behavior on rotation {
+                        NumberAnimation { duration: 160; easing.type: Easing.InOutQuad }
                     }
                 }
             }
@@ -1664,10 +1491,12 @@ Page {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 1
                 color: Theme.dividerColor
+                visible: sectionCard.expanded
             }
 
             ColumnLayout {
                 id: body
+                visible: sectionCard.expanded
                 Layout.fillWidth: true
                 spacing: Theme.spacingMedium
             }
