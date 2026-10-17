@@ -102,8 +102,6 @@ GridView {
         }
     }
 
-    ScrollBar.vertical: ScrollBar {
-        policy: ScrollBar.AsNeeded
-    }
+    ScrollBar.vertical: TrophyScrollBar {}
 
 }

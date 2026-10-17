@@ -452,6 +452,7 @@ protected:
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
     QSignalSpy states(&recorder, &RecordingManager::stateChanged);
+    QSignalSpy selection(&recorder, &RecordingManager::captureSelectionFinished);
     QSignalSpy names(&recorder, &RecordingManager::currentGameNameChanged);
 
     recorder.startRecording("Old Game", 11);
@@ -483,6 +484,7 @@ protected:
     EXPECT_EQ(capture.data(), replacementSource.data());
     EXPECT_EQ(recorder.m_captureSource.get(), replacementSource.data());
     EXPECT_FALSE(recorder.m_session); // Old ready cannot build a new session.
+    EXPECT_EQ(selection.count(), 0); // Nor dismiss the replacement's guidance.
     EXPECT_EQ(replacementSource->resolutionQueries, 0);
     EXPECT_EQ(replacementSource->config.windowId, 22u);
     EXPECT_EQ(recorder.currentGameName(), "Replacement Game");

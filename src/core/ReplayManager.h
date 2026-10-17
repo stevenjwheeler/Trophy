@@ -65,6 +65,7 @@ public:
   void setStorageManager(StorageManager *storage);
 
   bool isActive() const { return m_state == State::Running; }
+  bool isStarting() const { return m_state == State::StartingCapture; }
   QString currentGame() const { return m_gameName; }
 
   // Pure helpers (unit-tested): window/retention over segment lists.
@@ -87,6 +88,8 @@ public slots:
   void saveReplay();
 
 signals:
+  // The capture source is ready; portal selection no longer needs guidance.
+  void captureSelectionFinished();
   void replayStateChanged();
   void replaySaved(const QString &filePath, double seconds);
   void replayFailed(const QString &reason);

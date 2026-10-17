@@ -6,6 +6,7 @@
  */
 
 import "../styles"
+import "../controls"
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -17,7 +18,8 @@ ListView {
 
     spacing: Theme.spacingSmall
     clip: true
-    boundsBehavior: Flickable.StopAtBounds
+    boundsBehavior: Flickable.DragAndOvershootBounds
+    boundsMovement: Flickable.FollowBoundsBehavior
     model: {
         var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
         if (skip > 0) {
@@ -79,8 +81,6 @@ ListView {
         height: Theme.spacingLarge
     }
 
-    ScrollBar.vertical: ScrollBar {
-        policy: ScrollBar.AsNeeded
-    }
+    ScrollBar.vertical: TrophyScrollBar {}
 
 }

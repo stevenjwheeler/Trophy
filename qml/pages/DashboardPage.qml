@@ -443,6 +443,25 @@ Page {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             sourceComponent: root.libraryListView ? listComponent : gridComponent
+
+                            Rectangle {
+                                id: libraryBottomFade
+                                // The grid surface is translucent; fade to its opaque
+                                // composite so cards actually disappear at the edge.
+                                readonly property color fadeColor: Qt.tint(Theme.backgroundColor, Theme.recordingGridBackgroundColor)
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.bottom: parent.bottom
+                                height: Theme.spacingLarge * 2
+                                z: 1
+                                opacity: libraryView.item ? Math.max(0, Math.min(1, (libraryView.item.originY + libraryView.item.contentHeight + libraryView.item.bottomMargin - libraryView.item.height - libraryView.item.contentY) / height)) : 0
+                                visible: opacity > 0
+                                gradient: Gradient {
+                                    GradientStop { position: 0; color: Qt.alpha(libraryBottomFade.fadeColor, 0) }
+                                    GradientStop { position: 1; color: libraryBottomFade.fadeColor }
+                                }
+                            }
                         }
 
                         Component {
@@ -464,22 +483,6 @@ Page {
                                 bottomMargin: Theme.spacingSmall
                                 rightMargin: Theme.spacingSmall
 
-                                ScrollBar.vertical: ScrollBar {
-                                    id: customVBar
-                                    active: hovered || pressed
-                                    width: 8
-
-                                    contentItem: Rectangle {
-                                        implicitWidth: 4
-                                        implicitHeight: 40
-                                        radius: 16
-                                        color: customVBar.pressed || customVBar.hovered ? Theme.highlightedColor : Theme.secondaryColor
-                                        opacity: customVBar.active ? 1.0 : 0.2
-                                        Behavior on opacity { NumberAnimation { duration: 200 } }
-                                    }
-
-                                    background: Rectangle { color: "transparent" }
-                                }
                             }
                         }
                     }
@@ -749,6 +752,7 @@ Page {
                         // Long clip filenames must truncate (labels elide),
                         // never widen the content and summon a h-bar.
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ScrollBar.vertical: TrophyScrollBar {}
                         clip: true
                         ColumnLayout {
                             width: activityScroll.availableWidth; spacing: 0

@@ -822,19 +822,48 @@ void Application::connectSignals() {
               isRecord = false;
               m_pendingDvrGame.clear();
             }
-            m_notificationService->closeLastNotification();
-            if (!isCurrentCaptureGame(game))
+            if (!isCurrentCaptureGame(game)) {
+              m_notificationService->closeLastNotification();
               return;
+            }
             if (action == QStringLiteral("block")) {
+              m_notificationService->closeLastNotification();
               blockGame(game);
               return;
             }
+            m_captureSelectionForRecording = isRecord;
+            m_notificationService->showCaptureSelectionHint(game);
             if (isRecord)
               m_recordingManager->startRecording(game);
             else
               m_replayManager->startDvr(game);
+            // Includes synchronous refusal/failure before a state transition.
+            if (isRecord ? m_recordingManager->state() != RecordingManager::RecordingState::Initializing
+                         : !m_replayManager->isStarting())
+              m_notificationService->closeCaptureSelectionHint();
             // Prompt click authorizes capture: allow-list the game.
             authorizeGame(game);
+          });
+  connect(m_recordingManager.get(), &RecordingManager::captureSelectionFinished,
+          this, [this] {
+            if (m_captureSelectionForRecording)
+              m_notificationService->closeCaptureSelectionHint();
+          });
+  connect(m_recordingManager.get(), &RecordingManager::stateChanged,
+          this, [this](RecordingManager::RecordingState state) {
+            if (m_captureSelectionForRecording &&
+                state != RecordingManager::RecordingState::Initializing)
+              m_notificationService->closeCaptureSelectionHint();
+          });
+  connect(m_replayManager.get(), &ReplayManager::captureSelectionFinished,
+          this, [this] {
+            if (!m_captureSelectionForRecording)
+              m_notificationService->closeCaptureSelectionHint();
+          });
+  connect(m_replayManager.get(), &ReplayManager::replayStateChanged,
+          this, [this] {
+            if (!m_captureSelectionForRecording && !m_replayManager->isStarting())
+              m_notificationService->closeCaptureSelectionHint();
           });
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingAdded, m_storageManager.get(), &StorageManager::refresh);
   connect(m_recordingLibrary.get(), &RecordingLibrary::recordingRemoved, m_storageManager.get(), &StorageManager::refresh);
@@ -1450,9 +1479,9 @@ void Application::requestReplay() {
   }
   if (!m_replayManager->isActive()) {
     m_notificationService->showNotification(
-        "Nothing Buffered",
+        "Trophy",
         "Launch a game first — there's nothing buffered yet.",
-        "trophy", 3000, 2);
+        "trophy", 5000, 1);
     return;
   }
   // Storage pre-flight (mirrors the in-manager gate in saveReplay):

@@ -192,6 +192,22 @@ TEST_F(NotificationServiceTest, CloseLastCancelsPendingReply) {
   EXPECT_TRUE(mayWithdraw(svc, request, 42));
 }
 
+TEST_F(NotificationServiceTest, CaptureHintCompletionCancelsPendingReply) {
+  NotificationService svc;
+  const auto request = beginNotice(svc, "Select capture: TestGame");
+  svc.closeCaptureSelectionHint();
+  EXPECT_FALSE(adoptReply(svc, request, 42));
+  EXPECT_EQ(lastId(svc), 0u);
+}
+
+TEST_F(NotificationServiceTest, CaptureHintCompletionPreservesReplacementNotice) {
+  NotificationService svc;
+  setLastNotice(svc, 42, "Recording Started");
+  svc.closeCaptureSelectionHint();
+  EXPECT_EQ(lastId(svc), 42u);
+  EXPECT_TRUE(pendingWithdraw(svc).isEmpty());
+}
+
 TEST_F(NotificationServiceTest, ClosePromptDefersWithdrawWhileReplyInflight) {
   // Async Notify round-trip: the id is still 0 when the game closes.
   // closeAuthorizePrompt must record the title so the reply callback can

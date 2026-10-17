@@ -194,6 +194,7 @@ private:
   QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;
   QString m_pendingDvrGame;
+  bool m_captureSelectionForRecording = true;
   QTimer *m_detectionDebounceTimer = nullptr;
   // Window-gated capture: a portal restore references concrete windows, so
   // a token-armed capture waits for the game's window before requesting.

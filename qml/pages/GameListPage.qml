@@ -121,6 +121,7 @@ Page {
             border.color: Theme.borderColor
 
             ColumnLayout {
+                id: gamesContent
                 anchors.fill: parent
                 anchors.margins: Theme.spacingMedium
 
@@ -140,10 +141,11 @@ Page {
                     spacing: Theme.spacingSmall
                     visible: count > 0
                     model: gameDetector ? gameDetector.gamesModel : null
+                    ScrollBar.vertical: TrophyScrollBar { id: gamesScrollBar }
 
                     section.property: "section"
                     section.delegate: Label {
-                        width: gamesList.width
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         text: section
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
@@ -156,7 +158,7 @@ Page {
                     }
 
                     delegate: GameListItem {
-                        width: gamesList.width
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         entryKey: model.key || ""
                         entryDisplay: model.display || ""
                         entryRunning: model.running || false
@@ -175,6 +177,19 @@ Page {
 
                 }
 
+            }
+
+            Rectangle {
+                anchors.left: gamesContent.left
+                anchors.right: gamesContent.right
+                anchors.bottom: gamesContent.bottom
+                height: Theme.spacingLarge * 2
+                opacity: Math.max(0, Math.min(1, (gamesList.originY + gamesList.contentHeight - gamesList.height - gamesList.contentY) / height))
+                visible: gamesList.visible && opacity > 0
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Qt.alpha(Theme.cardColor, 0) }
+                    GradientStop { position: 1; color: Theme.cardColor }
+                }
             }
 
         }
@@ -371,8 +386,7 @@ Page {
 
                 }
 
-                ScrollIndicator.vertical: ScrollIndicator {
-                }
+                ScrollBar.vertical: TrophyScrollBar {}
 
             }
 

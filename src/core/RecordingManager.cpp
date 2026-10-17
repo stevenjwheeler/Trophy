@@ -290,6 +290,8 @@ void RecordingManager::finishPipelineAndStart() {
   if (m_state != RecordingState::Initializing) {
     return;
   }
+  if (!m_captureReadyForPipeline)
+    emit captureSelectionFinished();
   m_captureReadyForPipeline = true;
 
   qDebug() << "Capture source ready, finishing pipeline...";

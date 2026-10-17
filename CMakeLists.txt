@@ -445,6 +445,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
         qml/controls/TrophySlider.qml
+        qml/controls/TrophyScrollBar.qml
         qml/controls/TrophyRadioButton.qml
         qml/controls/TrophySwitch.qml
         qml/controls/TrophyTextField.qml

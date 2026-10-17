@@ -32,6 +32,27 @@ ApplicationWindow {
     // exiting fullscreen restores it (not a plain window).
     property bool wasMaximizedBeforeFullscreen: false
 
+    function requestAttention(reason) {
+        // Popups live inside this window; opening one must never restore or
+        // activate the window behind a fullscreen game.
+        if (!window.active)
+            notificationService.showAttention(reason);
+    }
+
+    onActiveChanged: {
+        if (window.active)
+            notificationService.clearAttention();
+    }
+
+    Connections {
+        target: notificationService
+        function onAttentionRequested() {
+            if (window.visibility === Window.Minimized)
+                window.showNormal();
+            window.app.showMainWindow();
+        }
+    }
+
     onVisibilityChanged: {
         // The compositor may leave fullscreen on its own
         // (its own keybinding): keep the player's flag in
@@ -631,15 +652,33 @@ ApplicationWindow {
         }
     }
 
-    MouseArea {
-        id: resizeGrip
-        width: 15
-        height: 15
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        cursorShape: Qt.SizeFDiagCursor
-        visible: !playerPage.playerFullscreen
-        onPressed: window.startSystemResize(Qt.RightEdge | Qt.BottomEdge)
+    // Non-overlapping edge strips and larger corner targets sit above the
+    // content so title-bar dragging cannot swallow a resize press.
+    Repeater {
+        model: [Qt.LeftEdge, Qt.RightEdge, Qt.TopEdge, Qt.BottomEdge,
+                Qt.TopEdge | Qt.LeftEdge, Qt.TopEdge | Qt.RightEdge,
+                Qt.BottomEdge | Qt.LeftEdge, Qt.BottomEdge | Qt.RightEdge]
+
+        delegate: MouseArea {
+            required property int modelData
+            readonly property bool leftEdge: (modelData & Qt.LeftEdge) !== 0
+            readonly property bool rightEdge: (modelData & Qt.RightEdge) !== 0
+            readonly property bool topEdge: (modelData & Qt.TopEdge) !== 0
+            readonly property bool bottomEdge: (modelData & Qt.BottomEdge) !== 0
+            readonly property bool corner: (leftEdge || rightEdge) && (topEdge || bottomEdge)
+            readonly property int cornerSize: 15
+            readonly property int edgeSize: 6
+
+            x: leftEdge ? 0 : rightEdge ? parent.width - width : cornerSize
+            y: topEdge ? 0 : bottomEdge ? parent.height - height : cornerSize
+            width: corner ? cornerSize : (leftEdge || rightEdge) ? edgeSize : parent.width - 2 * cornerSize
+            height: corner ? cornerSize : (topEdge || bottomEdge) ? edgeSize : parent.height - 2 * cornerSize
+            cursorShape: corner ? (leftEdge === topEdge ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor)
+                                : (leftEdge || rightEdge) ? Qt.SizeHorCursor : Qt.SizeVerCursor
+            visible: window.visibility === Window.Windowed && !playerPage.playerFullscreen
+            acceptedButtons: Qt.LeftButton
+            onPressed: window.startSystemResize(modelData)
+        }
     }
 
     Shortcut {
@@ -664,6 +703,7 @@ ApplicationWindow {
         function onRecordingError(error) {
             errorDialog.message = error;
             errorDialog.open();
+            window.requestAttention(qsTr("Recording error: %1\nOpen Trophy when you're ready.").arg(error));
         }
     }
 
@@ -679,6 +719,10 @@ ApplicationWindow {
         title: qsTr("Recording Error")
         confirmText: qsTr("OK")
         cancelText: ""
+        onClosed: {
+            if (!trackingRepairDialog.visible)
+                notificationService.clearAttention();
+        }
     }
 
     WindowPickerDialog {
@@ -894,8 +938,8 @@ ApplicationWindow {
                 !window.settingsManager.setupCompleted)
                 return;
             prompted = true;
-            window.show();
             trackingRepairDialog.open();
+            window.requestAttention(qsTr("The Game Window Helper needs repair. Open Trophy when you're ready."));
         }
         Component.onCompleted: Qt.callLater(check)
     }
@@ -917,6 +961,10 @@ ApplicationWindow {
         confirmText: qsTr("Repair")
         cancelText: qsTr("Later")
         onAccepted: if (windowMonitor) windowMonitor.repairTracking()
+        onClosed: {
+            if (!errorDialog.visible)
+                notificationService.clearAttention();
+        }
     }
 
     SetupWizard {

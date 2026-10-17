@@ -106,8 +106,7 @@ Dialog {
 
             }
 
-            ScrollIndicator.vertical: ScrollIndicator {
-            }
+            ScrollBar.vertical: TrophyScrollBar {}
 
         }
 

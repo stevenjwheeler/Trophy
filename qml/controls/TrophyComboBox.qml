@@ -113,8 +113,7 @@ ComboBox {
             model: control.popup.visible ? control.delegateModel : null
             currentIndex: control.highlightedIndex
 
-            ScrollIndicator.vertical: ScrollIndicator {
-            }
+            ScrollBar.vertical: TrophyScrollBar {}
 
         }
 

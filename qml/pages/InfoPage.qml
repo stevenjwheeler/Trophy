@@ -55,9 +55,17 @@ Page {
     }
 
     ScrollView {
+        id: infoScroll
         anchors.fill: parent
         contentWidth: availableWidth
-        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+        ScrollBar.vertical: TrophyScrollBar {
+            // A custom ScrollView bar needs viewport parenting/geometry;
+            // otherwise it can end up inside the scrolling content.
+            parent: infoScroll
+            x: infoScroll.width - width
+            y: infoScroll.topPadding
+            height: infoScroll.availableHeight
+        }
         clip: true
 
         ColumnLayout {
@@ -481,6 +489,20 @@ Page {
 
         }
 
+    }
+
+    Rectangle {
+        anchors.left: infoScroll.left
+        anchors.right: infoScroll.right
+        anchors.rightMargin: infoScroll.ScrollBar.vertical.width
+        anchors.bottom: infoScroll.bottom
+        height: Theme.spacingLarge * 2
+        opacity: Math.max(0, Math.min(1, (infoScroll.contentItem.contentHeight - infoScroll.contentItem.height - infoScroll.contentItem.contentY) / height))
+        visible: opacity > 0
+        gradient: Gradient {
+            GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }
+            GradientStop { position: 1; color: Theme.backgroundColor }
+        }
     }
 
     background: Rectangle {

@@ -157,6 +157,7 @@ Rectangle {
                     // Step 1: Welcome
                     ScrollView {
                         id: step1Scroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {
@@ -196,6 +197,7 @@ Rectangle {
                     // Step 2: Storage
                     ScrollView {
                         id: step2Scroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {
@@ -265,6 +267,7 @@ Rectangle {
                     // Step 3: Audio
                     ScrollView {
                         id: step3Scroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {
@@ -375,6 +378,7 @@ Rectangle {
                     /// Step 4: Required tracking and optional reporters
                     ScrollView {
                         id: step4Scroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {
@@ -507,6 +511,7 @@ Rectangle {
                     /// Step 5: Hardware & Performance
                     ScrollView {
                         id: stepHwScroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         // Preferred hardware family for explicit codec picks.
@@ -727,6 +732,7 @@ Rectangle {
                     /// Step 6: Keyboard Shortcuts
                     ScrollView {
                         id: stepKeysScroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         // Bound session vs. actually usable keys: the portal
@@ -842,6 +848,7 @@ Rectangle {
                     /// Step 7: Finish
                     ScrollView {
                         id: step5Scroll
+                        ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {

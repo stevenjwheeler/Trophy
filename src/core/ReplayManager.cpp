@@ -320,6 +320,8 @@ void ReplayManager::onRestoreTokenStale(const QString &oldToken) {
 void ReplayManager::onCaptureReady() {
   if (m_state != State::StartingCapture)
     return;
+  if (!m_captureReadyForPipeline)
+    emit captureSelectionFinished();
   m_captureReadyForPipeline = true;
   if (!m_lookupCacheValid || m_lookupAudioKey != audioSetupKey()) {
     refreshLookupCacheAsync();

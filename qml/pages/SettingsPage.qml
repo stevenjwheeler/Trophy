@@ -166,9 +166,13 @@ Page {
     }
 
     ColumnLayout {
+        id: settingsLayout
         anchors.fill: parent
         anchors.margins: Theme.spacingLarge
-        anchors.bottomMargin: Theme.spacingMedium
+        // Let the viewport and its fade reach the page edge, as on Info.
+        // The scrolling content already supplies its own bottom padding.
+        anchors.bottomMargin: 0
+        anchors.rightMargin: 0
         spacing: Theme.spacingMedium
 
         // --- HEADER ---
@@ -195,6 +199,7 @@ Page {
             id: settingsFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.topMargin: Theme.spacingMedium
             contentWidth: width
             contentHeight: contentCol.implicitHeight + Theme.spacingLarge
             clip: true
@@ -206,24 +211,7 @@ Page {
                 }
             }
 
-            ScrollBar.vertical: ScrollBar {
-                id: settingsVBar
-                active: hovered || pressed
-                width: 8
-
-                contentItem: Rectangle {
-                    implicitWidth: 4
-                    implicitHeight: 40
-                    radius: 16
-                    color: settingsVBar.pressed ? Theme.highlightedColor : (settingsVBar.hovered ? Theme.highlightedColor : Theme.secondaryColor)
-                    opacity: settingsVBar.active ? 1.0 : 0.2
-                    Behavior on opacity { NumberAnimation { duration: 200 } }
-                }
-
-                background: Rectangle {
-                    color: "transparent"
-                }
-            }
+            ScrollBar.vertical: TrophyScrollBar {}
 
             ColumnLayout {
                 id: contentCol
@@ -1355,6 +1343,21 @@ Page {
                     Layout.preferredHeight: Theme.spacingMedium
                 }
             }
+        }
+    }
+
+    // Keep the fade outside the Flickable so it stays fixed over scrolling content.
+    Rectangle {
+        anchors.left: settingsLayout.left
+        anchors.right: settingsLayout.right
+        anchors.rightMargin: settingsFlick.ScrollBar.vertical.width
+        anchors.bottom: settingsLayout.bottom
+        height: Theme.spacingLarge * 2
+        opacity: Math.max(0, Math.min(1, (settingsFlick.contentHeight - settingsFlick.height - settingsFlick.contentY) / height))
+        visible: opacity > 0
+        gradient: Gradient {
+            GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }
+            GradientStop { position: 1; color: Theme.backgroundColor }
         }
     }
 

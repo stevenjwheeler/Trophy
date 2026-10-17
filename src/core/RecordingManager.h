@@ -111,6 +111,8 @@ public:
   static bool sourceLabelsAgree(const QString &a, const QString &b);
 
 signals:
+  // The capture source is ready; portal selection no longer needs guidance.
+  void captureSelectionFinished();
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);

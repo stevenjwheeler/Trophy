@@ -371,6 +371,7 @@ protected:
       return result;
     };
     int builds = 0;
+    QSignalSpy selection(&mgr, &ReplayManager::captureSelectionFinished);
     mgr.m_segmentBuilder = [&] {
       ++builds;
       EXPECT_EQ(mgr.m_lookupCache.voiceNodeName, "new-voice");
@@ -378,6 +379,7 @@ protected:
       return true;
     };
     mgr.onCaptureReady();
+    EXPECT_EQ(selection.count(), 1); // Picker guidance ends before audio setup.
     ASSERT_TRUE(gate->waitForEntry());
     EXPECT_EQ(gate->firstVoice, "old-voice");
     bool heartbeat = false;
@@ -805,6 +807,7 @@ TEST_F(ReplayManagerTest, SupersededLookupCannotOverwriteNewerCache) {
 TEST_F(ReplayManagerTest, QueuedOldCaptureEventsCannotStopReplacement) {
   for (bool ready : {false, true}) {
     ReplayManager mgr;
+    QSignalSpy selection(&mgr, &ReplayManager::captureSelectionFinished);
     auto *old = replaceCapture(mgr);
     if (ready)
       emit old->ready();
@@ -813,6 +816,7 @@ TEST_F(ReplayManagerTest, QueuedOldCaptureEventsCannotStopReplacement) {
     replaceCapture(mgr); // destroys sender, but already queued calls survive
     QCoreApplication::processEvents();
     EXPECT_TRUE(isStarting(mgr));
+    EXPECT_EQ(selection.count(), 0);
     EXPECT_EQ(mgr.currentGame(), "Replacement");
   }
 }
