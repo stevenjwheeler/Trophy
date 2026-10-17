@@ -737,9 +737,8 @@ bool RecordingManager::buildPipeline() {
           activeSources++;
           gameSourceAdded = true;
         } else {
-          // Fallback to default monitor (whole system audio) if no specific
-          // game found. This is NOT marked connected: the session retry
-          // keeps hunting the real app node and hot-swaps when it appears.
+          // Preserve some audio while the game stream is unavailable. This
+          // full-system fallback is not a game bind: retries keep looking.
           qDebug() << "Game audio: no specific node found, falling back to "
                         "default monitor for track"
                      << gameTrack;
@@ -752,11 +751,8 @@ bool RecordingManager::buildPipeline() {
 
       // === Voice chat (track 1 in separate; next contiguous slot in merged)
       // ===
-      // Suppressed while track 0 is full-mix fallback: the monitor
-      // already carries voice, so a separate leg would double it. The
-      // slot is still reserved in separate mode (the session retry binds
-      // it once the game track upgrades past fallback); merged mode
-      // leaves it unadopted so no hole stalls the mix gate.
+      // The desktop fallback already includes voice. Avoid doubling it until
+      // the game binds; separate mode reserves Voice for the later upgrade.
       vcApp = m_preparedAudio.voiceApp;
       voiceTrack = -1;
       if (!vcApp.isEmpty()) {

@@ -387,6 +387,17 @@ target_include_directories(test_PipeWireAudioSource PRIVATE ${TEST_INCLUDE_DIRS}
 target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 gtest_discover_tests(test_PipeWireAudioSource)
 
+if(Python3_Interpreter_FOUND)
+    add_executable(test_AppAudioGroup test_AppAudioGroup.cpp)
+    target_include_directories(test_AppAudioGroup PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_AppAudioGroup PRIVATE Trophy GTest::GTest GTest::Main Qt6::Test PkgConfig::PIPEWIRE)
+    add_test(NAME AppAudioGroupTest.PrivatePipeWire
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
+            $<TARGET_FILE:test_AppAudioGroup>)
+    set_tests_properties(AppAudioGroupTest.PrivatePipeWire PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 45)
+endif()
+
 add_executable(test_ReplayManager test_ReplayManager.cpp)
 target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
