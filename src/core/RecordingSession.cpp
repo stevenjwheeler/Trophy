@@ -501,10 +501,22 @@ QVariantMap RecordingSession::captureHealth() const {
   for (int role = 0; role < AudioMixer::kTrackCount; ++role) {
     QString status = m_audioMixer ? m_audioMixer->semanticSourceStatus(role)
                                  : QStringLiteral("unavailable");
+    QString sourceName = m_audioMixer ? m_audioMixer->semanticSourceName(role)
+                                      : QString();
     if (m_audioMixer && m_audioMixer->isSemanticTrackMuted(role))
       status = QStringLiteral("muted");
-    if (role == 1 && m_voiceChatApp.isEmpty()) status = QStringLiteral("not-configured");
-    else if (role == 1 && (m_desktopAudio || m_gameIsFallback)) {
+    if (role == 1) {
+      if (m_voiceChatApp.isEmpty()) {
+        status = QStringLiteral("not-configured");
+        sourceName.clear();
+      } else {
+        // Voice identity comes from settings, not the node name (which may
+        // read as "application output" or an unknown binary).
+        sourceName = m_voiceChatApp;
+      }
+    }
+    if (role == 1 && !m_voiceChatApp.isEmpty() &&
+        (m_desktopAudio || m_gameIsFallback)) {
       status = m_audioMixer && m_audioMixer->sourceIsCapturing(0)
                    ? QStringLiteral("included-in-desktop")
                    : QStringLiteral("desktop-mix-unavailable");
@@ -512,6 +524,7 @@ QVariantMap RecordingSession::captureHealth() const {
         status = QStringLiteral("desktop-mix-muted");
     }
     result[QStringLiteral("audio%1").arg(role)] = status;
+    result[QStringLiteral("audio%1Name").arg(role)] = sourceName;
   }
   return result;
 }

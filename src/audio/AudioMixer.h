@@ -90,6 +90,10 @@ public:
   Q_INVOKABLE float semanticTrackLevel(int role) const;
   // Owner-thread, nonblocking native-state snapshot; silence is not failure.
   QString semanticSourceStatus(int role) const;
+  // Human-readable name of the source bound to a semantic role, for capture
+  // health ("connected to <name>"). Empty when no source is bound. Never
+  // performs a native query; returns the source's recorded display name.
+  QString semanticSourceName(int role) const;
 
   // Audio level metering (0.0 - 1.0)
   Q_INVOKABLE float getTrackLevel(int trackIndex) const;

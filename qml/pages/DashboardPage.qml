@@ -37,9 +37,41 @@ Page {
     function audioHealthName(role) {
         return role === 0 ? (root.healthStatus.desktopAudio || root.healthStatus.desktopFallback ? qsTr("System") : qsTr("Game")) : role === 1 ? qsTr("Voice") : qsTr("Mic");
     }
+    function deviceDescription(id, isInput) {
+        if (!id || id === "default")
+            return isInput ? qsTr("System default input") : qsTr("System default output");
+        const enumerator = (typeof audioDeviceEnumerator !== "undefined") ? audioDeviceEnumerator : null;
+        const list = enumerator ? (isInput ? enumerator.inputDevices : enumerator.outputDevices) : [];
+        for (let i = 0; list && i < list.length; ++i) {
+            if (list[i].id === id)
+                return list[i].name;
+        }
+        return id;
+    }
+    // What a role is actually bound to, for "Connected to <name>".
+    function audioHealthTarget(role) {
+        const status = root.healthStatus;
+        if (role === 0) {
+            if (status.desktopFallback)
+                return qsTr("desktop mix");
+            if (status.desktopAudio)
+                return root.deviceDescription(settingsManager ? settingsManager.gameAudioDevice : "", false);
+            return status.gameName || status.audio0Name || "";
+        }
+        if (role === 1)
+            return status.audio1Name || "";
+        const micId = settingsManager ? settingsManager.microphoneDevice : "";
+        return (micId ? root.deviceDescription(micId, true) : "") || status.audio2Name || "";
+    }
     function audioHealthText(role) {
         const state = root.healthStatus["audio" + role];
-        let detail = state === "capturing" ? qsTr("Connected") : state === "muted" ? qsTr("Muted") : state === "starting" ? qsTr("Connecting…") : state === "not-configured" ? qsTr("Not configured") : state === "included-in-desktop" ? qsTr("Included in desktop mix") : state === "desktop-mix-muted" ? qsTr("Desktop mix is muted") : state === "desktop-mix-unavailable" ? qsTr("Desktop mix unavailable") : qsTr("Unavailable — retrying");
+        let detail = "";
+        if (state === "capturing") {
+            const target = root.audioHealthTarget(role);
+            detail = target ? qsTr("Connected to %1").arg(target) : qsTr("Connected");
+        } else {
+            detail = state === "muted" ? qsTr("Muted") : state === "starting" ? qsTr("Connecting…") : state === "not-configured" ? qsTr("Not configured") : state === "included-in-desktop" ? qsTr("Included in desktop mix") : state === "desktop-mix-muted" ? qsTr("Desktop mix is muted") : state === "desktop-mix-unavailable" ? qsTr("Desktop mix unavailable") : qsTr("Unavailable — retrying");
+        }
         if (role === 0 && root.healthStatus.desktopFallback)
             detail = qsTr("Desktop fallback") + (state === "muted" ? qsTr(" · Muted") : state === "capturing" ? "" : " · " + detail);
         return detail;

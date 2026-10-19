@@ -980,8 +980,13 @@ Page {
                         ToolTip.delay: 600
                         onClicked: {
                             const ms = Math.round(Math.max(0, Math.min(playerPage.playPosition, playerPage.playDuration)));
-                            if (!recordingLibrary.addBookmark(playerPage.filePath, ms))
+                            if (!recordingLibrary.addBookmark(playerPage.filePath, ms)) {
                                 window.showMetadataError();
+                            } else if (typeof app !== "undefined" && app && typeof app.playClipPing === "function") {
+                                // Sampling confirmation: a bookmark gets the same
+                                // completion chime as a saved clip.
+                                app.playClipPing(false);
+                            }
                         }
                     }
 

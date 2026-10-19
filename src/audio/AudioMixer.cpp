@@ -114,6 +114,19 @@ QString AudioMixer::semanticSourceStatus(int role) const {
   return pending ? QStringLiteral("starting") : QStringLiteral("unavailable");
 }
 
+QString AudioMixer::semanticSourceName(int role) const {
+  std::shared_ptr<IAudioSource> source;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto &track : m_tracks) {
+      if (track.semanticRole != role) continue;
+      source = track.source;
+      break;
+    }
+  }
+  return source ? source->displayName() : QString();
+}
+
 void AudioMixer::applySourceRole(Track &track) {
   const int role = semanticRoleForSource(*track.source, track.config.index);
   // Preserve a legacy physical idle preference on the slot's FIRST bind,

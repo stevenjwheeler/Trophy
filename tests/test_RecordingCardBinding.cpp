@@ -11,6 +11,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlExpression>
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -883,6 +884,24 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   QTest::qWait(50);
   EXPECT_EQ(page->findChild<QQuickItem *>("primaryAudioMeter")->property("label").toString(), "Game");
   EXPECT_TRUE(page->findChild<QQuickItem *>("voiceAudioMeter")->isVisible());
+  appAudio["gameName"] = "Deadlock";
+  appAudio["audio1Name"] = "Discord";
+  appAudio["audio2Name"] = "USB Microphone";
+  appAudio["audio0"] = "capturing";
+  appAudio["audio1"] = "capturing";
+  appAudio["audio2"] = "capturing";
+  page->setProperty("captureStatus", appAudio);
+  QTest::qWait(50);
+  const auto healthText = [&](int role) {
+    QQmlExpression expression(qmlContext(page.get()), page.get(),
+                              QStringLiteral("audioHealthText(%1)").arg(role));
+    return expression.evaluate().toString();
+  };
+  EXPECT_EQ(healthText(0), "Connected to Deadlock");
+  EXPECT_EQ(healthText(1), "Connected to Discord");
+  // The device enumerator is a null context property here, so the mic falls
+  // back to the source's own display name rather than a generic "Connected".
+  EXPECT_EQ(healthText(2), "Connected to USB Microphone");
   auto *primary = page->findChild<QQuickItem *>("primaryAudioMeter");
   auto *voice = page->findChild<QQuickItem *>("voiceAudioMeter");
   auto *mic = page->findChild<QQuickItem *>("micAudioMeter");

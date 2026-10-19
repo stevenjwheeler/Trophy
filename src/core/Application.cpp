@@ -1566,6 +1566,7 @@ void Application::requestBookmark() {
     return;
   }
   const bool saved = m_recordingManager->addBookmark();
+  if (saved) playClipPing(false);
   m_notificationService->showNotification(
       saved ? "Bookmark saved" : "Bookmark failed",
       saved ? "Find this moment on the recording's player timeline."
@@ -1577,10 +1578,14 @@ QVariantMap Application::captureHealth() const {
   if (m_recordingManager && m_recordingManager->isRecording()) {
     auto result = m_recordingManager->captureHealth();
     result["mode"] = QStringLiteral("recording");
+    result["gameName"] = m_recordingManager->currentGameName();
     return result;
   }
-  if (m_replayManager && m_replayManager->isActive())
-    return m_replayManager->captureHealth();
+  if (m_replayManager && m_replayManager->isActive()) {
+    auto result = m_replayManager->captureHealth();
+    result["gameName"] = m_replayManager->currentGame();
+    return result;
+  }
   return {};
 }
 

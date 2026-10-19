@@ -321,6 +321,8 @@ TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
   session.setVoiceChatApp("Discord");
   EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
   EXPECT_EQ(session.captureHealth()["audio1"].toString(), "desktop-mix-unavailable");
+  // Capture health names the bound identity, not just a generic "connected".
+  EXPECT_EQ(session.captureHealth()["audio1Name"].toString(), "Discord");
   mixer.setSemanticTrackMuted(2, true);
   EXPECT_EQ(session.captureHealth()["audio2"].toString(), "muted");
   session.setGameIsFallback(false);

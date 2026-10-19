@@ -116,6 +116,21 @@ TEST(AudioHealthTest, SemanticStatusUsesActualSourcesAndNotSignalLevel) {
   EXPECT_EQ(mixer.semanticSourceStatus(2), "unavailable");
 }
 
+TEST(AudioHealthTest, SemanticNameReportsBoundSourceName) {
+  AudioMixer mixer(48000, 2);
+  EXPECT_TRUE(mixer.semanticSourceName(0).isEmpty());
+  auto desktop = std::make_unique<FakeAudioSource>(
+      IAudioSource::SourceType::DesktopAudio, "Desktop Audio");
+  mixer.addSource(std::move(desktop), 0);
+  // Merged routing binds mic to physical slot 1 but logical role 2.
+  auto mic = std::make_unique<FakeAudioSource>(
+      IAudioSource::SourceType::Microphone, "USB Microphone");
+  mixer.addSource(std::move(mic), 1);
+  EXPECT_EQ(mixer.semanticSourceName(0), "Desktop Audio");
+  EXPECT_EQ(mixer.semanticSourceName(2), "USB Microphone");
+  EXPECT_TRUE(mixer.semanticSourceName(1).isEmpty());
+}
+
 // All gates self-release on timeout so even a failed assertion can join
 // its worker. State is separate from the source so destruction is observable
 // without ever dereferencing a retired raw pointer.
