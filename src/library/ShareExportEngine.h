@@ -10,6 +10,7 @@ struct ShareExportOptions {
   int maxHeight = 1080; // 0 = original, never upscale
   qint64 targetBytes = 0; // approximate per-file bitrate budget, 0 = quality mode
   QList<int> audioStreams; // absolute stream indices; empty = silent export
+  bool watermark = true; // burned into share copies only
 };
 struct ShareExportResult { QString path; QString error; };
 // Worker-only native FFmpeg operations. No ffmpeg executable dependency,

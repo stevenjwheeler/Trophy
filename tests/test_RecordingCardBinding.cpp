@@ -871,6 +871,11 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
     ASSERT_NE(primary, nullptr); ASSERT_NE(voice, nullptr);
     EXPECT_EQ(primary->property("label").toString(), "System");
     EXPECT_FALSE(voice->isVisible());
+    auto *mic = page->findChild<QQuickItem *>("micAudioMeter");
+    ASSERT_NE(mic, nullptr);
+    EXPECT_TRUE(mic->isVisible());
+    EXPECT_EQ(primary->parentItem(), mic->parentItem());
+    EXPECT_NEAR(mic->y(), primary->y() + primary->height(), 1);
   }
   auto appAudio = page->property("captureStatus").toMap();
   appAudio["desktopFallback"] = false;
@@ -878,6 +883,11 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   QTest::qWait(50);
   EXPECT_EQ(page->findChild<QQuickItem *>("primaryAudioMeter")->property("label").toString(), "Game");
   EXPECT_TRUE(page->findChild<QQuickItem *>("voiceAudioMeter")->isVisible());
+  auto *primary = page->findChild<QQuickItem *>("primaryAudioMeter");
+  auto *voice = page->findChild<QQuickItem *>("voiceAudioMeter");
+  auto *mic = page->findChild<QQuickItem *>("micAudioMeter");
+  EXPECT_NEAR(voice->y(), primary->y() + primary->height(), 1);
+  EXPECT_NEAR(mic->y(), voice->y() + voice->height(), 1);
   QTest::qWait(260);
   const qreal expandedHeight = card->height();
   page->setProperty("captureStatus", QVariantMap{});
@@ -890,6 +900,38 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   QTest::qWait(260);
   EXPECT_FALSE(health->isVisible());
   EXPECT_NEAR(card->height(), 80, 1);
+}
+
+TEST_F(RecordingCardBindingTest, DashboardStorageAndActivityIgnoreLibraryFilters) {
+  createVideo("Game_2026-01-15_20-30-00.mkv");
+  createVideo("Other_2026-01-15_20-31-00.mkv");
+  RecordingLibrary lib(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &lib);
+  for (const auto *name : {"settingsManager", "storageManager", "replayManager",
+                           "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto dashboardUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, dashboardUrl);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  auto *count = page->findChild<QObject *>("storageRecordingCount");
+  auto *activity = page->findChild<QObject *>("recentActivityModel");
+  ASSERT_NE(count, nullptr);
+  ASSERT_NE(activity, nullptr);
+  const auto totalText = count->property("text").toString();
+  EXPECT_TRUE(totalText.startsWith("2"));
+  ASSERT_EQ(activity->property("count").toInt(), 2);
+  lib.setSearchQuery("no matching capture");
+  lib.setKindFilter(RecordingLibrary::NoCaptures);
+  lib.setProtectedOnly(true);
+  lib.setSortOrder(RecordingLibrary::NameZA);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(lib.count(), 0);
+  EXPECT_EQ(count->property("text").toString(), totalText);
+  EXPECT_EQ(activity->property("count").toInt(), 2);
+  waitForProbes();
 }
 
 TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelection) {

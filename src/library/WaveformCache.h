@@ -22,7 +22,8 @@ namespace TrophyBackend {
  * @brief Per-track waveform peaks for the in-app player
  *
  * Decodes an audio stream to mono float, buckets the peak
- * amplitudes and hands them to QML for drawing. Work runs on
+   * amplitudes and hands them to QML for drawing. Normalization is
+   * capped at 20 dB gain so near-silence stays visually flat. Work runs on
  * the global thread pool (a 2h game track decodes in seconds,
  * but never on the GUI thread); results arrive via
  * peaksReady. Computed peaks are cached next to the

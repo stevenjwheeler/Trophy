@@ -7,6 +7,10 @@
 #include <QTemporaryFile>
 #include <QSet>
 #include <QDateTime>
+#include <QImage>
+#include <QPainter>
+#include <QFontMetrics>
+#include <QImageReader>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -187,7 +191,7 @@ public:
 struct Output {
   AVFormatContext *ctx = nullptr;
   ~Output() { if (ctx) { if (ctx->pb) avio_closep(&ctx->pb); avformat_free_context(ctx); } }
-  void write(AVCodecContext *codec, AVStream *stream, AVFrame *f) {
+  void write(AVCodecContext *codec, AVStream *stream, AVFrame *f, int64_t packetDuration = 0) {
     ffcheck(avcodec_send_frame(codec, f), "Cannot encode export");
     auto p = packet();
     while (true) {
@@ -196,6 +200,9 @@ struct Output {
       ffcheck(result, "Cannot receive encoded export packet");
       check(stream && stream->index >= 0 && unsigned(stream->index) < ctx->nb_streams &&
             p->size > 0 && p->data, "Encoder produced an invalid export packet.");
+      // libx264 can omit frame duration. CFR packets, including delayed flush
+      // output, need an explicit final duration or MP4 may trim the last frame.
+      if (p->duration <= 0 && packetDuration > 0) p->duration = packetDuration;
       av_packet_rescale_ts(p.get(), codec->time_base, stream->time_base);
       p->stream_index = stream->index;
       ffcheck(av_interleaved_write_frame(ctx, p.get()), "Cannot write export (check free disk space)");
@@ -216,6 +223,144 @@ AVStream *addStream(Output &out, AVCodecContext *codec) {
   ffcheck(avcodec_parameters_from_context(stream->codecpar, codec), "Cannot configure export stream");
   return stream;
 }
+
+// Prepare the branded layers once per job. Animation uses the video timeline,
+// not wall time, and composites into the final limited-range BT.709 frame.
+class Watermark {
+  struct Pixel { float alpha = 0, luma = 0, u = 0, v = 0; };
+  std::vector<Pixel> pixels;
+  int width = 0, height = 0, bleed = 0;
+  int y = 0;
+  static double smooth(double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+  static double spring(double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    const double x = t - 1;
+    return 1 + 2.1 * x * x * x + 1.1 * x * x;
+  }
+  void composite(AVFrame *frame, double left) const {
+    // Filter premultiplied colors/coverage at fractional positions. Chroma is
+    // averaged on the destination's 2x2 grid, so motion need not snap to it.
+    const int begin = std::max(0, int(std::floor(left)) & ~1);
+    const int end = std::min(frame->width, (int(std::ceil(left + width)) + 1) & ~1);
+    const int origin = int(std::ceil(left));
+    const float fraction = float(origin - left);
+    auto sample = [&](int col, int row) {
+      const int index = col - origin;
+      const Pixel a = index >= 0 && index < width ? pixels[size_t(row) * width + index] : Pixel{};
+      const Pixel b = index + 1 >= 0 && index + 1 < width ? pixels[size_t(row) * width + index + 1] : Pixel{};
+      return Pixel{a.alpha + (b.alpha - a.alpha) * fraction,
+                   a.luma + (b.luma - a.luma) * fraction,
+                   a.u + (b.u - a.u) * fraction, a.v + (b.v - a.v) * fraction};
+    };
+    auto blend = [](uint8_t &pixel, float premultiplied, float alpha) {
+      pixel = uint8_t(std::clamp(std::lround(pixel * (1 - alpha) + premultiplied), 0L, 255L));
+    };
+    for (int row = 0; row < height; row += 2) {
+      for (int col = begin; col < end; col += 2) {
+        float alpha = 0, u = 0, v = 0;
+        for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+          const auto p = sample(col + dx, row + dy);
+          blend(frame->data[0][(y + row + dy) * frame->linesize[0] + col + dx], p.luma, p.alpha);
+          alpha += p.alpha * 0.25f;
+          u += p.u * 0.25f;
+          v += p.v * 0.25f;
+        }
+        blend(frame->data[1][((y + row) / 2) * frame->linesize[1] + col / 2], u, alpha);
+        blend(frame->data[2][((y + row) / 2) * frame->linesize[2] + col / 2], v, alpha);
+      }
+    }
+  }
+public:
+  Watermark(int width, int height, bool enabled) {
+    if (!enabled) return;
+    QFont font(QStringLiteral("sans-serif"));
+    font.setPixelSize(std::clamp(height / 54, 12, 80));
+    font.setWeight(QFont::Normal);
+    const QFontMetrics metrics(font);
+    QFont brandFont = font;
+    brandFont.setPixelSize(font.pixelSize() * 5 / 4);
+    brandFont.setWeight(QFont::DemiBold);
+    const QFontMetrics brandMetrics(brandFont);
+    const int padding = std::max(6, font.pixelSize() / 2);
+    const int gap = std::max(3, font.pixelSize() / 5);
+    const int textHeight = metrics.height() + gap + brandMetrics.height();
+    const int badgeSize = (textHeight + padding * 2 + 1) & ~1;
+    const int panelWidth = (std::max(metrics.horizontalAdvance(QStringLiteral("Captured with")),
+                                   brandMetrics.horizontalAdvance(QStringLiteral("Trophy"))) + 3 * padding + 1) & ~1;
+    const int margin = std::min(height / 30, height / 8) & ~1;
+    const double scale = std::min({1.0, double(std::max(4, width * 2 / 5)) / (badgeSize + panelWidth),
+                                   double(height - margin) / badgeSize});
+    const int badge = std::clamp(int(badgeSize * scale) & ~1, 2, width);
+    const int panelSize = std::clamp(int(panelWidth * scale) & ~1, 2, width);
+    const int layerHeight = std::clamp(int(badgeSize * scale) & ~1, 2, height);
+    y = (height - margin - layerHeight) & ~1;
+    QImageReader reader(QStringLiteral(":/icons/trophy.svg"));
+    reader.setScaledSize(QSize(badgeSize, badgeSize));
+    const QImage logo = reader.read();
+    check(!logo.isNull(), "Cannot load the Trophy watermark logo.");
+    QImage panel(panelWidth, badgeSize, QImage::Format_ARGB32);
+    check(!panel.isNull(), "Cannot allocate export watermark.");
+    panel.fill(Qt::transparent);
+    {
+      QPainter painter(&panel);
+      painter.setRenderHint(QPainter::Antialiasing);
+      painter.setRenderHint(QPainter::TextAntialiasing);
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(20, 22, 28));
+      painter.drawRoundedRect(panel.rect(), padding * 2, padding * 2);
+      painter.drawRect(0, 0, padding * 2, badgeSize); // flush attachment, rounded outer end
+      painter.setFont(font);
+      painter.setPen(QColor(220, 222, 228));
+      const int textTop = (badgeSize - textHeight) / 2;
+      painter.drawText(padding, textTop + metrics.ascent(), QStringLiteral("Captured with"));
+      painter.setFont(brandFont);
+      painter.setPen(Qt::white);
+      painter.drawText(padding, textTop + metrics.height() + gap + brandMetrics.ascent(), QStringLiteral("Trophy"));
+    }
+    panel = panel.scaled(panelSize, layerHeight, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_ARGB32);
+    check(!panel.isNull(), "Cannot resize export watermark.");
+    // An offscreen background extension keeps the tab attached to the edge
+    // during its small overshoot. Logo, lettering and panel move as one image.
+    bleed = std::max(4, (badge + panelSize) / 8);
+    this->width = bleed + badge + panelSize;
+    this->height = layerHeight;
+    QImage artwork(this->width, layerHeight, QImage::Format_ARGB32);
+    check(!artwork.isNull(), "Cannot allocate watermark artwork.");
+    artwork.fill(Qt::transparent);
+    {
+      QPainter painter(&artwork);
+      painter.setRenderHint(QPainter::SmoothPixmapTransform);
+      painter.fillRect(0, 0, bleed + badge, layerHeight, QColor(20, 22, 28));
+      painter.drawImage(bleed + badge, 0, panel);
+      const double size = std::min(badge, layerHeight) * 0.72;
+      painter.drawImage(QRectF(bleed + (badge - size) / 2, (layerHeight - size) / 2, size, size), logo);
+    }
+    pixels.reserve(size_t(this->width) * layerHeight);
+    for (int row = 0; row < layerHeight; ++row) {
+      const auto *line = reinterpret_cast<const QRgb *>(artwork.constScanLine(row));
+      for (int col = 0; col < this->width; ++col) {
+        const auto p = line[col];
+        const float alpha = qAlpha(p) / 255.0f;
+        pixels.push_back({alpha,
+            alpha * (16 + (47 * qRed(p) + 157 * qGreen(p) + 16 * qBlue(p)) / 256.0f),
+            alpha * (128 + (-26 * qRed(p) - 87 * qGreen(p) + 112 * qBlue(p)) / 256.0f),
+            alpha * (128 + (112 * qRed(p) - 102 * qGreen(p) - 10 * qBlue(p)) / 256.0f)});
+      }
+    }
+  }
+  void apply(AVFrame *frame, int64_t timestampUs) const {
+    timestampUs -= AV_TIME_BASE / 2; // Let the video play cleanly for 500ms first.
+    if (pixels.empty() || timestampUs <= 0 || timestampUs >= 5000000) return;
+    const double seconds = double(timestampUs) / AV_TIME_BASE;
+    const double entry = spring(seconds / 0.55);
+    const double exit = smooth((seconds - 4.65) / 0.35);
+    const double left = -width + (width - bleed) * entry * (1 - exit);
+    composite(frame, left);
+  }
+};
 }
 
 QVariantMap ShareExportEngine::inspect(const QString &source, std::atomic_bool &cancel) {
@@ -291,8 +436,8 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     const bool knownRate = rate.num > 0 && rate.den > 0 && av_q2d(rate) >= 1;
     const int64_t inputFrameUs = knownRate ? std::max<int64_t>(1, av_rescale_q(1, av_inv_q(rate), kUs)) : 16667;
     const bool capRate = !knownRate || av_q2d(rate) > 60;
-    if (capRate) rate = {60, 1};
-    const int64_t frameUs = std::max<int64_t>(1, av_rescale_q(1, av_inv_q(rate), kUs));
+    const bool steadyWatermark = options.watermark;
+    if (steadyWatermark || capRate) rate = {60, 1};
     const int inputWidth = first->width, inputHeight = first->height;
     const int inputFormat = first->format;
     const double scale = options.maxHeight > 0 ? std::min(1.0, double(options.maxHeight) / inputHeight) : 1.0;
@@ -355,8 +500,17 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     converted->color_primaries = v->color_primaries; converted->color_trc = v->color_trc;
     converted->sample_aspect_ratio = v->sample_aspect_ratio;
     ffcheck(av_frame_get_buffer(converted.get(), 32), "Cannot allocate video conversion frame");
+    Frame rendered;
+    if (steadyWatermark) {
+      rendered = frame();
+      rendered->format = converted->format; rendered->width = converted->width; rendered->height = converted->height;
+      ffcheck(av_frame_copy_props(rendered.get(), converted.get()), "Cannot configure watermark output frame");
+      ffcheck(av_frame_get_buffer(rendered.get(), 32), "Cannot allocate watermark output frame");
+    }
+    const Watermark watermark(v->width, v->height, options.watermark);
     std::unique_ptr<SwsContext, decltype(&sws_freeContext)> sws(nullptr, sws_freeContext);
     int64_t audioAt = 0, lastVideo = -1, lastSlot = -1, endUs = 0, seenFrames = 0;
+    int64_t nextOutputSlot = 0;
     auto writeAudioUntil = [&](int64_t untilUs) {
       if (!a) return;
       const int64_t target = av_rescale_q(untilUs, kUs, kSamples);
@@ -376,6 +530,29 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
         audioAt += n;
       }
     };
+    auto writeVideo = [&](int64_t at) {
+      cancelled(cancel);
+      writeAudioUntil(at);
+      AVFrame *output = converted.get();
+      if (steadyWatermark) {
+        // Always draw onto a fresh copy of the clean held picture. Otherwise
+        // repeated frames would accumulate trails from earlier logo positions.
+        ffcheck(av_frame_make_writable(rendered.get()), "Cannot write watermark output frame");
+        ffcheck(av_frame_copy(rendered.get(), converted.get()), "Cannot copy held video frame");
+        output = rendered.get();
+        output->duration = av_rescale_q(1, av_inv_q(rate), v->time_base);
+      }
+      output->pts = av_rescale_q(at, kUs, v->time_base);
+      watermark.apply(output, at);
+      out.write(v.get(), vs, output, steadyWatermark ? output->duration : 0);
+      if (video.input->duration > 0) progress.store(std::clamp(double(at) / video.input->duration, 0.0, 0.99));
+    };
+    auto writeHeldUntil = [&](int64_t slot) {
+      while (nextOutputSlot < slot) {
+        writeVideo(av_rescale_q(nextOutputSlot, av_inv_q(rate), kUs));
+        ++nextOutputSlot;
+      }
+    };
     do {
       cancelled(cancel);
       auto *decoded = video.decoded.get();
@@ -391,16 +568,24 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
       }
       ++seenFrames;
       check(at >= 0 && at <= kMaxUs, "Video timestamps exceed the supported 24-hour timeline.");
-      endUs = std::max(endUs, at + inputFrameUs);
+      int64_t durationUs = inputFrameUs;
+      if (steadyWatermark && decoded->duration > 0) {
+        durationUs = av_rescale_q(decoded->duration, video.stream->time_base, kUs);
+        check(durationUs > 0 && durationUs <= kMaxUs - at, "Invalid decoded video duration.");
+      }
+      endUs = std::max(endUs, at + durationUs);
       if (lastVideo >= 0 && at <= lastVideo) continue;
       // Do not drop ordinary 30/60fps MKV frames just because their 1ms
       // timestamps alternate 33/34 or 16/17ms. Only cap genuinely high rates.
-      if (capRate) {
+      if (steadyWatermark || capRate) {
         const int64_t slot = av_rescale_q(at, kUs, av_inv_q(rate));
         if (slot <= lastSlot) continue;
+        // Quantize incoming timestamps to the nearest output slot (at most
+        // half a frame), avoiding 16/17ms MKV rounding dropping 60fps pictures.
+        // Fill gaps from the previous clean picture before replacing it.
+        if (steadyWatermark && lastVideo >= 0) writeHeldUntil(slot);
         lastSlot = slot;
       }
-      writeAudioUntil(at);
       ffcheck(av_frame_make_writable(converted.get()), "Cannot write video frame");
       const auto *descriptor = av_pix_fmt_desc_get(AVPixelFormat(decoded->format));
       check(descriptor && !(descriptor->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_PAL)), "Unsupported decoded pixel format.");
@@ -421,13 +606,13 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
       check(decoded->format == inputFormat && !(decoded->flags & AV_FRAME_FLAG_CORRUPT), "Video pixel format changed or a frame is corrupt.");
       check(sws_scale(sws.get(), decoded->data, decoded->linesize, 0, inputHeight,
           converted->data, converted->linesize) == v->height, "Video conversion was incomplete.");
-      converted->pts = av_rescale_q(at, kUs, v->time_base);
-      out.write(v.get(), vs, converted.get());
+      if (!steadyWatermark) writeVideo(at);
       lastVideo = at;
-      if (video.input->duration > 0) progress.store(std::clamp(double(at) / video.input->duration, 0.0, 0.99));
     } while (video.next());
+    if (steadyWatermark)
+      writeHeldUntil(std::max(lastSlot + 1, av_rescale_q(endUs, kUs, av_inv_q(rate))));
     writeAudioUntil(endUs);
-    out.write(v.get(), vs, nullptr);
+    out.write(v.get(), vs, nullptr, steadyWatermark ? av_rescale_q(1, av_inv_q(rate), v->time_base) : 0);
     if (a) out.write(a.get(), as, nullptr);
     ffcheck(av_write_trailer(out.ctx), "Cannot finalize export");
     avio_flush(out.ctx->pb);

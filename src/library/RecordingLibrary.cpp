@@ -90,6 +90,17 @@ QList<Recording *> RecordingLibrary::recordings() const {
 
 int RecordingLibrary::count() const { return m_filteredRecordings.size(); }
 
+QList<Recording *> RecordingLibrary::allRecordings() const {
+  QList<Recording *> result;
+  for (const auto &rec : m_recordings) {
+    if (rec->filePath() != m_activeRecordingPath)
+      result.append(rec.get());
+  }
+  return result;
+}
+
+int RecordingLibrary::totalCount() const { return allRecordings().size(); }
+
 void RecordingLibrary::setLibraryPath(const QString &path) {
   if (m_libraryPath != path) {
     // Remove old watch

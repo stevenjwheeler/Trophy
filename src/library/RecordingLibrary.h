@@ -36,6 +36,9 @@ class RecordingLibrary : public QObject {
   Q_PROPERTY(
       QList<Recording *> recordings READ recordings NOTIFY recordingsChanged)
   Q_PROPERTY(int count READ count NOTIFY recordingsChanged)
+  // Dashboard data is independent of library view filters and Undo hiding.
+  Q_PROPERTY(QList<Recording *> allRecordings READ allRecordings NOTIFY recordingsChanged)
+  Q_PROPERTY(int totalCount READ totalCount NOTIFY recordingsChanged)
   Q_PROPERTY(QString libraryPath READ libraryPath WRITE setLibraryPath NOTIFY
                  libraryPathChanged)  Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY
                  recordingsChanged)
@@ -61,6 +64,8 @@ public:
 
   QList<Recording *> recordings() const;
   int count() const;
+  QList<Recording *> allRecordings() const;
+  int totalCount() const;
 
   QString libraryPath() const { return m_libraryPath; }
   void setLibraryPath(const QString &path);

@@ -131,6 +131,7 @@ void SettingsManager::load() {
   m_replayCachePath = general["replayCachePath"].toString();
   m_libraryListView = general["libraryListView"].toBool(false);
   m_shareExportFolder = general["shareExportFolder"].toString();
+  m_shareExportWatermark = general["shareExportWatermark"].toBool(true);
 
   const QJsonObject customization = root["customization"].toObject();
   m_themeMode = customization["themeMode"].toString("dark");
@@ -203,6 +204,7 @@ void SettingsManager::load() {
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
   emit shareExportFolderChanged();
+  emit shareExportWatermarkChanged();
   emit themeModeChanged();
   emit accentColorChanged();
   emit replayCachePathChanged();
@@ -272,6 +274,7 @@ void SettingsManager::save() {
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;
   general["shareExportFolder"] = m_shareExportFolder;
+  general["shareExportWatermark"] = m_shareExportWatermark;
   root["general"] = general;
 
   QJsonObject customization;
@@ -353,6 +356,7 @@ void SettingsManager::resetToDefaults() {
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
   emit shareExportFolderChanged();
+  emit shareExportWatermarkChanged();
   emit themeModeChanged();
   emit accentColorChanged();
   emit waylandRestoreTokensChanged();
@@ -410,6 +414,7 @@ void SettingsManager::loadDefaults() {
   m_completionSoundEnabled = true;
   m_libraryListView = false;
   m_shareExportFolder.clear();
+  m_shareExportWatermark = true;
   m_themeMode = "dark";
   m_accentColor = "rose";
 }
@@ -678,6 +683,13 @@ void SettingsManager::setShareExportFolder(const QString &folder) {
   m_shareExportFolder = folder;
   save();
   emit shareExportFolderChanged();
+}
+
+void SettingsManager::setShareExportWatermark(bool enabled) {
+  if (m_shareExportWatermark == enabled) return;
+  m_shareExportWatermark = enabled;
+  save();
+  emit shareExportWatermarkChanged();
 }
 
 void SettingsManager::setThemeMode(const QString &mode) {

@@ -674,7 +674,7 @@ Page {
                 horizontalPadding: 12
                 icon.width: 18
                 icon.height: 18
-                text: qsTr("Share MP4")
+                text: qsTr("Share")
                 icon.source: "qrc:/icons/share.svg"
                 enabled: !!playerPage.infoRec
                 onClicked: window.openShareExport(playerPage.filePath, playerPage.mutedTracks.concat(playerPage.hiddenVoiceTrack >= 0 ? [playerPage.hiddenVoiceTrack] : []))

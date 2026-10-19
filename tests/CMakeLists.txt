@@ -11,12 +11,12 @@ target_include_directories(test_DeletionQueue PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_DeletionQueue PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
 gtest_discover_tests(test_DeletionQueue)
 
-add_executable(test_ShareExport test_ShareExport.cpp
+add_executable(test_ShareExport test_ShareExport.cpp ${CMAKE_SOURCE_DIR}/resources/resources.qrc
     ${CMAKE_SOURCE_DIR}/src/library/ShareExportEngine.cpp
     ${CMAKE_SOURCE_DIR}/src/library/ShareExporter.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_ShareExport PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(test_ShareExport PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test
+target_link_libraries(test_ShareExport PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Gui Qt6::Test
     PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL PkgConfig::SWSCALE PkgConfig::SWRESAMPLE)
 gtest_discover_tests(test_ShareExport)
 

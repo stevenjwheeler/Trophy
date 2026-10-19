@@ -41,7 +41,11 @@ constexpr int kPeakRate = 8000;
 constexpr int kBlockSamples = 256;
 constexpr int kMaxTracks = 32; // same bound as the sidecar schema
 constexpr quint32 kCacheMagic = 0x54504b31; // "TPK1"
-constexpr quint32 kCacheVersion = 1;
+// v1 normalized arbitrarily small noise to full height. Regenerate those peaks.
+constexpr quint32 kCacheVersion = 2;
+// Keep ordinary audio legible without making near-silence look loud:
+// normalization may boost by at most 20 dB (10x).
+constexpr float kNormalizationFloor = 0.1f;
 
 QString peaksPathFor(const QString &filePath) {
   const QFileInfo info(filePath);
@@ -203,9 +207,9 @@ struct TrackDecoder {
       peaks[b] = maximum;
       globalMax = qMax(globalMax, maximum);
     }
-    if (globalMax > 0.0f)
-      for (float &peak : peaks)
-        peak /= globalMax;
+    const float divisor = qMax(globalMax, kNormalizationFloor);
+    for (float &peak : peaks)
+      peak /= divisor;
     return peaks;
   }
 };

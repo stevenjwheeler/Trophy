@@ -142,9 +142,8 @@ protected:
       result.append(double(value));
       maximum = std::max(maximum, double(value));
     }
-    if (maximum > 0)
-      for (QVariant &value : result)
-        value = value.toDouble() / maximum;
+    for (QVariant &value : result)
+      value = value.toDouble() / std::max(maximum, 0.1);
     return result;
   }
 
@@ -215,7 +214,7 @@ TEST_F(WaveformCacheTest, DestroyWhileMissingFileJobIsPending) {
   EXPECT_FALSE(QFile::exists(tempDir.path() + "/.thumbnails/missing.peaks"));
 }
 
-TEST_F(WaveformCacheTest, TonePeaksLoudAndNormalized) {
+TEST_F(WaveformCacheTest, OrdinaryTonePeaksRemainLegible) {
   const QString path = renderTone("tone.mkv");
   if (path.isEmpty())
     GTEST_SKIP() << "ffmpeg unavailable or render failed";
@@ -234,7 +233,7 @@ TEST_F(WaveformCacheTest, TonePeaksLoudAndNormalized) {
     EXPECT_GE(v.toDouble(), 0.0);
     EXPECT_LE(v.toDouble(), 1.0);
   }
-  // A full-scale sine normalizes near 1 somewhere.
+  // The ordinary test sine stays legible with bounded normalization.
   EXPECT_GT(listMax(peaks), 0.5);
 }
 
@@ -254,6 +253,79 @@ TEST_F(WaveformCacheTest, SilencePeaksAllZero) {
 
   ASSERT_EQ(peaks.size(), WaveformCache::kBuckets);
   EXPECT_EQ(listMax(peaks), 0.0);
+}
+
+TEST_F(WaveformCacheTest, QuietTracksCannotNormalizeNoiseToFullHeight) {
+  // Float PCM preserves tiny nonzero signals, including the roughly -140 dB
+  // residue observed on an otherwise silent recorded microphone track.
+  for (const double amplitude : {1e-7, 0.001, 0.01, 0.1, 0.5}) {
+    SCOPED_TRACE(amplitude);
+    const QString path = render(QString("quiet-%1.mkv").arg(amplitude), {
+        "-f", "lavfi", "-i",
+        QString("aevalsrc=%1*sin(2*PI*440*t):s=48000:d=1").arg(amplitude),
+        "-c:a", "pcm_f32le"});
+    if (path.isEmpty())
+      GTEST_SKIP() << "ffmpeg unavailable or render failed";
+    WaveformCache cache;
+    QSignalSpy spy(&cache, &WaveformCache::peaksReady);
+    cache.requestPeaks(path, 0);
+    ASSERT_TRUE(spy.wait(10000));
+    ASSERT_EQ(spy.size(), 1);
+    const QVariantList peaks = spy.first()[2].toList();
+    ASSERT_EQ(peaks.size(), WaveformCache::kBuckets);
+    const double maximum = listMax(peaks);
+    EXPECT_NEAR(maximum, std::min(1.0, amplitude * 10),
+                std::min(1.0, amplitude * 10) * 0.02);
+
+    // A fresh cache object must retain the corrected scale on disk reuse.
+    WaveformCache reopened;
+    std::atomic<int> jobs{0};
+    WaveformCacheTestPeer::observe(reopened, [&](const auto &) { ++jobs; });
+    QSignalSpy cached(&reopened, &WaveformCache::peaksReady);
+    reopened.requestPeaks(path, 0);
+    ASSERT_TRUE(cached.wait(5000));
+    ASSERT_EQ(cached.size(), 1);
+    EXPECT_EQ(cached.first()[2].toList(), peaks);
+    EXPECT_EQ(jobs.load(), 0);
+  }
+}
+
+TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
+  const QString path = render("legacy.mkv", {
+      "-f", "lavfi", "-i", "aevalsrc=0.0000001*sin(2*PI*440*t):s=48000:d=1",
+      "-c:a", "pcm_f32le"});
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable or render failed";
+  const QString sidecar = tempDir.path() + "/.thumbnails/legacy.peaks";
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(sidecar).absolutePath()));
+  QFile file(sidecar);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  QDataStream data(&file);
+  data.setVersion(QDataStream::Qt_6_0);
+  data.setFloatingPointPrecision(QDataStream::SinglePrecision);
+  const QFileInfo source(path);
+  data << quint32(0x54504b31) << quint32(1) << source.size()
+       << source.lastModified().toSecsSinceEpoch() << qint32(1)
+       << qint32(WaveformCache::kBuckets);
+  for (int b = 0; b < WaveformCache::kBuckets; ++b)
+    data << 1.0f;
+  file.close();
+
+  WaveformCache cache;
+  std::atomic<int> jobs{0};
+  WaveformCacheTestPeer::observe(cache, [&](const auto &) { ++jobs; });
+  QSignalSpy spy(&cache, &WaveformCache::peaksReady);
+  cache.requestPeaks(path, 0);
+  ASSERT_TRUE(spy.wait(10000));
+  ASSERT_EQ(spy.size(), 1);
+  EXPECT_LT(listMax(spy.first()[2].toList()), 0.000002);
+  EXPECT_EQ(jobs.load(), 1);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  QDataStream updated(&file);
+  quint32 magic = 0, version = 0;
+  updated >> magic >> version;
+  EXPECT_EQ(magic, 0x54504b31u);
+  EXPECT_EQ(version, 2u);
 }
 
 TEST_F(WaveformCacheTest, CacheWrittenAndReused) {
@@ -365,7 +437,7 @@ TEST_F(WaveformCacheTest, BoundedMalformedPeakCacheCorpusRegeneratesFinitePeaks)
     data.setFloatingPointPrecision(QDataStream::SinglePrecision);
     const qint32 count = variant == 0 ? 0 : variant == 1 ? -1 :
                          variant == 2 ? 33 : 1;
-    data << quint32(0x54504b31) << quint32(1) << source.size()
+    data << quint32(0x54504b31) << quint32(2) << source.size()
          << source.lastModified().toSecsSinceEpoch() << count
          << qint32(WaveformCache::kBuckets);
     for (int b = 0; b < WaveformCache::kBuckets; ++b)

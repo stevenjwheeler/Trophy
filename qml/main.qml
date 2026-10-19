@@ -795,6 +795,8 @@ ApplicationWindow {
         exporter: shareExporter
         destination: window.settingsManager.shareExportFolder
         onDestinationChanged: window.settingsManager.shareExportFolder = destination
+        includeWatermark: window.settingsManager.shareExportWatermark
+        onIncludeWatermarkChanged: window.settingsManager.shareExportWatermark = includeWatermark
     }
 
     ToastStack {

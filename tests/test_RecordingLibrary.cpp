@@ -96,6 +96,32 @@ protected:
   }
 };
 
+TEST_F(RecordingLibraryTest, DashboardTotalsIgnoreViewFiltersAndUndoHiding) {
+  const auto first = createFile("Game.mkv");
+  createFile("Other_Replay.mkv");
+  RecordingLibrary lib(tempDir.path());
+  const auto captures = lib.allRecordings();
+  ASSERT_EQ(captures.size(), 2);
+  EXPECT_EQ(lib.totalCount(), 2);
+  lib.setSearchQuery("no matching capture");
+  lib.setKindFilter(RecordingLibrary::NoCaptures);
+  lib.setProtectedOnly(true);
+  lib.setSortOrder(RecordingLibrary::NameZA);
+  EXPECT_EQ(lib.count(), 0);
+  EXPECT_EQ(lib.totalCount(), 2);
+  EXPECT_EQ(lib.allRecordings(), captures);
+  lib.setHiddenRecordings({first});
+  EXPECT_EQ(lib.totalCount(), 2);
+  EXPECT_EQ(lib.allRecordings(), captures);
+  lib.setActiveRecordingPath(first);
+  EXPECT_EQ(lib.totalCount(), 1);
+  EXPECT_FALSE(lib.allRecordings().contains(lib.getRecording(first)));
+  lib.setActiveRecordingPath({});
+  lib.removeRecording(first);
+  EXPECT_EQ(lib.totalCount(), 1);
+  EXPECT_EQ(lib.allRecordings().size(), 1);
+}
+
 TEST_F(RecordingLibraryTest, ProtectionFilterAndBookmarkRemovalPersist) {
   const auto first = createFile("Game.mkv");
   const auto second = createFile("Game.mp4");

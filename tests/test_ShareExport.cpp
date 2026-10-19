@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QDir>
@@ -28,7 +29,8 @@ class ShareEnvironment : public testing::Environment {
   void SetUp() override {
     if (!QCoreApplication::instance()) {
       static int argc = 1; static char arg[] = "test"; static char *argv[]{arg, nullptr};
-      new QCoreApplication(argc, argv);
+      qputenv("QT_QPA_PLATFORM", "offscreen");
+      new QGuiApplication(argc, argv);
     }
   }
 };
@@ -174,8 +176,8 @@ protected:
     ASSERT_TRUE(ffmpeg.waitForFinished(30000));
     ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
   }
-  ShareExportResult run(const QList<int> &tracks, int height = 1080, qint64 bytes = 0) {
-    return ShareExportEngine::run(source, directory.path(), {height, bytes, tracks}, cancel, progress);
+  ShareExportResult run(const QList<int> &tracks, int height = 1080, qint64 bytes = 0, bool watermark = true) {
+    return ShareExportEngine::run(source, directory.path(), {height, bytes, tracks, watermark}, cancel, progress);
   }
   std::vector<float> audio(const QString &path) {
     QProcess ffmpeg;
@@ -213,6 +215,205 @@ TEST_F(ShareExportTest, FolderUrlsPreserveSpecialCharactersAndRejectNonLocalUrls
   EXPECT_EQ(service.localFolderPath(QUrl::fromLocalFile(path)), path);
   EXPECT_TRUE(service.localFolderPath(QUrl("https://example.com/folder")).isEmpty());
   EXPECT_TRUE(service.localFolderPath(QUrl()).isEmpty());
+}
+TEST_F(ShareExportTest, AnimatedWatermarkIsBurnedInOnlyAtOpeningAndQueueRetainsEachChoice) {
+  QProcess fixture;
+  fixture.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "color=black:size=320x180:rate=10:duration=7", "-c:v", "mpeg4", source});
+  ASSERT_TRUE(fixture.waitForFinished(30000));
+  ASSERT_EQ(fixture.exitCode(), 0);
+  QFile original(source); ASSERT_TRUE(original.open(QIODevice::ReadOnly));
+  const auto originalBytes = original.readAll(); original.close();
+  QTemporaryDir destination;
+  StorageManager storage(directory.path());
+  ShareExporter service(&storage);
+  QSignalSpy settled(&service, &ShareExporter::jobSettled);
+  const QVariantList captures{QVariantMap{{"sourcePath", source}, {"audioStreams", QVariantList{}}}};
+  ASSERT_TRUE(service.startBatch(destination.path(), 1080, 0, captures, false));
+  ASSERT_TRUE(service.inspect(source));
+  // The first queued job may finish while inspecting; the probe must settle.
+  QElapsedTimer timer; timer.start();
+  while (service.inspecting() && timer.elapsed() < 10000) {
+    QCoreApplication::processEvents(); QThread::msleep(1);
+  }
+  ASSERT_FALSE(service.inspecting());
+  ASSERT_TRUE(service.start(destination.path(), 1080, 0, {})); // default on
+  service.release();
+  ASSERT_TRUE(wait(service));
+  ASSERT_EQ(settled.size(), 2);
+  auto pixels = [](const QString &path) {
+    QProcess decoder;
+    decoder.start("ffmpeg", {"-v", "error", "-ignore_editlist", "1", "-i", path, "-map", "0:v:0", "-fps_mode", "passthrough", "-pix_fmt", "gray", "-f", "rawvideo", "-"});
+    EXPECT_TRUE(decoder.waitForFinished(30000));
+    EXPECT_EQ(decoder.exitCode(), 0);
+    return decoder.readAllStandardOutput();
+  };
+  const auto plain = pixels(settled[0][2].toString());
+  const auto markedFrames = pixels(settled[1][2].toString());
+  constexpr int size = 320 * 180;
+  ASSERT_EQ(plain.size(), 70 * size);
+  ASSERT_EQ(markedFrames.size(), 420 * size);
+  QByteArray marked;
+  for (int index = 0; index < 70; ++index)
+    marked.append(markedFrames.constData() + index * 6 * size, size);
+  auto difference = [&](int index, int x0, int y0, int x1, int y1) {
+    double sum = 0;
+    for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
+      const int at = index * size + y * 320 + x;
+      sum += std::abs(int(uint8_t(marked[at])) - int(uint8_t(plain[at])));
+    }
+    return sum / ((x1 - x0) * (y1 - y0));
+  };
+  EXPECT_LT(difference(0, 0, 0, 320, 180), 0.5);
+  for (int index = 1; index <= 5; ++index)
+    EXPECT_LT(difference(index, 0, 0, 320, 180), 0.5); // clean first 500ms
+  EXPECT_GT(difference(25, 0, 125, 140, 180), 3.0);
+  EXPECT_GT(difference(25, 0, 140, 8, 170), 3.0); // attached to the left edge
+  EXPECT_LT(difference(25, 180, 0, 320, 180), 0.5);
+  EXPECT_LT(difference(25, 0, 0, 320, 110), 0.5);
+  EXPECT_LT(difference(65, 0, 0, 320, 180), 0.5);
+  auto rightEdge = [&](int index) {
+    int edge = -1;
+    for (int y = 125; y < 180; ++y) for (int x = 0; x < 160; ++x)
+      if (uint8_t(marked[index * size + y * 320 + x]) > 35) edge = std::max(edge, x);
+    return edge;
+  };
+  EXPECT_GT(difference(6, 0, 125, 140, 180), 0.5); // starts after 500ms, not one second
+  EXPECT_LT(rightEdge(6), rightEdge(25));
+  EXPECT_GT(rightEdge(9), rightEdge(12)); // whole-tab overshoot settles gently
+  EXPECT_LT(rightEdge(53), rightEdge(45)); // entire tab slides back out
+  EXPECT_LT(rightEdge(54), rightEdge(53));
+  QProcess color;
+  color.start("ffmpeg", {"-v", "error", "-ignore_editlist", "1", "-i", settled[1][2].toString(),
+      "-vf", "select=eq(n\\,150)", "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"});
+  ASSERT_TRUE(color.waitForFinished(30000));
+  ASSERT_EQ(color.exitCode(), 0);
+  const auto rgb = color.readAllStandardOutput();
+  ASSERT_EQ(rgb.size(), size * 3);
+  int logoPixels = 0;
+  for (int y = 125; y < 180; ++y) for (int x = 0; x < 40; ++x) {
+    const int at = (y * 320 + x) * 3;
+    if (uint8_t(rgb[at]) > 100 && int(uint8_t(rgb[at])) > int(uint8_t(rgb[at + 1])) + 50)
+      ++logoPixels;
+  }
+  EXPECT_GT(logoPixels, 20); // bundled red Trophy logo, not a neutral placeholder
+  int redTextPixels = 0;
+  for (int y = 125; y < 180; ++y) for (int x = 50; x < 140; ++x) {
+    const int at = (y * 320 + x) * 3;
+    if (uint8_t(rgb[at]) > 100 && int(uint8_t(rgb[at])) > int(uint8_t(rgb[at + 1])) + 50)
+      ++redTextPixels;
+  }
+  EXPECT_EQ(redTextPixels, 0); // no red underline beneath the lettering
+  ASSERT_TRUE(original.open(QIODevice::ReadOnly));
+  EXPECT_EQ(original.readAll(), originalBytes);
+}
+TEST_F(ShareExportTest, WholeTabSpringKeepsLetteringIntactAtThirtyAndSixtyFps) {
+  for (const int fps : {30, 60}) {
+    SCOPED_TRACE(fps);
+    QProcess fixture;
+    fixture.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+        QString("color=black:size=320x180:rate=%1:duration=2").arg(fps), "-c:v", "mpeg4", source});
+    ASSERT_TRUE(fixture.waitForFinished(30000));
+    ASSERT_EQ(fixture.exitCode(), 0);
+    const auto output = run({});
+    ASSERT_TRUE(output.error.isEmpty()) << output.error.toStdString();
+    QProcess decoder;
+    decoder.start("ffmpeg", {"-v", "error", "-ignore_editlist", "1", "-i", output.path,
+        "-map", "0:v:0", "-fps_mode", "passthrough", "-pix_fmt", "gray", "-f", "rawvideo", "-"});
+    ASSERT_TRUE(decoder.waitForFinished(30000));
+    ASSERT_EQ(decoder.exitCode(), 0);
+    const auto frames = decoder.readAllStandardOutput();
+    constexpr int size = 320 * 180;
+    constexpr int outputFps = 60;
+    ASSERT_EQ(frames.size(), 2 * outputFps * size);
+    auto ink = [&](int index) {
+      double sum = 0, moment = 0;
+      for (int y = 110; y < 180; ++y) for (int x = 0; x < 160; ++x) {
+        const double value = std::max(0, int(uint8_t(frames[index * size + y * 320 + x])) - 50);
+        sum += value;
+        moment += value * x;
+      }
+      return std::pair{sum, sum ? moment / sum : 0};
+    };
+    const auto reference = ink(outputFps + outputFps / 5);
+    ASSERT_GT(reference.first, 1000);
+    double minimum = reference.second, maximum = reference.second;
+    double previous = -1;
+    // The tab is fully onscreen by 0.8s. During spring settling, lettering
+    // translates intact rather than being repeatedly clipped by a reveal edge.
+    for (int index = int(std::ceil(0.8 * outputFps)); index <= int(1.1 * outputFps); ++index) {
+      const auto current = ink(index);
+      EXPECT_NEAR(current.first, reference.first, reference.first * 0.08);
+      minimum = std::min(minimum, current.second);
+      maximum = std::max(maximum, current.second);
+      if (previous >= 0) EXPECT_LT(std::abs(current.second - previous), 3.0);
+      previous = current.second;
+    }
+    EXPECT_GT(maximum - minimum, 1.0); // genuine whole-artwork spring motion
+  }
+}
+TEST_F(ShareExportTest, SparseNominalSixtyFpsSourceGetsSteadyWatermarkWithoutRetimingAudioOrScene) {
+  QProcess fixture;
+  fixture.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "color=black:size=320x180:rate=60:duration=2,drawbox=x=200:y=0:w=120:h=110:color=white:t=fill:enable='gte(t,1)'",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+      "-itsoffset", "0.4", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1.6",
+      "-map", "0:v", "-map", "1:a", "-map", "2:a", "-vf", "select='not(mod(n,5))+eq(n,119)'",
+      "-fps_mode", "passthrough", "-enc_time_base:v", "1:60", "-c:v", "mpeg4", "-c:a", "pcm_s16le", source});
+  ASSERT_TRUE(fixture.waitForFinished(30000));
+  ASSERT_EQ(fixture.exitCode(), 0) << fixture.readAllStandardError().toStdString();
+  const auto marked = run({2});
+  ASSERT_TRUE(marked.error.isEmpty()) << marked.error.toStdString();
+  const auto plain = run({}, 1080, 0, false);
+  ASSERT_TRUE(plain.error.isEmpty()) << plain.error.toStdString();
+  auto timestamps = [](const QString &path) {
+    std::vector<double> times;
+    AVFormatContext *ctx = nullptr;
+    if (avformat_open_input(&ctx, QFile::encodeName(path).constData(), nullptr, nullptr) < 0) return times;
+    if (avformat_find_stream_info(ctx, nullptr) < 0) { avformat_close_input(&ctx); return times; }
+    const int video = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    AVPacket *p = av_packet_alloc();
+    if (video >= 0 && p) while (av_read_frame(ctx, p) >= 0) {
+      if (p->stream_index == video && p->pts != AV_NOPTS_VALUE)
+        times.push_back(p->pts * av_q2d(ctx->streams[video]->time_base));
+      av_packet_unref(p);
+    }
+    av_packet_free(&p); avformat_close_input(&ctx);
+    return times;
+  };
+  const auto inputTimes = timestamps(source), plainTimes = timestamps(plain.path), markedTimes = timestamps(marked.path);
+  ASSERT_EQ(inputTimes.size(), 25u);
+  ASSERT_EQ(plainTimes.size(), inputTimes.size());
+  for (size_t i = 0; i < inputTimes.size(); ++i) EXPECT_NEAR(plainTimes[i], inputTimes[i], 0.0001);
+  ASSERT_EQ(markedTimes.size(), 120u);
+  for (size_t i = 0; i < markedTimes.size(); ++i) EXPECT_NEAR(markedTimes[i], double(i) / 60, 0.00002);
+  QProcess decoder;
+  decoder.start("ffmpeg", {"-v", "error", "-i", marked.path, "-map", "0:v:0", "-fps_mode", "passthrough",
+      "-pix_fmt", "gray", "-f", "rawvideo", "-"});
+  ASSERT_TRUE(decoder.waitForFinished(30000));
+  ASSERT_EQ(decoder.exitCode(), 0);
+  const auto frames = decoder.readAllStandardOutput();
+  constexpr int size = 320 * 180;
+  ASSERT_EQ(frames.size(), 120 * size); // including the final frame in ordinary playback
+  for (int index = 0; index < 120; ++index) {
+    const int scenePixel = uint8_t(frames[index * size + 30 * 320 + 250]);
+    if (index < 60) EXPECT_LT(scenePixel, 10);
+    else EXPECT_GT(scenePixel, 240); // scene change stays at 1.0s, not pulled forward
+  }
+  int movingFrames = 0;
+  for (int index = 34; index < 46; ++index) {
+    bool changed = false;
+    for (int y = 125; y < 180 && !changed; ++y) for (int x = 0; x < 150; ++x) {
+      const int at = index * size + y * 320 + x;
+      if (std::abs(int(uint8_t(frames[at])) - int(uint8_t(frames[at + size]))) > 15) { changed = true; break; }
+    }
+    movingFrames += changed;
+  }
+  EXPECT_GE(movingFrames, 10); // animation advances between the sparse input pictures
+  const auto pcm = audio(marked.path);
+  EXPECT_LT(tone(pcm, 880, 0.05, 0.2), 0.001);
+  EXPECT_GT(tone(pcm, 880), 0.04);
+  EXPECT_NEAR(double(pcm.size()) / (48000 * 2), 2.0, 0.03);
 }
 TEST_F(ShareExportTest, LegacyThreeTrackNamesAreExplicitlyEstimatedAndRoutingOverridesThem) {
   const auto legacy = directory.filePath("legacy.mkv");
@@ -255,7 +456,7 @@ TEST_F(ShareExportTest, InspectAndMixProducesFastStartCompatibleMp4) {
   EXPECT_EQ(ctx->streams[0]->codecpar->codec_id, AV_CODEC_ID_H264);
   EXPECT_EQ(ctx->streams[0]->codecpar->format, AV_PIX_FMT_YUV420P);
   EXPECT_EQ(ctx->streams[0]->codecpar->width, 320); // Never upscale.
-  EXPECT_EQ(ctx->streams[0]->nb_frames, 60); // Millisecond timestamp quantization must not drop frames.
+  EXPECT_EQ(ctx->streams[0]->nb_frames, 120); // 30fps source is held on the watermark's 60fps timeline.
   EXPECT_EQ(ctx->streams[1]->codecpar->codec_id, AV_CODEC_ID_AAC);
   EXPECT_EQ(ctx->streams[1]->codecpar->ch_layout.nb_channels, 2);
   avformat_close_input(&ctx);

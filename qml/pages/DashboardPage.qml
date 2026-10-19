@@ -838,7 +838,7 @@ Page {
                         ColumnLayout {
                             spacing: 2
                             Layout.alignment: Qt.AlignTop
-                            Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignRight }
+                            Label { objectName: "storageRecordingCount"; text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.totalCount : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignRight }
                             Label {
                                 text: ((typeof storageManager !== "undefined" && storageManager && storageManager.autoDeleteOldest) ? qsTr("Auto-Cleanup: on") : qsTr("Auto-Cleanup: off"))
                                 font.pixelSize: Theme.fontSizeTiny
@@ -906,11 +906,8 @@ Page {
                         columnSpacing: Theme.spacingMedium
                         rowSpacing: 0
 
-                        // One header row + value row per text pair, with a
-                        // meter riding each value row: sharing the row (and
-                        // centering both) is what lines bars up with the
-                        // values. A spanned meter column can never align 3
-                        // bars against 2 text rows.
+                        // Keep text rows stable while the independent audio
+                        // stack collapses hidden meters without empty slots.
                         Label { text: qsTr("Encoder"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 0 }
                         Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 1 }
                         Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 2 }
@@ -930,43 +927,56 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
                             Layout.row: 1; Layout.column: 1; Layout.alignment: Qt.AlignVCenter
                         }
-                        AudioLevelMeter {
-                            id: meter0
-                            objectName: "primaryAudioMeter"
-                            horizontal: true
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 1; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: root.captureStatus.mode ? (root.captureStatus.desktopAudio || root.captureStatus.desktopFallback ? qsTr("System") : qsTr("Game")) : (settingsManager && settingsManager.audioMode === "desktop" ? qsTr("System") : qsTr("Game"))
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(0, muted) }
-                        }
-
                         Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0; Layout.minimumHeight: 18; verticalAlignment: Text.AlignVCenter }
                         Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 1 }
-                        AudioLevelMeter {
-                            id: meter1
-                            objectName: "voiceAudioMeter"
-                            // Desktop mode merges to one track (system + mic
-                            // mixed); game mode keeps 3.
-                            visible: !(settingsManager && settingsManager.audioMode === "desktop") && !root.captureStatus.desktopFallback && !root.captureStatus.desktopAudio
-                            horizontal: true
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 2; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: audioMixer ? audioMixer.trackName(1) : ""
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(1, muted) }
-                        }
                         Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 0; Layout.alignment: Qt.AlignVCenter }
                         Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
-                        AudioLevelMeter {
-                            id: meter2
-                            visible: !(settingsManager && settingsManager.audioMode === "desktop")
-                            horizontal: true
+
+                        Item {
+                            Layout.row: 1; Layout.column: 2; Layout.rowSpan: 3
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 3; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: audioMixer ? audioMixer.trackName(2) : ""
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(2, muted) }
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitHeight: 3 * 18
+                            implicitWidth: audioMeterStack.implicitWidth
+
+                            ColumnLayout {
+                                id: audioMeterStack
+                                width: parent.width
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 0
+
+                                AudioLevelMeter {
+                                    id: meter0
+                                    objectName: "primaryAudioMeter"
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: root.captureStatus.mode ? (root.captureStatus.desktopAudio || root.captureStatus.desktopFallback ? qsTr("System") : qsTr("Game")) : (settingsManager && settingsManager.audioMode === "desktop" ? qsTr("System") : qsTr("Game"))
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(0, muted) }
+                                }
+
+                                AudioLevelMeter {
+                                    id: meter1
+                                    objectName: "voiceAudioMeter"
+                                    // Desktop mode mixes; fallback includes Voice.
+                                    visible: !(settingsManager && settingsManager.audioMode === "desktop") && !root.captureStatus.desktopFallback && !root.captureStatus.desktopAudio
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: audioMixer ? audioMixer.trackName(1) : ""
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(1, muted) }
+                                }
+                                AudioLevelMeter {
+                                    id: meter2
+                                    objectName: "micAudioMeter"
+                                    visible: !(settingsManager && settingsManager.audioMode === "desktop")
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: audioMixer ? audioMixer.trackName(2) : ""
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(2, muted) }
+                                }
+                            }
                         }
                     }
 
@@ -1012,6 +1022,7 @@ Page {
                             Repeater {
                                 model: ListModel {
                                     id: activityModel
+                                    objectName: "recentActivityModel"
                                     Component.onCompleted: updateActivity()
                                     function updateActivity() {
                                         var rows = []
@@ -1036,18 +1047,17 @@ Page {
                                                 rows.push({ at: at, kind: ev.kind, dot: ev.dot, title: ev.title, detail: evDetail, time: getRelativeTime(at), stamp: at.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
                                             }
                                         }
-                                        if (recordingLibrary && recordingLibrary.count > 0) {
-                                            for (var i = 0; i < recordingLibrary.count; i++) {
-                                                var clip = recordingLibrary.get(i)
-                                                if (!clip) continue
-                                                // Clips already show as "Clip saved" rows
-                                                // above — listing them again as Completed
-                                                // doubles every entry. The container tag
-                                                // wins and survives renames; the suffix
-                                                // covers older files.
-                                                if (clip.isClip || (clip.fileName || "").endsWith("_Replay.mkv")) continue
-                                                rows.push({ at: new Date(clip.date), kind: "completed", dot: "green", title: qsTr("Completed: %1").arg(clip.gameName || "Unknown Game"), detail: root.recordingDetail(clip), time: getRelativeTime(clip.date), stamp: clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
-                                            }
+                                        var captures = recordingLibrary ? recordingLibrary.allRecordings : []
+                                        for (var i = 0; i < captures.length; i++) {
+                                            var clip = captures[i]
+                                            if (!clip) continue
+                                            // Clips already show as "Clip saved" rows
+                                            // above — listing them again as Completed
+                                            // doubles every entry. The container tag
+                                            // wins and survives renames; the suffix
+                                            // covers older files.
+                                            if (clip.isClip || (clip.fileName || "").endsWith("_Replay.mkv")) continue
+                                            rows.push({ at: new Date(clip.date), kind: "completed", dot: "green", title: qsTr("Completed: %1").arg(clip.gameName || "Unknown Game"), detail: root.recordingDetail(clip), time: getRelativeTime(clip.date), stamp: clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
                                         }
                                         rows.sort(function(a, b) { return b.at - a.at })
                                         clear()

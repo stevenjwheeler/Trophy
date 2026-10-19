@@ -21,6 +21,7 @@ TrophyDialog {
     property string preparationError: ""
     readonly property var currentInfo: batch ? (captureInfos[currentCapture] || {}) : exporter.info
     property string destination: ""
+    property bool includeWatermark: true
     property var selectedAudio: []
     property var excludedAudioOrdinals: []
     property bool tracksLoaded: false
@@ -67,10 +68,10 @@ TrophyDialog {
         const height = [0, 1080, 720][resolution.currentIndex];
         const bytes = [0, 25 * 1048576, 50 * 1048576, 100 * 1048576][sizeTarget.currentIndex];
         if (!batch)
-            return exporter.start(destination, height, bytes, selectedAudio);
+            return exporter.start(destination, height, bytes, selectedAudio, includeWatermark);
         chooseCapture(currentCapture);
         const captures = sourcePaths.map((path, index) => ({sourcePath: path, audioStreams: captureAudio[index]}));
-        return exporter.startBatch(destination, height, bytes, captures);
+        return exporter.startBatch(destination, height, bytes, captures, includeWatermark);
     }
 
     onAboutToShow: {
@@ -208,6 +209,25 @@ TrophyDialog {
                 color: Theme.textSecondaryColor
                 font.pixelSize: Theme.fontSizeSmall
                 wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                objectName: "shareWatermarkRow"
+                Layout.fillWidth: true
+                Label {
+                    id: watermarkLabel
+                    Layout.fillWidth: true
+                    text: qsTr("Animated Trophy watermark")
+                    color: Theme.textColor
+                    wrapMode: Text.WordWrap
+                }
+                TrophySwitch {
+                    objectName: "shareWatermark"
+                    Accessible.name: watermarkLabel.text
+                    checked: root.includeWatermark
+                    onToggled: root.includeWatermark = checked
+                    ToolTip.text: qsTr("After a half-second delay, a Trophy logo tab slides from the bottom-left edge and retracts five seconds later.")
+                    ToolTip.visible: hovered
+                }
             }
             }
             SettingsSectionCard {
