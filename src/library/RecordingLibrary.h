@@ -80,6 +80,7 @@ public:
   bool protectedOnly() const { return m_protectedOnly; }
   void setProtectedOnly(bool value);
   Q_INVOKABLE bool setProtected(const QString &filePath, bool value);
+  Q_INVOKABLE bool addBookmark(const QString &filePath, qint64 positionMs);
   Q_INVOKABLE bool removeBookmark(const QString &filePath, int index);
 
   bool clipSaving() const { return m_clipSaving; }

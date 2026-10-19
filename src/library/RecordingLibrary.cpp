@@ -162,6 +162,17 @@ bool RecordingLibrary::setProtected(const QString &filePath, bool value) {
   return true;
 }
 
+bool RecordingLibrary::addBookmark(const QString &filePath, qint64 positionMs) {
+  auto *recording = getRecording(filePath);
+  if (!recording || !isInsideLibrary(filePath, m_libraryPath) ||
+      // Library duration is truncated to whole seconds; the player clock
+      // can legitimately bookmark the final fractional second.
+      (recording->duration() > 0 && positionMs >= (recording->duration() + 1) * 1000) ||
+      !RecordingAnnotations::addBookmark(filePath, positionMs)) return false;
+  recording->reloadAnnotations();
+  return true;
+}
+
 bool RecordingLibrary::removeBookmark(const QString &filePath, int index) {
   auto *recording = getRecording(filePath);
   if (!recording || !isInsideLibrary(filePath, m_libraryPath) ||

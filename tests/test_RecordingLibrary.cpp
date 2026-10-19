@@ -122,6 +122,48 @@ TEST_F(RecordingLibraryTest, DashboardTotalsIgnoreViewFiltersAndUndoHiding) {
   EXPECT_EQ(lib.allRecordings().size(), 1);
 }
 
+TEST_F(RecordingLibraryTest, PlayerBookmarksPersistAndRejectInvalidPositions) {
+  const auto path = createFile("Bookmarked.mkv");
+  {
+    RecordingLibrary lib(tempDir.path());
+    ASSERT_TRUE(lib.setProtected(path, true));
+    ASSERT_TRUE(lib.addBookmark(path, 0));
+    ASSERT_TRUE(lib.addBookmark(path, 12345));
+    EXPECT_TRUE(lib.addBookmark(path, 0));
+    EXPECT_TRUE(lib.addBookmark(path, 12345));
+    EXPECT_FALSE(lib.addBookmark(path, -1));
+    EXPECT_FALSE(lib.addBookmark(path, 86400001));
+    EXPECT_FALSE(lib.addBookmark(tempDir.filePath("missing.mkv"), 1000));
+    ASSERT_EQ(lib.getRecording(path)->bookmarks().size(), 2);
+    EXPECT_EQ(lib.getRecording(path)->bookmarks()[1].toMap()["positionMs"].toLongLong(), 12345);
+    EXPECT_TRUE(lib.getRecording(path)->protectedFromCleanup());
+  }
+  RecordingLibrary reopened(tempDir.path());
+  ASSERT_EQ(reopened.getRecording(path)->bookmarks().size(), 2);
+  EXPECT_EQ(reopened.getRecording(path)->bookmarks()[1].toMap()["positionMs"].toLongLong(), 12345);
+}
+
+TEST_F(RecordingLibraryTest, DuplicateBookmarkPreservesLabelAndSucceedsAtCapacity) {
+  const auto path = createFile("Duplicate.mkv");
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 12345, "Original label"));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 12345, "Replacement"));
+  auto marks = RecordingAnnotations::bookmarks(path);
+  ASSERT_EQ(marks.size(), 1);
+  EXPECT_EQ(marks[0].toMap().value("label").toString(), "Original label");
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 12346));
+  EXPECT_EQ(RecordingAnnotations::bookmarks(path).size(), 2);
+  QJsonObject object;
+  ASSERT_TRUE(RecordingAnnotations::read(path, object));
+  auto array = object.value("bookmarks").toArray();
+  for (int i = 0; array.size() < 1000; ++i)
+    array.append(QJsonObject{{"positionMs", i}});
+  object["bookmarks"] = array;
+  ASSERT_TRUE(RecordingAnnotations::write(path, object));
+  EXPECT_TRUE(RecordingAnnotations::addBookmark(path, 12345));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(path, 50000));
+  EXPECT_EQ(RecordingAnnotations::bookmarks(path).size(), 1000);
+}
+
 TEST_F(RecordingLibraryTest, ProtectionFilterAndBookmarkRemovalPersist) {
   const auto first = createFile("Game.mkv");
   const auto second = createFile("Game.mp4");

@@ -13,6 +13,7 @@
 #include <QUrl>
 #include <QSignalSpy>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <memory>
 #include <tuple>
 
@@ -34,6 +35,25 @@ class PlayerLibraryFake : public QObject {
 public:
   QQmlPropertyMap entry;
   bool hasEntry = false;
+  QString bookmarkedPath;
+  qint64 bookmarkedPosition = -1;
+  int removedIndex = -1;
+  Q_INVOKABLE bool removeBookmark(const QString &, int index) {
+    removedIndex = index;
+    auto marks = entry.value("bookmarks").toList();
+    if (index < 0 || index >= marks.size()) return false;
+    marks.removeAt(index);
+    entry.insert("bookmarks", marks);
+    return true;
+  }
+  Q_INVOKABLE bool addBookmark(const QString &path, qint64 ms) {
+    bookmarkedPath = path;
+    bookmarkedPosition = ms;
+    auto marks = entry.value("bookmarks").toList();
+    marks.append(QVariantMap{{"positionMs", ms}});
+    entry.insert("bookmarks", marks);
+    return true;
+  }
   PlayerLibraryFake() {
     // Returned QObject pointers default to JS ownership; this is a member,
     // not a heap object the engine may collect.
@@ -156,6 +176,26 @@ TEST_F(PlayerProbeTest, BookmarkListReactsAndRangeClampsAtFileEdges) {
   auto *dialog = page->findChild<QObject *>("playerBookmarksDialog");
   ASSERT_NE(dialog, nullptr);
   EXPECT_GT(dialog->property("implicitHeight").toDouble(), 100);
+  auto *content = dialog->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  auto *row = findVisual(content, "bookmarkMomentRow");
+  ASSERT_NE(row, nullptr);
+  EXPECT_GT(row->width(), 450);
+  EXPECT_GT(row->height(), 55);
+  auto *icon = findVisual(row, "bookmarkMomentIcon");
+  ASSERT_NE(icon, nullptr);
+  EXPECT_EQ(QQmlProperty::read(icon, "icon.color").value<QColor>(), QColor("#FFD54F"));
+  auto *header = dialog->property("header").value<QObject *>();
+  ASSERT_NE(header, nullptr);
+  EXPECT_EQ(header->findChild<QObject *>("bookmarkMomentCount")->property("text").toString(), "1 moment");
+  auto *remove = findVisual(row, "bookmarkRemoveButton");
+  ASSERT_NE(remove, nullptr);
+  remove->forceActiveFocus();
+  EXPECT_EQ(remove->opacity(), 1);
+  // Real row pointer activation closes the dialog (no separate Jump button).
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      row->mapToScene(QPointF(70, row->height() / 2)).toPoint());
+  EXPECT_FALSE(dialog->property("visible").toBool());
   ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
   library.entry.insert("bookmarks", QVariantList{});
   QCoreApplication::processEvents();
@@ -172,6 +212,82 @@ TEST_F(PlayerProbeTest, BookmarkListReactsAndRangeClampsAtFileEdges) {
     EXPECT_EQ(range[0].toInt(), expectedStart);
     EXPECT_EQ(range[1].toInt(), expectedEnd);
   }
+  close();
+}
+
+TEST_F(PlayerProbeTest, TimelineAddsBookmarkAndRefreshesMarkers) {
+  library.entry.insert("bookmarks", QVariantList{});
+  library.entry.insert("fileName", "Game.mkv");
+  library.entry.insert("gameName", "Game");
+  library.entry.insert("duration", 60);
+  library.hasEntry = true;
+  window.resize(1024, 720); window.show();
+  open("/fake/add-bookmark.mkv");
+  auto *add = page->findChild<QQuickItem *>("playerAddBookmarkButton");
+  ASSERT_NE(add, nullptr);
+  EXPECT_FALSE(add->property("enabled").toBool()); // No decoded timeline yet.
+  // This suite deliberately does not decode media; enable the control to
+  // exercise a real pointer click at the initial playhead (zero).
+  add->setProperty("enabled", true);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return add->isVisible() && add->width() > 0; }));
+  QTest::qWait(50); // Let the newly opened tracks layout polish before hit testing.
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      add->mapToScene(QPointF(add->width() / 2, add->height() / 2)).toPoint());
+  EXPECT_EQ(library.bookmarkedPath, "/fake/add-bookmark.mkv");
+  EXPECT_EQ(library.bookmarkedPosition, 0);
+  auto *list = page->findChild<QObject *>("playerBookmarksButton");
+  ASSERT_NE(list, nullptr);
+  EXPECT_TRUE(list->property("enabled").toBool());
+  auto *lane = page->findChild<QQuickItem *>("playerVideoLane");
+  ASSERT_NE(lane, nullptr);
+  EXPECT_NE(findVisual(lane, "timelineBookmark"), nullptr);
+  close();
+}
+
+TEST_F(PlayerProbeTest, MomentsSortChronologicallyAndDeleteOriginalEntry) {
+  library.entry.insert("bookmarks", QVariantList{
+      QVariantMap{{"positionMs", 2000}}, QVariantMap{{"positionMs", 10000}},
+      QVariantMap{{"positionMs", 5000}}});
+  library.entry.insert("fileName", "Game.mkv");
+  library.entry.insert("gameName", "Game");
+  library.entry.insert("duration", 60);
+  library.hasEntry = true;
+  window.resize(1024, 720); window.show();
+  open("/fake/sorted.mkv");
+  auto *button = page->findChild<QObject *>("playerBookmarksButton");
+  ASSERT_NE(button, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(button, "clicked"));
+  QTest::qWait(50);
+  auto *dialog = page->findChild<QObject *>("playerBookmarksDialog");
+  ASSERT_NE(dialog, nullptr);
+  auto *content = dialog->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  auto *first = findVisual(content, "bookmarkMomentRow");
+  ASSERT_NE(first, nullptr);
+  QList<QQuickItem *> rows;
+  for (auto *child : first->parentItem()->childItems())
+    if (child->objectName() == "bookmarkMomentRow") rows.append(child);
+  std::sort(rows.begin(), rows.end(), [](auto *a, auto *b) { return a->y() < b->y(); });
+  ASSERT_EQ(rows.size(), 3);
+  const QList<int> expected{2000, 5000, 10000};
+  for (int i = 0; i < rows.size(); ++i) {
+    const auto value = rows[i]->property("modelData");
+    const auto data = value.canConvert<QJSValue>() ? value.value<QJSValue>().toVariant().toMap() : value.toMap();
+    EXPECT_EQ(data.value("positionMs").toInt(), expected[i]);
+    auto *remove = findVisual(rows[i], "bookmarkRemoveButton");
+    ASSERT_NE(remove, nullptr);
+    EXPECT_TRUE(remove->isVisible());
+    EXPECT_EQ(remove->opacity(), 1);
+  }
+  auto *removeMiddle = findVisual(rows[1], "bookmarkRemoveButton");
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      removeMiddle->mapToScene(QPointF(removeMiddle->width() / 2, removeMiddle->height() / 2)).toPoint());
+  EXPECT_EQ(library.removedIndex, 2);
+  const auto remaining = library.entry.value("bookmarks").toList();
+  ASSERT_EQ(remaining.size(), 2);
+  EXPECT_EQ(remaining[0].toMap().value("positionMs").toInt(), 2000);
+  EXPECT_EQ(remaining[1].toMap().value("positionMs").toInt(), 10000);
+  EXPECT_TRUE(dialog->property("visible").toBool());
   close();
 }
 

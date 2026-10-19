@@ -25,6 +25,13 @@ Page {
     // refresh rows as the background probe lands.
     readonly property var infoRec: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.getRecording(filePath) : null
     readonly property var bookmarks: infoRec && infoRec.bookmarks ? infoRec.bookmarks : []
+    // Keep storage indices: older annotations may be in insertion order,
+    // and removal must target the original entry rather than its sorted row.
+    readonly property var bookmarkMoments: bookmarks.map(function(mark, index) {
+        return { positionMs: mark.positionMs, sourceIndex: index };
+    }).sort(function(a, b) {
+        return a.positionMs - b.positionMs || a.sourceIndex - b.sourceIndex;
+    })
     readonly property var audioRouting: infoRec && infoRec.audioRouting ? infoRec.audioRouting : ({})
     readonly property int hiddenVoiceTrack: audioRouting.v === 1 && audioRouting.separate
         && audioRouting.system && !audioRouting.voice
@@ -525,45 +532,120 @@ Page {
         padding: Theme.spacingMedium
         background: Rectangle { color: Theme.cardColor; radius: Theme.radiusLarge; border.color: Theme.borderColor }
         Overlay.modal: Rectangle { color: Theme.withOpacity("#000000", 0.5) }
-        header: Label { text: bookmarksDialog.title; padding: Theme.spacingMedium; color: Theme.textColor; font.pixelSize: Theme.fontSizeLarge; font.bold: true }
+        header: ColumnLayout {
+            spacing: Theme.spacingTiny
+            Label {
+                Layout.leftMargin: Theme.spacingMedium
+                Layout.topMargin: Theme.spacingMedium
+                text: bookmarksDialog.title
+                color: Theme.textColor
+                font.pixelSize: Theme.fontSizeLarge
+                font.bold: true
+            }
+            Label {
+                objectName: "bookmarkMomentCount"
+                Layout.leftMargin: Theme.spacingMedium
+                text: playerPage.bookmarks.length === 1 ? qsTr("1 moment") : qsTr("%1 moments").arg(playerPage.bookmarks.length)
+                color: Theme.textSecondaryColor
+                font.pixelSize: Theme.fontSizeSmall
+            }
+        }
         footer: Item {
             implicitHeight: 48
             TrophyButton { anchors.right: parent.right; anchors.rightMargin: Theme.spacingMedium; text: qsTr("Close"); onClicked: bookmarksDialog.close() }
         }
         contentItem: ScrollView {
+            id: bookmarkScroll
             implicitHeight: Math.min(320, bookmarkRows.implicitHeight)
+            contentWidth: availableWidth
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ColumnLayout {
                 id: bookmarkRows
-                width: parent.width
+                width: bookmarkScroll.availableWidth
+                spacing: Theme.spacingSmall
+                Label {
+                    Layout.fillWidth: true
+                    Layout.margins: Theme.spacingSmall
+                    visible: playerPage.bookmarks.length === 0
+                    text: qsTr("No bookmarked moments")
+                    color: Theme.textSecondaryColor
+                }
                 Repeater {
-                    model: playerPage.bookmarks
-                    delegate: RowLayout {
+                    model: playerPage.bookmarkMoments
+                    delegate: Button {
+                        id: momentRow
                         required property var modelData
                         required property int index
+                        readonly property var clipRange: playerPage.bookmarkClipRange(modelData.positionMs, playerPage.playDuration)
+                        objectName: "bookmarkMomentRow"
                         Layout.fillWidth: true
-                        Label {
-                            Layout.fillWidth: true
-                            text: player.formatTime(modelData.positionMs)
-                            color: Theme.textColor
-                            font.family: "monospace"
+                        padding: Theme.spacingNormal
+                        hoverEnabled: true
+                        Accessible.name: qsTr("Jump to bookmark at %1").arg(player.formatTime(modelData.positionMs))
+                        onClicked: { playerPage.seekAll(modelData.positionMs); bookmarksDialog.close() }
+                        background: Rectangle {
+                            radius: Theme.radiusNormal
+                            color: momentRow.hovered || momentRow.activeFocus ? Theme.cardHoverColor : Theme.withOpacity(Theme.textColor, 0.04)
+                            border.color: momentRow.activeFocus ? "#FFD54F" : Theme.withOpacity(Theme.textColor, 0.06)
                         }
-                        TrophyButton {
-                            text: qsTr("Jump")
-                            onClicked: { playerPage.seekAll(modelData.positionMs); bookmarksDialog.close() }
-                        }
-                        TrophyButton {
-                            text: qsTr("Clip ±15 s")
-                            enabled: playerPage.playDuration >= 500
-                            onClicked: playerPage.selectBookmarkClip(modelData.positionMs)
-                        }
-                        TrophyButton {
-                            icon.source: "qrc:/icons/trash.svg"
-                            Accessible.name: qsTr("Remove bookmark")
-                            onClicked: {
-                                if (!recordingLibrary.removeBookmark(playerPage.filePath, index))
-                                    window.showMetadataError();
+                        contentItem: RowLayout {
+                            spacing: Theme.spacingNormal
+                            ToolButton {
+                                objectName: "bookmarkMomentIcon"
+                                enabled: false
+                                opacity: 1
+                                padding: 0
+                                icon.source: "qrc:/icons/bookmark.svg"
+                                icon.color: "#FFD54F"
+                                icon.width: 20
+                                icon.height: 24
+                                background: Item {}
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacingTiny
+                                Label {
+                                    text: player.formatTime(momentRow.modelData.positionMs)
+                                    color: Theme.textColor
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.weight: Font.DemiBold
+                                    font.family: "monospace"
+                                }
+                                Label {
+                                    objectName: "bookmarkClipSummary"
+                                    Layout.fillWidth: true
+                                    text: momentRow.clipRange.length === 2
+                                        ? qsTr("Clip range · %1–%2").arg(player.formatTime(momentRow.clipRange[0])).arg(player.formatTime(momentRow.clipRange[1]))
+                                        : qsTr("Click to jump to this moment")
+                                    color: Theme.textSecondaryColor
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            TrophyButton {
+                                objectName: "bookmarkClipButton"
+                                text: qsTr("Select ±15 s")
+                                enabled: momentRow.clipRange.length === 2
+                                onClicked: playerPage.selectBookmarkClip(momentRow.modelData.positionMs)
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Select this range in the clip editor")
+                            }
+                            TrophyButton {
+                                id: removeMoment
+                                objectName: "bookmarkRemoveButton"
+                                Layout.preferredWidth: 32
+                                padding: 6
+                                horizontalPadding: 0
+                                baseColor: "transparent"
+                                icon.source: "qrc:/icons/trash.svg"
+                                Accessible.name: qsTr("Remove bookmark")
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Remove bookmark")
+                                onClicked: {
+                                    if (!recordingLibrary.removeBookmark(playerPage.filePath, momentRow.modelData.sourceIndex))
+                                        window.showMetadataError();
+                                }
                             }
                         }
                     }
@@ -882,6 +964,27 @@ Page {
 
                     // Clip mode: range handles on every lane (snip
                     // cuts via the library).
+                    TrophyButton {
+                        objectName: "playerAddBookmarkButton"
+                        implicitWidth: 32
+                        implicitHeight: 28
+                        padding: 0
+                        horizontalPadding: 0
+                        icon.source: "qrc:/icons/bookmark.svg"
+                        icon.width: 16
+                        icon.height: 16
+                        enabled: playerPage.infoRec !== null && playerPage.playDuration > 0
+                        Accessible.name: qsTr("Add bookmark at current position")
+                        ToolTip.text: qsTr("Add bookmark at current position")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
+                        onClicked: {
+                            const ms = Math.round(Math.max(0, Math.min(playerPage.playPosition, playerPage.playDuration)));
+                            if (!recordingLibrary.addBookmark(playerPage.filePath, ms))
+                                window.showMetadataError();
+                        }
+                    }
+
                     TrophyButton {
                         implicitWidth: 32
                         implicitHeight: 28

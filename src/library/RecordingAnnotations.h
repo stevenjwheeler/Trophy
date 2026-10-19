@@ -114,6 +114,10 @@ inline bool addBookmark(const QString &video, qint64 ms, const QString &label = 
   QJsonObject object;
   if (!read(video, object)) return false;
   auto marks = object.value("bookmarks").toArray();
+  // Idempotent for every caller (player and live recording). Check before
+  // the capacity limit, and preserve the original label without rewriting.
+  for (const auto &entry : marks)
+    if (entry.toObject().value("positionMs").toDouble(-1) == ms) return true;
   if (marks.size() >= 1000) return false;
   marks.append(QJsonObject{{"positionMs", ms}, {"label", label.left(120)}});
   object["bookmarks"] = marks;
