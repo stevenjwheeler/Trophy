@@ -14,11 +14,14 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThreadPool>
+#include <QThread>
+#include <QElapsedTimer>
 #include <gtest/gtest.h>
 
 #include "core/StorageManager.h"
 #include "library/Recording.h"
 #include "library/RecordingLibrary.h"
+#include "library/RecordingAnnotations.h"
 
 using namespace TrophyBackend;
 
@@ -92,6 +95,121 @@ protected:
     QCoreApplication::processEvents();
   }
 };
+
+TEST_F(RecordingLibraryTest, ProtectionFilterAndBookmarkRemovalPersist) {
+  const auto first = createFile("Game.mkv");
+  const auto second = createFile("Game.mp4");
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(first, 12000));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(first, 23000));
+  {
+    RecordingLibrary lib(tempDir.path());
+    EXPECT_TRUE(lib.setProtected(first, true));
+    EXPECT_TRUE(lib.getRecording(first)->protectedFromCleanup());
+    EXPECT_FALSE(lib.getRecording(second)->protectedFromCleanup());
+    lib.setProtectedOnly(true);
+    ASSERT_EQ(lib.count(), 1);
+    EXPECT_EQ(lib.get(0)->filePath(), first);
+    ASSERT_EQ(lib.get(0)->bookmarks().size(), 2);
+    EXPECT_TRUE(lib.removeBookmark(first, 0));
+    EXPECT_FALSE(lib.removeBookmark(first, 5));
+    EXPECT_TRUE(lib.setProtected(first, false));
+    EXPECT_EQ(lib.count(), 0);
+  }
+  RecordingLibrary reopened(tempDir.path());
+  EXPECT_FALSE(reopened.getRecording(first)->protectedFromCleanup());
+  ASSERT_EQ(reopened.getRecording(first)->bookmarks().size(), 1);
+  EXPECT_EQ(reopened.getRecording(first)->bookmarks()[0].toMap()["positionMs"].toLongLong(), 23000);
+  EXPECT_TRUE(reopened.getRecording(second)->bookmarks().isEmpty());
+}
+
+TEST_F(RecordingLibraryTest, UndoHidingPreservesObjectsWithoutDeletionEvents) {
+  const auto path = createFile("Keep.mkv");
+  ASSERT_TRUE(RecordingAnnotations::setProtected(path, true));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 1234));
+  RecordingLibrary library(tempDir.path());
+  auto *recording = library.getRecording(path);
+  ASSERT_NE(recording, nullptr);
+  QSignalSpy removed(&library, &RecordingLibrary::recordingRemoved);
+  QSignalSpy batch(&library, &RecordingLibrary::recordingsRemoved);
+  library.setHiddenRecordings({path});
+  EXPECT_EQ(library.count(), 0);
+  EXPECT_EQ(library.getRecording(path), recording);
+  EXPECT_TRUE(QFile::exists(path));
+  library.setHiddenRecordings({});
+  EXPECT_EQ(library.count(), 1);
+  EXPECT_EQ(library.get(0), recording);
+  EXPECT_TRUE(recording->protectedFromCleanup());
+  EXPECT_EQ(recording->bookmarks().size(), 1);
+  EXPECT_TRUE(removed.isEmpty()); EXPECT_TRUE(batch.isEmpty());
+}
+
+TEST_F(RecordingLibraryTest, AudioRoutingSurvivesRenameButRejectsChangedVideo) {
+  const auto path = createFile("System.mkv");
+  AudioRoutingInfo history;
+  history.known = true; history.system = true; history.separate = true;
+  history.primary = 0; history.voiceTrack = 1; history.micTrack = 2;
+  ASSERT_TRUE(RecordingAnnotations::setProtected(path, true));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 1000));
+  ASSERT_TRUE(RecordingAnnotations::setAudioRouting(path, history.toJson()));
+  StorageManager storage(tempDir.path());
+  const auto renamed = storage.renameRecording(path, "Renamed");
+  ASSERT_FALSE(renamed.isEmpty());
+  Recording recording(renamed);
+  EXPECT_TRUE(recording.audioRouting().value("system").toBool());
+  EXPECT_FALSE(recording.audioRouting().value("game").toBool());
+  EXPECT_EQ(recording.audioRouting().value("voiceTrack").toInt(), 1);
+  QSignalSpy routingChanges(&recording, &Recording::audioRoutingChanged);
+  ASSERT_TRUE(RecordingAnnotations::setProtected(renamed, false));
+  recording.reloadAnnotations();
+  EXPECT_EQ(routingChanges.count(), 0); // Pinning cannot restart player audio delegates.
+  QFile file(renamed); ASSERT_TRUE(file.open(QIODevice::Append)); file.write("changed"); file.close();
+  recording.reloadAnnotations();
+  EXPECT_TRUE(recording.audioRouting().isEmpty());
+  EXPECT_EQ(routingChanges.count(), 1);
+  EXPECT_EQ(recording.bookmarks().size(), 1);
+}
+
+TEST(AudioRoutingInfoTest, UnionPreservesMixedSourcesAndUnknownInputs) {
+  AudioRoutingInfo system;
+  system.known = true; system.system = true; system.separate = true;
+  system.primary = 0; system.voiceTrack = 1; system.micTrack = 2;
+  auto game = system; game.system = false; game.game = true; game.voice = true;
+  const auto mixed = AudioRoutingInfo::fromJson(AudioRoutingInfo::combine({system.toJson(), game.toJson()}));
+  EXPECT_TRUE(mixed.known); EXPECT_TRUE(mixed.system); EXPECT_TRUE(mixed.game); EXPECT_TRUE(mixed.voice);
+  EXPECT_TRUE(AudioRoutingInfo::combine({system.toJson(), QJsonObject{}}).isEmpty());
+  auto changed = system; changed.voiceTrack = 2; changed.micTrack = 1;
+  EXPECT_TRUE(AudioRoutingInfo::combine({system.toJson(), changed.toJson()}).isEmpty());
+  auto invalid = system.toJson(); invalid["voiceTrack"] = 2;
+  EXPECT_FALSE(AudioRoutingInfo::fromJson(invalid).known);
+}
+
+TEST_F(RecordingLibraryTest, RangeClipPinsItsInputUntilWorkerSettles) {
+  const auto source = makeTitledClip("Source.mkv", "Game", 4);
+  if (source.isEmpty()) GTEST_SKIP() << "Optional ffmpeg fixture tool unavailable";
+  AudioRoutingInfo routing;
+  routing.known = true; routing.system = true; routing.separate = true;
+  routing.primary = 0; routing.voiceTrack = 1; routing.micTrack = 2;
+  ASSERT_TRUE(RecordingAnnotations::setAudioRouting(source, routing.toJson()));
+  StorageManager storage(tempDir.path());
+  RecordingLibrary library(tempDir.path());
+  library.setStorageManager(&storage);
+  QSignalSpy saved(&library, &RecordingLibrary::clipSaved);
+  library.saveClipRange(source, 1.0, 2.0);
+  ASSERT_TRUE(library.clipSaving());
+  EXPECT_FALSE(storage.reserveRecordings({source}));
+  EXPECT_FALSE(storage.deleteRecording(source));
+  QElapsedTimer deadline; deadline.start();
+  while (library.clipSaving() && deadline.elapsed() < 10000) {
+    QCoreApplication::processEvents(); QThread::msleep(1);
+  }
+  ASSERT_FALSE(library.clipSaving());
+  ASSERT_EQ(saved.count(), 1);
+  const auto inherited = RecordingAnnotations::audioRouting(saved[0][0].toString());
+  EXPECT_TRUE(inherited.value("system").toBool());
+  EXPECT_FALSE(inherited.value("voice").toBool());
+  EXPECT_TRUE(storage.reserveRecordings({source}));
+  storage.releaseRecordings({source});
+}
 
 TEST_F(RecordingLibraryTest, ScanRemovesOrphanCachesButKeepsLiveAndUnknownFiles) {
   ASSERT_TRUE(QDir(tempDir.path()).mkpath(".thumbnails"));

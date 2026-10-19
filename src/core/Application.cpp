@@ -35,6 +35,8 @@
 #include "detection/WaylandWindowMonitor.h"
 #include "encoding/EncoderFactory.h"
 #include "library/ActivityFeed.h"
+#include "library/ShareExporter.h"
+#include "DeletionQueue.h"
 #include "library/RecordingLibrary.h"
 #include "library/WaveformCache.h"
 #include "library/FilmstripCache.h"
@@ -83,6 +85,8 @@ Application::~Application() {
   if (m_recordingManager) disconnect(m_recordingManager.get(), nullptr, this, nullptr);
   if (m_replayManager) disconnect(m_replayManager.get(), nullptr, this, nullptr);
   m_engine.reset();
+  m_shareExporter.reset();
+  m_deletionQueue.reset();
   m_controlServer.reset();
   m_recordingManager.reset();
   m_replayManager.reset();
@@ -375,6 +379,10 @@ void Application::initializeServices() {
   m_replayManager->setGameDetectionService(m_gameDetector.get());
   m_replayManager->setStorageManager(m_storageManager.get());
   m_recordingLibrary->setStorageManager(m_storageManager.get());
+  m_shareExporter = std::make_unique<ShareExporter>(m_storageManager.get(), this);
+  m_deletionQueue = std::make_unique<DeletionQueue>(m_storageManager.get(), this);
+  connect(m_deletionQueue.get(), &DeletionQueue::hiddenPathsChanged,
+          m_recordingLibrary.get(), &RecordingLibrary::setHiddenRecordings);
   m_shortcutManager = std::make_unique<GlobalShortcutManager>(this);
   m_shortcutManager->setEnabled(m_settingsManager->globalShortcutsEnabled());
   m_controlServer = std::make_unique<ControlServer>(this);
@@ -382,6 +390,8 @@ void Application::initializeServices() {
           this, [this]() { requestToggleRecording(); });
   connect(m_controlServer.get(), &ControlServer::saveClipRequested, this,
           [this]() { requestReplay(); });
+  connect(m_controlServer.get(), &ControlServer::bookmarkRequested, this,
+          &Application::requestBookmark);
   connect(m_controlServer.get(), &ControlServer::showWindowRequested, this,
           [this]() { showMainWindow(); });
 
@@ -447,6 +457,8 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("waveformCache", m_waveformCache.get());
   context->setContextProperty("filmstripCache", m_filmstripCache.get());
   context->setContextProperty("previewCache", m_previewCache.get());
+  context->setContextProperty("shareExporter", m_shareExporter.get());
+  context->setContextProperty("deletionQueue", m_deletionQueue.get());
   context->setContextProperty("gameDetector", m_gameDetector.get());
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());
@@ -785,10 +797,19 @@ void Application::connectSignals() {
               return;
             m_notificationService->showNotification(
                 "Storage Full",
-                "Recordings exceed the storage limit. Enable auto-cleanup or delete old recordings manually.",
+                m_settingsManager->autoDeleteOldest()
+                    ? "No eligible recordings remain for cleanup. Protected captures and the current recording are kept. Unprotect or delete captures, or increase the storage limit."
+                    : "Recordings exceed the storage limit. Enable auto-cleanup, delete captures or increase the limit. Protected captures are never auto-deleted.",
                 "dialog-warning", 0, 2);
           });
   connect(m_storageManager.get(), &StorageManager::recordingDeleted, m_recordingLibrary.get(), &RecordingLibrary::removeRecording);
+  connect(m_shareExporter.get(), &ShareExporter::finished, this, [this](const QString &path) {
+    m_notificationService->showQueuedNotification(
+        "Export saved", QFileInfo(path).fileName(), "video-x-generic", 5000, 1);
+  });
+  connect(m_shareExporter.get(), &ShareExporter::failed, this, [this](const QString &reason) {
+    m_notificationService->showQueuedNotification("Export failed", reason, "dialog-error", 5000, 2);
+  });
   // Bulk-delete chain: the worker unlinks in the background, the batch
   // signal settles the model once, and finish unsuppresses the watcher
   // with one catch-up refresh. While suppressed, per-file watcher
@@ -913,6 +934,7 @@ void Application::connectSignals() {
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
           [this](const QString &filePath, qint64 durationMs, qint64 sizeBytes) {
+            m_recordingLibrary->refreshAnnotations(filePath);
             preparePlayerCaches(filePath);
             playRecordingStoppedPing(false);
             if (!m_settingsManager->notifyRecordings())
@@ -941,11 +963,6 @@ void Application::connectSignals() {
             if (m_recordingManager->isRecording()) {
               m_recordingManager->stopRecording();
             }
-          });
-  connect(m_trayManager.get(), &SystemTrayManager::openRecordingsRequested,
-          this, [this]() {
-            QDesktopServices::openUrl(
-                QUrl::fromLocalFile(m_settingsManager->recordingsPath()));
           });
   connect(m_trayManager.get(), &SystemTrayManager::quitRequested, this,
           [this]() { requestQuit(); });
@@ -994,6 +1011,7 @@ void Application::connectSignals() {
                   "trophy", 3000, 2); // critical: visible over screenshare
             }
             m_recordingLibrary->refresh();
+            m_recordingLibrary->refreshAnnotations(filePath);
           });
   connect(m_replayManager.get(), &ReplayManager::replayFailed, this,
           [this](const QString &reason) {
@@ -1480,14 +1498,11 @@ void Application::playChime(const QString &resource, const QString &fileName,
 }
 
 void Application::requestReplay() {
-  if (!m_replayManager || !m_settingsManager) {
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    requestBookmark();
     return;
   }
-  if (m_recordingManager && m_recordingManager->isRecording()) {
-    m_notificationService->showNotification(
-        "Already Recording",
-        "You're already recording — the full session is being saved.",
-        "trophy", 3000, 2);
+  if (!m_replayManager || !m_settingsManager) {
     return;
   }
   if (!m_settingsManager->instantReplayEnabled()) {
@@ -1542,6 +1557,31 @@ bool Application::isTrackMuted(int trackIndex) const {
   if (m_audioMixer)
     return m_audioMixer->isSemanticTrackMuted(trackIndex);
   return false;
+}
+
+void Application::requestBookmark() {
+  if (!m_recordingManager || !m_notificationService) return;
+  if (!m_recordingManager->isRecording()) {
+    m_notificationService->showNotification("Bookmark", "Start a full recording to bookmark moments.", {}, 5000, 2);
+    return;
+  }
+  const bool saved = m_recordingManager->addBookmark();
+  m_notificationService->showNotification(
+      saved ? "Bookmark saved" : "Bookmark failed",
+      saved ? "Find this moment on the recording's player timeline."
+            : "Could not save the bookmark. Wait for video frames and check recording-folder permissions.",
+      {}, 5000, 2);
+}
+
+QVariantMap Application::captureHealth() const {
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    auto result = m_recordingManager->captureHealth();
+    result["mode"] = QStringLiteral("recording");
+    return result;
+  }
+  if (m_replayManager && m_replayManager->isActive())
+    return m_replayManager->captureHealth();
+  return {};
 }
 
 float Application::trackLevel(int trackIndex) const {

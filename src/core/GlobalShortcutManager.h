@@ -53,7 +53,7 @@ inline const QDBusArgument &operator>>(const QDBusArgument &arg,
 /**
  * @brief System-wide hotkeys via the GlobalShortcuts portal.
  *
- * Registers toggle-recording (F9) and save-clip (F10); the portal shows
+ * Registers toggle-recording (F9) and save-clip/bookmark (F10); the portal shows
  * a system dialog on first bind where the user can remap them. Works
  * from inside games. When no portal/backend exists the manager reports
  * unavailable; recording/clip actions remain accessible from the UI and

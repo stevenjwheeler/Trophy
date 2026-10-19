@@ -282,6 +282,8 @@ TEST(DmaBufCudaImportTest, InvalidFdFallsBackWithoutCrash) {
   frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
   frame.isDmaBuf = true;
   frame.dmaBufFd = -1; // invalid: must not crash
+  int fallbackRequests = 0;
+  frame.requestCpuFallback = [&] { ++fallbackRequests; };
   frame.drmFormat = DRM_FORMAT_XRGB8888;
   frame.drmModifier = 0;
   frame.dmaBufStride = 640 * 4;
@@ -289,4 +291,5 @@ TEST(DmaBufCudaImportTest, InvalidFdFallsBackWithoutCrash) {
   EncodedPacket pkt;
   EXPECT_FALSE(venc.encodeFrame(frame, pkt));
   EXPECT_GE(venc.droppedFrames(), 1);
+  EXPECT_EQ(fallbackRequests, 1);
 }

@@ -328,44 +328,12 @@ Rectangle {
                                         visible: settingsManager && settingsManager.audioMode === "game"
                                         spacing: Theme.spacingSmall
                                         Label { text: qsTr("Voice Chat Application"); font.weight: Font.Bold; color: Theme.textColor }
-                                        TrophyComboBox {
+                                        VoiceAppComboBox {
                                             id: voiceAppBox; Layout.fillWidth: true
-                                            property var apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
-                                            model: {
-                                                let names = ["None"];
-                                                for (let a of apps) { names.push(a.name); }
-                                                let saved = settingsManager ? settingsManager.voiceChatApp : "";
-                                                if (saved && saved !== "") {
-                                                    let found = false;
-                                                    for (let a of apps) {
-                                                        if (a.binary && a.binary.toLowerCase() === saved.toLowerCase()) { found = true; break; }
-                                                    }
-                                                    if (!found) names.push(saved);
-                                                }
-                                                return names;
-                                            }
-                                            Binding {
-                                                target: voiceAppBox
-                                                property: "currentIndex"
-                                                value: (function() {
-                                                    if (!settingsManager || !audioDeviceEnumerator) return 0;
-                                                    let apps = audioDeviceEnumerator.audioApps;
-                                                    let saved = settingsManager.voiceChatApp;
-                                                    if (!saved || saved === "") return 0;
-                                                    for (let i = 0; i < apps.length; i++) {
-                                                        if (apps[i].binary && apps[i].binary.toLowerCase() === saved.toLowerCase()) return i + 1;
-                                                    }
-                                                    return apps.length + 1;
-                                                })()
-                                            }
-                                            onActivated: {
-                                                if (settingsManager && audioDeviceEnumerator) {
-                                                    if (currentIndex === 0) {
-                                                        settingsManager.voiceChatApp = "";
-                                                    } else if (currentIndex > 0 && currentIndex <= apps.length) {
-                                                        settingsManager.voiceChatApp = apps[currentIndex - 1].binary;
-                                                    }
-                                                }
+                                            apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
+                                            savedApp: settingsManager ? settingsManager.voiceChatApp : ""
+                                            onAppSelected: function(binary) {
+                                                if (settingsManager) settingsManager.voiceChatApp = binary;
                                             }
                                         }
                                     }
@@ -751,7 +719,7 @@ Rectangle {
                                 Layout.alignment: Qt.AlignHCenter
                                 spacing: 2
                                 Label { text: qsTr("Keyboard Shortcuts"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
-                                Label { text: qsTr("Two keys that work even inside your game."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                Label { text: qsTr("Two keys: record, and clip / bookmark."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                             }
                             // User-assigned recording key
                             Rectangle {
@@ -796,8 +764,8 @@ Rectangle {
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 0
-                                        Label { text: qsTr("Save a clip"); font.weight: Font.Bold; color: Theme.textColor }
-                                        Label { text: qsTr("Saves the last moments instantly."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                        Label { text: qsTr("Save a clip / bookmark"); font.weight: Font.Bold; color: Theme.textColor }
+                                        Label { text: qsTr("DVR: save a clip. Full recording: mark this moment."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                                     }
                                 }
                             }

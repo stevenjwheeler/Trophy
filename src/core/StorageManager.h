@@ -13,6 +13,9 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QSet>
+#include <QMap>
+#include <future>
 #include <functional>
 #include <vector>
 
@@ -89,6 +92,11 @@ public:
   Q_INVOKABLE QString renameRecording(const QString &filePath,
                                       const QString &newTitle);
   Q_INVOKABLE bool exportRecording(const QString &sourcePath, const QString &destDir) const;
+  // Owner-thread reservations for export and the undo grace period. These
+  // are temporary, not persisted protection; conflicting operations refuse.
+  bool reserveRecordings(const QStringList &paths);
+  void releaseRecordings(const QStringList &paths);
+  bool recordingInUse(const QString &path) const;
 
   // Formatting helpers
   Q_INVOKABLE static QString formatSize(qint64 bytes);
@@ -168,6 +176,9 @@ private:
   // Coalesces filesystem-event bursts (a 50-file import fires per file)
   // into a single enforceStorageLimit pass (see onDirectoryChanged).
   QTimer m_debounceTimer;
+  QSet<QString> m_reservedRecordings;
+  QMap<QString, QString> m_reservationKeys;
+  std::vector<std::future<void>> m_deleteWorkers;
 };
 
 } // namespace TrophyBackend

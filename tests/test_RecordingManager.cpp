@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include "core/RecordingManager.h"
+#include "library/RecordingAnnotations.h"
 #include "capture/IVideoCaptureSource.h"
 #include "core/StorageManager.h"
 #include "settings/SettingsManager.h"
@@ -70,6 +71,12 @@ public:
     return {};
   }
   QString name() const override { return QStringLiteral("Pending capture"); }
+};
+
+class BookmarkCapture : public PendingCapture {
+public:
+  FrameCallback callback;
+  void setFrameCallback(FrameCallback value) override { callback = std::move(value); }
 };
 
 class FinalizationMuxer : public IMuxer {
@@ -198,6 +205,40 @@ protected:
     ASSERT_TRUE(f.open(QIODevice::WriteOnly));
     f.write(QByteArray(size, 'x'));
     f.close();
+  }
+
+  void bookmarkLifecycle() {
+    createDummyFile("bookmarked.mkv", 64);
+    const QString path = tempDir.filePath("bookmarked.mkv");
+    StorageManager storage(tempDir.path());
+    RecordingManager recorder;
+    recorder.setStorageManager(&storage);
+    EXPECT_FALSE(recorder.addBookmark());
+    recorder.m_currentFilePath = path;
+    auto capture = std::make_unique<BookmarkCapture>();
+    auto *source = capture.get();
+    recorder.m_captureSource = std::move(capture);
+    recorder.m_videoEncoder = std::make_unique<ManagerOutputEncoder>();
+    recorder.m_muxer = std::make_unique<FinalizationMuxer>(true);
+    recorder.m_session = std::make_unique<RecordingSession>(
+        path, source, recorder.m_videoEncoder.get(), recorder.m_muxer.get(),
+        nullptr, true, 128, 0);
+    ASSERT_TRUE(recorder.m_session->start());
+    recorder.m_recordingTimer.start();
+    recorder.setState(RecordingManager::RecordingState::Recording);
+    EXPECT_FALSE(recorder.addBookmark()); // No media origin yet.
+    ASSERT_TRUE(bool(source->callback));
+    VideoFrame frame{};
+    frame.timestamp = 90000000;
+    source->callback(frame);
+    ASSERT_TRUE(recorder.addBookmark());
+    const auto marks = RecordingAnnotations::bookmarks(path);
+    ASSERT_EQ(marks.size(), 1);
+    EXPECT_EQ(marks[0].toMap()["positionMs"].toLongLong(), 0);
+    recorder.stopRecording();
+    EXPECT_FALSE(recorder.addBookmark());
+    ASSERT_TRUE(waitForIdle(recorder));
+    EXPECT_EQ(RecordingAnnotations::bookmarks(path).size(), 1);
   }
 
   bool waitForIdle(RecordingManager &recorder) {
@@ -569,6 +610,10 @@ TEST_F(RecordingManagerTest, GenericSourceLabelsCarryNoIdentity) {
   EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Firefox"));
 }
 
+TEST_F(RecordingManagerTest, BookmarksRequireActiveVideoAndSurviveStop) {
+  bookmarkLifecycle();
+}
+
 TEST_F(RecordingManagerTest, SourceLabelsAgreeAcrossTitleAndExeForms) {
   // Portal exe basenames agree with detector display names.
   EXPECT_TRUE(RecordingManager::sourceLabelsAgree("Deadlock", "deadlock.exe"));
@@ -808,7 +853,6 @@ TEST_F(RecordingManagerTest, QueuedStartupErrorReleasesOutputAndStorageExclusion
 TEST_F(RecordingManagerTest, OutputPathSkipsExistingBaseAndNumberedCollision) {
   SettingsManager settings;
   settings.setRecordingsPath(tempDir.path());
-  settings.setContainerFormat("mkv");
   RecordingManager recorder;
   recorder.setSettingsManager(&settings);
   // Cover adjacent wall-clock seconds rather than assuming the test never
@@ -834,18 +878,26 @@ TEST_F(RecordingManagerTest, OutputPathSkipsExistingBaseAndNumberedCollision) {
   }
 }
 
-TEST_F(RecordingManagerTest, OutputPathUsesSafeFallbackAndConfiguredContainer) {
+TEST_F(RecordingManagerTest, OutputPathUsesSafeFallbackAndAlwaysMkv) {
   SettingsManager settings;
+  // Even an existing installation that selected MP4 now records as MKV.
+  const auto settingsPath = settings.settingsFilePath();
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(settingsPath).path()));
+  QFile legacy(settingsPath);
+  ASSERT_TRUE(legacy.open(QIODevice::WriteOnly));
+  legacy.write(R"({"video":{"format":"mp4"}})");
+  legacy.close();
+  settings.load();
   settings.setRecordingsPath(tempDir.path());
-  settings.setContainerFormat("mp4");
   RecordingManager recorder;
   recorder.setSettingsManager(&settings);
   const QString sanitized = outputPath(recorder, "../ : ???");
   EXPECT_EQ(QFileInfo(sanitized).absolutePath(), tempDir.path());
   EXPECT_TRUE(QFileInfo(sanitized).fileName().startsWith("Game_"));
-  EXPECT_TRUE(sanitized.endsWith(".mp4"));
+  EXPECT_TRUE(sanitized.endsWith(".mkv"));
   EXPECT_TRUE(QFileInfo(outputPath(recorder, QString())).fileName()
                   .startsWith("Recording_"));
+  EXPECT_TRUE(outputPath(recorder, QString()).endsWith(".mkv"));
 }
 
 TEST_F(RecordingManagerTest, FinalizationFailureDoesNotEmitRecordingSaved) {

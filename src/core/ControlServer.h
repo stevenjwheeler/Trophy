@@ -19,7 +19,7 @@ namespace TrophyBackend {
  *
  * Listens on $XDG_RUNTIME_DIR/trophy-control.sock. Native binds that the
  * portal can't reach (GNOME custom shortcuts, Sway/Hyprland bindsym) call
- * `trophy --toggle-record|--save-clip|--show-window`, which forwards the
+ * `trophy --toggle-record|--save-clip|--add-bookmark|--show-window`, which forwards the
  * command here when an instance is already running. Only single-line
  * ASCII commands are accepted; anything else is ignored. The runtime
  * dir is user-private (0700), so no other user can connect.
@@ -47,6 +47,7 @@ public:
 signals:
   void toggleRecordingRequested();
   void saveClipRequested();
+  void bookmarkRequested();
   void showWindowRequested();
 
 private slots:

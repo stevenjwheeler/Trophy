@@ -15,9 +15,8 @@ import QtQuick.Layouts
 Page {
     id: root
 
-    // The app list goes stale (apps publish streams on demand), so refresh
-    // it every time Settings opens — otherwise a saved voice app reads as
-    // "(not running)" until the user hits Refresh by hand.
+    // Refresh live choices on open; the voice picker retains the saved app
+    // independently because apps publish audio streams on demand.
     onVisibleChanged: {
         if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
     }
@@ -531,33 +530,6 @@ Page {
                         }
                     }
 
-                    SettingStack {
-                        label: qsTr("Container Format")
-                        help: qsTr("How the video file is stored on disk.")
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.spacingSmall
-
-                            OptionCard {
-                                title: qsTr("MKV (Recommended)")
-                                description: qsTr("Crash-resistant. Your recording survives power cuts and app crashes.")
-                                selected: settingsManager ? settingsManager.containerFormat === "mkv" : true
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.containerFormat = "mkv"
-                            }
-
-                            OptionCard {
-                                title: qsTr("MP4")
-                                description: qsTr("Widely compatible but fragile — an unexpected stop can corrupt the whole file.")
-                                selected: settingsManager ? settingsManager.containerFormat === "mp4" : false
-                                danger: true
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.containerFormat = "mp4"
-                            }
-                        }
-                    }
-
                     SettingRow {
                         label: qsTr("Zero-Copy Capture (DMA-BUF)")
                         help: qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
@@ -571,6 +543,14 @@ Page {
                                     settingsManager.useDmaBuf = checked;
                             }
                         }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Recordings are saved as crash-resilient MKV. Use Export to share in the Library to create a compatible MP4 copy.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
                     }
                 }
 
@@ -676,67 +656,66 @@ Page {
                         visible: recordingManager && recordingManager.isRecording
                     }
 
-                    SettingStack {
-                        label: qsTr("Audio Mode")
+                    SettingRow {
+                        label: qsTr("Capture")
+                        help: settingsManager && settingsManager.audioMode === "desktop"
+                            ? qsTr("Everything you hear, plus your microphone.")
+                            : qsTr("Game audio, with desktop audio as a fallback until the game is available.")
 
-                        ColumnLayout {
-                            Layout.fillWidth: true
+                        RowLayout {
+                            objectName: "audioCaptureMode"
+                            Layout.preferredWidth: 300
                             spacing: Theme.spacingSmall
-
-                            OptionCard {
-                                title: qsTr("Game Mode")
-                                description: qsTr("Focused capture of game window audio and voice apps.")
-                                selected: settingsManager ? settingsManager.audioMode === "game" : true
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.audioMode = "game"
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
+                            TrophyButton {
+                                Layout.preferredWidth: 146
+                                text: qsTr("Game audio")
+                                radius: 0
+                                outlined: true
+                                checked: !settingsManager || settingsManager.audioMode === "game"
+                                onClicked: if (settingsManager) settingsManager.audioMode = "game"
                             }
-
-                            OptionCard {
-                                title: qsTr("Desktop Mode")
-                                description: qsTr("Captures everything you hear on your system.")
-                                selected: settingsManager ? settingsManager.audioMode === "desktop" : false
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.audioMode = "desktop"
+                            TrophyButton {
+                                Layout.preferredWidth: 146
+                                text: qsTr("Desktop audio")
+                                radius: 0
+                                outlined: true
+                                checked: settingsManager && settingsManager.audioMode === "desktop"
+                                onClicked: if (settingsManager) settingsManager.audioMode = "desktop"
                             }
                         }
                     }
 
-                    SettingStack {
-                        label: qsTr("Audio Track Configuration")
-                        // Desktop mode always records one merged track, so
-                        // there is nothing to configure here.
+                    SettingRow {
+                        label: qsTr("Tracks")
+                        help: settingsManager && !settingsManager.separateAudioTracks
+                            ? qsTr("Combine game, voice chat and microphone into one track.")
+                            : qsTr("Keep game, voice chat and microphone separate for editing.")
+                        // Desktop mode always uses a single mixed track.
                         visible: settingsManager ? settingsManager.audioMode === "game" : true
 
-                        ColumnLayout {
-                            Layout.fillWidth: true
+                        RowLayout {
+                            objectName: "audioTrackLayout"
+                            Layout.preferredWidth: 300
                             spacing: Theme.spacingSmall
-
-                            OptionCard {
-                                title: qsTr("Single Track (Mixed)")
-                                description: {
-                                    let mode = settingsManager ? settingsManager.audioMode : "game";
-                                    if (mode === "desktop")
-                                        return qsTr("System audio and microphone mixed together into one track.");
-                                    else
-                                        return qsTr("Game, voice chat and microphone all mixed together into one track.");
-                                }
-                                selected: settingsManager ? !settingsManager.separateAudioTracks : true
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.separateAudioTracks = false
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
+                            TrophyButton {
+                                Layout.preferredWidth: 146
+                                text: qsTr("Separate tracks")
+                                radius: 0
+                                outlined: true
+                                checked: !settingsManager || settingsManager.separateAudioTracks
+                                onClicked: if (settingsManager) settingsManager.separateAudioTracks = true
                             }
-
-                            OptionCard {
-                                title: qsTr("Separate Tracks")
-                                description: {
-                                    let mode = settingsManager ? settingsManager.audioMode : "game";
-                                    if (mode === "desktop")
-                                        return qsTr("System audio and microphone on separate tracks. Switch audio tracks in your media player to hear both.");
-                                    else
-                                        return qsTr("Game, voice chat and microphone on separate tracks. Switch audio tracks in your media player to hear all audio.");
-                                }
-                                selected: settingsManager ? settingsManager.separateAudioTracks : false
-                                cardEnabled: !(recordingManager && recordingManager.isRecording)
-                                onChosen: if (settingsManager) settingsManager.separateAudioTracks = true
+                            TrophyButton {
+                                Layout.preferredWidth: 146
+                                text: qsTr("Mixed track")
+                                radius: 0
+                                outlined: true
+                                checked: settingsManager && !settingsManager.separateAudioTracks
+                                onClicked: if (settingsManager) settingsManager.separateAudioTracks = false
                             }
                         }
                     }
@@ -822,72 +801,26 @@ Page {
                         RowLayout {
                             spacing: Theme.spacingSmall
 
-                            TrophyComboBox {
-                                id: voiceChatAppBox
-                                Layout.preferredWidth: 300
-                                // Live-applied to the running pipeline; no lock needed.
-                                property var apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
-
-                                model: {
-                                    let names = ["None"];
-                                    for (let a of apps) {
-                                        names.push(a.name);
-                                    }
-                                    // Show the saved app even while it has no
-                                    // live entry (the list only refreshes on
-                                    // open/Refresh; streams come and go).
-                                    let saved = settingsManager ? settingsManager.voiceChatApp : "";
-                                    if (saved && saved !== "") {
-                                        let found = false;
-                                        for (let a of apps) {
-                                            if (a.binary && a.binary.toLowerCase() === saved.toLowerCase()) { found = true; break; }
-                                        }
-                                        if (!found) names.push(saved);
-                                    }
-                                    names;
-                                }
-
-                                Binding {
-                                    target: voiceChatAppBox
-                                    property: "currentIndex"
-                                    value: (function() {
-                                        if (!settingsManager || !audioDeviceEnumerator) return 0;
-                                        let apps = audioDeviceEnumerator.audioApps;
-                                        let saved = settingsManager.voiceChatApp;
-                                        if (!saved || saved === "") return 0;
-                                        for (let i = 0; i < apps.length; i++) {
-                                            if (apps[i].binary && apps[i].binary.toLowerCase() === saved.toLowerCase()) return i + 1;
-                                        }
-                                        return apps.length + 1; // saved but unmatched entry
-                                    })()
-                                }
-
-                                onActivated: {
-                                    if (settingsManager && audioDeviceEnumerator) {
-                                        if (currentIndex === 0) {
-                                            settingsManager.voiceChatApp = "";
-                                        } else if (currentIndex > 0 && currentIndex <= apps.length) {
-                                            settingsManager.voiceChatApp = apps[currentIndex - 1].binary;
-                                        }
-                                        // Saved-but-unmatched entry: keep the saved value.
-                                    }
-                                }
-
-                                Connections {
-                                    target: audioDeviceEnumerator
-                                    function onAudioAppsChanged() {
-                                        voiceChatAppBox.apps = audioDeviceEnumerator.audioApps;
-                                    }
-                                }
-                            }
-
                             TrophyButton {
                                 text: qsTr("Refresh")
                                 enabled: audioDeviceEnumerator
                                 onClicked: if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
                             }
+
+                            VoiceAppComboBox {
+                                id: voiceChatAppBox
+                                Layout.preferredWidth: 300
+                                // Live-applied to the running pipeline; no lock needed.
+                                apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
+                                savedApp: settingsManager ? settingsManager.voiceChatApp : ""
+                                onAppSelected: function(binary) {
+                                    if (settingsManager) settingsManager.voiceChatApp = binary;
+                                }
+                            }
+
                         }
                     }
+
                 }
 
                 // ================= STORAGE =================
@@ -1327,7 +1260,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("Enable global shortcuts")
-                        help: (globalShortcuts && globalShortcuts.bound) ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.") : qsTr("Recording and clip keys that work from anywhere. The system asks for approval when you turn this on.")
+                        help: (globalShortcuts && globalShortcuts.bound) ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.") : qsTr("Two keys that work from anywhere: recording toggle and clip/bookmark. The system asks for approval when you turn this on.")
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1343,7 +1276,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("Record (global)")
-                        help: (globalShortcuts && globalShortcuts.bound && globalShortcuts.boundShortcuts["toggle-recording"]) ? qsTr("Press %1 anywhere — even in-game — to start or stop recording.").arg(globalShortcuts.boundShortcuts["toggle-recording"]) : qsTr("System-wide recording key. The system asks for approval on first launch.")
+                        help: ((globalShortcuts && globalShortcuts.bound && globalShortcuts.boundShortcuts["toggle-recording"]) ? qsTr("Press %1 anywhere — even in-game — to start or stop recording.").arg(globalShortcuts.boundShortcuts["toggle-recording"]) : qsTr("System-wide recording key. The system asks for approval on first launch.")) + " " + qsTr("Or bind trophy --toggle-record in your compositor.")
 
                         ValuePill {
                             pillText: (globalShortcuts && globalShortcuts.boundShortcuts["toggle-recording"]) || qsTr("Not bound")
@@ -1351,8 +1284,8 @@ Page {
                     }
 
                     SettingRow {
-                        label: qsTr("Save clip (global)")
-                        help: (globalShortcuts && globalShortcuts.bound && globalShortcuts.boundShortcuts["save-clip"]) ? qsTr("Press %1 anywhere — even in-game — to save the last moments as a clip.").arg(globalShortcuts.boundShortcuts["save-clip"]) : qsTr("System-wide clip key. The system asks for approval on first launch.")
+                        label: qsTr("Clip / bookmark (global)")
+                        help: ((globalShortcuts && globalShortcuts.bound && globalShortcuts.boundShortcuts["save-clip"]) ? qsTr("Press %1 to save a replay clip in DVR mode, or add a bookmark during a full recording.").arg(globalShortcuts.boundShortcuts["save-clip"]) : qsTr("One key saves DVR clips or bookmarks full recordings.")) + " " + qsTr("Or bind trophy --save-clip in your compositor.")
 
                         ValuePill {
                             pillText: (globalShortcuts && globalShortcuts.boundShortcuts["save-clip"]) || qsTr("Not bound")
@@ -1367,12 +1300,10 @@ Page {
                         TrophyButton {
                             Layout.alignment: Qt.AlignVCenter
                             text: qsTr("Configure")
-                            onClicked: {
-                                if (globalShortcuts)
-                                    globalShortcuts.reconfigureShortcuts();
-                            }
+                            onClicked: { if (globalShortcuts) globalShortcuts.reconfigureShortcuts() }
                         }
                     }
+
                 }
 
                 // --- FOOTER ACTIONS ---
@@ -1666,70 +1597,6 @@ Page {
             font.pixelSize: Theme.fontSizeSmall
             wrapMode: Text.WordWrap
             visible: help.length > 0
-        }
-    }
-
-    // Selectable card used for container format, audio mode and track config.
-    component OptionCard: Rectangle {
-        property string title: ""
-        property string description: ""
-        property bool selected: false
-        property bool danger: false
-        property bool cardEnabled: true
-        signal chosen()
-
-        Layout.fillWidth: true
-        implicitHeight: optionRow.implicitHeight + Theme.spacingMedium * 2
-        radius: Theme.radiusSmall
-        color: !cardEnabled ? "transparent" : selected ? (danger ? Theme.withOpacity(Theme.warningColor, 0.08) : Theme.withOpacity(Theme.primaryColor, 0.08)) : "transparent"
-        border.width: selected ? 2 : 1
-        border.color: {
-            if (!cardEnabled)
-                return Theme.withOpacity(Theme.textColor, 0.1);
-            if (selected)
-                return danger ? Theme.warningColor : Theme.primaryColor;
-            return Theme.withOpacity(Theme.textColor, 0.12);
-        }
-        opacity: cardEnabled ? 1.0 : 0.5
-
-        RowLayout {
-            id: optionRow
-            anchors.fill: parent
-            anchors.margins: Theme.spacingMedium
-            spacing: Theme.spacingSmall
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-
-                Label {
-                    text: title
-                    color: Theme.textColor
-                    font.weight: Font.Medium
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    text: description
-                    color: (selected && danger) ? Theme.warningColor : Theme.textMutedColor
-                    font.pixelSize: Theme.fontSizeSmall
-                    wrapMode: Text.WordWrap
-                }
-            }
-
-            TrophyRadioButton {
-                checked: selected
-                enabled: cardEnabled
-                onClicked: chosen()
-            }
-        }
-
-        HoverHandler {
-            cursorShape: Qt.PointingHandCursor
-        }
-        TapHandler {
-            enabled: cardEnabled
-            onTapped: chosen()
         }
     }
 

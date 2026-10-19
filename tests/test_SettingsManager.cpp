@@ -74,6 +74,20 @@ protected:
 
 // --- Default Values ---
 
+TEST_F(SettingsManagerTest, ShareExportFolderPersistsAndResets) {
+  EXPECT_TRUE(mgr->shareExportFolder().isEmpty());
+  QSignalSpy changed(mgr.get(), &SettingsManager::shareExportFolderChanged);
+  const QString folder = QString::fromUtf8("/exports/Share #1 % café");
+  mgr->setShareExportFolder(folder);
+  mgr->setShareExportFolder(folder);
+  EXPECT_EQ(changed.count(), 1);
+  SettingsManager restored;
+  restored.load();
+  EXPECT_EQ(restored.shareExportFolder(), folder);
+  mgr->resetToDefaults();
+  EXPECT_TRUE(mgr->shareExportFolder().isEmpty());
+}
+
 TEST_F(SettingsManagerTest, CustomizationDefaultsAndRoundTrip) {
   EXPECT_EQ(mgr->themeMode(), "dark");
   EXPECT_EQ(mgr->accentColor(), "rose");
@@ -160,7 +174,6 @@ TEST_F(SettingsManagerTest, DefaultEncoder) {
 }
 
 TEST_F(SettingsManagerTest, DefaultContainerFormat) {
-  EXPECT_EQ(mgr->containerFormat(), "mkv");
 }
 
 TEST_F(SettingsManagerTest, DefaultEncoderPreset) {
@@ -570,12 +583,29 @@ TEST_F(SettingsManagerTest, LegacySingularTokenKeyNotPersisted) {
 
 // --- Save/Load Round Trip ---
 
+TEST_F(SettingsManagerTest, LegacyContainerPreferenceIsIgnoredAndNotPersisted) {
+  const auto path = mgr->settingsFilePath();
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(path).path()));
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write(R"({"video":{"format":"mp4","fps":30,"bitrate":25000}})");
+  file.close();
+  mgr->load();
+  EXPECT_EQ(mgr->fps(), 30);
+  EXPECT_EQ(mgr->videoBitrate(), 25000);
+  EXPECT_EQ(mgr->metaObject()->indexOfProperty("containerFormat"), -1);
+  mgr->save();
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto video = QJsonDocument::fromJson(file.readAll()).object().value("video").toObject();
+  EXPECT_FALSE(video.contains("format"));
+  EXPECT_EQ(video.value("fps").toInt(), 30);
+}
+
 TEST_F(SettingsManagerTest, SaveLoadRoundTrip) {
   // Modify settings
   mgr->setVideoBitrate(25000);
   mgr->setFps(30);
   mgr->setEncoder("nvenc_h264");
-  mgr->setContainerFormat("mp4");
   mgr->setSeparateAudioTracks(false);
   mgr->setAutoRecordEnabled(true);
   mgr->save();
@@ -587,7 +617,6 @@ TEST_F(SettingsManagerTest, SaveLoadRoundTrip) {
   EXPECT_EQ(mgr2->videoBitrate(), 25000);
   EXPECT_EQ(mgr2->fps(), 30);
   EXPECT_EQ(mgr2->encoder(), "nvenc_h264");
-  EXPECT_EQ(mgr2->containerFormat(), "mp4");
   EXPECT_FALSE(mgr2->separateAudioTracks());
   EXPECT_TRUE(mgr2->autoRecordEnabled());
 }

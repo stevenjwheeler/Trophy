@@ -38,6 +38,9 @@
     <file>icons/warning.svg</file>
     <file>icons/sparkles.svg</file>
     <file>icons/heart.svg</file>
+    <file>icons/lock.svg</file>
+    <file>icons/bookmark.svg</file>
+    <file>icons/share.svg</file>
     <file>icons/file-text.svg</file>
     <file>icons/code.svg</file>
     <file>icons/refresh.svg</file>

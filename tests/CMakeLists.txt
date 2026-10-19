@@ -4,6 +4,27 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_DeletionQueue test_DeletionQueue.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
+target_include_directories(test_DeletionQueue PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_DeletionQueue PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_DeletionQueue)
+
+add_executable(test_ShareExport test_ShareExport.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ShareExportEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/ShareExporter.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
+target_include_directories(test_ShareExport PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_ShareExport PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test
+    PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL PkgConfig::SWSCALE PkgConfig::SWRESAMPLE)
+gtest_discover_tests(test_ShareExport)
+
+add_executable(test_ShareUi test_ShareUi.cpp ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+target_compile_definitions(test_ShareUi PRIVATE SHARING_QML_DIR="${CMAKE_SOURCE_DIR}/qml/components")
+target_link_libraries(test_ShareUi PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ShareUi)
+
 add_executable(test_Theme test_Theme.cpp
     ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.cpp
     ${CMAKE_SOURCE_DIR}/src/core/WindowChrome.h)
@@ -344,6 +365,18 @@ target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::C
 gtest_discover_tests(test_RecordingManager)
 
 add_executable(test_WaylandPortalCapture test_WaylandPortalCapture.cpp)
+add_executable(test_PipeWireVideoFormat test_PipeWireVideoFormat.cpp)
+target_include_directories(test_PipeWireVideoFormat PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireVideoFormat PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+gtest_discover_tests(test_PipeWireVideoFormat)
+add_executable(test_PipeWireBufferLease test_PipeWireBufferLease.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/FrameDispatcher.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/FrameTypes.cpp)
+target_include_directories(test_PipeWireBufferLease PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireBufferLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+target_link_options(test_PipeWireBufferLease PRIVATE "-Wl,--wrap=pw_stream_queue_buffer"
+    "-Wl,--wrap=pw_stream_update_params")
+gtest_discover_tests(test_PipeWireBufferLease)
 target_include_directories(test_WaylandPortalCapture PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_WaylandPortalCapture PRIVATE test_RecordingBackend Qt6::DBus Qt6::Test PkgConfig::PIPEWIRE)
 find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)

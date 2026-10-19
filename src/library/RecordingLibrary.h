@@ -42,6 +42,7 @@ class RecordingLibrary : public QObject {
   Q_PROPERTY(
       int sortOrder READ sortOrder WRITE setSortOrder NOTIFY recordingsChanged)
   Q_PROPERTY(int kindFilter READ kindFilter WRITE setKindFilter NOTIFY recordingsChanged)
+  Q_PROPERTY(bool protectedOnly READ protectedOnly WRITE setProtectedOnly NOTIFY recordingsChanged)
   // True while a player-range clip is remuxing on the worker thread.
   Q_PROPERTY(bool clipSaving READ clipSaving NOTIFY clipSavingChanged)
 
@@ -71,6 +72,10 @@ public:
   void setSortOrder(int order);
   int kindFilter() const { return m_kindFilter; }
   void setKindFilter(int filter);
+  bool protectedOnly() const { return m_protectedOnly; }
+  void setProtectedOnly(bool value);
+  Q_INVOKABLE bool setProtected(const QString &filePath, bool value);
+  Q_INVOKABLE bool removeBookmark(const QString &filePath, int index);
 
   bool clipSaving() const { return m_clipSaving; }
 
@@ -100,6 +105,8 @@ public:
   // when none of the paths were tracked. Direct calls are unaffected
   // by setBulkOperationActive — only watcher refreshes are gated.
   Q_INVOKABLE void removeRecordings(const QStringList &filePaths);
+  void setHiddenRecordings(const QStringList &paths);
+  void refreshAnnotations(const QString &path);
 
  public slots:
   // Suppresses watcher-driven refresh() while a background bulk
@@ -168,7 +175,9 @@ private:
   StorageManager *m_storage = nullptr;
   int m_sortOrder = NewestFirst;
   int m_kindFilter = AllCaptures;
+  bool m_protectedOnly = false;
   QString m_activeRecordingPath;
+  QSet<QString> m_hiddenRecordings;
   std::vector<std::unique_ptr<Recording>> m_recordings;
   QList<Recording *> m_filteredRecordings;
   QFileSystemWatcher m_watcher;
@@ -204,6 +213,7 @@ private:
   // thread (worker completion hops back via queued invoke).
   bool m_clipSaving = false;
   std::thread m_clipThread;
+  QString m_clipPinnedSource;
 };
 
 } // namespace TrophyBackend

@@ -89,15 +89,14 @@ GridView {
                     window.openPlayer(recording.filePath);
                 }
             }
-            onOpenFolder: {
-                if (recording) {
-                    window.openFolder(recording.directory);
-                }
-            }
             onDeleteRequested: {
                 if (recording) {
                     window.confirmDelete(recording.filePath, recording.fileName);
                 }
+            }
+            onShareRequested: {
+                if (recording)
+                    window.openShareExport(recording.filePath);
             }
             onRenameRequested: {
                 if (recording) {

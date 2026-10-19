@@ -242,6 +242,7 @@ configure_file(
 
 # Source files
 set(CORE_SOURCES
+    src/core/DeletionQueue.cpp
     src/core/Application.cpp
     src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
@@ -299,6 +300,8 @@ set(DETECTION_SOURCES
 list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GlShimEnrollment.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
 
 set(LIBRARY_SOURCES
+    src/library/ShareExportEngine.cpp
+    src/library/ShareExporter.cpp
     src/library/RecordingLibrary.cpp
     src/library/Recording.cpp
     src/library/ThumbnailGenerator.cpp
@@ -314,6 +317,7 @@ set(SETTINGS_SOURCES
 
 # Header files (for MOC)
 set(CORE_HEADERS
+    src/core/DeletionQueue.h
     src/core/Application.h
     src/core/HardwareInfo.h
     src/core/RecordingManager.h
@@ -375,6 +379,7 @@ set(DETECTION_HEADERS
 list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h src/detection/KWinBackend.h src/detection/WindowInfo.h src/detection/GlShimEnrollment.h src/detection/GnomeBackend.h src/detection/HyprlandBackend.h src/detection/SwayBackend.h src/detection/VulkanLayer.h)
 
 set(LIBRARY_HEADERS
+    src/library/ShareExporter.h
     src/library/RecordingLibrary.h
     src/library/Recording.h
     src/library/ThumbnailGenerator.h
@@ -434,6 +439,9 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/NavigationRail.qml
         qml/components/WindowPickerDialog.qml
         qml/components/SetupWizard.qml
+        qml/components/ShareExportDialog.qml
+        qml/components/OriginalCopyDialog.qml
+        qml/components/ToastStack.qml
         qml/pages/DashboardPage.qml
         qml/pages/InfoPage.qml
         qml/pages/PlayerPage.qml
@@ -452,6 +460,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/SettingsSectionCard.qml
         qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
+        qml/controls/VoiceAppComboBox.qml
         qml/controls/TrophySlider.qml
         qml/controls/TrophyScrollBar.qml
         qml/controls/TrophyRadioButton.qml

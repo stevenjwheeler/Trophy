@@ -135,10 +135,48 @@ ApplicationWindow {
         lastSelectedIndex = -1;
     }
 
+    function toggleCaptureProtection(path) {
+        const rec = recordingLibrary ? recordingLibrary.getRecording(path) : null;
+        if (rec && !recordingLibrary.setProtected(path, !rec.protectedFromCleanup))
+            showMetadataError();
+    }
+
+    function showMetadataError() {
+        errorDialog.title = qsTr("Unable to save changes");
+        errorDialog.message = qsTr("Could not save protection or bookmarks. Check recording-folder permissions. Existing metadata was left unchanged.");
+        errorDialog.open();
+    }
+
     function exportSelected() {
         if (selectedRecordings.length > 0) {
             exportDialog.open();
         }
+    }
+
+    function openShareExport(path, excludedAudioOrdinals) {
+        if (!path || shareExporter.inspecting)
+            return;
+        shareDialog.sourcePath = path;
+        shareDialog.sourcePaths = [];
+        shareDialog.excludedAudioOrdinals = excludedAudioOrdinals || [];
+        shareDialog.open();
+    }
+
+    function openShareExportBatch(paths) {
+        if (!paths || !paths.length || shareExporter.inspecting)
+            return;
+        if (paths.length === 1) {
+            openShareExport(paths[0]);
+            return;
+        }
+        shareDialog.sourcePaths = paths.slice();
+        shareDialog.excludedAudioOrdinals = [];
+        shareDialog.open();
+    }
+
+    function queueDeletion(paths) {
+        if (deletionQueue.enqueue(paths))
+            window.clearSelection();
     }
 
     function deleteSelected() {
@@ -158,7 +196,7 @@ ApplicationWindow {
         // clears when bulkDeleteFinished arrives (below), keeping the
         // progress indicator visible until then.
         if (window.storageManager) {
-            window.storageManager.deleteRecordings(selectedRecordings);
+            window.queueDeletion(selectedRecordings);
         }
     }
 
@@ -209,9 +247,7 @@ ApplicationWindow {
     function confirmDelete(filePath, fileName) {
         if (window.skipDeleteConfirmation) {
             if (window.storageManager) {
-                window.storageManager.deleteRecording(filePath);
-                if (window.recordingLibrary)
-                    window.recordingLibrary.refresh();
+                window.queueDeletion([filePath]);
             }
         } else {
             deleteDialog.filePath = filePath;
@@ -737,6 +773,7 @@ ApplicationWindow {
     Connections {
         target: window.recordingManager
         function onRecordingError(error) {
+            errorDialog.title = qsTr("Recording Error");
             errorDialog.message = error;
             errorDialog.open();
             window.requestAttention(qsTr("Recording error: %1\nOpen Trophy when you're ready.").arg(error));
@@ -744,10 +781,32 @@ ApplicationWindow {
     }
 
     Connections {
-        target: window.storageManager
-        function onBulkDeleteFinished() {
-            window.clearSelection();
+        target: deletionQueue
+        function onFailed(message) {
+            errorDialog.title = qsTr("Deletion unavailable");
+            errorDialog.message = message;
+            errorDialog.open();
+            window.requestAttention(qsTr("Capture deletion needs attention. Open Trophy to review."));
         }
+    }
+
+    ShareExportDialog {
+        id: shareDialog
+        exporter: shareExporter
+        destination: window.settingsManager.shareExportFolder
+        onDestinationChanged: window.settingsManager.shareExportFolder = destination
+    }
+
+    ToastStack {
+        exporter: shareExporter
+        queue: deletionQueue
+        parent: Overlay.overlay
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.spacingLarge
+        width: Math.min(400, window.width - 40)
+        maxToastHeight: window.height - 80
+        z: 100
     }
 
     TrophyDialog {
@@ -773,15 +832,13 @@ ApplicationWindow {
         property string filePath: ""
         property string fileName: ""
         title: qsTr("Delete Recording")
-        message: qsTr("Are you sure you want to delete '%1'? This cannot be undone.").arg(fileName)
+        message: qsTr("Delete '%1'? You will have 10 seconds to Undo in the app before permanent deletion.").arg(fileName)
         confirmText: qsTr("Delete")
         confirmColor: Theme.errorColor
         showDontAsk: true
         onAccepted: {
             if (window.storageManager) {
-                window.storageManager.deleteRecording(filePath);
-                if (window.recordingLibrary)
-                    window.recordingLibrary.refresh();
+                window.queueDeletion([filePath]);
             }
             if (deleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
@@ -791,7 +848,7 @@ ApplicationWindow {
     TrophyDialog {
         id: bulkDeleteDialog
         title: qsTr("Delete Selected Recordings")
-        message: qsTr("Are you sure you want to delete %1 recordings? This cannot be undone.").arg(window.selectedRecordings.length)
+        message: qsTr("Delete %1 captures? You will have 10 seconds to Undo in the app before permanent deletion.").arg(window.selectedRecordings.length)
         confirmText: qsTr("Delete All")
         confirmColor: Theme.errorColor
         showDontAsk: true
@@ -943,18 +1000,15 @@ ApplicationWindow {
         }
     }
 
-    FolderDialog {
+    OriginalCopyDialog {
         id: exportDialog
-        title: qsTr("Choose Export Directory")
-        onAccepted: {
-            var destDir = exportDialog.selectedFolder.toLocalFile();
-            if (window.storageManager) {
-                for (var i = 0; i < window.selectedRecordings.length; i++) {
-                    window.storageManager.exportRecording(window.selectedRecordings[i], destDir);
-                }
-            }
-            window.clearSelection();
-            window.openFolder(destDir);
+        exporter: shareExporter
+        sourcePaths: window.selectedRecordings
+        onQueued: window.clearSelection()
+        onCopyFailed: function(message) {
+            errorDialog.title = qsTr("Unable to copy captures");
+            errorDialog.message = message;
+            errorDialog.open();
         }
     }
 

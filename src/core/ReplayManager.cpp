@@ -6,6 +6,8 @@
  */
 
 #include "ReplayManager.h"
+#include "library/RecordingAnnotations.h"
+#include "audio/AudioRoutingInfo.h"
 #include "detection/GameDetectionService.h"
 
 #include <QDateTime>
@@ -86,6 +88,21 @@ void ReplayManager::setState(State s) {
 
 double ReplayManager::elapsedSec() const {
   return m_dvrClock.isValid() ? m_dvrClock.elapsed() / 1000.0 : 0.0;
+}
+
+QVariantMap ReplayManager::captureHealth() const {
+  if (!isActive() || !m_session) return {};
+  auto result = m_session->captureHealth();
+  result["mode"] = QStringLiteral("replay");
+  const int target = m_settings ? m_settings->clipBufferSeconds() : 30;
+  result["bufferTargetSeconds"] = target;
+  // Portal/encoder startup time is not buffered footage. Base the open
+  // segment on delivered video, plus retained finalized/retiring segments.
+  double buffered = std::max(qint64(0), m_session->videoPositionMs()) / 1000.0;
+  for (const auto &segment : m_segments) buffered += segment.durationSec;
+  for (const auto &segment : m_retiringSegments) buffered += segment->segment.durationSec;
+  result["bufferSeconds"] = std::min(double(target), buffered);
+  return result;
 }
 
 QString ReplayManager::legacyCacheDir() {
@@ -458,6 +475,7 @@ bool ReplayManager::switchSegment() {
   newSession->setVoiceChatApp(m_settings->voiceChatApp().trimmed());
   newSession->setVoiceTrack(voiceTrack);
   newSession->setGameIsFallback(!gameFound);
+  newSession->setDesktopAudio(m_settings->audioMode() == "desktop");
   if (gameFound)
     newSession->markSourceConnected(0);
   if (voiceFound && voiceTrack >= 0)
@@ -511,6 +529,8 @@ void ReplayManager::pollRetirements() {
     m_saveInputPaths.clear();
     m_saving = false;
     auto result = std::move(m_saveResult);
+    if (result && result->ok && !RecordingAnnotations::setAudioRouting(result->path, result->audioHistory))
+      qWarning() << "Could not save replay audio source history:" << result->path;
     if (result && !m_shuttingDown) {
       if (result->ok) emit replaySaved(result->path, result->seconds);
       else emit replayFailed(result->error.isEmpty() ? "Could not save replay." : result->error);
@@ -522,6 +542,7 @@ void ReplayManager::pollRetirements() {
     if (retired.session->stopPending()) { ++it; continue; }
     const bool succeeded = retired.session->outputSucceeded();
     if (succeeded && m_state != State::Stopping) {
+      retired.segment.audioHistory = retired.session->audioHistory();
       m_segments.push_back(retired.segment);
       std::sort(m_segments.begin(), m_segments.end(), [](const auto &a, const auto &b) {
         return a.startSec < b.startSec;
@@ -1008,6 +1029,14 @@ void ReplayManager::beginReplayRemux(double now) {
     m_saveInputPaths.push_back(segment.path);
   m_saveDone = std::make_shared<std::atomic<bool>>(false);
   m_saveResult = std::make_shared<ReplaySaveResult>();
+  QList<QJsonObject> histories;
+  for (const auto &selected : segs) {
+    const auto found = std::find_if(m_segments.begin(), m_segments.end(), [&](const auto &segment) {
+      return segment.path == selected.path;
+    });
+    histories.append(found == m_segments.end() ? QJsonObject{} : found->audioHistory);
+  }
+  m_saveResult->audioHistory = AudioRoutingInfo::combine(histories);
   m_saveThread = std::thread([segs, window, fallbackSec, out, tmpOut,
                               done = m_saveDone, result = m_saveResult]() {
     struct Completion {

@@ -30,7 +30,7 @@ The easiest way to use Trophy on any Linux distribution (including Arch/CachyOS,
 - **Software Fallback** - x264 encoding when hardware acceleration isn't available
 - **DMA-BUF Support** - Uses compatible DMA-BUF paths when the compositor and encoder support them; falls back to CPU-backed capture otherwise
 - **Wayland Focused** - Supports recording native Wayland and XWayland windows via PipeWire
-- **Multiple Container Formats** - MKV (crash-resilient) and MP4 output options
+- **Resilient Recording, Easy Sharing** - Record in crash-resilient MKV, then use Export to share for a compatible MP4 copy
 - **Configurable Quality** - Adjustable bitrate, resolution, frame rate, and encoder presets
 
 ### Audio
@@ -73,9 +73,12 @@ require a fresh login environment; anti-cheat compatibility is not guaranteed.
 Trophy asks to bind its recording toggle and Save Clip shortcuts during
 setup (the wizard's Keyboard Shortcuts step) through the system Global
 Shortcuts portal. The portal suggests **F9** (toggle recording) and
-**F10** (save clip) as defaults, but the keys are yours to assign —
+**F10** (clip / bookmark) as defaults, but the keys are yours to assign —
 accept the dialog to bind them, and remap them anytime in
 Settings → Keyboard Shortcuts or in the portal's own shortcut dialog.
+The **same clip key** adds a bookmark during a full recording, and saves a replay
+clip in DVR mode. There is no separate bookmark shortcut. `trophy --save-clip`
+uses the same context-sensitive behavior, even when DVR is disabled while recording.
 On KDE and Hyprland they work globally, even in-game.
 
 Where the portal can't reach (GNOME, Sway), bind Trophy's commands
@@ -96,6 +99,83 @@ Custom Shortcuts, pointing at the same two commands. The commands
 talk to the already-running Trophy over a user-private socket
 (`$XDG_RUNTIME_DIR/trophy-control.sock`); if Trophy isn't running,
 they just launch it.
+
+### Keeping and finding moments
+
+- Click a capture's **padlock** to protect it from automatic storage cleanup.
+  The Library filter includes **Protected only**. Explicit deletion still works.
+  If protected/current captures prevent cleanup, increase the limit or manually
+  unprotect/delete captures; Trophy never removes protection to make room.
+- During a full recording, use **Bookmark moment** or your clip key (also
+  `trophy --save-clip`; the explicit `--add-bookmark` command remains available).
+  The player shows yellow clickable markers across video/audio tracks and a
+  bookmark list with Jump, **Clip ±15 s**, and Remove. Clip selects an editable
+  range; it does not immediately save a clip. Normal keyframe snapping applies.
+  Bookmarks do not automatically protect a capture from cleanup.
+- The Dashboard shows live source connection/mute state, desktop audio fallback,
+  approximate replay-buffer fill and a warning for sustained video-queue drops.
+  Connection status does not prove audible content; check the audio meters.
+  During desktop fallback the primary input is **System** and the redundant
+  Voice meter is hidden; both revert when game-specific audio binds.
+
+New recordings also save audio-source history in `.trophy/`. The player labels
+the primary lane **System**, **Game**, or **Game / System**, and hides the Voice
+lane only when fallback was used and Voice never delivered separate audio.
+Mic retains its original stream index when Voice is hidden. Clips inherit
+conservative source history (mixed-source clips may retain an unused lane).
+Older files without history, or files changed externally after that history
+was saved, retain their existing lanes rather than guessing from silence.
+
+Protection and bookmarks are stored atomically in the library's **`.trophy/`**
+directory, separately from regenerable caches. Keep that directory when moving
+or backing up a library. In-app rename/delete follows the metadata; external
+file renames and video-only exports do not carry it. Unreadable annotation files
+are treated as protected rather than risking automatic deletion.
+
+### Share-ready MP4 export
+
+Open a capture in the player and choose **Share MP4**, or select captures in
+the Library and use **Export → Share-ready MP4**. Choose original/1080p/720p
+resolution, a quality or approximate size preset, and which audio tracks to
+include. Selected tracks are averaged into **one stereo AAC track**, with their
+timing offsets preserved. Selecting no audio creates a silent video. A source
+opened from the player starts with its muted audio lanes unchecked; review the
+track choices before exporting. A source
+track that already contains desktop audio may also include Voice/Mic; selecting
+those again can double their sound.
+
+For multiple captures, quality and destination apply to the whole batch. Expand
+**Audio** and use the capture picker to review each file's independent track
+choices. **Export N MP4s** queues one copy per capture, processed one at a time
+in the background; each queued export can be cancelled independently.
+
+Export re-encodes to H.264/YUV420P MP4 (up to 60fps), never upscales, and enables
+fast-start playback. It exports the **whole file**: snip a range first if needed.
+Size targets are approximate, not guaranteed upload limits. HDR-to-SDR conversion
+is not supported. The FFmpeg libraries need libx264 and AAC encoder support;
+there is no additional `ffmpeg` executable requirement.
+
+Choose an export folder **outside the managed recording library**, so cleanup
+cannot delete your share copy or original to make room. Original files are
+read-only during export and held against in-app rename/deletion/cleanup while
+in use. Progress, cancellation and **Run in background** are available; a
+background progress panel can reopen the dialog. Existing files are never
+overwritten and incomplete exports are removed. **Export → Copy original files**
+still provides the original, unconverted single/bulk copy operation.
+
+### Undo deletion
+
+Manual deletion removes captures from the library view immediately and shows a
+toast with **Undo** and a filling progress bar. You have **10 seconds** before
+permanent deletion starts. Each batch has its own toast; one deletion never
+silently replaces another batch's undo opportunity.
+
+During the grace period, videos and their protection/bookmark/cache files stay
+in place and still occupy disk space. Undo restores the view without rewriting
+anything. Quitting Trophy before expiry cancels pending deletion (hiding to the
+tray does not quit it). Automatic storage cleanup is still permanent and does
+not show Undo. If a capture changes externally during the countdown, its batch
+is cancelled rather than deleting a replacement file.
 
 ### GNOME window helper
 
@@ -197,7 +277,7 @@ sudo apt install cmake qt6-base-dev qt6-declarative-dev \
 1. Launch Trophy and complete setup, explicitly installing the window helper and choosing any optional detection reporters and shortcuts.
 2. Start a supported game. When Trophy detects it, authorize window capture if prompted; saved approvals allow later automatic starts without another picker when restoration succeeds.
 3. Click **Record** or press your assigned recording shortcut (suggested **F9**) to start recording.
-4. Press the shortcut again or click **Stop** to end recording. With Instant Replay enabled and ready, your Save Clip shortcut (suggested **F10**) saves the trailing buffer.
+4. Press the recording shortcut again or click **Stop** to end recording. Your clip/bookmark shortcut marks moments during a full recording; with DVR enabled and ready, it saves the trailing buffer instead.
 5. Find recordings and clips in the **Home** library. Click an item to open the built-in player and clip editor.
 
 ### Hover previews and local caches
@@ -232,7 +312,7 @@ Access **Settings** to configure:
 | Shortcut | Action |
 |----------|--------|
 | Recording toggle (suggested F9) | Start/Stop recording |
-| Save Clip (suggested F10) | Save the trailing clip |
+| Clip / Bookmark (suggested F10) | Save a DVR clip, or bookmark the active full recording |
 | Ctrl+Q | Quit application |
 
 The recording-toggle and Save-Clip keys are user-assigned through the

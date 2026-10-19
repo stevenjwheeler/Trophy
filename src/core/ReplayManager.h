@@ -13,6 +13,8 @@
 #include <QPointer>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantMap>
+#include <QJsonObject>
 #include <cstdint>
 #include <future>
 #include <functional>
@@ -67,12 +69,14 @@ public:
   bool isActive() const { return m_state == State::Running; }
   bool isStarting() const { return m_state == State::StartingCapture; }
   QString currentGame() const { return m_gameName; }
+  QVariantMap captureHealth() const;
 
   // Pure helpers (unit-tested): window/retention over segment lists.
   struct Segment {
     QString path;
     double startSec = 0.0; // since DVR start
     double durationSec = 0.0;
+    QJsonObject audioHistory{};
     double endSec() const { return startSec + durationSec; }
   };
   static QList<ReplaySegment> selectForWindow(const QList<Segment> &segments,
@@ -143,6 +147,7 @@ private:
     bool ok = false;
     QString path, error;
     double seconds = 0.0;
+    QJsonObject audioHistory{};
   };
   std::shared_ptr<ReplaySaveResult> m_saveResult;
   QString audioSetupKey() const;

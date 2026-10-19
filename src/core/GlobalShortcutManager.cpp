@@ -218,7 +218,7 @@ QList<PortalShortcut> GlobalShortcutManager::shortcutDefinitions() {
   PortalShortcut clip;
   clip.id = QString::fromLatin1(kSaveClipId);
   clip.options["description"] = QCoreApplication::translate(
-      "GlobalShortcutManager", "Save the last moments as a clip");
+      "GlobalShortcutManager", "Save a replay clip, or bookmark the current recording");
   clip.options["preferred_trigger"] = QStringLiteral("F10");
   return {toggle, clip};
 }
@@ -226,8 +226,10 @@ QList<PortalShortcut> GlobalShortcutManager::shortcutDefinitions() {
 QVariantMap
 GlobalShortcutManager::boundMap(const QList<PortalShortcut> &shortcuts) {
   QVariantMap bound;
-  for (const PortalShortcut &s : shortcuts)
-    bound.insert(s.id, s.options.value("trigger_description").toString());
+  for (const PortalShortcut &s : shortcuts) {
+    if (s.id == QLatin1String(kToggleRecordingId) || s.id == QLatin1String(kSaveClipId))
+      bound.insert(s.id, s.options.value("trigger_description").toString());
+  }
   return bound;
 }
 

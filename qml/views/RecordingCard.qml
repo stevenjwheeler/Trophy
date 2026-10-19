@@ -65,7 +65,7 @@ Rectangle {
     layer.enabled: false
 
     signal play()
-    signal openFolder()
+    signal shareRequested()
     signal renameRequested()
     signal deleteRequested()
 
@@ -201,13 +201,14 @@ Rectangle {
                     }
 
                     RoundButton {
+                        objectName: "gridShareExport"
                         width: 42; height: 42
-                        icon.source: "qrc:/icons/folder.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
-                        Accessible.name: qsTr("Show in folder")
-                        ToolTip.text: qsTr("Show in folder")
+                        icon.source: "qrc:/icons/share.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
+                        Accessible.name: qsTr("Export to share")
+                        ToolTip.text: qsTr("Export to share")
                         ToolTip.visible: hovered
                         ToolTip.delay: 600
-                        onClicked: root.openFolder()
+                        onClicked: root.shareRequested()
                         background: Rectangle {
                             radius: 21
                             color: parent.hovered ? "#e6353f5c" : "#b31a2238"
@@ -325,6 +326,7 @@ Rectangle {
     // --- SELECTION CIRCLE OVERLAY ---
     Rectangle {
         id: selectionCircle
+        objectName: "gridSelection"
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.margins: Theme.spacingSmall
@@ -377,6 +379,35 @@ Rectangle {
                 }
             }
             cursorShape: Qt.PointingHandCursor
+        }
+    }
+
+    // Protection stays at the top-left; selection keeps the top-right.
+    ToolButton {
+        id: protectionButton
+        objectName: "captureProtectionButton"
+        readonly property bool protectionOn: !!root.recording && !!root.recording.protectedFromCleanup
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.margins: Theme.spacingSmall
+        width: 24
+        height: 24
+        padding: 0
+        horizontalPadding: 0
+        z: 20
+        visible: !!root.recording && (root.hovered || protectionOn)
+        icon.source: "qrc:/icons/lock.svg"
+        icon.width: 16; icon.height: 16
+        icon.color: "white"
+        Accessible.name: qsTr("Protect from auto-cleanup")
+        ToolTip.text: protectionOn ? qsTr("Protected from auto-cleanup — click to unprotect") : qsTr("Protect from auto-cleanup (manual deletion still allowed)")
+        ToolTip.visible: hovered
+        onClicked: { if (root.recording) window.toggleCaptureProtection(root.recording.filePath) }
+        background: Rectangle {
+            radius: 12
+            color: protectionButton.protectionOn ? Theme.primaryColor : "#80000000"
+            border.color: protectionButton.protectionOn ? Theme.primaryColor : "white"
+            border.width: 1.5
         }
     }
 

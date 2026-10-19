@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "core/StorageManager.h"
+#include "library/RecordingAnnotations.h"
 #include <QSignalSpy>
 
 using namespace TrophyBackend;
@@ -154,6 +155,102 @@ TEST_F(StorageManagerTest, UsagePercentNormal) {
   // Create a 25 GB equivalent file (we'll just test the calculation)
   // Instead of creating a huge file, set up and verify the formula
   EXPECT_DOUBLE_EQ(mgr.usagePercent(), 0.0); // No files yet
+}
+
+TEST_F(StorageManagerTest, CleanupKeepsProtectedAndReportsWhenNothingEligible) {
+  createDummyFile("Keep.mkv", 8192);
+  createDummyFile("Delete.mkv", 8192);
+  const QString keep = tempDir.filePath("Keep.mkv");
+  ASSERT_TRUE(RecordingAnnotations::setProtected(keep, true));
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(4096);
+  mgr.setAutoDeleteOldest(true);
+  QSignalSpy blocked(&mgr, &StorageManager::storageLimitCannotCleanup);
+  EXPECT_FALSE(mgr.enforceStorageLimit(true, true));
+  EXPECT_TRUE(QFile::exists(keep));
+  EXPECT_FALSE(QFile::exists(tempDir.filePath("Delete.mkv")));
+  EXPECT_GE(blocked.count(), 1);
+  // Protection is not a ban on explicit user deletion.
+  EXPECT_TRUE(mgr.deleteRecording(keep));
+  EXPECT_FALSE(QFile::exists(RecordingAnnotations::path(keep)));
+}
+
+TEST_F(StorageManagerTest, RenamePreservesProtectionAndBookmarks) {
+  createDummyFile("Game.mkv", 8192);
+  const QString from = tempDir.filePath("Game.mkv");
+  ASSERT_TRUE(RecordingAnnotations::setProtected(from, true));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(from, 12345));
+  StorageManager mgr(tempDir.path());
+  const QString to = mgr.renameRecording(from, "Renamed");
+  ASSERT_FALSE(to.isEmpty());
+  EXPECT_TRUE(RecordingAnnotations::isProtected(to));
+  ASSERT_EQ(RecordingAnnotations::bookmarks(to).size(), 1);
+  EXPECT_EQ(RecordingAnnotations::bookmarks(to)[0].toMap()["positionMs"].toLongLong(), 12345);
+  EXPECT_FALSE(QFile::exists(RecordingAnnotations::path(from)));
+}
+
+TEST_F(StorageManagerTest, RenameRefusesExistingAnnotationsWithoutLosingProtection) {
+  createDummyFile("Game.mkv", 8192);
+  const QString from = tempDir.filePath("Game.mkv");
+  ASSERT_TRUE(RecordingAnnotations::setProtected(from, true));
+  QFile collision(RecordingAnnotations::path(tempDir.filePath("Renamed.mkv")));
+  ASSERT_TRUE(collision.open(QIODevice::WriteOnly));
+  collision.write("{\"protected\":false}");
+  collision.close();
+  StorageManager mgr(tempDir.path());
+  EXPECT_TRUE(mgr.renameRecording(from, "Renamed").isEmpty());
+  EXPECT_TRUE(QFile::exists(from));
+  EXPECT_TRUE(RecordingAnnotations::isProtected(from));
+}
+
+TEST_F(StorageManagerTest, CorruptAnnotationsFailClosedAndAreNotOverwritten) {
+  createDummyFile("Game.mkv", 8192);
+  const QString video = tempDir.filePath("Game.mkv");
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".trophy"));
+  QFile file(RecordingAnnotations::path(video));
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write("{broken");
+  file.close();
+  EXPECT_TRUE(RecordingAnnotations::isProtected(video));
+  EXPECT_FALSE(RecordingAnnotations::setProtected(video, false));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(video, 1));
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  EXPECT_EQ(file.readAll(), "{broken");
+  file.close();
+  StorageManager mgr(tempDir.path());
+  mgr.setMaxSize(1);
+  EXPECT_FALSE(mgr.enforceStorageLimit(true));
+  EXPECT_TRUE(QFile::exists(video));
+}
+
+TEST_F(StorageManagerTest, AnnotationWritesRejectSymlinkDirectoryAndInvalidTimes) {
+  createDummyFile("Game.mkv", 8192);
+  const QString video = tempDir.filePath("Game.mkv");
+  QTemporaryDir outside;
+  ASSERT_TRUE(outside.isValid());
+  ASSERT_TRUE(QFile::link(outside.path(), tempDir.filePath(".trophy")));
+  EXPECT_TRUE(RecordingAnnotations::isProtected(video));
+  EXPECT_FALSE(RecordingAnnotations::setProtected(video, true));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(video, 1234));
+  EXPECT_TRUE(QDir(outside.path()).entryList(QDir::Files).isEmpty());
+  ASSERT_TRUE(QFile::remove(tempDir.filePath(".trophy")));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(video, -1));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(video, 86400001));
+  ASSERT_TRUE(RecordingAnnotations::setProtected(video, true));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(video, 1234));
+  EXPECT_TRUE(RecordingAnnotations::isProtected(video));
+}
+
+TEST_F(StorageManagerTest, SpecialAnnotationFileFailsClosedWithoutOpeningIt) {
+  createDummyFile("Game.mkv", 8192);
+  const QString video = tempDir.filePath("Game.mkv");
+  ASSERT_TRUE(QDir(tempDir.path()).mkpath(".trophy"));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(RecordingAnnotations::path(video)).constData(), 0600), 0);
+  EXPECT_TRUE(RecordingAnnotations::isProtected(video));
+  EXPECT_FALSE(RecordingAnnotations::addBookmark(video, 123));
+  StorageManager mgr(tempDir.path());
+  EXPECT_TRUE(mgr.renameRecording(video, "Renamed").isEmpty());
+  EXPECT_TRUE(QFile::exists(video));
 }
 
 TEST_F(StorageManagerTest, UsagePercentZeroMax) {

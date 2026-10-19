@@ -16,6 +16,9 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
+#include <QJsonObject>
+#include <algorithm>
 #include <QTimer>
 #include <array>
 #include <atomic>
@@ -76,6 +79,12 @@ public:
 
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
+  QVariantMap captureHealth() const;
+  QJsonObject audioHistory() const;
+  qint64 videoPositionMs() const {
+    const auto time = m_capturedVideoTimelineUs.load();
+    return time < 0 ? -1 : std::max(int64_t(0), time - m_videoFrameDurationUs) / 1000;
+  }
 
   // Owner-thread snapshots only: preserve the actual slot identities and
   // bindings over a DVR handoff, including voice adopted after initial setup.
@@ -112,7 +121,8 @@ public:
   void setVoiceTrack(int track) { m_voiceTrack = track; }
   // Track 0 is on monitor fallback (full mix), not the real app node — the
   // retry keeps hunting instead of treating it as connected.
-  void setGameIsFallback(bool fallback) { m_gameIsFallback = fallback; }
+  void setGameIsFallback(bool fallback) { m_gameIsFallback = fallback; noteAudioRouting(); }
+  void setDesktopAudio(bool desktop) { m_desktopAudio = desktop; noteAudioRouting(); }
 
   void setFrameDispatcher(std::shared_ptr<TrophyBackend::FrameDispatcher> d) { m_frameDispatcher = d; }
   bool pushQueuedFrame(QueuedFrame &&frame);
@@ -278,6 +288,13 @@ private:
   // Session wall start (steady clock).
   int64_t m_sessionStartMs = -1;
   bool m_gameIsFallback = false;
+  bool m_desktopAudio = false;
+  void noteAudioRouting(); // Owner-thread routing history; audio receipt is atomic.
+  bool m_audioHistoryStarted = false;
+  bool m_usedSystemAudio = false;
+  bool m_usedGameAudio = false;
+  std::array<std::atomic<bool>, kAudioTrackCount> m_audioReceived{};
+  std::atomic<quint64> m_queueDrops{0};
   // One-shot note when voice capture is suppressed by full-mix fallback
   // (see checkForNewAudioNodes); re-arms if the game track ever leaves
   // fallback so a later suppression is still visible in the log.

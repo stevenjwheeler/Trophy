@@ -6,6 +6,8 @@
 
 #include <QApplication>
 #include <QSignalSpy>
+#include <QSystemTrayIcon>
+#include <QMenu>
 #include <gtest/gtest.h>
 
 #include "core/SystemTrayManager.h"
@@ -39,6 +41,14 @@ TEST_F(SystemTrayTest, ConstructsWithoutTrayHost) {
   tray.setTrayVisible(false);
 }
 
+TEST_F(SystemTrayTest, MenuDoesNotOfferRawRecordingsFolder) {
+  SystemTrayManager tray;
+  auto *icon = tray.findChild<QSystemTrayIcon *>();
+  ASSERT_NE(icon, nullptr);
+  ASSERT_NE(icon->contextMenu(), nullptr);
+  for (auto *action : icon->contextMenu()->actions())
+    EXPECT_FALSE(action->text().contains("Folder", Qt::CaseInsensitive));
+}
 TEST_F(SystemTrayTest, SetRecordingSwitchesMenuAndTooltip) {
   SystemTrayManager tray;
   EXPECT_EQ(tray.recordActionText(), "Start Recording");

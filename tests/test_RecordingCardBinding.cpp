@@ -11,6 +11,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QQuickImageProvider>
@@ -127,11 +128,15 @@ public:
     emit selectedRecordingsChanged();
   }
   Q_INVOKABLE void openPlayer(const QString &path) { playedPath = path; }
+  Q_INVOKABLE void openShareExport(const QString &path) { sharedPath = path; }
+  QString sharedPath;
   QString playedPath;
   int rangeIndex = -1;
   Q_INVOKABLE void openFolder(const QString &) {}
   Q_INVOKABLE void confirmDelete(const QString &, const QString &) {}
   Q_INVOKABLE void requestRename(const QString &, const QString &) {}
+  Q_INVOKABLE void toggleCaptureProtection(const QString &path) { protectionPath = path; }
+  QString protectionPath;
 signals:
   void selectedRecordingsChanged();
   void lastSelectedIndexChanged();
@@ -202,6 +207,7 @@ protected:
   }
   void exerciseHoverPreview(bool list);
   void exerciseFailedPreview(bool list);
+  void exerciseProtection(bool list);
   void createPreviewService() {
     QString qmlPath = CARD_QML_FILE;
     qmlPath.replace("RecordingCard.qml", "HoverPreview.qml");
@@ -295,6 +301,14 @@ TEST_F(RecordingCardBindingTest, GridDetailsStayCompactWithoutShrinkingThumbnail
   ASSERT_NE(date, nullptr);
   EXPECT_EQ(item->height(), 248);
   EXPECT_EQ(thumbnail->height(), 180);
+  auto *share = card->findChild<QQuickItem *>("gridShareExport");
+  ASSERT_NE(share, nullptr);
+  QSignalSpy shareSpy(card.get(), SIGNAL(shareRequested()));
+  QTest::mouseMove(&window, QPoint(150, 90));
+  QTest::qWait(250);
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      share->mapToScene(QPointF(share->width() / 2, share->height() / 2)).toPoint());
+  EXPECT_EQ(shareSpy.count(), 1);
   EXPECT_EQ(type->property("text").toString(), "Recording");
   EXPECT_TRUE(metadata->property("text").toString().startsWith("• "));
   const qreal metadataBottom = metadata->mapToItem(item, QPointF(0, metadata->height())).y();
@@ -309,6 +323,76 @@ TEST_F(RecordingCardBindingTest, GridDetailsStayCompactWithoutShrinkingThumbnail
   EXPECT_TRUE(metadata->property("text").toString().startsWith("• "));
   card.reset();
   waitForProbes();
+}
+
+void RecordingCardBindingTest::exerciseProtection(bool list) {
+  const auto path = createVideo("Protected_Game.mkv");
+  RecordingLibrary library(tempDir.path());
+  engine.rootContext()->setContextProperty("recordingLibrary", &library);
+  QString qmlPath = CARD_QML_FILE;
+  if (list) qmlPath.replace("RecordingCard.qml", "RecordingListItem.qml");
+  QQmlComponent component(&engine, QUrl::fromLocalFile(qmlPath));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> card(component.create());
+  ASSERT_NE(card, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(card.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setWidth(list ? 720 : 320);
+  card->setProperty("recording", QVariant::fromValue(library.getRecording(path)));
+  auto *lock = card->findChild<QQuickItem *>("captureProtectionButton");
+  auto *selection = card->findChild<QQuickItem *>(list ? "listSelection" : "gridSelection");
+  ASSERT_NE(lock, nullptr);
+  ASSERT_NE(selection, nullptr);
+  QTest::mouseMove(&window, QPoint(950, 700));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !lock->isVisible(); }));
+  QTest::mouseMove(&window, QPoint(150, 60));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return item->property("hovered").toBool() && lock->isVisible(); }));
+  if (list) ASSERT_TRUE(QTest::qWaitFor([&] { return item->property("protectionReveal").toDouble() >= 0.999; }));
+  EXPECT_EQ(lock->width(), selection->width());
+  EXPECT_EQ(lock->height(), selection->height());
+  EXPECT_DOUBLE_EQ(QQmlProperty::read(lock, "background.radius").toDouble(), lock->width() / 2);
+  EXPECT_EQ(QQmlProperty::read(lock, "background.color"), selection->property("color"));
+  EXPECT_EQ(QQmlProperty::read(lock, "background.border.color"), QQmlProperty::read(selection, "border.color"));
+  const auto lockPos = lock->mapToItem(item, QPointF());
+  const auto selectPos = selection->mapToItem(item, QPointF());
+  if (list) {
+    EXPECT_NEAR(lockPos.x(), selectPos.x(), 0.5);
+    EXPECT_GT(lockPos.y(), selectPos.y() + selection->height());
+  } else {
+    EXPECT_NEAR(lockPos.y(), selectPos.y(), 0.5);
+    EXPECT_NEAR(lockPos.x(), selectPos.y(), 0.5); // Same inset, opposite corners.
+    EXPECT_LT(lockPos.x() + lock->width(), selectPos.x());
+  }
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      lock->mapToScene(QPointF(lock->width() / 2, lock->height() / 2)).toPoint());
+  EXPECT_EQ(windowFake.protectionPath, path);
+  EXPECT_TRUE(windowFake.selectedRecordings().isEmpty());
+  EXPECT_TRUE(windowFake.playedPath.isEmpty());
+  ASSERT_TRUE(library.setProtected(path, true));
+  windowFake.toggleSelection(path);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(QQmlProperty::read(lock, "background.color"), selection->property("color"));
+  QTest::mouseMove(&window, QPoint(950, 700));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !item->property("hovered").toBool(); }));
+  EXPECT_TRUE(lock->isVisible());
+  ASSERT_TRUE(library.setProtected(path, false));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !lock->isVisible(); }));
+  EXPECT_TRUE(selection->isVisible()); // Selection mode must not reveal an off lock.
+  if (list) {
+    auto *slot = card->findChild<QQuickItem *>("listSelectionSlot");
+    ASSERT_NE(slot, nullptr);
+    EXPECT_NEAR(slot->width(), 30, 0.5); // Selected row still needs its checkbox.
+    windowFake.clearSelection();
+    ASSERT_TRUE(QTest::qWaitFor([&] { return slot->width() < 0.1; }));
+  }
+}
+
+TEST_F(RecordingCardBindingTest, GridPadlockMatchesSelectionAndStaysVisibleOnlyWhenProtected) {
+  exerciseProtection(false);
+}
+TEST_F(RecordingCardBindingTest, ListPadlockMatchesSelectionAndCollapsesWhenUnprotected) {
+  exerciseProtection(true);
 }
 
 void RecordingCardBindingTest::exerciseHoverPreview(bool list) {
@@ -738,6 +822,76 @@ TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
   waitForProbes();
 }
 
+TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
+  for (const auto *name : {"recordingLibrary", "settingsManager", "storageManager",
+                           "replayManager", "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto dashboardUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, dashboardUrl);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  auto *item = qobject_cast<QQuickItem *>(page.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(1280, 800));
+  QTest::qWait(50);
+  auto *card = page->findChild<QQuickItem *>("captureStatusCard");
+  auto *settings = page->findChild<QQuickItem *>("recordingSettingsCard");
+  auto *health = page->findChild<QQuickItem *>("captureHealthStatus");
+  auto *bookmark = page->findChild<QQuickItem *>("addRecordingBookmark");
+  ASSERT_NE(card, nullptr);
+  ASSERT_NE(settings, nullptr);
+  ASSERT_NE(health, nullptr);
+  ASSERT_NE(bookmark, nullptr);
+  EXPECT_TRUE(card->isAncestorOf(health));
+  EXPECT_FALSE(settings->isAncestorOf(health));
+  EXPECT_FALSE(health->isVisible());
+  EXPECT_NEAR(card->height(), 80, 1);
+  const qreal settingsHeight = settings->height();
+
+  for (const QString &mode : {QStringLiteral("recording"), QStringLiteral("replay")}) {
+    QVariantMap status{{"mode", mode}, {"hasVideo", true},
+                       {"audio0", "capturing"}, {"audio1", "included-in-desktop"},
+                       {"audio2", "capturing"}, {"desktopFallback", true},
+                       {"bufferSeconds", 12}, {"bufferTargetSeconds", 30}};
+    page->setProperty("captureStatus", status);
+    QTest::qWait(50);
+    EXPECT_TRUE(health->isVisible());
+    EXPECT_EQ(bookmark->isVisible(), mode == "recording");
+    EXPECT_GT(card->height(), 80);
+    const QPointF top = health->mapToItem(card, QPointF());
+    EXPECT_GE(top.y(), 80);
+    EXPECT_LE(top.y() + health->height(), card->height());
+    EXPECT_GT(health->width(), 200);
+    EXPECT_NEAR(settings->height(), settingsHeight, 1);
+    auto *primary = page->findChild<QQuickItem *>("primaryAudioMeter");
+    auto *voice = page->findChild<QQuickItem *>("voiceAudioMeter");
+    ASSERT_NE(primary, nullptr); ASSERT_NE(voice, nullptr);
+    EXPECT_EQ(primary->property("label").toString(), "System");
+    EXPECT_FALSE(voice->isVisible());
+  }
+  auto appAudio = page->property("captureStatus").toMap();
+  appAudio["desktopFallback"] = false;
+  page->setProperty("captureStatus", appAudio);
+  QTest::qWait(50);
+  EXPECT_EQ(page->findChild<QQuickItem *>("primaryAudioMeter")->property("label").toString(), "Game");
+  EXPECT_TRUE(page->findChild<QQuickItem *>("voiceAudioMeter")->isVisible());
+  QTest::qWait(260);
+  const qreal expandedHeight = card->height();
+  page->setProperty("captureStatus", QVariantMap{});
+  QTest::qWait(120);
+  EXPECT_TRUE(health->isVisible());
+  EXPECT_FALSE(health->isEnabled());
+  EXPECT_GT(card->height(), 80);
+  EXPECT_LT(card->height(), expandedHeight);
+  EXPECT_EQ(page->property("healthStatus").toMap().value("mode").toString(), "replay");
+  QTest::qWait(260);
+  EXPECT_FALSE(health->isVisible());
+  EXPECT_NEAR(card->height(), 80, 1);
+}
+
 TEST_F(RecordingCardBindingTest, DashboardSwitchesLibraryViewWithoutLosingSelection) {
   const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
   RecordingLibrary lib(tempDir.path());
@@ -986,7 +1140,7 @@ TEST_F(RecordingCardBindingTest, ListRowPlaybackAndSelectionUseLibraryIndices) {
   QTest::mouseMove(&window, QPoint(340, 46));
   QTest::qWait(250);
   EXPECT_TRUE(selection->isVisible());
-  EXPECT_NEAR(thumbnail->x() - restingThumbnailX, 30, 0.5);
+  EXPECT_NEAR(thumbnail->x() - restingThumbnailX, 30, 0.5); // Stacked controls share one gutter.
   EXPECT_LT(selection->mapToItem(thumbnail, QPointF(selection->width(), 0)).x(), 0);
   QTest::mouseMove(&window, QPoint(900, 500));
   QTest::qWait(250);
@@ -998,7 +1152,14 @@ TEST_F(RecordingCardBindingTest, ListRowPlaybackAndSelectionUseLibraryIndices) {
   EXPECT_TRUE(selection->isVisible());
   EXPECT_NEAR(thumbnail->x() - restingThumbnailX, 30, 0.5);
   windowFake.toggleSelection("/other-recording.mkv");
-  EXPECT_GE(actions->width(), 152);
+  EXPECT_GE(actions->width(), 152); // Play / Export to share / Rename / Delete.
+  auto *share = row->findChild<QQuickItem *>("listShareExport");
+  ASSERT_NE(share, nullptr);
+  QTest::mouseMove(&window, actions->mapToScene(QPointF(10, 10)).toPoint());
+  QTest::qWait(250);
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      share->mapToScene(QPointF(share->width() / 2, share->height() / 2)).toPoint());
+  EXPECT_EQ(windowFake.sharedPath, path);
   // No labels/badges may obscure the preview: metadata is outside it.
   for (auto *child : thumbnail->findChildren<QObject *>())
     EXPECT_LT(child->metaObject()->indexOfProperty("text"), 0);

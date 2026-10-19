@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QTimer>
+#include <QVariantMap>
 #include <functional>
 #include <memory>
 
@@ -25,6 +26,8 @@ class ActivityFeed;
 class WaveformCache;
 class FilmstripCache;
 class PreviewCache;
+class ShareExporter;
+class DeletionQueue;
 class GameDetectionService;
 class NotificationService;
 class AudioMixer;
@@ -120,6 +123,8 @@ public:
   Q_INVOKABLE void showMainWindow();
   // Instant replay: routes tray/F10/hotkey requests with user feedback.
   Q_INVOKABLE void requestReplay();
+  Q_INVOKABLE void requestBookmark();
+  Q_INVOKABLE QVariantMap captureHealth() const;
   // Track mute that follows the active pipeline (the dashboard meters).
   // The recording and the DVR own different mixers; muting only one
   // would silently do nothing half the time, so both are always set and
@@ -196,6 +201,8 @@ private:
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
   std::unique_ptr<PreviewCache> m_previewCache;
+  std::unique_ptr<ShareExporter> m_shareExporter;
+  std::unique_ptr<DeletionQueue> m_deletionQueue;
   
   QString m_mainQmlPath; // Path for live-reload
   QString m_pendingAutoRecordGame;

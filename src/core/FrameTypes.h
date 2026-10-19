@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 
 namespace TrophyBackend {
 
@@ -15,6 +16,8 @@ struct FrameDescriptor {
   int dmaBufStride{0};
   int dmaBufOffset{0};
   uint64_t pts{0};
+  std::shared_ptr<void> bufferLease;
+  std::function<void()> requestCpuFallback;
 
   FrameDescriptor() = default;
   explicit FrameDescriptor(int fd_, uint32_t w, uint32_t h, uint32_t fmt,
@@ -34,4 +37,3 @@ struct FrameDescriptor {
 };
 
 } // namespace TrophyBackend
-
