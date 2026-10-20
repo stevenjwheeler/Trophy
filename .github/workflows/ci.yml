@@ -238,6 +238,12 @@ jobs:
           cpack -G "TXZ;DEB;RPM" -B "$GITHUB_WORKSPACE/dist"
           # Remove CPack's working directory so it isn't shipped as an artifact.
           rm -rf "$GITHUB_WORKSPACE/dist/_CPack_Packages"
+          # Normalize artifact names to the project's release naming scheme.
+          cd "$GITHUB_WORKSPACE/dist"
+          for f in *.deb; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-amd64.deb"; done
+          for f in *.rpm; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-x86_64.rpm"; done
+          for f in *.tar.xz; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}.tar.xz"; done
+          cd "$GITHUB_WORKSPACE"
           echo "Generated packages:"
           ls -lh "$GITHUB_WORKSPACE/dist"
 
