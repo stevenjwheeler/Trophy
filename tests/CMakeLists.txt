@@ -354,6 +354,8 @@ add_library(test_RecordingBackend STATIC
 )
 target_include_directories(test_RecordingBackend PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS})
 target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network Qt6::Concurrent PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES})
+# Propagate GTest to consumers of this static backend (they use gtest macros).
+target_link_libraries(test_RecordingBackend PUBLIC GTest::GTest GTest::Main)
 if(EGL_FOUND)
     # PUBLIC so executables linking this static lib inherit the EGL dep.
     target_link_libraries(test_RecordingBackend PUBLIC PkgConfig::EGL)
