@@ -236,6 +236,8 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cd build
           cpack -G "TXZ;DEB;RPM" -B "$GITHUB_WORKSPACE/dist"
+          # Remove CPack's working directory so it isn't shipped as an artifact.
+          rm -rf "$GITHUB_WORKSPACE/dist/_CPack_Packages"
           echo "Generated packages:"
           ls -lh "$GITHUB_WORKSPACE/dist"
 
@@ -340,7 +342,7 @@ jobs:
         run: |
           # Generate SHA256 for the AppImage and all generated packages.
           sha256sum Trophy-*-x86_64.AppImage > SHA256SUMS
-          (cd dist && sha256sum * > SHA256SUMS)
+          (cd dist && find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
         
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
