@@ -5,7 +5,7 @@
   <p>Take clips, record full sessions, save the moment you just missed, and turn your best plays into share-ready videos.</p>
 </div>
 
-[![Latest Release](https://img.shields.io/github/v/release/OasisLab-Software/Trophy?color=blue&label=Latest%20Release)](https://github.com/OasisLab-Software/Trophy/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/stevenjwheeler/Trophy?color=blue&label=Latest%20Release)](https://github.com/stevenjwheeler/Trophy/releases/latest)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%2F%20Wayland-green.svg)
 
@@ -57,7 +57,7 @@ Recordings use MKV for crash-resilient recording; share exports create separate 
 
 ## Get Trophy
 
-Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/OasisLab-Software/Trophy/releases/latest), make it executable, and launch it:
+Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest), make it executable, and launch it:
 
 ```bash
 chmod +x Trophy-<version>-x86_64.AppImage
@@ -76,7 +76,7 @@ Replace `<version>` with the downloaded version. The setup wizard walks you thro
 
 ## Help and contribute
 
-Found a problem or have an idea? [Open an issue](https://github.com/OasisLab-Software/Trophy/issues). Trophy's bug-report action can prepare version, system, and recent log details for you to review before sharing.
+Found a problem or have an idea? [Open an issue](https://github.com/stevenjwheeler/Trophy/issues). Trophy's bug-report action can prepare version, system, and recent log details for you to review before sharing.
 
 Code and documentation contributions are welcome. See the [development guide](docs/development.md) for build and test instructions, and [packaging notes](packaging/README.md) for AppImage and integration details.
 

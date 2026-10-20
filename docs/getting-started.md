@@ -4,7 +4,7 @@
 
 ## Install and launch
 
-1. Download `Trophy-<version>-x86_64.AppImage` from the [latest release](https://github.com/OasisLab-Software/Trophy/releases/latest).
+1. Download `Trophy-<version>-x86_64.AppImage` from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest).
 2. Make the downloaded file executable, using your file manager's permissions settings or `chmod +x <filename>`.
 3. Open it from your file manager or run `./<filename>` in a terminal.
 
@@ -110,4 +110,4 @@ Commands contact an already-running Trophy through its user-private control sock
 - **Unexpected desktop audio:** game-specific audio may not have bound yet. See the [audio guide](user-guide.md#audio).
 - **Hardware encoder unavailable:** check your driver and encoder support, or try software H.264.
 
-For a bug report, use Trophy's report action or [open an issue](https://github.com/OasisLab-Software/Trophy/issues). Include your desktop, GPU/driver, Trophy version, and reproduction steps. Review logs for personal information before posting them.
+For a bug report, use Trophy's report action or [open an issue](https://github.com/stevenjwheeler/Trophy/issues). Include your desktop, GPU/driver, Trophy version, and reproduction steps. Review logs for personal information before posting them.

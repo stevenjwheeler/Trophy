@@ -48,7 +48,7 @@ sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-declarative-d
 ## Build and install
 
 ```bash
-git clone https://github.com/OasisLab-Software/Trophy.git
+git clone https://github.com/stevenjwheeler/Trophy.git
 cd Trophy
 cmake -S . -B ../trophy-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build ../trophy-build --parallel

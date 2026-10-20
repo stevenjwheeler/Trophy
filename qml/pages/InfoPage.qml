@@ -469,7 +469,7 @@ Page {
 
                 FooterLink {
                     text: "GitHub"
-                    url: "https://github.com/OasisLab-Software/Trophy"
+                    url: "https://github.com/stevenjwheeler/Trophy"
                     iconSource: "qrc:/icons/github.svg"
                 }
 
@@ -480,7 +480,7 @@ Page {
 
                 FooterLink {
                     text: qsTr("Releases")
-                    url: "https://github.com/OasisLab-Software/Trophy/releases"
+                    url: "https://github.com/stevenjwheeler/Trophy/releases"
                 }
 
             }
