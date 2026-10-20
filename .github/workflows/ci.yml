@@ -116,7 +116,8 @@ jobs:
             libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
             libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
             libavutil-dev libswscale-dev libswresample-dev libva-dev \
-            libva-drm2 libgtest-dev desktop-file-utils appstream"
+            libva-drm2 libgtest-dev desktop-file-utils appstream \
+            dpkg-dev rpm"
           for attempt in 1 2 3; do
             echo "apt attempt $attempt/3..."
             if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
@@ -230,6 +231,14 @@ jobs:
           chmod 700 "$XDG_RUNTIME_DIR"
           cd build && ctest --output-on-failure --timeout 300
 
+      - name: Generate packages (tar.xz, deb, rpm)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cd build
+          cpack -G "TXZ;DEB;RPM" -B "$GITHUB_WORKSPACE/dist"
+          echo "Generated packages:"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
       - name: Generate AppImage
         shell: bash
         run: |
@@ -329,8 +338,9 @@ jobs:
 
       - name: Generate Checksum
         run: |
-          # Generate SHA256 for any AppImage in the directory
+          # Generate SHA256 for the AppImage and all generated packages.
           sha256sum Trophy-*-x86_64.AppImage > SHA256SUMS
+          (cd dist && sha256sum * > SHA256SUMS)
         
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -341,6 +351,14 @@ jobs:
             SHA256SUMS
           # Artifacts are short-lived (14 days); release attachments
           # are uploaded manually.
+          retention-days: 14
+
+      - name: Upload Packages Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-Packages-${{ env.VERSION }}-x86_64
+          path: |
+            dist/*
           retention-days: 14
 
   comment-pr:
