@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include "core/ReplayManager.h"
+#include "library/RecordingAnnotations.h"
 #include "core/RecordingSession.h"
 #include "capture/IVideoCaptureSource.h"
 #include "audio/AudioMixer.h"
@@ -233,6 +234,15 @@ protected:
   }
   void prune(ReplayManager &mgr) { mgr.pruneOldSegments(1000); }
   void releaseSaveInputs(ReplayManager &mgr) { mgr.m_saveInputPaths.clear(); }
+  void deliverAudioHistory(ReplayManager &mgr, const QString &path, const QJsonObject &history) {
+    mgr.m_saving = true;
+    mgr.m_saveDone = std::make_shared<std::atomic<bool>>(true);
+    mgr.m_saveResult = std::make_shared<ReplayManager::ReplaySaveResult>();
+    mgr.m_saveResult->ok = true; mgr.m_saveResult->path = path;
+    mgr.m_saveResult->audioHistory = history;
+    mgr.m_saveThread = std::thread([] {});
+    mgr.pollRetirements();
+  }
   void retireOutput(bool writeOk, bool finalizeOk) {
     ReplayManager mgr;
     const QString good = makeSegFile("closed-good.mkv");
@@ -570,6 +580,22 @@ static QList<Seg> threeSegments() {
 
 TEST_F(ReplayManagerTest, FailedPacketWriteIsNotEnlistedForReplay) {
   retireOutput(false, true);
+}
+
+TEST_F(ReplayManagerTest, SavedReplayPublishesAudioHistoryBeforeCompletion) {
+  ReplayManager manager;
+  const auto path = makeSegFile("saved.mkv");
+  AudioRoutingInfo history;
+  history.known = true; history.system = true; history.separate = true;
+  history.primary = 0; history.voiceTrack = 1; history.micTrack = 2;
+  bool presentAtSignal = false;
+  QObject::connect(&manager, &ReplayManager::replaySaved, &manager,
+      [&](const QString &file, double) {
+        presentAtSignal = RecordingAnnotations::audioRouting(file).value("system").toBool();
+      });
+  deliverAudioHistory(manager, path, history.toJson());
+  EXPECT_TRUE(presentAtSignal);
+  EXPECT_EQ(RecordingAnnotations::audioRouting(path).value("voiceTrack").toInt(), 1);
 }
 
 TEST_F(ReplayManagerTest, FailedTrailerIsNotEnlistedForReplay) {

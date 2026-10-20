@@ -112,6 +112,8 @@ void ControlServer::handleLine(const QString &line) {
     emit toggleRecordingRequested();
   } else if (line == QLatin1String("save-clip")) {
     emit saveClipRequested();
+  } else if (line == QLatin1String("add-bookmark")) {
+    emit bookmarkRequested();
   } else if (line == QLatin1String("show-window")) {
     emit showWindowRequested();
   } else if (!line.isEmpty()) {

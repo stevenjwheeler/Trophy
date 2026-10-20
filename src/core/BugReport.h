@@ -14,7 +14,7 @@ namespace TrophyBackend {
 
 // Canonical repo for bug reports (matches InfoPage + UpdateChecker).
 inline const QString kBugReportRepo =
-    QStringLiteral("https://github.com/OasisLab-Software/Trophy");
+    QStringLiteral("https://github.com/stevenjwheeler/Trophy");
 
 // Browsers cannot receive a file attachment via URL, so the report
 // prefills the issue body with the version, OS, and the tail of the

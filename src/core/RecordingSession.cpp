@@ -6,6 +6,7 @@
  */
 
 #include "RecordingSession.h"
+#include "audio/AudioRoutingInfo.h"
 #include "audio/AudioMixer.h"
 #include "audio/PipeWireAudioSource.h"
 #include "capture/IVideoCaptureSource.h"
@@ -106,6 +107,11 @@ bool RecordingSession::start() {
 
   // Initialize state BEFORE starting any threads or callbacks
   m_frameCount = 0;
+  m_audioHistoryStarted = false;
+  m_usedSystemAudio = false;
+  m_usedGameAudio = false;
+  for (auto &received : m_audioReceived) received.store(false);
+  m_queueDrops = 0;
   m_bytesWritten = 0;
   m_outputFailed = false;
   m_outputFinalized = false;
@@ -229,6 +235,8 @@ bool RecordingSession::start() {
                  nowUs() / 1000 - m_sessionStartMs <= kVideoWaitTimeoutMs)) {
               return;
             }
+            // Delivery evidence is not inferred from nonzero levels.
+            if (samples && frameCount > 0) m_audioReceived[trackIndex].store(true);
             // Latch audio origin; a track starting after the first video
             // frame gets a one-time encoder offset so origins agree.
             const int64_t inputNowUs = nowUs();
@@ -356,6 +364,10 @@ bool RecordingSession::start() {
     return false;
   }
 
+  // Pin initial routing before callbacks start.
+  m_audioHistoryStarted = true;
+  noteAudioRouting();
+
   // Set video capture callback
   // Replace direct queuing with FrameDispatcher-based routing if available
   if (!m_frameDispatcher) {
@@ -377,6 +389,7 @@ bool RecordingSession::start() {
         m_queueCv.notify_one();
       } else {
         qWarning() << "Video queue full, dropping frame";
+        ++m_queueDrops;
       }
     });
   } else {
@@ -403,6 +416,8 @@ bool RecordingSession::start() {
         fd.drmModifier = frame.drmModifier;
         fd.dmaBufStride = frame.dmaBufStride;
         fd.dmaBufOffset = frame.dmaBufOffset;
+        fd.bufferLease = frame.bufferLease;
+        fd.requestCpuFallback = frame.requestCpuFallback;
         fd.pts = frame.timestamp;
         m_frameDispatcher->dispatch(fd);
       } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
@@ -448,6 +463,72 @@ bool RecordingSession::start() {
   return true;
 }
 
+void RecordingSession::noteAudioRouting() {
+  if (!m_running || !m_audioHistoryStarted) return;
+  m_usedSystemAudio |= m_desktopAudio || m_gameIsFallback;
+  m_usedGameAudio |= !m_desktopAudio && !m_gameIsFallback;
+}
+
+QJsonObject RecordingSession::audioHistory() const {
+  AudioRoutingInfo info;
+  info.known = m_audioHistoryStarted;
+  info.system = m_usedSystemAudio; info.game = m_usedGameAudio;
+  info.separate = m_separateAudioTracks;
+  if (m_separateAudioTracks) {
+    int ordinal = 0;
+    for (int slot = 0; slot < kAudioTrackCount; ++slot) {
+      if (m_trackToStreamMap[slot] < 0) continue;
+      if (slot == 0) info.primary = ordinal;
+      else if (slot == 1) info.voiceTrack = ordinal;
+      else if (slot == 2) info.micTrack = ordinal;
+      ++ordinal;
+    }
+    info.known &= ordinal > 0;
+    info.voice = m_audioReceived[1].load();
+  } else {
+    info.primary = m_mergedEncoder ? 0 : -1;
+    info.known &= info.primary >= 0;
+  }
+  return info.toJson();
+}
+
+QVariantMap RecordingSession::captureHealth() const {
+  QVariantMap result{{"session", m_outputPath},
+                     {"hasVideo", m_videoStartWallUs.load() >= 0},
+                     {"queueDrops", QVariant::fromValue(m_queueDrops.load())},
+                     {"desktopFallback", !m_desktopAudio && m_gameIsFallback},
+                     {"desktopAudio", m_desktopAudio}};
+  for (int role = 0; role < AudioMixer::kTrackCount; ++role) {
+    QString status = m_audioMixer ? m_audioMixer->semanticSourceStatus(role)
+                                 : QStringLiteral("unavailable");
+    QString sourceName = m_audioMixer ? m_audioMixer->semanticSourceName(role)
+                                      : QString();
+    if (m_audioMixer && m_audioMixer->isSemanticTrackMuted(role))
+      status = QStringLiteral("muted");
+    if (role == 1) {
+      if (m_voiceChatApp.isEmpty()) {
+        status = QStringLiteral("not-configured");
+        sourceName.clear();
+      } else {
+        // Voice identity comes from settings, not the node name (which may
+        // read as "application output" or an unknown binary).
+        sourceName = m_voiceChatApp;
+      }
+    }
+    if (role == 1 && !m_voiceChatApp.isEmpty() &&
+        (m_desktopAudio || m_gameIsFallback)) {
+      status = m_audioMixer && m_audioMixer->sourceIsCapturing(0)
+                   ? QStringLiteral("included-in-desktop")
+                   : QStringLiteral("desktop-mix-unavailable");
+      if (m_audioMixer && m_audioMixer->isSemanticTrackMuted(0))
+        status = QStringLiteral("desktop-mix-muted");
+    }
+    result[QStringLiteral("audio%1").arg(role)] = status;
+    result[QStringLiteral("audio%1Name").arg(role)] = sourceName;
+  }
+  return result;
+}
+
 bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
   if (!m_running) {
     qDebug() << "pushQueuedFrame: rejected (not running)";
@@ -467,6 +548,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
     return true;
   }
   qDebug() << "pushQueuedFrame: queue full, dropping frame";
+  ++m_queueDrops;
   return false;
 }
 
@@ -637,7 +719,7 @@ void RecordingSession::encodingLoop() {
 
   bool catchup = false;
   while (true) {
-    QueuedFrame frame(VideoFrame{nullptr, 0, 0, 0, 0, 0});
+    QueuedFrame frame(VideoFrame{});
     bool haveFrame = false;
     {
       std::unique_lock<std::mutex> lock(m_queueMutex);
@@ -984,8 +1066,9 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
       // Manager bound this node at build without knowing the serial —
       // adopt it so later generations read as new, not same.
       m_boundSerial[track] = nodeSerial;
-      if (isFallback)
-        *isFallback = false;
+        if (isFallback)
+          *isFallback = false;
+        noteAudioRouting();
       return;
     }
     if (nodeSerial.isEmpty() || nodeSerial == m_boundSerial[track])
@@ -1007,6 +1090,7 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   m_trackOffsetApplied[track].store(false);
   if (isFallback)
     *isFallback = false;
+  noteAudioRouting();
   qDebug() << "Audio node bound for track" << track << ":"
            << (nodeName.isEmpty() ? QString::number(nodeId) : nodeName);
 }

@@ -11,6 +11,8 @@
 #include <QFuture>
 #include <QObject>
 #include <QString>
+#include <QVariantList>
+#include <QVariantMap>
 
 namespace TrophyBackend {
 
@@ -53,6 +55,9 @@ class Recording : public QObject {
   // Stamped as trophy-encoder at record time; empty on older files
   // that predate the tag (the dialog then shows codec only).
   Q_PROPERTY(QString encoderName READ encoderName NOTIFY metadataChanged)
+  Q_PROPERTY(bool protectedFromCleanup READ protectedFromCleanup NOTIFY annotationsChanged)
+  Q_PROPERTY(QVariantList bookmarks READ bookmarks NOTIFY annotationsChanged)
+  Q_PROPERTY(QVariantMap audioRouting READ audioRouting NOTIFY audioRoutingChanged)
 
 public:
   explicit Recording(const QString &filePath, QObject *parent = nullptr);
@@ -75,6 +80,10 @@ public:
   int audioTrackCount() const { return m_audioTrackCount; }
   QString audioCodec() const { return m_audioCodec; }
   QString encoderName() const { return m_encoderName; }
+  bool protectedFromCleanup() const { return m_protectedFromCleanup; }
+  QVariantList bookmarks() const { return m_bookmarks; }
+  QVariantMap audioRouting() const { return m_audioRouting; }
+  void reloadAnnotations();
   // Canonical trophy-encoder tag ("nvenc_h264", "x264", ...) to the
   // display string the file-info dialog shows. Unknown tags pass
   // through raw rather than hiding behind "Unknown".
@@ -121,6 +130,8 @@ signals:
   void fileChanged();
   void thumbnailPathChanged();
   void metadataChanged();
+  void annotationsChanged();
+  void audioRoutingChanged();
 
 private:
   struct ProbeResult {
@@ -164,6 +175,9 @@ private:
   int m_audioTrackCount = 0;
   QString m_audioCodec;
   QString m_encoderName;
+  bool m_protectedFromCleanup = false;
+  QVariantList m_bookmarks;
+  QVariantMap m_audioRouting;
   QFuture<void> m_probeFuture;
   quint64 m_probeGeneration = 0;
 };

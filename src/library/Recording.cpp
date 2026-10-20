@@ -6,6 +6,7 @@
  */
 
 #include "Recording.h"
+#include "RecordingAnnotations.h"
 
 #include "muxing/TrophyMetadata.h"
 
@@ -32,6 +33,7 @@ Recording::Recording(const QString &filePath, QObject *parent)
   m_directory = fileInfo.absolutePath();
   m_size = fileInfo.size();
   m_date = fileInfo.birthTime();
+  reloadAnnotations();
 
   if (!m_date.isValid()) {
     m_date = fileInfo.lastModified();
@@ -46,6 +48,21 @@ Recording::Recording(const QString &filePath, QObject *parent)
 }
 
 Recording::~Recording() { m_probeFuture.waitForFinished(); }
+
+void Recording::reloadAnnotations() {
+  QJsonObject object;
+  const bool valid = RecordingAnnotations::read(m_filePath, object);
+  const bool protectedFromCleanup = !valid || object.value("protected").toBool();
+  const auto bookmarks = valid ? object.value("bookmarks").toArray().toVariantList() : QVariantList{};
+  const auto routing = valid ? RecordingAnnotations::audioRouting(m_filePath, object).toVariantMap() : QVariantMap{};
+  if (m_protectedFromCleanup == protectedFromCleanup && m_bookmarks == bookmarks && m_audioRouting == routing) return;
+  const bool routingChanged = m_audioRouting != routing;
+  m_protectedFromCleanup = protectedFromCleanup;
+  m_bookmarks = bookmarks;
+  m_audioRouting = routing;
+  if (routingChanged) emit audioRoutingChanged();
+  emit annotationsChanged();
+}
 
 void Recording::setThumbnailPath(const QString &path) {
   if (m_thumbnailPath != path) {

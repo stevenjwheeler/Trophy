@@ -18,6 +18,80 @@ Page {
     id: root
 
     property bool libraryListView: false
+    property var captureStatus: ({})
+    // Retain the last live snapshot until the closing animation finishes.
+    property var healthStatus: ({})
+    onCaptureStatusChanged: {
+        if (captureStatus.mode)
+            healthStatus = captureStatus;
+    }
+    property int dropWarningTicks: 0
+    function updateCaptureStatus() {
+        const next = (typeof app !== "undefined" && app && typeof app.captureHealth === "function") ? app.captureHealth() : ({});
+        if (next.session && next.session === root.captureStatus.session && next.queueDrops > root.captureStatus.queueDrops)
+            root.dropWarningTicks++;
+        else
+            root.dropWarningTicks = 0;
+        root.captureStatus = next;
+    }
+    function audioHealthName(role) {
+        return role === 0 ? (root.healthStatus.desktopAudio || root.healthStatus.desktopFallback ? qsTr("System") : qsTr("Game")) : role === 1 ? qsTr("Voice") : qsTr("Mic");
+    }
+    function deviceDescription(id, isInput) {
+        if (!id || id === "default")
+            return isInput ? qsTr("System default input") : qsTr("System default output");
+        const enumerator = (typeof audioDeviceEnumerator !== "undefined") ? audioDeviceEnumerator : null;
+        const list = enumerator ? (isInput ? enumerator.inputDevices : enumerator.outputDevices) : [];
+        for (let i = 0; list && i < list.length; ++i) {
+            if (list[i].id === id)
+                return list[i].name;
+        }
+        return id;
+    }
+    // What a role is actually bound to, for "Connected to <name>".
+    function audioHealthTarget(role) {
+        const status = root.healthStatus;
+        if (role === 0) {
+            if (status.desktopFallback)
+                return qsTr("desktop mix");
+            if (status.desktopAudio)
+                return root.deviceDescription(settingsManager ? settingsManager.gameAudioDevice : "", false);
+            return status.gameName || status.audio0Name || "";
+        }
+        if (role === 1)
+            return status.audio1Name || "";
+        const micId = settingsManager ? settingsManager.microphoneDevice : "";
+        return (micId ? root.deviceDescription(micId, true) : "") || status.audio2Name || "";
+    }
+    function audioHealthText(role) {
+        const state = root.healthStatus["audio" + role];
+        let detail = "";
+        if (state === "capturing") {
+            const target = root.audioHealthTarget(role);
+            detail = target ? qsTr("Connected to %1").arg(target) : qsTr("Connected");
+        } else {
+            detail = state === "muted" ? qsTr("Muted") : state === "starting" ? qsTr("Connecting…") : state === "not-configured" ? qsTr("Not configured") : state === "included-in-desktop" ? qsTr("Included in desktop mix") : state === "desktop-mix-muted" ? qsTr("Desktop mix is muted") : state === "desktop-mix-unavailable" ? qsTr("Desktop mix unavailable") : qsTr("Unavailable — retrying");
+        }
+        if (role === 0 && root.healthStatus.desktopFallback)
+            detail = qsTr("Desktop fallback") + (state === "muted" ? qsTr(" · Muted") : state === "capturing" ? "" : " · " + detail);
+        return detail;
+    }
+    function audioHealthColor(role) {
+        const state = root.healthStatus["audio" + role];
+        if (state === "muted" || state === "not-configured" || state === "desktop-mix-muted")
+            return Theme.textMutedColor;
+        if (role === 0 && root.healthStatus.desktopFallback)
+            return Theme.warningColor;
+        return state === "capturing" || state === "included-in-desktop" ? Theme.successColor : Theme.warningColor;
+    }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.visible
+        triggeredOnStart: true
+        onTriggered: root.updateCaptureStatus()
+    }
 
     HoverPreview {
         id: libraryPreview
@@ -216,7 +290,7 @@ Page {
                                     icon.height: 18
                                     outlined: true
                                     checked: filterPopup.opened || (recordingLibrary &&
-                                        (recordingLibrary.kindFilter !== 0 || recordingLibrary.sortOrder !== 0))
+                                        (recordingLibrary.kindFilter !== 0 || recordingLibrary.sortOrder !== 0 || recordingLibrary.protectedOnly))
                                     Accessible.name: qsTr("Filter and sort captures")
                                     ToolTip.text: qsTr("Filter and sort captures")
                                     ToolTip.visible: hovered
@@ -332,6 +406,33 @@ Page {
                                                 }
                                             }
 
+                                            CheckBox {
+                                                id: protectedCheck
+                                                objectName: "libraryProtectedOnly"
+                                                Layout.fillWidth: true
+                                                implicitHeight: 28
+                                                padding: 0
+                                                spacing: Theme.spacingSmall
+                                                text: qsTr("Protected only")
+                                                checked: recordingLibrary ? recordingLibrary.protectedOnly : false
+                                                onToggled: { if (recordingLibrary) recordingLibrary.protectedOnly = checked }
+                                                indicator: Rectangle {
+                                                    implicitWidth: 18; implicitHeight: 18
+                                                    y: (protectedCheck.height - height) / 2
+                                                    radius: 4
+                                                    color: protectedCheck.checked ? Theme.accentColor : "transparent"
+                                                    border.color: protectedCheck.checked ? Theme.accentColor : Theme.textMutedColor
+                                                    Label { anchors.centerIn: parent; text: "✓"; color: "white"; visible: protectedCheck.checked }
+                                                }
+                                                contentItem: Label {
+                                                    text: protectedCheck.text
+                                                    leftPadding: protectedCheck.indicator.width + protectedCheck.spacing
+                                                    color: Theme.textColor
+                                                    font.pixelSize: Theme.fontSizeSmall
+                                                    verticalAlignment: Text.AlignVCenter
+                                                }
+                                            }
+
                                             Rectangle {
                                                 Layout.fillWidth: true
                                                 Layout.topMargin: Theme.spacingSmall
@@ -408,21 +509,55 @@ Page {
                                 spacing: Theme.spacingSmall
                                 visible: window.selectedRecordings && window.selectedRecordings.length > 0
                                 // True while the background bulk delete runs;
-                                // the selection clears on bulkDeleteFinished.
+                                    // expired undo batches are permanently removed.
                                 property bool bulkDeleting: window.storageManager && window.storageManager.bulkDeleteInProgress
 
                                 TrophyButton {
-                                    text: qsTr("Export Selected (%1)").arg(window.selectedRecordings.length)
-                                    icon.source: "qrc:/icons/folder.svg"
+                                    icon.source: "qrc:/icons/share.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    outlined: true
+                                    implicitWidth: 32
                                     implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    Accessible.name: qsTr("Export Selected (%1)").arg(window.selectedRecordings.length)
+                                    ToolTip.text: Accessible.name
+                                    ToolTip.visible: hovered
                                     enabled: !parent.bulkDeleting
-                                    onClicked: window.exportSelected()
+                                    onClicked: exportActions.open()
+                                    Popup {
+                                        id: exportActions
+                                        y: parent.height + 4
+                                        width: 230
+                                        padding: Theme.spacingSmall
+                                        background: Rectangle { color: Theme.cardColor; radius: Theme.radiusMedium; border.color: Theme.borderColor }
+                                        contentItem: ColumnLayout {
+                                            TrophyButton {
+                                                Layout.fillWidth: true
+                                                text: qsTr("Share-ready MP4…")
+                                                onClicked: { exportActions.close(); window.openShareExportBatch(window.selectedRecordings) }
+                                            }
+                                            TrophyButton {
+                                                Layout.fillWidth: true
+                                                text: qsTr("Copy original files…")
+                                                onClicked: { exportActions.close(); window.exportSelected() }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 TrophyButton {
-                                    text: parent.bulkDeleting ? qsTr("Deleting…") : qsTr("Delete Selected")
                                     icon.source: "qrc:/icons/trash.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    implicitWidth: 32
                                     implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    Accessible.name: parent.bulkDeleting ? qsTr("Deleting…") : qsTr("Delete Selected")
+                                    ToolTip.text: Accessible.name
+                                    ToolTip.visible: hovered
                                     baseColor: Theme.errorColor
                                     enabled: !parent.bulkDeleting
                                     onClicked: window.deleteSelected()
@@ -436,8 +571,17 @@ Page {
                                 }
                                 
                                 TrophyButton {
-                                    text: qsTr("Cancel")
+                                    icon.source: "qrc:/icons/window-close.svg"
+                                    icon.width: 18
+                                    icon.height: 18
+                                    outlined: true
+                                    implicitWidth: 32
                                     implicitHeight: 28
+                                    padding: 0
+                                    horizontalPadding: 0
+                                    Accessible.name: qsTr("Cancel selection")
+                                    ToolTip.text: Accessible.name
+                                    ToolTip.visible: hovered
                                     onClicked: window.clearSelection()
                                 }
                             }
@@ -508,6 +652,18 @@ Page {
 
             // Game status card
             Rectangle {
+                objectName: "captureStatusCard"
+                Layout.fillWidth: true
+                Layout.preferredHeight: statusCardContent.implicitHeight
+                radius: Theme.radiusMedium
+                color: Theme.cardColor
+
+                ColumnLayout {
+                    id: statusCardContent
+                    anchors.fill: parent
+                    spacing: 0
+
+                Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 80
                 radius: Theme.radiusMedium
@@ -578,6 +734,124 @@ Page {
                         }
                     }
                 }
+                }
+
+                Item {
+                    id: healthReveal
+                    objectName: "captureHealthStatus"
+                    Layout.fillWidth: true
+                    implicitHeight: (healthContent.implicitHeight + Theme.spacingMedium * 2) * reveal
+                    property real reveal: root.captureStatus.mode ? 1 : 0
+                    visible: reveal > 0
+                    enabled: !!root.captureStatus.mode
+                    clip: true
+                    Behavior on reveal {
+                        NumberAnimation { duration: 240; easing.type: Easing.InOutCubic }
+                    }
+
+                ColumnLayout {
+                    id: healthContent
+                    x: Theme.spacingMedium
+                    y: Theme.spacingMedium - (1 - healthReveal.reveal) * Theme.spacingMedium
+                    width: healthReveal.width - Theme.spacingMedium * 2
+                    opacity: healthReveal.reveal
+                    spacing: Theme.spacingSmall
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("Capture health")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Medium
+                        }
+                        Rectangle {
+                            implicitWidth: videoStatus.implicitWidth + 12
+                            implicitHeight: videoStatus.implicitHeight + 6
+                            radius: height / 2
+                            color: Qt.alpha(root.healthStatus.hasVideo ? Theme.successColor : Theme.warningColor, 0.12)
+                            Label {
+                                id: videoStatus
+                                anchors.centerIn: parent
+                                text: root.healthStatus.hasVideo ? qsTr("Video active") : qsTr("Starting…")
+                                font.pixelSize: Theme.fontSizeTiny
+                                color: root.healthStatus.hasVideo ? Theme.successColor : Theme.warningColor
+                            }
+                        }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: !root.healthStatus.hasVideo || root.healthStatus.mode === "replay"
+                        text: !root.healthStatus.hasVideo ? qsTr("Waiting for video frames…") : (root.healthStatus.bufferSeconds >= root.healthStatus.bufferTargetSeconds ? qsTr("Ready to clip · ~%1 s buffered").arg(root.healthStatus.bufferTargetSeconds) : qsTr("Replay buffer filling · %1 / %2 s").arg(Math.floor(root.healthStatus.bufferSeconds || 0)).arg(root.healthStatus.bufferTargetSeconds || 0))
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        wrapMode: Text.WordWrap
+                    }
+                    Repeater {
+                        model: 3
+                        RowLayout {
+                            required property int index
+                            visible: index !== 1 || !(root.healthStatus.desktopAudio || root.healthStatus.desktopFallback)
+                            Layout.fillWidth: true
+                            spacing: Theme.spacingSmall
+                            Rectangle {
+                                implicitWidth: 5
+                                implicitHeight: 5
+                                radius: 3
+                                color: root.audioHealthColor(parent.index)
+                            }
+                            Label {
+                                Layout.preferredWidth: 42
+                                text: root.audioHealthName(parent.index)
+                                color: Theme.textSecondaryColor
+                                font.pixelSize: Theme.fontSizeTiny
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: root.audioHealthText(parent.index)
+                                color: Theme.textColor
+                                font.pixelSize: Theme.fontSizeTiny
+                                horizontalAlignment: Text.AlignRight
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: !!root.healthStatus.desktopFallback
+                        text: qsTr("Desktop fallback includes other apps.")
+                        color: Theme.warningColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        wrapMode: Text.WordWrap
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Connection status only · check meters for signal")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        wrapMode: Text.WordWrap
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: root.dropWarningTicks >= 3
+                        text: qsTr("Video queue is dropping frames. Try a lower resolution or frame rate.")
+                        color: Theme.errorColor
+                        font.pixelSize: Theme.fontSizeTiny
+                        wrapMode: Text.WordWrap
+                    }
+                    TrophyButton {
+                        objectName: "addRecordingBookmark"
+                        Layout.fillWidth: true
+                        visible: root.healthStatus.mode === "recording"
+                        text: qsTr("Bookmark moment")
+                        icon.source: "qrc:/icons/bookmark.svg"
+                        enabled: !!root.healthStatus.hasVideo
+                        onClicked: { if (app) app.requestBookmark() }
+                    }
+                }
+                }
+                }
             }
 
             // Storage Usage
@@ -596,7 +870,7 @@ Page {
                         ColumnLayout {
                             spacing: 2
                             Layout.alignment: Qt.AlignTop
-                            Label { text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.count : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignRight }
+                            Label { objectName: "storageRecordingCount"; text: qsTr("%n recording(s)", "", (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.totalCount : 0); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.alignment: Qt.AlignRight }
                             Label {
                                 text: ((typeof storageManager !== "undefined" && storageManager && storageManager.autoDeleteOldest) ? qsTr("Auto-Cleanup: on") : qsTr("Auto-Cleanup: off"))
                                 font.pixelSize: Theme.fontSizeTiny
@@ -626,6 +900,7 @@ Page {
             // height either clips the meters or leaves dead slack, and a
             // plain Rectangle takes no height from anchored children)
             Rectangle {
+                objectName: "recordingSettingsCard"
                 Layout.fillWidth: true
                 Layout.preferredHeight: settingsContent.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
@@ -663,11 +938,8 @@ Page {
                         columnSpacing: Theme.spacingMedium
                         rowSpacing: 0
 
-                        // One header row + value row per text pair, with a
-                        // meter riding each value row: sharing the row (and
-                        // centering both) is what lines bars up with the
-                        // values. A spanned meter column can never align 3
-                        // bars against 2 text rows.
+                        // Keep text rows stable while the independent audio
+                        // stack collapses hidden meters without empty slots.
                         Label { text: qsTr("Encoder"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 0 }
                         Label { text: qsTr("Resolution"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 1 }
                         Label { text: qsTr("Audio"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 0; Layout.column: 2 }
@@ -687,41 +959,56 @@ Page {
                             font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor
                             Layout.row: 1; Layout.column: 1; Layout.alignment: Qt.AlignVCenter
                         }
-                        AudioLevelMeter {
-                            id: meter0
-                            horizontal: true
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 1; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: audioMixer ? audioMixer.trackName(0) : ""
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(0, muted) }
-                        }
-
-                        Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0 }
+                        Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0; Layout.minimumHeight: 18; verticalAlignment: Text.AlignVCenter }
                         Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 1 }
-                        AudioLevelMeter {
-                            id: meter1
-                            // Desktop mode merges to one track (system + mic
-                            // mixed); game mode keeps 3.
-                            visible: !(settingsManager && settingsManager.audioMode === "desktop")
-                            horizontal: true
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 2; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: audioMixer ? audioMixer.trackName(1) : ""
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(1, muted) }
-                        }
                         Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 0; Layout.alignment: Qt.AlignVCenter }
                         Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
-                        AudioLevelMeter {
-                            id: meter2
-                            visible: !(settingsManager && settingsManager.audioMode === "desktop")
-                            horizontal: true
+
+                        Item {
+                            Layout.row: 1; Layout.column: 2; Layout.rowSpan: 3
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 18
-                            Layout.row: 3; Layout.column: 2; Layout.alignment: Qt.AlignVCenter
-                            label: audioMixer ? audioMixer.trackName(2) : ""
-                            onMuteToggled: function(muted) { if (app) app.setTrackMuted(2, muted) }
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitHeight: 3 * 18
+                            implicitWidth: audioMeterStack.implicitWidth
+
+                            ColumnLayout {
+                                id: audioMeterStack
+                                width: parent.width
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 0
+
+                                AudioLevelMeter {
+                                    id: meter0
+                                    objectName: "primaryAudioMeter"
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: root.captureStatus.mode ? (root.captureStatus.desktopAudio || root.captureStatus.desktopFallback ? qsTr("System") : qsTr("Game")) : (settingsManager && settingsManager.audioMode === "desktop" ? qsTr("System") : qsTr("Game"))
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(0, muted) }
+                                }
+
+                                AudioLevelMeter {
+                                    id: meter1
+                                    objectName: "voiceAudioMeter"
+                                    // Desktop mode mixes; fallback includes Voice.
+                                    visible: !(settingsManager && settingsManager.audioMode === "desktop") && !root.captureStatus.desktopFallback && !root.captureStatus.desktopAudio
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: audioMixer ? audioMixer.trackName(1) : ""
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(1, muted) }
+                                }
+                                AudioLevelMeter {
+                                    id: meter2
+                                    objectName: "micAudioMeter"
+                                    visible: !(settingsManager && settingsManager.audioMode === "desktop")
+                                    horizontal: true
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 18
+                                    label: audioMixer ? audioMixer.trackName(2) : ""
+                                    onMuteToggled: function(muted) { if (app) app.setTrackMuted(2, muted) }
+                                }
+                            }
                         }
                     }
 
@@ -767,6 +1054,7 @@ Page {
                             Repeater {
                                 model: ListModel {
                                     id: activityModel
+                                    objectName: "recentActivityModel"
                                     Component.onCompleted: updateActivity()
                                     function updateActivity() {
                                         var rows = []
@@ -791,18 +1079,17 @@ Page {
                                                 rows.push({ at: at, kind: ev.kind, dot: ev.dot, title: ev.title, detail: evDetail, time: getRelativeTime(at), stamp: at.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
                                             }
                                         }
-                                        if (recordingLibrary && recordingLibrary.count > 0) {
-                                            for (var i = 0; i < recordingLibrary.count; i++) {
-                                                var clip = recordingLibrary.get(i)
-                                                if (!clip) continue
-                                                // Clips already show as "Clip saved" rows
-                                                // above — listing them again as Completed
-                                                // doubles every entry. The container tag
-                                                // wins and survives renames; the suffix
-                                                // covers older files.
-                                                if (clip.isClip || (clip.fileName || "").endsWith("_Replay.mkv")) continue
-                                                rows.push({ at: new Date(clip.date), kind: "completed", dot: "green", title: qsTr("Completed: %1").arg(clip.gameName || "Unknown Game"), detail: root.recordingDetail(clip), time: getRelativeTime(clip.date), stamp: clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
-                                            }
+                                        var captures = recordingLibrary ? recordingLibrary.allRecordings : []
+                                        for (var i = 0; i < captures.length; i++) {
+                                            var clip = captures[i]
+                                            if (!clip) continue
+                                            // Clips already show as "Clip saved" rows
+                                            // above — listing them again as Completed
+                                            // doubles every entry. The container tag
+                                            // wins and survives renames; the suffix
+                                            // covers older files.
+                                            if (clip.isClip || (clip.fileName || "").endsWith("_Replay.mkv")) continue
+                                            rows.push({ at: new Date(clip.date), kind: "completed", dot: "green", title: qsTr("Completed: %1").arg(clip.gameName || "Unknown Game"), detail: root.recordingDetail(clip), time: getRelativeTime(clip.date), stamp: clip.date.toLocaleString(Qt.locale(), "MMM d, yyyy HH:mm") })
                                         }
                                         rows.sort(function(a, b) { return b.at - a.at })
                                         clear()

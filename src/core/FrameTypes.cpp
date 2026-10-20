@@ -20,6 +20,8 @@ FrameDescriptor::FrameDescriptor(FrameDescriptor &&other) noexcept {
   dmaBufStride = other.dmaBufStride;
   dmaBufOffset = other.dmaBufOffset;
   pts = other.pts;
+  bufferLease = std::move(other.bufferLease);
+  requestCpuFallback = std::move(other.requestCpuFallback);
   other.fd = -1;
 }
 
@@ -37,6 +39,8 @@ FrameDescriptor &FrameDescriptor::operator=(FrameDescriptor &&other) noexcept {
   dmaBufStride = other.dmaBufStride;
   dmaBufOffset = other.dmaBufOffset;
   pts = other.pts;
+  bufferLease = std::move(other.bufferLease);
+  requestCpuFallback = std::move(other.requestCpuFallback);
   other.fd = -1;
   return *this;
 }

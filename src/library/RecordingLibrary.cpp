@@ -8,6 +8,7 @@
 #include "RecordingLibrary.h"
 #include "Recording.h"
 #include "RecordingSidecars.h"
+#include "RecordingAnnotations.h"
 #include "ThumbnailGenerator.h"
 #include "core/StorageManager.h"
 #include "muxing/ReplayClipper.h"
@@ -79,6 +80,8 @@ RecordingLibrary::~RecordingLibrary() {
   // QObject teardown (and process shutdown) even after clipSaved is emitted.
   if (m_clipThread.joinable())
     m_clipThread.join();
+  if (m_storage && !m_clipPinnedSource.isEmpty())
+    m_storage->releaseRecordings({m_clipPinnedSource});
 }
 
 QList<Recording *> RecordingLibrary::recordings() const {
@@ -86,6 +89,17 @@ QList<Recording *> RecordingLibrary::recordings() const {
 }
 
 int RecordingLibrary::count() const { return m_filteredRecordings.size(); }
+
+QList<Recording *> RecordingLibrary::allRecordings() const {
+  QList<Recording *> result;
+  for (const auto &rec : m_recordings) {
+    if (rec->filePath() != m_activeRecordingPath)
+      result.append(rec.get());
+  }
+  return result;
+}
+
+int RecordingLibrary::totalCount() const { return allRecordings().size(); }
 
 void RecordingLibrary::setLibraryPath(const QString &path) {
   if (m_libraryPath != path) {
@@ -133,6 +147,40 @@ void RecordingLibrary::refresh() {
   endBatch();
 }
 
+void RecordingLibrary::setProtectedOnly(bool value) {
+  if (m_protectedOnly == value) return;
+  m_protectedOnly = value;
+  updateFilteredRecordings();
+}
+
+bool RecordingLibrary::setProtected(const QString &filePath, bool value) {
+  auto *recording = getRecording(filePath);
+  if (!recording || !isInsideLibrary(filePath, m_libraryPath) ||
+      !RecordingAnnotations::setProtected(filePath, value)) return false;
+  recording->reloadAnnotations();
+  updateFilteredRecordings();
+  return true;
+}
+
+bool RecordingLibrary::addBookmark(const QString &filePath, qint64 positionMs) {
+  auto *recording = getRecording(filePath);
+  if (!recording || !isInsideLibrary(filePath, m_libraryPath) ||
+      // Library duration is truncated to whole seconds; the player clock
+      // can legitimately bookmark the final fractional second.
+      (recording->duration() > 0 && positionMs >= (recording->duration() + 1) * 1000) ||
+      !RecordingAnnotations::addBookmark(filePath, positionMs)) return false;
+  recording->reloadAnnotations();
+  return true;
+}
+
+bool RecordingLibrary::removeBookmark(const QString &filePath, int index) {
+  auto *recording = getRecording(filePath);
+  if (!recording || !isInsideLibrary(filePath, m_libraryPath) ||
+      !RecordingAnnotations::removeBookmark(filePath, index)) return false;
+  recording->reloadAnnotations();
+  return true;
+}
+
 Recording *RecordingLibrary::get(int index) const {
   if (index < 0 || index >= m_filteredRecordings.size()) {
     return nullptr;
@@ -154,6 +202,7 @@ QUrl RecordingLibrary::localFileUrl(const QString &filePath) const {
 }
 
 void RecordingLibrary::deleteRecording(const QString &filePath) {
+  if (m_storage && m_storage->recordingInUse(filePath)) return;
   if (!isInsideLibrary(filePath, m_libraryPath)) {
     qWarning() << "Refusing to delete recording outside library:" << filePath;
     return;
@@ -162,6 +211,7 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
   m_suppressedPaths.insert(absolute);
   QFile file(filePath);
   if (file.remove()) {
+    RecordingAnnotations::remove(filePath);
     removeRecording(filePath);
   } else {
     m_suppressedPaths.remove(absolute);
@@ -173,6 +223,15 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
 void RecordingLibrary::setActiveRecordingPath(const QString &path) {
   m_activeRecordingPath = path;
   updateFilteredRecordings();
+}
+
+void RecordingLibrary::setHiddenRecordings(const QStringList &paths) {
+  m_hiddenRecordings = QSet<QString>(paths.begin(), paths.end());
+  updateFilteredRecordings();
+}
+
+void RecordingLibrary::refreshAnnotations(const QString &path) {
+  if (auto *recording = getRecording(path)) recording->reloadAnnotations();
 }
 
 void RecordingLibrary::saveClipRange(const QString &sourcePath,
@@ -251,6 +310,13 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
   // clip is written to a .part file and atomically renamed: the library
   // watches this directory and must never see a half-written file (it
   // would generate a thumbnail for garbage).
+  if (m_storage) {
+    if (!m_storage->reserveRecordings({sourcePath})) {
+      fail(tr("Source capture is in use or pending deletion."));
+      return;
+    }
+    m_clipPinnedSource = sourcePath;
+  }
   m_clipSaving = true;
   emit clipSavingChanged();
   // A prior worker may have queued completion immediately before it exited.
@@ -260,9 +326,10 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
   QPointer<RecordingLibrary> self(this);
   const QString tmpOut = baseOut + "." +
                          QUuid::createUuid().toString(QUuid::WithoutBraces) +
-                         ".part";
+                          ".part";
+  const auto sourceAudioRouting = RecordingAnnotations::audioRouting(sourcePath);
   m_clipThread = std::thread(
-      [self, sourcePath, startSeconds, endSeconds, game, baseOut, tmpOut]() {
+       [self, sourcePath, startSeconds, endSeconds, game, baseOut, tmpOut, sourceAudioRouting]() {
         QString err;
         double keptSec = 0.0;
         bool ok = ReplayClipper::saveRange(sourcePath, startSeconds, endSeconds,
@@ -297,6 +364,8 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
           err = "Could not save the clip file.";
         if (!ok)
           out.clear();
+        if (ok && !RecordingAnnotations::setAudioRouting(out, sourceAudioRouting))
+          qWarning() << "Could not copy clip audio source history:" << out;
         if (!self)
           return;
         QMetaObject::invokeMethod(
@@ -305,8 +374,13 @@ void RecordingLibrary::saveClipRange(const QString &sourcePath,
               if (!self)
                 return;
               self->m_clipSaving = false;
+              if (self->m_storage && !self->m_clipPinnedSource.isEmpty()) {
+                self->m_storage->releaseRecordings({self->m_clipPinnedSource});
+                self->m_clipPinnedSource.clear();
+              }
               emit self->clipSavingChanged();
               if (ok) {
+                self->refreshAnnotations(out);
                 emit self->clipSaved(out, game, actualSec);
               } else {
                 emit self->clipSaveFailed(
@@ -631,7 +705,8 @@ void RecordingLibrary::updateFilteredRecordings() {
     }
 
     // Apply search filter
-    if (m_kindFilter == NoCaptures ||
+    if (m_hiddenRecordings.contains(rec->filePath()) ||
+        (m_protectedOnly && !rec->protectedFromCleanup()) || m_kindFilter == NoCaptures ||
         (m_kindFilter == RecordingsOnly && rec->isClip()) ||
         (m_kindFilter == ClipsOnly && !rec->isClip())) {
       continue;

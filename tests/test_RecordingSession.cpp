@@ -24,6 +24,7 @@
 
 #include "audio/AudioMixer.h"
 #include "audio/IAudioSource.h"
+#include "audio/AudioRoutingInfo.h"
 #include "capture/IVideoCaptureSource.h"
 #include "core/RecordingSession.h"
 #include "encoding/IEncoder.h"
@@ -60,6 +61,15 @@ public:
     VideoFrame frame{};
     frame.timestamp = timestamp;
     session.noteCapturedVideo(frame);
+  }
+  static bool overflowQueue(RecordingSession &session) {
+    session.m_running = true;
+    VideoFrame frame{};
+    while (session.m_videoQueue.size() < session.MAX_QUEUE_SIZE)
+      session.m_videoQueue.emplace(frame);
+    const bool accepted = session.pushQueuedFrame(QueuedFrame(frame));
+    session.m_running = false;
+    return accepted;
   }
   static AudioMixer::TrackAudioCallbackHandle registration(
       const RecordingSession &session) {
@@ -294,6 +304,44 @@ private:
   int m_finalizations = 0;
 };
 
+TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
+  AudioMixer mixer(48000, 2);
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  RecordingSession session("health.mkv", &capture, &encoder, &muxer,
+                           &mixer, true, 128, 0);
+  auto now = std::make_shared<std::atomic<int64_t>>(5000000);
+  RecordingSessionTestPeer::clock(session, now);
+  EXPECT_EQ(session.videoPositionMs(), -1);
+  EXPECT_FALSE(session.captureHealth()["hasVideo"].toBool());
+  EXPECT_FALSE(RecordingSessionTestPeer::overflowQueue(session));
+  EXPECT_EQ(session.captureHealth()["queueDrops"].toULongLong(), 1);
+  session.setGameIsFallback(true);
+  session.setVoiceChatApp("Discord");
+  EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
+  EXPECT_EQ(session.captureHealth()["audio1"].toString(), "desktop-mix-unavailable");
+  // Capture health names the bound identity, not just a generic "connected".
+  EXPECT_EQ(session.captureHealth()["audio1Name"].toString(), "Discord");
+  mixer.setSemanticTrackMuted(2, true);
+  EXPECT_EQ(session.captureHealth()["audio2"].toString(), "muted");
+  session.setGameIsFallback(false);
+  EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
+  // Marking a node bound is not proof the source is actually capturing.
+  RecordingSessionTestPeer::bindKnownNode(session);
+  EXPECT_EQ(session.captureHealth()["audio0"].toString(), "unavailable");
+  EXPECT_EQ(session.captureHealth()["audio1"].toString(), "unavailable");
+  RecordingSessionTestPeer::videoTime(session, 100000000);
+  EXPECT_EQ(session.videoPositionMs(), 0);
+  now->fetch_add(12345000);
+  RecordingSessionTestPeer::videoTime(session, 112345000);
+  EXPECT_EQ(session.videoPositionMs(), 12345);
+  EXPECT_TRUE(session.captureHealth()["hasVideo"].toBool());
+  session.setDesktopAudio(true);
+  EXPECT_TRUE(session.captureHealth()["desktopAudio"].toBool());
+  EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
+}
+
 class FakeAudioSource : public IAudioSource {
 public:
   ~FakeAudioSource() override {
@@ -346,6 +394,34 @@ private:
   std::atomic<bool> m_capturing{false};
   std::atomic<int> m_starts{0};
 };
+
+TEST(RecordingSessionHealthTest, HistoryKeepsFallbackAndLaterSeparateVoice) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC)) GTEST_SKIP() << "AAC unavailable";
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  AudioMixer mixer(48000, 2);
+  mixer.addSource(std::make_unique<FakeAudioSource>(), 0);
+  RecordingSession session("unused-history.mkv", &capture, &encoder, &muxer, &mixer, true, 128, 3);
+  session.setGameIsFallback(true);
+  ASSERT_TRUE(session.start());
+  ASSERT_TRUE(settleMixerSources(mixer));
+  VideoFrame video{}; video.timestamp = 0;
+  capture.fire(video);
+  auto history = AudioRoutingInfo::fromJson(session.audioHistory());
+  ASSERT_TRUE(history.known);
+  EXPECT_TRUE(history.system); EXPECT_FALSE(history.game); EXPECT_FALSE(history.voice);
+  EXPECT_EQ(history.primary, 0); EXPECT_EQ(history.voiceTrack, 1); EXPECT_EQ(history.micTrack, 2);
+  session.setGameIsFallback(false);
+  auto voice = std::make_unique<FakeAudioSource>();
+  auto *source = voice.get();
+  mixer.addSource(std::move(voice), 1);
+  std::vector<float> samples(4096, 0.0f); // Silence still counts as separate source delivery.
+  source->fire(samples.data(), 2048);
+  session.stop();
+  history = AudioRoutingInfo::fromJson(session.audioHistory());
+  EXPECT_TRUE(history.system); EXPECT_TRUE(history.game); EXPECT_TRUE(history.voice);
+}
 
 // The encoding worker is parked at a controlled video encode boundary while
 // tests advance the production clock driver directly. No scheduling sleeps or

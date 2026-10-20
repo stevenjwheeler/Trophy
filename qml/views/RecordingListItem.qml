@@ -55,6 +55,12 @@ ItemDelegate {
     Behavior on selectionReveal {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
     }
+    readonly property bool captureProtected: !!root.recording && !!root.recording.protectedFromCleanup
+    readonly property bool showProtection: !root.live && !!root.recording && (root.hovered || root.captureProtected)
+    property real protectionReveal: root.showProtection ? 1 : 0
+    Behavior on protectionReveal {
+        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+    }
     // Same identity rule as RecordingCard: the container tag wins and
     // survives renames; the filename suffix covers older files and the
     // first paint before the background probe lands.
@@ -119,66 +125,93 @@ ItemDelegate {
         z: 1
         spacing: 0
 
-        // Collapse the gutter completely at rest. Animate one shared
-        // value so checkbox opacity and the thumbnail slide stay in sync.
+        // One compact gutter: selection above a circular lock. Either
+        // control can remain visible independently when the row is idle.
         Item {
             objectName: "listSelectionSlot"
-            Layout.preferredWidth: (18 + Theme.spacingNormal) * root.selectionReveal
-            Layout.preferredHeight: 18
+            Layout.preferredWidth: (18 + Theme.spacingNormal) * Math.max(root.selectionReveal, root.protectionReveal)
+            Layout.preferredHeight: 18 * (root.selectionReveal + root.protectionReveal)
+                + Theme.spacingSmall * Math.min(root.selectionReveal, root.protectionReveal)
             Layout.alignment: Qt.AlignVCenter
 
-        Rectangle {
-            objectName: "listSelection"
-            width: 18
-            height: 18
-            radius: 5
-            color: root.isSelected ? Theme.primaryColor : "transparent"
-            border.color: root.isSelected ? Theme.primaryColor : Theme.textSecondaryColor
-            border.width: 1.5
-            opacity: root.selectionReveal
-            visible: root.selectionReveal > 0
-            enabled: root.showSelection
+            Rectangle {
+                objectName: "listSelection"
+                width: 18
+                height: 18
+                radius: 5
+                color: root.isSelected ? Theme.primaryColor : "transparent"
+                border.color: root.isSelected ? Theme.primaryColor : Theme.textSecondaryColor
+                border.width: 1.5
+                opacity: root.selectionReveal
+                visible: root.selectionReveal > 0
+                enabled: root.showSelection
 
-            Item {
-                anchors.centerIn: parent
-                width: 7
-                height: 7
-                visible: root.isSelected
-                rotation: 45
-                anchors.verticalCenterOffset: -2
-                anchors.horizontalCenterOffset: -1
-
-                Rectangle {
-                    width: 2
+                Item {
+                    anchors.centerIn: parent
+                    width: 7
                     height: 7
-                    color: "white"
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                }
-                Rectangle {
-                    width: 3
-                    height: 2
-                    color: "white"
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                }
-            }
+                    visible: root.isSelected
+                    rotation: 45
+                    anchors.verticalCenterOffset: -2
+                    anchors.horizontalCenterOffset: -1
 
-            MouseArea {
-                anchors.fill: parent
-                onClicked: (mouse) => {
-                    if (root.recording) {
-                        if (mouse.modifiers & Qt.ShiftModifier) {
-                            window.shiftSelectRange(root.cardIndex);
-                        } else {
-                            window.toggleSelection(root.recording.filePath);
-                            window.lastSelectedIndex = root.cardIndex;
-                        }
+                    Rectangle {
+                        width: 2
+                        height: 7
+                        color: "white"
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                    }
+                    Rectangle {
+                        width: 3
+                        height: 2
+                        color: "white"
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
                     }
                 }
-                cursorShape: Qt.PointingHandCursor
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: (mouse) => {
+                        if (root.recording) {
+                            if (mouse.modifiers & Qt.ShiftModifier) {
+                                window.shiftSelectRange(root.cardIndex);
+                            } else {
+                                window.toggleSelection(root.recording.filePath);
+                                window.lastSelectedIndex = root.cardIndex;
+                            }
+                        }
+                    }
+                    cursorShape: Qt.PointingHandCursor
+                }
             }
-        }
+
+            ToolButton {
+                id: protectionButton
+                objectName: "captureProtectionButton"
+                width: 18
+                height: 18
+                y: (18 + Theme.spacingSmall) * root.selectionReveal
+                padding: 0
+                horizontalPadding: 0
+                visible: root.protectionReveal > 0
+                opacity: root.protectionReveal
+                enabled: root.showProtection
+                icon.source: "qrc:/icons/lock.svg"
+                icon.width: 14; icon.height: 14
+                icon.color: root.captureProtected ? "white" : Theme.textSecondaryColor
+                Accessible.name: qsTr("Protect from auto-cleanup")
+                ToolTip.text: root.captureProtected ? qsTr("Protected from auto-cleanup — click to unprotect") : qsTr("Protect from auto-cleanup (manual deletion still allowed)")
+                ToolTip.visible: hovered
+                onClicked: { if (root.recording) window.toggleCaptureProtection(root.recording.filePath) }
+                background: Rectangle {
+                    radius: 9
+                    color: root.captureProtected ? Theme.primaryColor : "transparent"
+                    border.color: root.captureProtected ? Theme.primaryColor : Theme.textSecondaryColor
+                    border.width: 1.5
+                }
+            }
         }
 
         // Only the small app icon overlays the preview; metadata stays
@@ -335,18 +368,18 @@ ItemDelegate {
             }
 
             RoundButton {
+                objectName: "listShareExport"
                 width: 32
                 height: 32
-                icon.source: "qrc:/icons/folder.svg"
+                icon.source: "qrc:/icons/share.svg"
                 icon.color: "white"
                 icon.width: 16
                 icon.height: 16
-                Accessible.name: qsTr("Show in folder")
-                ToolTip.text: qsTr("Show in folder")
+                Accessible.name: qsTr("Export to share")
+                ToolTip.text: qsTr("Export to share")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: { if (root.recording) window.openFolder(root.recording.directory) }
-
+                onClicked: { if (root.recording) window.openShareExport(root.recording.filePath) }
                 background: Rectangle {
                     radius: 16
                     color: parent.hovered ? "#e6353f5c" : "#b31a2238"
@@ -356,7 +389,6 @@ ItemDelegate {
                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }
-
             }
 
             RoundButton {

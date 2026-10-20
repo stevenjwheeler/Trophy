@@ -511,19 +511,32 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
         desc->layers[0].planes[0].offset = frame.dmaBufOffset;
 
         drm_frame = av_frame_alloc();
+        if (!drm_frame || desc->objects[0].fd < 0) {
+          if (desc->objects[0].fd >= 0) close(desc->objects[0].fd);
+          av_free(desc);
+          av_frame_free(&drm_frame);
+          ++m_droppedFrames;
+          if (frame.requestCpuFallback) frame.requestCpuFallback();
+          return false;
+        }
         drm_frame->width = frame.width;
         drm_frame->height = frame.height;
         drm_frame->format = AV_PIX_FMT_DRM_PRIME;
         drm_frame->data[0] = (uint8_t *)desc;
         
-        drm_frame->buf[0] = av_buffer_create((uint8_t *)desc, sizeof(*desc), 
-            [](void*, uint8_t* data) {
+        // VA-API may retain the mapped source beyond send_frame. Attach the
+        // producer lease to its AVBuffer lifetime, not just this stack frame.
+        auto *lease = new std::shared_ptr<void>(frame.bufferLease);
+        drm_frame->buf[0] = av_buffer_create((uint8_t *)desc, sizeof(*desc),
+            [](void *opaque, uint8_t* data) {
                 auto *d = reinterpret_cast<AVDRMFrameDescriptor*>(data);
                 if (d->objects[0].fd >= 0) close(d->objects[0].fd);
                 av_free(d);
-            }, nullptr, 0);
+                delete static_cast<std::shared_ptr<void> *>(opaque);
+            }, lease, 0);
 
         if (!drm_frame->buf[0]) {
+            delete lease;
             // Buffer allocation failed: release the descriptor (including
             // the dup'd fd the free callback would have owned) and fall
             // through to the CPU path below.
@@ -536,6 +549,11 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
 
         if (drm_frame) {
         tempHwFrame = av_frame_alloc();
+        if (!tempHwFrame) {
+          av_frame_free(&drm_frame);
+          ++m_droppedFrames;
+          return false;
+        }
         tempHwFrame->format = m_codecCtx->pix_fmt;
         tempHwFrame->hw_frames_ctx = av_buffer_ref(m_codecCtx->hw_frames_ctx);
 
@@ -660,12 +678,18 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
         // the caller to mux (writing `output` here would mux garbage).
         success = false;
       }
+    } else if (frame.isDmaBuf && frame.requestCpuFallback) {
+      // Import success alone does not prove the encoder accepts the mapped
+      // surface (e.g. RGB imported into an NV12-only VA-API encoder).
+      frame.requestCpuFallback();
     }
   } else {
     // Neither the DMA-BUF hwmap nor the CPU fallback produced a frame.
     // This is the GPU-only DMA-BUF case (no mapped CPU pointer) with a
     // mapper that cannot import the buffer (e.g. CUDA ENOSYS).
     m_droppedFrames++;
+    if (frame.isDmaBuf && frame.requestCpuFallback)
+      frame.requestCpuFallback();
     if (m_droppedFrames == 1 || m_droppedFrames % 600 == 0) {
       qWarning() << "FFmpegEncoder: dropping frame, no usable path for"
                  << m_codecName << "isDmaBuf:" << frame.isDmaBuf

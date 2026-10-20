@@ -1,7 +1,7 @@
 # Packaging status
 
 Native prefix installs and the CI-produced AppImage are the supported
-distribution paths. Build outside the repository's CloudDrive mount.
+distribution paths.
 
 ## Verification
 

@@ -24,6 +24,51 @@ Page {
     // file-info dialog. Reactive on filePath; the entry's own NOTIFYs
     // refresh rows as the background probe lands.
     readonly property var infoRec: (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.getRecording(filePath) : null
+    readonly property var bookmarks: infoRec && infoRec.bookmarks ? infoRec.bookmarks : []
+    // Keep storage indices: older annotations may be in insertion order,
+    // and removal must target the original entry rather than its sorted row.
+    readonly property var bookmarkMoments: bookmarks.map(function(mark, index) {
+        return { positionMs: mark.positionMs, sourceIndex: index };
+    }).sort(function(a, b) {
+        return a.positionMs - b.positionMs || a.sourceIndex - b.sourceIndex;
+    })
+    readonly property var audioRouting: infoRec && infoRec.audioRouting ? infoRec.audioRouting : ({})
+    readonly property int hiddenVoiceTrack: audioRouting.v === 1 && audioRouting.separate
+        && audioRouting.system && !audioRouting.voice
+        && audioRouting.primary >= 0 && audioRouting.primary < playerPage.audioLanes ? audioRouting.voiceTrack : -1
+    readonly property real trackHeaderWidth: audioRouting.v === 1 && audioRouting.system ? 88 : 64
+    readonly property var displayedAudioTracks: {
+        let tracks = [];
+        for (let i = 0; i < playerPage.audioLanes; ++i)
+            if (i !== playerPage.hiddenVoiceTrack) tracks.push(i);
+        return tracks;
+    }
+    function audioTrackName(ordinal) {
+        const routing = playerPage.audioRouting;
+        if (routing.v !== 1) return "";
+        if (ordinal === routing.primary)
+            return routing.system ? (routing.game ? qsTr("Game / System") : qsTr("System")) : qsTr("Game");
+        if (ordinal === routing.voiceTrack) return qsTr("Voice");
+        if (ordinal === routing.micTrack) return qsTr("Mic");
+        return "";
+    }
+
+    function bookmarkClipRange(ms, durationMs) {
+        if (!isFinite(ms) || !isFinite(durationMs) || durationMs < 500) return [];
+        const center = Math.max(0, Math.min(ms, durationMs));
+        return [Math.max(0, center - 15000), Math.min(durationMs, center + 15000)];
+    }
+
+    function selectBookmarkClip(ms) {
+        const range = playerPage.bookmarkClipRange(ms, playerPage.playDuration);
+        if (range.length !== 2) return;
+        playerPage.clipMode = true;
+        playerPage.clipStartMs = range[0];
+        playerPage.clipEndMs = range[1];
+        playerPage.seekAll(Math.min(ms, playerPage.playDuration));
+        playerPage.centerView(ms);
+        bookmarksDialog.close();
+    }
 
     function formatInfoSize(bytes) {
         if (!bytes)
@@ -104,6 +149,7 @@ Page {
     // dies and the lanes paint blank on reopen (duration
     // stays 0 while the page-level span is valid).
     readonly property double playPosition: player.position
+    readonly property bool playRunning: player.playing
     readonly property double playDuration: player.duration
 
     // Clip editor: the scissors toggle in the tracks header opens a
@@ -214,7 +260,7 @@ Page {
     readonly property real minTracksHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + audioLanes) * (minLaneHeight + Theme.spacingSmall)
+        + (1 + displayedAudioTracks.length) * (minLaneHeight + Theme.spacingSmall)
         + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     // Lane height while the card fits its content;
@@ -228,7 +274,7 @@ Page {
             return fullLaneHeight
         var interior = tracksHeight - Theme.spacingMedium * 2
         return Math.max(minLaneHeight, Math.min(fullLaneHeight,
-            (interior - zoomRow.implicitHeight) / (1 + audioLanes) - Theme.spacingSmall))
+            (interior - zoomRow.implicitHeight) / (1 + displayedAudioTracks.length) - Theme.spacingSmall))
     }
 
     // Uncompressed content height, derived from the
@@ -241,7 +287,7 @@ Page {
     readonly property real tracksNaturalHeight: Theme.spacingMedium * 2
         + zoomRow.implicitHeight
         + (playerPage.clipError !== "" ? clipErrorLabel.implicitHeight + Theme.spacingSmall : 0)
-        + (1 + audioLanes) * (fullLaneHeight + Theme.spacingSmall)
+        + (1 + displayedAudioTracks.length) * (fullLaneHeight + Theme.spacingSmall)
         + (trackCount <= 0 ? noAudioLabel.implicitHeight + Theme.spacingSmall : 0)
 
     function setTracksHeight(height) {
@@ -292,6 +338,7 @@ Page {
     }
 
     function close() {
+        bookmarksDialog.close()
         stopAll()
         fileInfoDialog.close()
         player.source = ""
@@ -475,6 +522,138 @@ Page {
         }
     }
 
+    Dialog {
+        id: bookmarksDialog
+        objectName: "playerBookmarksDialog"
+        title: qsTr("Bookmarked moments")
+        width: Math.min(560, Math.max(280, playerPage.width - 40))
+        anchors.centerIn: parent
+        modal: true
+        padding: Theme.spacingMedium
+        background: Rectangle { color: Theme.cardColor; radius: Theme.radiusLarge; border.color: Theme.borderColor }
+        Overlay.modal: Rectangle { color: Theme.withOpacity("#000000", 0.5) }
+        header: ColumnLayout {
+            spacing: Theme.spacingTiny
+            Label {
+                Layout.leftMargin: Theme.spacingMedium
+                Layout.topMargin: Theme.spacingMedium
+                text: bookmarksDialog.title
+                color: Theme.textColor
+                font.pixelSize: Theme.fontSizeLarge
+                font.bold: true
+            }
+            Label {
+                objectName: "bookmarkMomentCount"
+                Layout.leftMargin: Theme.spacingMedium
+                text: playerPage.bookmarks.length === 1 ? qsTr("1 moment") : qsTr("%1 moments").arg(playerPage.bookmarks.length)
+                color: Theme.textSecondaryColor
+                font.pixelSize: Theme.fontSizeSmall
+            }
+        }
+        footer: Item {
+            implicitHeight: 48
+            TrophyButton { anchors.right: parent.right; anchors.rightMargin: Theme.spacingMedium; text: qsTr("Close"); onClicked: bookmarksDialog.close() }
+        }
+        contentItem: ScrollView {
+            id: bookmarkScroll
+            implicitHeight: Math.min(320, bookmarkRows.implicitHeight)
+            contentWidth: availableWidth
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ColumnLayout {
+                id: bookmarkRows
+                width: bookmarkScroll.availableWidth
+                spacing: Theme.spacingSmall
+                Label {
+                    Layout.fillWidth: true
+                    Layout.margins: Theme.spacingSmall
+                    visible: playerPage.bookmarks.length === 0
+                    text: qsTr("No bookmarked moments")
+                    color: Theme.textSecondaryColor
+                }
+                Repeater {
+                    model: playerPage.bookmarkMoments
+                    delegate: Button {
+                        id: momentRow
+                        required property var modelData
+                        required property int index
+                        readonly property var clipRange: playerPage.bookmarkClipRange(modelData.positionMs, playerPage.playDuration)
+                        objectName: "bookmarkMomentRow"
+                        Layout.fillWidth: true
+                        padding: Theme.spacingNormal
+                        hoverEnabled: true
+                        Accessible.name: qsTr("Jump to bookmark at %1").arg(player.formatTime(modelData.positionMs))
+                        onClicked: { playerPage.seekAll(modelData.positionMs); bookmarksDialog.close() }
+                        background: Rectangle {
+                            radius: Theme.radiusNormal
+                            color: momentRow.hovered || momentRow.activeFocus ? Theme.cardHoverColor : Theme.withOpacity(Theme.textColor, 0.04)
+                            border.color: momentRow.activeFocus ? "#FFD54F" : Theme.withOpacity(Theme.textColor, 0.06)
+                        }
+                        contentItem: RowLayout {
+                            spacing: Theme.spacingNormal
+                            ToolButton {
+                                objectName: "bookmarkMomentIcon"
+                                enabled: false
+                                opacity: 1
+                                padding: 0
+                                icon.source: "qrc:/icons/bookmark.svg"
+                                icon.color: "#FFD54F"
+                                icon.width: 20
+                                icon.height: 24
+                                background: Item {}
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacingTiny
+                                Label {
+                                    text: player.formatTime(momentRow.modelData.positionMs)
+                                    color: Theme.textColor
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.weight: Font.DemiBold
+                                    font.family: "monospace"
+                                }
+                                Label {
+                                    objectName: "bookmarkClipSummary"
+                                    Layout.fillWidth: true
+                                    text: momentRow.clipRange.length === 2
+                                        ? qsTr("Clip range · %1–%2").arg(player.formatTime(momentRow.clipRange[0])).arg(player.formatTime(momentRow.clipRange[1]))
+                                        : qsTr("Click to jump to this moment")
+                                    color: Theme.textSecondaryColor
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            TrophyButton {
+                                objectName: "bookmarkClipButton"
+                                text: qsTr("Select ±15 s")
+                                enabled: momentRow.clipRange.length === 2
+                                onClicked: playerPage.selectBookmarkClip(momentRow.modelData.positionMs)
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Select this range in the clip editor")
+                            }
+                            TrophyButton {
+                                id: removeMoment
+                                objectName: "bookmarkRemoveButton"
+                                Layout.preferredWidth: 32
+                                padding: 6
+                                horizontalPadding: 0
+                                baseColor: "transparent"
+                                icon.source: "qrc:/icons/trash.svg"
+                                Accessible.name: qsTr("Remove bookmark")
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Remove bookmark")
+                                onClicked: {
+                                    if (!recordingLibrary.removeBookmark(playerPage.filePath, momentRow.modelData.sourceIndex))
+                                        window.showMetadataError();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     background: Rectangle {
         color: Theme.backgroundColor
         // Same page chrome as the other pages: the top
@@ -536,9 +715,58 @@ Page {
             }
 
             TrophyButton {
-                implicitHeight: 28
+                implicitHeight: 32
+                implicitWidth: 32
+                objectName: "playerBookmarksButton"
+                padding: 0
+                horizontalPadding: 0
+                icon.width: 18
+                icon.height: 18
+                icon.source: "qrc:/icons/bookmark.svg"
+                enabled: playerPage.bookmarks.length > 0
+                opacity: enabled ? 1 : 0.45
+                Accessible.name: qsTr("Bookmarks")
+                ToolTip.text: qsTr("Bookmarks (%1)").arg(playerPage.bookmarks.length)
+                ToolTip.visible: hovered
+                onClicked: bookmarksDialog.open()
+            }
+
+            TrophyButton {
+                objectName: "playerProtectionButton"
+                implicitHeight: 32
                 implicitWidth: 32
                 padding: 0
+                horizontalPadding: 0
+                icon.width: 18
+                icon.height: 18
+                visible: !!playerPage.infoRec
+                icon.source: "qrc:/icons/lock.svg"
+                outlined: true
+                checked: !!playerPage.infoRec && !!playerPage.infoRec.protectedFromCleanup
+                ToolTip.text: qsTr("Protect from auto-cleanup (manual deletion still allowed)")
+                ToolTip.visible: hovered
+                Accessible.name: qsTr("Protect from auto-cleanup")
+                onClicked: window.toggleCaptureProtection(playerPage.filePath)
+            }
+
+            TrophyButton {
+                objectName: "playerShareExportButton"
+                implicitHeight: 32
+                padding: 0
+                horizontalPadding: 12
+                icon.width: 18
+                icon.height: 18
+                text: qsTr("Share")
+                icon.source: "qrc:/icons/share.svg"
+                enabled: !!playerPage.infoRec
+                onClicked: window.openShareExport(playerPage.filePath, playerPage.mutedTracks.concat(playerPage.hiddenVoiceTrack >= 0 ? [playerPage.hiddenVoiceTrack] : []))
+            }
+
+            TrophyButton {
+                implicitHeight: 32
+                implicitWidth: 32
+                padding: 0
+                horizontalPadding: 0
                 Layout.alignment: Qt.AlignVCenter
                 text: "ⓘ"
                 ToolTip.text: qsTr("File info")
@@ -600,26 +828,36 @@ Page {
         // creation: setting it with no open source is ignored.
         Instantiator {
             id: audioPipelines
-            model: playerPage.audioLanes
+            objectName: "playerAudioPipelines"
+            model: playerPage.displayedAudioTracks
 
             MediaPlayer {
+                id: audioPipeline
+                required property int modelData
+                objectName: "playerAudioPipeline" + modelData
                 source: playerPage.filePath !== "" ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
                 autoPlay: false
                 playbackRate: playerPage.playbackRate
+                function pinTrack() {
+                    if (audioTracks.length <= audioPipeline.modelData) return;
+                    if (activeAudioTrack !== audioPipeline.modelData)
+                        activeAudioTrack = audioPipeline.modelData;
+                    position = playerPage.playPosition;
+                    if (playerPage.playRunning) play();
+                }
+                onModelDataChanged: audioPipeline.pinTrack()
+                onTracksChanged: audioPipeline.pinTrack()
                 onMediaStatusChanged: {
                     if (mediaStatus === MediaPlayer.LoadedMedia) {
-                        activeAudioTrack = index
                         // Track discovery now runs asynchronously: a new
                         // audio pipeline can load after video has started.
                         // Join its current position/state, not time zero.
-                        position = playerPage.playPosition
-                        if (player.playing)
-                            play()
+                        audioPipeline.pinTrack()
                     }
                 }
                 audioOutput: AudioOutput {
                     volume: playerPage.masterVolume
-                    muted: playerPage.masterMuted || playerPage.isMuted(index)
+                    muted: playerPage.masterMuted || playerPage.isMuted(audioPipeline.modelData)
                 }
             }
         }
@@ -726,6 +964,32 @@ Page {
 
                     // Clip mode: range handles on every lane (snip
                     // cuts via the library).
+                    TrophyButton {
+                        objectName: "playerAddBookmarkButton"
+                        implicitWidth: 32
+                        implicitHeight: 28
+                        padding: 0
+                        horizontalPadding: 0
+                        icon.source: "qrc:/icons/bookmark.svg"
+                        icon.width: 16
+                        icon.height: 16
+                        enabled: playerPage.infoRec !== null && playerPage.playDuration > 0
+                        Accessible.name: qsTr("Add bookmark at current position")
+                        ToolTip.text: qsTr("Add bookmark at current position")
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 600
+                        onClicked: {
+                            const ms = Math.round(Math.max(0, Math.min(playerPage.playPosition, playerPage.playDuration)));
+                            if (!recordingLibrary.addBookmark(playerPage.filePath, ms)) {
+                                window.showMetadataError();
+                            } else if (typeof app !== "undefined" && app && typeof app.playClipPing === "function") {
+                                // Sampling confirmation: a bookmark gets the same
+                                // completion chime as a saved clip.
+                                app.playClipPing(false);
+                            }
+                        }
+                    }
+
                     TrophyButton {
                         implicitWidth: 32
                         implicitHeight: 28
@@ -856,9 +1120,13 @@ Page {
                 }
 
                 VideoLane {
+                    objectName: "playerVideoLane"
                     Layout.fillWidth: true
                     laneHeight: playerPage.laneHeight
+                    headerWidth: playerPage.trackHeaderWidth
                     filePath: playerPage.filePath
+                    bookmarks: playerPage.bookmarks
+                    onBookmarkActivated: function(ms) { playerPage.seekAll(ms) }
                     playPosition: playerPage.playPosition
                     playDuration: playerPage.playDuration
                     viewStartMs: playerPage.viewStartMs
@@ -881,15 +1149,21 @@ Page {
                 }
 
                 Repeater {
-                    model: playerPage.audioLanes
+                    model: playerPage.displayedAudioTracks
 
                     WaveLane {
+                        required property int modelData
+                        objectName: "playerAudioLane" + modelData
                         Layout.fillWidth: true
                         laneHeight: playerPage.laneHeight
+                        headerWidth: playerPage.trackHeaderWidth
                         filePath: playerPage.filePath
-                        trackIndex: index
+                        bookmarks: playerPage.bookmarks
+                        onBookmarkActivated: function(ms) { playerPage.seekAll(ms) }
+                        trackIndex: modelData
+                        trackLabelOverride: playerPage.audioTrackName(modelData)
                         trackTotal: playerPage.audioLanes
-                        laneMuted: playerPage.mutedTracks.indexOf(index) !== -1
+                        laneMuted: playerPage.mutedTracks.indexOf(modelData) !== -1
                         playPosition: playerPage.playPosition
                         playDuration: playerPage.playDuration
                         viewStartMs: playerPage.viewStartMs
@@ -926,12 +1200,65 @@ Page {
         }
     }
 
+    // The same positioned hit targets are used on every lane. Only the
+    // video lane draws flags; audio lanes continue their yellow stems.
+    component BookmarkMarkers: Item {
+        id: markerLayer
+        property var bookmarks: []
+        property double viewStartMs: 0
+        property double viewSpanMs: 0
+        property bool showFlags: true
+        signal bookmarkActivated(double ms)
+        z: 5
+        Repeater {
+            model: markerLayer.bookmarks
+            delegate: ToolButton {
+                id: bookmarkMarker
+                required property var modelData
+                readonly property double timelineX: markerLayer.viewSpanMs > 0 ? (modelData.positionMs - markerLayer.viewStartMs) / markerLayer.viewSpanMs * markerLayer.width : 0
+                objectName: "timelineBookmark"
+                width: 20
+                height: markerLayer.height
+                x: Math.max(0, Math.min(markerLayer.width - width, timelineX - width / 2))
+                visible: markerLayer.viewSpanMs > 0 && modelData.positionMs >= markerLayer.viewStartMs && modelData.positionMs <= markerLayer.viewStartMs + markerLayer.viewSpanMs
+                padding: 0
+                horizontalPadding: 0
+                icon.source: markerLayer.showFlags ? "qrc:/icons/bookmark.svg" : ""
+                icon.color: "#FFD54F"
+                icon.width: 16; icon.height: 20
+                background: Item {
+                    Rectangle {
+                        x: Math.max(0, Math.min(parent.width - width, bookmarkMarker.timelineX - bookmarkMarker.x - width / 2))
+                        width: 4
+                        height: parent.height
+                        color: "#B3000000"
+                        Rectangle { anchors.centerIn: parent; width: 2; height: parent.height; color: "#FFD54F" }
+                    }
+                    Rectangle {
+                        visible: markerLayer.showFlags
+                        anchors.centerIn: parent
+                        width: 18
+                        height: Math.min(22, parent.height)
+                        radius: 3
+                        color: "#E6202020"
+                    }
+                }
+                ToolTip.text: qsTr("Bookmark · %1 s").arg((modelData.positionMs / 1000).toFixed(1))
+                ToolTip.visible: hovered
+                Accessible.name: qsTr("Jump to bookmark")
+                onClicked: markerLayer.bookmarkActivated(modelData.positionMs)
+            }
+        }
+    }
+
     component WaveLane: Rectangle {
         id: lane
 
         property string filePath: ""
         property int trackIndex: 0
         property int trackTotal: 1
+        property string trackLabelOverride: ""
+        property real headerWidth: 64
         // True mute from the page (this lane's pipeline is
         // silent). Dimmed while muted.
         property bool laneMuted: false
@@ -942,6 +1269,8 @@ Page {
         property double viewStartMs: 0
         property double viewSpanMs: 0
         property var peaks: []
+        property var bookmarks: []
+        signal bookmarkActivated(double ms)
         // Set on arrival (even empty) so the spinner stops —
         // mirrors VideoLane stripDone. The cache emits [] on
         // failure, so settled-with-empty means no decodable
@@ -950,7 +1279,7 @@ Page {
         readonly property bool trackEmpty: peaksDone && peaks.length === 0 && filePath !== ""
         // Track caption (Game/Voice/Mic), resolved once
         // so both header layouts can show it.
-        readonly property string headerText: (typeof waveformCache !== "undefined" && waveformCache !== null) ? waveformCache.trackLabel(trackIndex, trackTotal) : ""
+        readonly property string headerText: trackLabelOverride || ((typeof waveformCache !== "undefined" && waveformCache !== null) ? waveformCache.trackLabel(trackIndex, trackTotal) : "")
         // Set from the page: 64 while the card fits its
         // content, shrinking when it is compressed.
         property real laneHeight: 64
@@ -1037,7 +1366,7 @@ Page {
                 // Zero width while hidden: a hidden header
                 // must never reserve space, or the wave
                 // area gets squeezed to a sliver.
-                Layout.preferredWidth: visible ? 64 : 0
+                Layout.preferredWidth: visible ? lane.headerWidth : 0
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 2
                 // Mute above the name while the lane has
@@ -1063,7 +1392,7 @@ Page {
                 }
 
                 Label {
-                    Layout.preferredWidth: 64
+                    Layout.preferredWidth: lane.headerWidth
                     Layout.alignment: Qt.AlignVCenter
                     horizontalAlignment: Text.AlignHCenter
                     text: lane.headerText
@@ -1077,7 +1406,7 @@ Page {
             RowLayout {
                 id: laneHeaderCompact
                 // Zero width while hidden (see above).
-                Layout.preferredWidth: visible ? 64 : 0
+                Layout.preferredWidth: visible ? lane.headerWidth : 0
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 2
                 // Mute button first, name to its right
@@ -1103,14 +1432,15 @@ Page {
                 }
 
                 Label {
-                    // Fixed share of the 64px header (28
-                    // button + 2 spacing + 34 label): never
+                    // Fixed share of the header (28px button + 2px gap): never
                     // fillWidth here — inside a fixed-width
                     // layout that inflates the header and
                     // squeezes the wave area to a sliver.
-                    Layout.preferredWidth: 34
+                    Layout.preferredWidth: lane.headerWidth - 30
                     horizontalAlignment: Text.AlignLeft
                     text: lane.headerText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
                     color: Theme.textColor
                     font.pixelSize: Theme.fontSizeSmall
                     font.weight: Font.Medium
@@ -1209,6 +1539,15 @@ Page {
                     }
                 }
 
+                BookmarkMarkers {
+                    anchors.fill: parent
+                    bookmarks: lane.bookmarks
+                    viewStartMs: lane.viewStartMs
+                    viewSpanMs: lane.viewSpanMs
+                    showFlags: false
+                    onBookmarkActivated: function(ms) { lane.bookmarkActivated(ms) }
+                }
+
                 // Shared playhead: positioned overlay, so the
                 // waveform never repaints during playback. Hidden
                 // while scrolled out of the zoom window.
@@ -1281,6 +1620,7 @@ Page {
 
                 Item {
                     id: waveHandleStart
+                    z: 6
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     width: 16
@@ -1315,6 +1655,7 @@ Page {
 
                 Item {
                     id: waveHandleEnd
+                    z: 6
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     width: 16
@@ -1364,11 +1705,14 @@ Page {
         id: vlane
 
         property string filePath: ""
+        property real headerWidth: 64
         property double playPosition: 0
         property double playDuration: 0
         property double viewStartMs: 0
         property double viewSpanMs: 0
         property var thumbs: []
+        property var bookmarks: []
+        signal bookmarkActivated(double ms)
 
         signal seekRequested(double ms)
 
@@ -1461,7 +1805,7 @@ Page {
             // height (the strip has no buttons), so
             // it stays put instead of hiding.
             Label {
-                Layout.preferredWidth: 64
+                Layout.preferredWidth: vlane.headerWidth
                 Layout.alignment: Qt.AlignVCenter
                 horizontalAlignment: Text.AlignHCenter
                 text: qsTr("Video")
@@ -1512,6 +1856,14 @@ Page {
                     anchors.centerIn: parent
                     running: visible
                     visible: !vlane.stripDone && vlane.filePath !== ""
+                }
+
+                BookmarkMarkers {
+                    anchors.fill: parent
+                    bookmarks: vlane.bookmarks
+                    viewStartMs: vlane.viewStartMs
+                    viewSpanMs: vlane.viewSpanMs
+                    onBookmarkActivated: function(ms) { vlane.bookmarkActivated(ms) }
                 }
 
                 Rectangle {
@@ -1583,6 +1935,7 @@ Page {
 
                 Item {
                     id: stripHandleStart
+                    z: 6 // Range editing remains usable when a handle overlaps a bookmark.
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     width: 16
@@ -1617,6 +1970,7 @@ Page {
 
                 Item {
                     id: stripHandleEnd
+                    z: 6
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     width: 16

@@ -67,10 +67,6 @@ SystemTrayManager::SystemTrayManager(QObject *parent) : QObject(parent) {
       m_menu->addAction(tr("Save Clip"), this, [this]() {
         emit saveReplayRequested();
       });
-  m_openFolderAction =
-      m_menu->addAction(tr("Open Recordings Folder"), this, [this]() {
-        emit openRecordingsRequested();
-      });
   m_menu->addSeparator();
   m_quitAction = m_menu->addAction(tr("Quit"), this, [this]() {
     emit quitRequested();

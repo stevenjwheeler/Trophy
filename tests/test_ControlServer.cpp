@@ -61,12 +61,13 @@ TEST_F(ControlServerTest, CommandsRouteToSignals) {
   QSignalSpy toggleSpy(&server, &ControlServer::toggleRecordingRequested);
   QSignalSpy clipSpy(&server, &ControlServer::saveClipRequested);
   QSignalSpy showSpy(&server, &ControlServer::showWindowRequested);
+  QSignalSpy bookmarkSpy(&server, &ControlServer::bookmarkRequested);
 
   {
     QLocalSocket client;
     client.connectToServer(sockPath);
     ASSERT_TRUE(client.waitForConnected(2000));
-    client.write("toggle-record\nsave-clip\nshow-window\n");
+    client.write("toggle-record\nsave-clip\nshow-window\nadd-bookmark\n");
     ASSERT_TRUE(client.waitForBytesWritten(2000));
     client.disconnectFromServer();
   }
@@ -74,6 +75,7 @@ TEST_F(ControlServerTest, CommandsRouteToSignals) {
   ASSERT_TRUE(waitFor([&] { return toggleSpy.count() == 1; }));
   EXPECT_EQ(clipSpy.count(), 1);
   EXPECT_EQ(showSpy.count(), 1);
+  EXPECT_EQ(bookmarkSpy.count(), 1);
 }
 
 TEST_F(ControlServerTest, UnknownCommandsIgnored) {

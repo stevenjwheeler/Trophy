@@ -22,6 +22,7 @@
 class QDBusPendingCallWatcher;
 
 namespace TrophyBackend {
+class PipeWireBufferLease;
 
 /**
  * @brief Wayland screen capture using XDG Desktop Portal
@@ -153,9 +154,9 @@ private:
   uint64_t m_negotiatedModifier = 0; // DRM modifier agreed during format negotiation
   uint32_t m_negotiatedFormat = 0;   // DRM format agreed during format negotiation
   // Stage A: DMA-BUF modifiers queried from EGL for XRGB8888, offered to the
-  // compositor tiled-first (LINEAR last). Empty = EGL unavailable, legacy
-  // single modifier-agnostic offer is used.
+  // compositor tiled-first (LINEAR last). Empty = shared memory only.
   std::vector<uint64_t> m_offeredModifiers;
+  std::shared_ptr<PipeWireBufferLease> m_bufferLeases;
   bool m_buffersResultLogged = false;
   // Step-1 observability: per-buffer-type frame accounting for the
   // zero-copy vs. shared-memory paths. -1 = unknown, 0 = shm, 1 = DMA-BUF.

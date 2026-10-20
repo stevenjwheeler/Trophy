@@ -125,7 +125,7 @@ TEST_F(GlobalShortcutTest, DisabledManagerSwallowsActivations) {
   EXPECT_EQ(clipSpy.count(), 1);
 }
 
-TEST_F(GlobalShortcutTest, CatalogueHasBothActions) {
+TEST_F(GlobalShortcutTest, CatalogueUsesOneSharedClipBookmarkKey) {
   const auto defs = GlobalShortcutManager::shortcutDefinitions();
   ASSERT_EQ(defs.size(), 2);
   EXPECT_EQ(defs[0].id, "toggle-recording");
@@ -134,6 +134,21 @@ TEST_F(GlobalShortcutTest, CatalogueHasBothActions) {
       defs[0].options.value("description").toString().isEmpty());
   EXPECT_EQ(defs[1].id, "save-clip");
   EXPECT_EQ(defs[1].options.value("preferred_trigger").toString(), "F10");
+  EXPECT_TRUE(defs[1].options.value("description").toString().contains("bookmark"));
+}
+
+TEST_F(GlobalShortcutTest, RetiredStandaloneBookmarkIdIsIgnored) {
+  GlobalShortcutManager mgr;
+  QSignalSpy spy(&mgr, &GlobalShortcutManager::saveClipRequested);
+  mgr.simulateActivation("add-bookmark");
+  EXPECT_EQ(spy.count(), 0);
+  mgr.setEnabled(false);
+  mgr.simulateActivation("add-bookmark");
+  EXPECT_EQ(spy.count(), 0);
+  PortalShortcut retired;
+  retired.id = "add-bookmark";
+  retired.options["trigger_description"] = "F11";
+  EXPECT_TRUE(GlobalShortcutManager::boundMap({retired}).isEmpty());
 }
 
 TEST_F(GlobalShortcutTest, SimulateActivationRoutesById) {

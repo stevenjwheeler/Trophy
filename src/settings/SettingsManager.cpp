@@ -85,7 +85,6 @@ void SettingsManager::load() {
   m_videoResolution = video["resolution"].toString("native");
   m_fps = video["fps"].toInt(60);
   m_encoder = video["encoder"].toString("auto");
-  m_containerFormat = video["format"].toString("mkv");
   m_encoderPreset = video["preset"].toString("fast");
   m_maxVideoBitrate = video["maxBitrate"].toInt(20000);
   m_useVBR = video["useVBR"].toBool(true);
@@ -131,6 +130,8 @@ void SettingsManager::load() {
   m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
   m_libraryListView = general["libraryListView"].toBool(false);
+  m_shareExportFolder = general["shareExportFolder"].toString();
+  m_shareExportWatermark = general["shareExportWatermark"].toBool(true);
 
   const QJsonObject customization = root["customization"].toObject();
   m_themeMode = customization["themeMode"].toString("dark");
@@ -172,7 +173,6 @@ void SettingsManager::load() {
   emit videoResolutionChanged();
   emit fpsChanged();
   emit encoderChanged();
-  emit containerFormatChanged();
   emit encoderPresetChanged();
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
@@ -203,6 +203,8 @@ void SettingsManager::load() {
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
+  emit shareExportFolderChanged();
+  emit shareExportWatermarkChanged();
   emit themeModeChanged();
   emit accentColorChanged();
   emit replayCachePathChanged();
@@ -228,7 +230,6 @@ void SettingsManager::save() {
   video["resolution"] = m_videoResolution;
   video["fps"] = m_fps;
   video["encoder"] = m_encoder;
-  video["format"] = m_containerFormat;
   video["preset"] = m_encoderPreset;
   video["maxBitrate"] = m_maxVideoBitrate;
   video["useVBR"] = m_useVBR;
@@ -272,6 +273,8 @@ void SettingsManager::save() {
   general["updateCheck"] = m_updateCheckEnabled;
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;
+  general["shareExportFolder"] = m_shareExportFolder;
+  general["shareExportWatermark"] = m_shareExportWatermark;
   root["general"] = general;
 
   QJsonObject customization;
@@ -318,7 +321,6 @@ void SettingsManager::resetToDefaults() {
   emit videoResolutionChanged();
   emit fpsChanged();
   emit encoderChanged();
-  emit containerFormatChanged();
   emit encoderPresetChanged();
   emit maxVideoBitrateChanged();
   emit useVBRChanged();
@@ -353,6 +355,8 @@ void SettingsManager::resetToDefaults() {
   emit notifyStorageChanged();
   emit completionSoundEnabledChanged();
   emit libraryListViewChanged();
+  emit shareExportFolderChanged();
+  emit shareExportWatermarkChanged();
   emit themeModeChanged();
   emit accentColorChanged();
   emit waylandRestoreTokensChanged();
@@ -364,7 +368,6 @@ void SettingsManager::loadDefaults() {
   m_videoResolution = "native";
   m_fps = 60;
   m_encoder = "auto";
-  m_containerFormat = "mkv";
   m_encoderPreset = "fast";
   m_maxVideoBitrate = 20000;
   m_useVBR = true;
@@ -410,6 +413,8 @@ void SettingsManager::loadDefaults() {
   m_notifyStorage = true;
   m_completionSoundEnabled = true;
   m_libraryListView = false;
+  m_shareExportFolder.clear();
+  m_shareExportWatermark = true;
   m_themeMode = "dark";
   m_accentColor = "rose";
 }
@@ -480,14 +485,6 @@ QString SettingsManager::encoderDisplayName() const {
   }
 
   return m_encoder;
-}
-
-void SettingsManager::setContainerFormat(const QString &format) {
-  if (m_containerFormat != format) {
-    m_containerFormat = format;
-    save();
-    emit containerFormatChanged();
-  }
 }
 
 void SettingsManager::setEncoderPreset(const QString &preset) {
@@ -679,6 +676,20 @@ void SettingsManager::setLibraryListView(bool enabled) {
     save();
     emit libraryListViewChanged();
   }
+}
+
+void SettingsManager::setShareExportFolder(const QString &folder) {
+  if (m_shareExportFolder == folder) return;
+  m_shareExportFolder = folder;
+  save();
+  emit shareExportFolderChanged();
+}
+
+void SettingsManager::setShareExportWatermark(bool enabled) {
+  if (m_shareExportWatermark == enabled) return;
+  m_shareExportWatermark = enabled;
+  save();
+  emit shareExportWatermarkChanged();
 }
 
 void SettingsManager::setThemeMode(const QString &mode) {

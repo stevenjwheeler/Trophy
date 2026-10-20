@@ -6,9 +6,9 @@
  */
 
 #include "RecordingManager.h"
+#include "library/RecordingAnnotations.h"
 #include "RecordingSession.h"
 #include "CallbackSink.h"
-#include "CircularFrameBuffer.h"
 #include "StorageManager.h"
 #include "WindowService.h"
 #include "audio/AudioMixer.h"
@@ -41,6 +41,15 @@ extern "C" {
 #include <atomic>
 
 namespace TrophyBackend {
+
+bool RecordingManager::addBookmark() {
+  if (!isRecording() || !m_session || m_currentFilePath.isEmpty()) return false;
+  return RecordingAnnotations::addBookmark(m_currentFilePath, m_session->videoPositionMs());
+}
+
+QVariantMap RecordingManager::captureHealth() const {
+  return isRecording() && m_session ? m_session->captureHealth() : QVariantMap{};
+}
 
 RecordingManager::RecordingManager(QObject *parent) : QObject(parent) {
   // Progress update timer
@@ -157,8 +166,9 @@ void RecordingManager::startRecording(const QString &gameName,
   if (!m_storage->enforceStorageLimit(false, true)) {
     qWarning() << "Storage limit cannot be satisfied, aborting recording start";
     emit recordingError("Storage full: recordings exceed the storage limit. "
-                        "Enable auto-cleanup or delete old recordings to "
-                        "record again.");
+                        "Enable auto-cleanup, delete captures or increase the limit. "
+                        "Protected captures are never auto-deleted; unprotect them "
+                        "if you want cleanup to remove them.");
     setState(RecordingState::Idle);
     return;
   }
@@ -832,12 +842,10 @@ bool RecordingManager::buildPipeline() {
       192, // Audio bitrate: hard-coded to 192 kbps (CD quality)
       activeAudioTrackCount, outputMetadata);
 
-  // Create a FrameDispatcher and provide a CircularFrameBuffer sink for clips
+  // The encoded ReplayManager owns replay history. Do not retain capture
+  // buffers in an unused raw-frame ring: that would exhaust the compositor's
+  // finite DMA-BUF pool and stall capture.
   auto dispatcher = std::make_shared<TrophyBackend::FrameDispatcher>();
-  auto bufferSeconds = std::max(1, m_settings->clipBufferSeconds());
-  auto circular = std::make_shared<TrophyBackend::CircularFrameBuffer>(static_cast<size_t>(m_settings->fps() * bufferSeconds));
-  circular->start();
-  dispatcher->registerSink(circular);
   // Register encoder sink that forwards frames to the recording session queue
   // Detach-before-destroy: the capture callback is detached in
   // RecordingSession::stop() (mutex-guarded across set and invoke), and the
@@ -864,7 +872,9 @@ bool RecordingManager::buildPipeline() {
           vf.drmFormat = frame.format;
           vf.drmModifier = frame.drmModifier;
           vf.dmaBufStride = frame.dmaBufStride;
-          vf.dmaBufOffset = frame.dmaBufOffset;
+           vf.dmaBufOffset = frame.dmaBufOffset;
+           vf.bufferLease = frame.bufferLease;
+           vf.requestCpuFallback = frame.requestCpuFallback;
           TrophyBackend::QueuedFrame qf(vf);
           bool pushed = weakSelf->m_session->pushQueuedFrame(std::move(qf));
           // Per-frame success logs flood at 60fps; always log drops, and
@@ -890,6 +900,7 @@ bool RecordingManager::buildPipeline() {
   m_session->setVoiceChatApp(vcApp);
   m_session->setVoiceTrack(voiceTrack);
   m_session->setGameIsFallback(gameIsFallback);
+  m_session->setDesktopAudio(m_preparedAudio.mode == "desktop");
 
 #ifdef HAVE_PIPEWIRE
   // True app binds adopt their serial on the first retry tick (so later
@@ -933,6 +944,9 @@ bool RecordingManager::teardownPipeline() {
   if (m_session) {
     m_session->stop();
     sessionSucceeded = m_session->outputSucceeded();
+    if (sessionSucceeded && !m_currentFilePath.isEmpty() &&
+        !RecordingAnnotations::setAudioRouting(m_currentFilePath, m_session->audioHistory()))
+      qWarning() << "Could not save audio source history:" << m_currentFilePath;
     m_session.reset();
   }
 
@@ -1023,7 +1037,8 @@ void RecordingManager::applyVoiceChatApp() {
 
 QString RecordingManager::generateOutputPath() const {
   QString basePath = m_settings->recordingsPath();
-  QString format = m_settings->containerFormat();
+  // Capture always uses crash-resilient MKV; share export creates MP4 copies.
+  const QString format = QStringLiteral("mkv");
   QString timestamp =
       QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
 

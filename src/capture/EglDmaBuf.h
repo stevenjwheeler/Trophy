@@ -49,7 +49,7 @@ inline EGLDisplay openEglDisplayForNode(const char *drmNodePath) {
       if (queryDevices(static_cast<EGLint>(devices.size()), devices.data(),
                        &numDevices)) {
         int best = -1, bestScore = -1;
-        for (int i = 0; i < numDevices; ++i) {
+        for (int i = 0; i < std::min<int>(numDevices, devices.size()); ++i) {
           const char *node =
               queryDeviceString(devices[i], EGL_DRM_DEVICE_FILE_EXT);
           const char *vendor =
@@ -87,9 +87,9 @@ inline EGLDisplay openEglDisplayForNode(const char *drmNodePath) {
   return eglGetDisplay(EGL_DEFAULT_DISPLAY);
 }
 
-// Ask the EGL driver which DMA-BUF modifiers it can allocate for
-// drmFormat, in driver-preferred order. Empty when EGL or the modifiers
-// extension is unavailable (caller falls back to the legacy offer).
+// Ask the EGL driver which DMA-BUF modifiers it can import for drmFormat.
+// This is a consumer capability, not a guarantee the compositor can allocate
+// them. Empty when unavailable (caller offers shared memory only).
 inline std::vector<uint64_t> queryDmaBufModifiers(uint32_t drmFormat) {
   std::vector<uint64_t> out;
   EGLDisplay dpy = openEglDisplayForNode("/dev/dri/renderD128");
@@ -120,7 +120,7 @@ inline std::vector<uint64_t> queryDmaBufModifiers(uint32_t drmFormat) {
     if (queryFn(dpy, static_cast<EGLint>(drmFormat), count, mods.data(),
                 nullptr, &got) == EGL_TRUE &&
         got > 0) {
-      out.assign(mods.begin(), mods.begin() + got);
+      out.assign(mods.begin(), mods.begin() + std::min(got, count));
     }
   }
   eglTerminate(dpy);

@@ -30,6 +30,7 @@
     <releases>
         <!-- Keep in sync with the latest release tag (CI stamps binaries
              from tags; this file is manual). -->
+        <release version="0.9.6" date="2026-10-19"/>
         <release version="0.9.5" date="2026-10-17"/>
     </releases>
 

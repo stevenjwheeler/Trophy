@@ -38,7 +38,9 @@ void FrameDispatcher::dispatch(const FrameDescriptor &frame) {
     }
     FrameDescriptor copy(dupfd, frame.width, frame.height, frame.format,
                              frame.pts, frame.pixelFormat, frame.drmModifier,
-                             frame.dmaBufStride, frame.dmaBufOffset);
+                              frame.dmaBufStride, frame.dmaBufOffset);
+    copy.bufferLease = frame.bufferLease;
+    copy.requestCpuFallback = frame.requestCpuFallback;
     bool ok = sink->tryEnqueue(std::move(copy));
     if (!ok) {
       // sink full or rejected; close dupfd by letting destructor close when leaving scope

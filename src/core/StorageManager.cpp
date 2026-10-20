@@ -6,6 +6,7 @@
  */
 
 #include "StorageManager.h"
+#include "library/RecordingAnnotations.h"
 #include "library/RecordingSidecars.h"
 
 #include <QDateTime>
@@ -85,7 +86,41 @@ StorageManager::StorageManager(const QString &storagePath, QObject *parent)
   refresh();
 }
 
-StorageManager::~StorageManager() = default;
+StorageManager::~StorageManager() {
+  for (auto &worker : m_deleteWorkers) if (worker.valid()) worker.wait();
+}
+
+bool StorageManager::reserveRecordings(const QStringList &paths) {
+  if (paths.isEmpty() || bulkDeleteInProgress()) return false;
+  QSet<QString> canonical;
+  const QString active = QFileInfo(m_excludedRecordingPath).canonicalFilePath();
+  for (const auto &path : paths) {
+    const QFileInfo info(path);
+    const QString key = info.canonicalFilePath();
+    if (!isWithinStoragePath(path, m_storagePath) || !info.isFile() ||
+        info.isSymLink() || key.isEmpty() || key == active ||
+        m_reservedRecordings.contains(key)) return false;
+    canonical.insert(key);
+  }
+  m_reservedRecordings.unite(canonical);
+  for (const auto &path : paths)
+    m_reservationKeys.insert(QFileInfo(path).absoluteFilePath(), QFileInfo(path).canonicalFilePath());
+  return true;
+}
+
+void StorageManager::releaseRecordings(const QStringList &paths) {
+  for (const auto &path : paths) {
+    // Reservations retain the original absolute path even after unlink.
+    const QString key = m_reservationKeys.take(QFileInfo(path).absoluteFilePath());
+    if (!key.isEmpty()) m_reservedRecordings.remove(key);
+  }
+}
+
+bool StorageManager::recordingInUse(const QString &path) const {
+  const QString key = QFileInfo(path).canonicalFilePath();
+  return m_reservedRecordings.contains(key) ||
+      (!m_excludedRecordingPath.isEmpty() && key == QFileInfo(m_excludedRecordingPath).canonicalFilePath());
+}
 
 void StorageManager::setStoragePath(const QString &path) {
   if (m_storagePath != path) {
@@ -220,6 +255,7 @@ void StorageManager::notifyLimitCannotCleanup(bool force) {
 }
 
 bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
+  if (m_bulkDeletesActive > 0) return !isOverLimit();
   if (m_enforceInFlight) {
     qWarning() << "enforceStorageLimit re-entered while a pass is in flight; "
                   "skipping overlapping pass";
@@ -279,9 +315,11 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
       m_excludedRecordingPath.isEmpty()
           ? QString()
           : QFileInfo(m_excludedRecordingPath).canonicalFilePath();
-  auto isExcluded = [&excludedCanonical](const QString &path) {
-    return !excludedCanonical.isEmpty() &&
-           QFileInfo(path).canonicalFilePath() == excludedCanonical;
+  auto isExcluded = [this, &excludedCanonical](const QString &path) {
+    return RecordingAnnotations::isProtected(path) ||
+           m_reservedRecordings.contains(QFileInfo(path).canonicalFilePath()) ||
+           (!excludedCanonical.isEmpty() &&
+            QFileInfo(path).canonicalFilePath() == excludedCanonical);
   };
 
   qint64 runningSize = m_usedSize;
@@ -293,7 +331,7 @@ bool StorageManager::enforceStorageLimit(bool allowDelete, bool forceNotify) {
       break;
     }
     if (isExcluded(entry.path)) {
-      qDebug() << "Not deleting current recording:" << entry.path;
+      qDebug() << "Not deleting protected or current recording:" << entry.path;
       continue;
     }
     const QFileInfo fresh(entry.path);
@@ -373,6 +411,9 @@ bool StorageManager::deleteRecording(const QString &filePath) {
 
 bool StorageManager::deleteRecordingNoRefresh(const QString &filePath) {
   QFileInfo info(filePath);
+  if (m_reservedRecordings.contains(info.canonicalFilePath())) return false;
+  if (!m_excludedRecordingPath.isEmpty() && info.canonicalFilePath() ==
+      QFileInfo(m_excludedRecordingPath).canonicalFilePath()) return false;
 
   // Security check: ensure file and any symlink target are within storage.
   if (!isWithinStoragePath(filePath, m_storagePath)) {
@@ -389,6 +430,7 @@ bool StorageManager::deleteRecordingNoRefresh(const QString &filePath) {
   if (file.remove()) {
     qDebug() << "Deleted recording:" << filePath;
     RecordingSidecars::removeForVideo(filePath);
+    RecordingAnnotations::remove(filePath);
     emit recordingDeleted(filePath);
     return true;
   }
@@ -424,6 +466,8 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
 
   // Snapshot for the worker: m_storagePath lives on the GUI thread.
   const QString storagePath = m_storagePath;
+  const auto reserved = m_reservedRecordings;
+  const QString active = QFileInfo(m_excludedRecordingPath).canonicalFilePath();
   const int total = filePaths.size();
 
   ++m_bulkDeletesActive;
@@ -435,7 +479,11 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
   // Guarded by QPointer like Recording::loadMetadata: the manager is
   // app-owned, but a late completion must never touch a dead object.
   QPointer<StorageManager> self(this);
-  QThreadPool::globalInstance()->start([self, filePaths, storagePath, total]() {
+  std::erase_if(m_deleteWorkers, [](auto &worker) {
+    return worker.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  });
+  m_deleteWorkers.emplace_back(std::async(std::launch::async,
+      [self, filePaths, storagePath, total, reserved, active]() {
     QStringList deleted;
     int done = 0;
     for (const QString &filePath : filePaths) {
@@ -451,13 +499,17 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
       const QFileInfo info(filePath);
       // Same guards as deleteRecording(): stay inside the storage
       // path, skip missing files.
-      if (!isWithinStoragePath(filePath, storagePath)) {
+      if (reserved.contains(info.canonicalFilePath()) ||
+          (!active.isEmpty() && info.canonicalFilePath() == active)) {
+        qWarning() << "Recording is in use:" << filePath;
+      } else if (!isWithinStoragePath(filePath, storagePath)) {
         qWarning() << "Refusing to delete file outside storage path:"
                    << filePath;
       } else if (!info.exists()) {
         qWarning() << "File does not exist:" << filePath;
       } else if (QFile::remove(filePath)) {
         RecordingSidecars::removeForVideo(filePath);
+        RecordingAnnotations::remove(filePath);
         deleted.append(filePath);
       } else {
         qWarning() << "Failed to delete recording:" << filePath;
@@ -480,7 +532,7 @@ void StorageManager::deleteRecordings(const QStringList &filePaths) {
           }
         },
         Qt::QueuedConnection);
-  });
+  }));
 }
 
 void StorageManager::finishBulkDelete(const QStringList &deletedPaths,
@@ -515,6 +567,8 @@ bool StorageManager::deleteOldestRecording() {
   // one. Giving up at the first excluded entry would disable auto-cleanup
   // entirely whenever the active recording happens to be the oldest file.
   for (const QString &candidate : recordings) {
+    if (m_reservedRecordings.contains(QFileInfo(candidate).canonicalFilePath())) continue;
+    if (RecordingAnnotations::isProtected(candidate)) continue;
     if (!excludedCanonical.isEmpty() &&
         QFileInfo(candidate).canonicalFilePath() == excludedCanonical) {
       qDebug() << "Not deleting current recording:" << candidate;
@@ -532,6 +586,7 @@ QString StorageManager::renameRecording(const QString &filePath,
                                         const QString &newTitle) {
   QFileInfo info(filePath);
   const QString oldAbsolute = info.absoluteFilePath();
+  if (m_reservedRecordings.contains(info.canonicalFilePath()) || bulkDeleteInProgress()) return {};
 
   // Security check: ensure file and any symlink target are within storage.
   if (!isWithinStoragePath(filePath, m_storagePath)) {
@@ -599,12 +654,20 @@ QString StorageManager::renameRecording(const QString &filePath,
     }
   }
 
+  // Publish a second copy before renaming the video. The old annotations
+  // stay until success, keeping protection safe across interruption.
+  if (!RecordingAnnotations::prepareRename(oldAbsolute, newAbsolute)) {
+    qWarning() << "Cannot move recording protection/bookmarks:" << oldAbsolute;
+    return {};
+  }
   if (!QFile::rename(oldAbsolute, newAbsolute)) {
+    RecordingAnnotations::remove(newAbsolute);
     qWarning() << "Failed to rename recording:" << oldAbsolute << "->"
                << newAbsolute;
     return QString();
   }
 
+  RecordingAnnotations::remove(oldAbsolute);
   RecordingSidecars::renameForVideo(oldAbsolute, newAbsolute);
 
   qDebug() << "Renamed recording:" << oldAbsolute << "->" << newAbsolute;

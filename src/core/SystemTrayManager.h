@@ -58,7 +58,6 @@ signals:
   void startRecordingRequested();
   void stopRecordingRequested();
   void saveReplayRequested();
-  void openRecordingsRequested();
   void quitRequested();
 
 private slots:
@@ -74,7 +73,6 @@ private:
   QAction *m_toggleWindowAction = nullptr;
   QAction *m_recordAction = nullptr;
   QAction *m_replayAction = nullptr;
-  QAction *m_openFolderAction = nullptr;
   QAction *m_quitAction = nullptr;
 
   bool m_isRecording = false;

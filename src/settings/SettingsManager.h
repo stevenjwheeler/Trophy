@@ -31,8 +31,6 @@ class SettingsManager : public QObject {
   Q_PROPERTY(
       QString encoder READ encoder WRITE setEncoder NOTIFY encoderChanged)
   Q_PROPERTY(QString encoderDisplayName READ encoderDisplayName NOTIFY encoderChanged)
-  Q_PROPERTY(QString containerFormat READ containerFormat WRITE
-                 setContainerFormat NOTIFY containerFormatChanged)
   Q_PROPERTY(QString encoderPreset READ encoderPreset WRITE setEncoderPreset
                  NOTIFY encoderPresetChanged)
   Q_PROPERTY(int maxVideoBitrate READ maxVideoBitrate WRITE setMaxVideoBitrate
@@ -115,6 +113,10 @@ class SettingsManager : public QObject {
                  NOTIFY completionSoundEnabledChanged)
   // Dashboard library layout: false = grid, true = list. Persisted so the
   // dashboard reopens in the user's last-used mode.
+  Q_PROPERTY(QString shareExportFolder READ shareExportFolder WRITE setShareExportFolder
+                  NOTIFY shareExportFolderChanged)
+  Q_PROPERTY(bool shareExportWatermark READ shareExportWatermark WRITE setShareExportWatermark
+                  NOTIFY shareExportWatermarkChanged)
   Q_PROPERTY(bool libraryListView READ libraryListView WRITE setLibraryListView
                   NOTIFY libraryListViewChanged)
   Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
@@ -165,8 +167,6 @@ public:
   void setEncoder(const QString &encoder);
   QString encoderDisplayName() const;
 
-  QString containerFormat() const { return m_containerFormat; }
-  void setContainerFormat(const QString &format);
 
   QString encoderPreset() const { return m_encoderPreset; }
   void setEncoderPreset(const QString &preset);
@@ -246,6 +246,10 @@ public:
 
   // Dashboard library layout (false = grid, true = list).
   bool libraryListView() const { return m_libraryListView; }
+  QString shareExportFolder() const { return m_shareExportFolder; }
+  bool shareExportWatermark() const { return m_shareExportWatermark; }
+  void setShareExportWatermark(bool enabled);
+  void setShareExportFolder(const QString &folder);
   void setLibraryListView(bool enabled);
 
   QString themeMode() const { return m_themeMode; }
@@ -276,7 +280,6 @@ signals:
   void videoResolutionChanged();
   void fpsChanged();
   void encoderChanged();
-  void containerFormatChanged();
   void encoderPresetChanged();
   void maxVideoBitrateChanged();
   void useVBRChanged();
@@ -313,6 +316,8 @@ signals:
   void notifyStorageChanged();
   void completionSoundEnabledChanged();
   void libraryListViewChanged();
+  void shareExportFolderChanged();
+  void shareExportWatermarkChanged();
   void themeModeChanged();
   void accentColorChanged();
   void replayCachePathChanged();
@@ -334,7 +339,6 @@ private:
   QString m_videoResolution = "native";
   int m_fps = 60;
   QString m_encoder = "auto";        // auto, nvenc, vaapi, x264
-  QString m_containerFormat = "mkv"; // mkv, mp4
   QString m_encoderPreset = "fast";
   int m_maxVideoBitrate = 20000;
   bool m_useVBR = true;
@@ -386,6 +390,8 @@ private:
   bool m_completionSoundEnabled = true;
   // Dashboard library layout (false = grid, true = list).
   bool m_libraryListView = false;
+  QString m_shareExportFolder;
+  bool m_shareExportWatermark = true;
   QString m_themeMode = "dark";
   QString m_accentColor = "rose";
   

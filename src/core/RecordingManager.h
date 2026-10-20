@@ -13,6 +13,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantMap>
 #include <functional>
 #include <future>
 #include <memory>
@@ -92,6 +93,8 @@ public:
   Q_INVOKABLE void startRecording(const QString &gameName = QString(),
                                   unsigned long windowId = 0);
   Q_INVOKABLE void stopRecording();
+  Q_INVOKABLE bool addBookmark();
+  QVariantMap captureHealth() const;
 
   /**
    * @brief Whether a portal source label carries no real identity.
@@ -139,6 +142,7 @@ private slots:
 
 private:
   friend class ::RecordingManagerTest;
+  friend class ApplicationAudioProbeTest;
 
   // Private injection seam for lifecycle tests; normal starts use CaptureFactory.
   std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;

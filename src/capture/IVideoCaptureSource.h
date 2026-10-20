@@ -11,6 +11,7 @@
 #include <QSize>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <unistd.h> // ::dup(), ::close()
 #include <vector>
 
@@ -34,14 +35,17 @@ struct VideoFrame {
   uint64_t drmModifier = 0;
   int dmaBufStride = 0;
   int dmaBufOffset = 0;
+  std::shared_ptr<void> bufferLease; // delays producer reuse, separate from fd ownership
+  std::function<void()> requestCpuFallback;
 };
 
 /**
  * @brief Frame with owned data for queuing
  *
  * For DMA-BUF frames the pixel data lives in GPU memory (no CPU pointer).
- * We dup() the fd on construction so PipeWire can recycle its buffer as soon
- * as the capture callback returns.  The destructor closes the duped fd.
+ * We dup() the fd on construction and retain the producer buffer lease so
+ * PipeWire cannot overwrite pixels before consumption. The destructor closes
+ * the duped fd and releases the lease.
  * Copying is deleted to prevent double-close; use move semantics instead.
  */
 struct QueuedFrame : public VideoFrame {
@@ -53,7 +57,7 @@ struct QueuedFrame : public VideoFrame {
                        other.data + (size_t(other.stride) * other.height));
       data = ownedData.data();
     } else if (other.isDmaBuf && other.dmaBufFd >= 0) {
-      // Dup so PipeWire can recycle its buffer immediately after our callback
+      // Dup pins allocation lifetime; bufferLease separately prevents reuse.
       dmaBufFd = ::dup(other.dmaBufFd);
       if (dmaBufFd < 0)
         isDmaBuf = false; // dup failed – frame is unusable, drop silently

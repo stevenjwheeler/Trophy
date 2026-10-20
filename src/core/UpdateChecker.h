@@ -81,7 +81,7 @@ private:
   QTimer m_requestTimeout;
 
   static constexpr const char *kApiUrl =
-      "https://api.github.com/repos/OasisLab-Software/Trophy/releases/latest";
+      "https://api.github.com/repos/stevenjwheeler/Trophy/releases/latest";
 };
 
 } // namespace TrophyBackend
