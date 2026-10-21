@@ -12,6 +12,10 @@
 #include <QQuickWindow>
 #include <QUrl>
 #include <QSignalSpy>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QElapsedTimer>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
@@ -35,6 +39,7 @@ class PlayerLibraryFake : public QObject {
 public:
   QQmlPropertyMap entry;
   bool hasEntry = false;
+  bool realMedia = false;
   QString bookmarkedPath;
   qint64 bookmarkedPosition = -1;
   int removedIndex = -1;
@@ -62,7 +67,9 @@ public:
   bool clipSaving() const { return false; }
   // Keep pipelines idle: this suite tests the page's probe lifecycle, not
   // decoding, and never passes the fake file paths to FFmpeg.
-  Q_INVOKABLE QUrl localFileUrl(const QString &) const { return {}; }
+  Q_INVOKABLE QUrl localFileUrl(const QString &path) const {
+    return realMedia ? QUrl::fromLocalFile(path) : QUrl{};
+  }
   // The file-info dialog looks the open path up in the library; unknown
   // here, so its rows fall back to path-derived text.
   Q_INVOKABLE QObject *getRecording(const QString &) { return hasEntry ? &entry : nullptr; }
@@ -149,6 +156,46 @@ TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   EXPECT_FALSE(pending());
   EXPECT_EQ(count(), 0);
   EXPECT_EQ(waveform.requests, 2);
+}
+
+TEST_F(PlayerProbeTest, SeekAfterEndResumesButPausedSeekStaysPaused) {
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP() << "ffmpeg fixture tool unavailable";
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("end.mkv");
+  QProcess generate;
+  generate.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=15", "-t", "1", "-c:v", "mpeg4", path});
+  ASSERT_TRUE(generate.waitForFinished(15000));
+  ASSERT_EQ(generate.exitCode(), 0) << generate.readAllStandardError().toStdString();
+  library.realMedia = true;
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  open(path);
+  emit waveform.audioTrackCountReady(path, requestId(), 0);
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(video, nullptr);
+  auto waitFor = [](auto predicate) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!predicate() && timer.elapsed() < 10000) QTest::qWait(20);
+    return predicate();
+  };
+  ASSERT_TRUE(waitFor([&] { return video->property("atEnd").toBool(); }));
+  auto *output = video->findChild<QObject *>("playerVideoOutput");
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(output->property("endOfStreamPolicy").toInt(), 1);
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(200))));
+  ASSERT_TRUE(waitFor([&] { return video->property("playing").toBool(); }));
+  EXPECT_FALSE(video->property("atEnd").toBool());
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "pauseAll"));
+  ASSERT_TRUE(waitFor([&] { return !video->property("playing").toBool(); }));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(100))));
+  QTest::qWait(150);
+  EXPECT_FALSE(video->property("playing").toBool());
+  close();
 }
 
 TEST_F(PlayerProbeTest, BookmarkListReactsAndRangeClampsAtFileEdges) {

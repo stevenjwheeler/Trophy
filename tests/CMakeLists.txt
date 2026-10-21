@@ -57,7 +57,7 @@ add_executable(test_PlayerProbe test_PlayerProbe.cpp)
 target_compile_definitions(test_PlayerProbe PRIVATE
     PLAYER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/PlayerPage.qml"
     AUDIO_METER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/components/AudioLevelMeter.qml")
-target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test Qt6::Multimedia)
 gtest_discover_tests(test_PlayerProbe)
 
 # Background low-resolution preview generation and cache lifecycle.

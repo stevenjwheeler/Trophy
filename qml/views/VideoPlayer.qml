@@ -21,6 +21,7 @@ Rectangle {
     // read these and drive seek()).
     property alias position: mediaPlayer.position
     property alias duration: mediaPlayer.duration
+    readonly property bool atEnd: mediaPlayer.mediaStatus === MediaPlayer.EndOfMedia
 
     // Transport is page-driven: the player screen runs one
     // audio-only MediaPlayer per track alongside this video
@@ -76,6 +77,8 @@ Rectangle {
 
     function stop() {
         mediaPlayer.stop();
+        if (typeof videoOutput.clearOutput === "function")
+            videoOutput.clearOutput();
     }
 
     function snapshot(filePath) {
@@ -115,8 +118,15 @@ Rectangle {
 
     VideoOutput {
         id: videoOutput
+        objectName: "playerVideoOutput"
 
         anchors.fill: parent
+        // Qt 6.9+ clears the output at EOF by default. Keep the final
+        // decoded frame instead; older Qt versions lack this policy API.
+        Component.onCompleted: {
+            if (typeof videoOutput.endOfStreamPolicy !== "undefined")
+                videoOutput.endOfStreamPolicy = VideoOutput.KeepLastFrame
+        }
     }
 
     // Hover anywhere over the player reveals the controls

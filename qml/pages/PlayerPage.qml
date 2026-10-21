@@ -503,12 +503,17 @@ Page {
     }
 
     function seekAll(ms) {
+        // Seeking clears EndOfMedia, so remember it before moving any clock.
+        // Restart every pipeline after EOF; an ordinary paused seek stays paused.
+        var resumeAfterEnd = player.atEnd && ms < player.duration
         player.seek(ms)
         for (var i = 0; i < audioPipelines.count; i++) {
             var p = audioPipelines.objectAt(i)
             if (p && p.duration > 0)
                 p.position = Math.max(0, Math.min(p.duration, ms))
         }
+        if (resumeAfterEnd)
+            playAll()
     }
 
     Shortcut {
@@ -778,6 +783,7 @@ Page {
 
         VideoPlayer {
             id: player
+            objectName: "playerVideo"
             Layout.fillWidth: true
             Layout.fillHeight: true
             volumeLevel: playerPage.masterVolume
