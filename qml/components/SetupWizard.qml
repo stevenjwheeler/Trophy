@@ -676,19 +676,26 @@ Rectangle {
                                         TrophyRadioButton { text: qsTr("AV1 — best quality"); checked: stepHwScroll.currentCodec() === "av1"; enabled: stepHwScroll.codecAvailable("av1") && !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("av1") }
                                     }
                                     RowLayout {
+                                        id: dmaBufRow
+                                        objectName: "wizardDmaBufOption"
+                                        readonly property bool softwareEncoder: settingsManager &&
+                                            (settingsManager.encoder === "x264" ||
+                                             (settingsManager.encoder === "auto" && hardwareInfo &&
+                                              hardwareInfo.recommendedEncoderName === "x264"))
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
+                                        enabled: !softwareEncoder && (hardwareInfo ? hardwareInfo.dmaBufAvailable : false) && !(recordingManager && recordingManager.isRecording)
+                                        opacity: enabled ? 1.0 : 0.5
                                         TrophySwitch {
+                                            objectName: "wizardDmaBufSwitch"
                                             checked: settingsManager ? settingsManager.useDmaBuf : true
-                                            enabled: (hardwareInfo ? hardwareInfo.dmaBufAvailable : false) && !(recordingManager && recordingManager.isRecording)
-                                            opacity: enabled ? 1.0 : 0.5
                                             onToggled: if (settingsManager) settingsManager.useDmaBuf = checked
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 0
                                             Label { text: qsTr("Zero-copy capture"); font.weight: Font.Bold; color: Theme.textColor }
-                                            Label { text: (hardwareInfo && hardwareInfo.dmaBufAvailable) ? qsTr("Frames go straight to the encoder.") : qsTr("Not available on this system."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                            Label { text: dmaBufRow.softwareEncoder ? qsTr("Software encoding uses shared memory capture.") : (hardwareInfo && hardwareInfo.dmaBufAvailable) ? qsTr("Frames go straight to the encoder.") : qsTr("Not available on this system."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                                         }
                                     }
                                 }

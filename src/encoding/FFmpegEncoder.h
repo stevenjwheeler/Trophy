@@ -24,6 +24,7 @@ namespace TrophyBackend {
 // Stage B import state (defined in FFmpegEncoder.cpp; needs no CUDA
 // toolkit headers here).
 struct CudaImportState;
+struct VaapiImportState;
 
 /**
  * @brief FFmpeg-based video encoder implementation
@@ -56,15 +57,19 @@ public:
   // vs. the CPU fallback, and inputs that produced no frame at all.
   int64_t zeroCopyFrames() const { return m_zeroCopyFrames.load(); }
   int64_t eglImportFrames() const { return m_eglImportFrames.load(); }
+  int64_t gpuScaledFrames() const { return m_gpuScaledFrames.load(); }
+  int64_t vaapiVppFrames() const { return m_vaapiVppFrames.load(); }
   int64_t fallbackFrames() const { return m_fallbackFrames.load(); }
   int64_t droppedFrames() const { return m_droppedFrames.load(); }
 
 private:
+  friend class FFmpegEncoderTestAccess;
   bool initializeCodec(const EncoderConfig &config);
   bool initializeHardwareContext();
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
   void logSummary();
+  bool convertSoftwareFrame(const VideoFrame &frame);
 
   int m_lastInputWidth = 0;
   int m_lastInputHeight = 0;
@@ -92,12 +97,15 @@ private:
   // which work on atomics via store/fetch-add/load-conversion.)
   std::atomic<int64_t> m_zeroCopyFrames{0};
   std::atomic<int64_t> m_eglImportFrames{0};
+  std::atomic<int64_t> m_gpuScaledFrames{0};
+  std::atomic<int64_t> m_vaapiVppFrames{0};
   std::atomic<int64_t> m_fallbackFrames{0};
   std::atomic<int64_t> m_droppedFrames{0};
   bool m_lastMapSucceeded = true; // suppress transition spam; first failure logs
   bool m_lastImportSucceeded = true;
   bool m_summaryLogged = false;
   std::unique_ptr<CudaImportState> m_cudaImport;
+  std::unique_ptr<VaapiImportState> m_vaapiImport;
 };
 
 } // namespace TrophyBackend

@@ -131,6 +131,7 @@ endif()
 # Common includes and link libraries
 set(TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/src
+    ${VAAPI_INCLUDE_DIRS}
 )
 
 # Warning flags for every test target (warnings only — never -Werror, so
@@ -652,6 +653,13 @@ target_link_libraries(test_ThumbnailGenerator PRIVATE
 )
 gtest_discover_tests(test_ThumbnailGenerator)
 
+if(EGL_FOUND)
+    add_executable(test_EglDisplayLease test_EglDisplayLease.cpp)
+    target_include_directories(test_EglDisplayLease PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_EglDisplayLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::EGL)
+    gtest_discover_tests(test_EglDisplayLease)
+endif()
+
 # --- DmaBufCudaImport (Stage B: real GBM DMA-BUF -> NVENC EGL import;
 # skips without NVIDIA EGL / GBM / NVENC) ---
 if(EGL_FOUND AND GBM_FOUND)
@@ -679,6 +687,13 @@ target_link_libraries(test_DmaBufCudaImport PRIVATE
     PkgConfig::GBM
 )
 gtest_discover_tests(test_DmaBufCudaImport)
+endif()
+
+if(VAAPI_FOUND)
+    add_executable(test_VaapiVideoProcessor test_VaapiVideoProcessor.cpp)
+    target_include_directories(test_VaapiVideoProcessor PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_VaapiVideoProcessor PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
+    gtest_discover_tests(test_VaapiVideoProcessor)
 endif()
 
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---

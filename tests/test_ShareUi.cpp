@@ -187,6 +187,105 @@ TEST_F(SharingUiTest, VoiceAppOnlyExplicitValidActivationChangesPreference) {
   EXPECT_EQ(object->property("displayText").toString(), "None");
 }
 
+TEST_F(SharingUiTest, DmaBufOptionsDisableForSoftwareWithoutChangingSavedPreference) {
+  auto read = [](const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString{};
+  };
+  const auto settings = read(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  const auto wizard = read(QString(SHARING_QML_DIR) + "/SetupWizard.qml");
+  ASSERT_FALSE(settings.isEmpty()); ASSERT_FALSE(wizard.isEmpty());
+  auto block = [](const QString &source, int start) {
+    if (start < 0) return QString{};
+    int depth = 0;
+    for (auto i = source.indexOf('{', start); i < source.size(); ++i) {
+      if (source[i] == '{') ++depth;
+      if (source[i] == '}' && --depth == 0) return source.mid(start, i - start + 1);
+    }
+    return QString{};
+  };
+  const auto rowType = block(settings, settings.indexOf("component SettingRow:"));
+  ASSERT_FALSE(rowType.isEmpty());
+  for (bool isWizard : {false, true}) {
+    const auto &source = isWizard ? wizard : settings;
+    const QString prefix = isWizard ? "wizard" : "settings";
+    SCOPED_TRACE(prefix.toStdString());
+    const auto marker = source.indexOf("objectName: \"" + prefix + "DmaBufOption\"");
+    ASSERT_GE(marker, 0);
+    const auto row = block(source, source.lastIndexOf(isWizard ? "RowLayout {" : "SettingRow {", marker));
+    ASSERT_FALSE(row.isEmpty());
+    QQmlComponent component(&engine);
+    component.setData((QStringLiteral(R"(
+      import QtQuick
+      import QtQuick.Controls
+      import QtQuick.Layouts
+      import "../controls"
+      import "../styles"
+      Item {
+        width: 640; height: 200
+        QtObject { id: settingsManager; objectName: "preferences"
+          property string encoder: "nvenc_h264"
+          property bool useDmaBuf: true
+        }
+        QtObject { id: recordingManager; objectName: "recorder"
+          property bool isRecording: false
+        }
+        QtObject { id: hardwareInfo; objectName: "hardware"
+          property string recommendedEncoderName: "nvenc_h264"
+          property bool dmaBufAvailable: true
+        }
+    )") + rowType + "\nColumnLayout { width: parent.width\n" + row + "\n}}" ).toUtf8(),
+        QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/DmaBufOptionsProbe.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+    ASSERT_TRUE(object) << component.errorString().toStdString();
+    auto *preferences = object->findChild<QObject *>("preferences");
+    auto *recorder = object->findChild<QObject *>("recorder");
+    auto *hardware = object->findChild<QObject *>("hardware");
+    auto *option = object->findChild<QQuickItem *>(prefix + "DmaBufOption");
+    auto *toggle = object->findChild<QQuickItem *>(prefix + "DmaBufSwitch");
+    ASSERT_NE(preferences, nullptr); ASSERT_NE(recorder, nullptr); ASSERT_NE(hardware, nullptr);
+    ASSERT_NE(option, nullptr); ASSERT_NE(toggle, nullptr);
+    QSignalSpy writes(preferences, SIGNAL(useDmaBufChanged()));
+    ASSERT_TRUE(writes.isValid());
+    ASSERT_TRUE(wait([&] { return toggle->width() > 0 && toggle->isEnabled(); }));
+    auto click = [&] {
+      QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+          toggle->mapToScene(QPointF(toggle->width() / 2, toggle->height() / 2)).toPoint());
+    };
+    preferences->setProperty("encoder", "x264");
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    EXPECT_DOUBLE_EQ(option->opacity(), 0.5);
+    click();
+    EXPECT_TRUE(preferences->property("useDmaBuf").toBool());
+    EXPECT_TRUE(toggle->property("checked").toBool());
+    EXPECT_TRUE(writes.isEmpty());
+    preferences->setProperty("encoder", "auto");
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    hardware->setProperty("recommendedEncoderName", "x264");
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    EXPECT_TRUE(writes.isEmpty());
+    hardware->setProperty("recommendedEncoderName", "vaapi_h264");
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    preferences->setProperty("encoder", "vaapi_h264");
+    recorder->setProperty("isRecording", true);
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    click();
+    EXPECT_TRUE(writes.isEmpty());
+    recorder->setProperty("isRecording", false);
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    click();
+    ASSERT_TRUE(wait([&] { return !preferences->property("useDmaBuf").toBool(); }));
+    EXPECT_EQ(writes.size(), 1);
+    preferences->setProperty("encoder", "x264");
+    preferences->setProperty("encoder", "nvenc_h264");
+    EXPECT_FALSE(toggle->property("checked").toBool());
+    EXPECT_FALSE(preferences->property("useDmaBuf").toBool());
+    EXPECT_EQ(writes.size(), 1);
+    object.reset();
+  }
+}
+
 TEST_F(SharingUiTest, AudioOptionsArePairedButtonsWithLiveStateAndRecordingLock) {
   QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
   ASSERT_TRUE(file.open(QIODevice::ReadOnly));

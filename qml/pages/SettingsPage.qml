@@ -531,13 +531,21 @@ Page {
                     }
 
                     SettingRow {
+                        id: dmaBufRow
+                        objectName: "settingsDmaBufOption"
+                        readonly property bool softwareEncoder: settingsManager &&
+                            (settingsManager.encoder === "x264" ||
+                             (settingsManager.encoder === "auto" && hardwareInfo &&
+                              hardwareInfo.recommendedEncoderName === "x264"))
                         label: qsTr("Zero-Copy Capture (DMA-BUF)")
-                        help: qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
+                        help: softwareEncoder ? qsTr("Not available with software encoding. Shared memory capture is used instead.")
+                                              : qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
+                        rowEnabled: !softwareEncoder && !(recordingManager && recordingManager.isRecording)
 
                         TrophySwitch {
+                            objectName: "settingsDmaBufSwitch"
                             Layout.alignment: Qt.AlignVCenter
                             checked: settingsManager ? settingsManager.useDmaBuf : true
-                            enabled: !(recordingManager && recordingManager.isRecording)
                             onToggled: {
                                 if (settingsManager)
                                     settingsManager.useDmaBuf = checked;

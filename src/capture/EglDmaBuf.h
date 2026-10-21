@@ -19,6 +19,7 @@
 #include <vector>
 
 #ifdef HAVE_EGL
+#include "EglDisplayLease.h"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #endif
@@ -92,22 +93,19 @@ inline EGLDisplay openEglDisplayForNode(const char *drmNodePath) {
 // them. Empty when unavailable (caller offers shared memory only).
 inline std::vector<uint64_t> queryDmaBufModifiers(uint32_t drmFormat) {
   std::vector<uint64_t> out;
-  EGLDisplay dpy = openEglDisplayForNode("/dev/dri/renderD128");
-  if (dpy == EGL_NO_DISPLAY)
+  auto lease = acquireEglDisplay(openEglDisplayForNode("/dev/dri/renderD128"));
+  if (!lease)
     return out;
-  if (eglInitialize(dpy, nullptr, nullptr) != EGL_TRUE)
-    return out;
+  const EGLDisplay dpy = lease.get();
   const char *vendor = eglQueryString(dpy, EGL_VENDOR);
   qDebug() << "Trophy EGL: display vendor:" << (vendor ? vendor : "(unknown)");
   const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);
   if (!exts || !strstr(exts, "EGL_EXT_image_dma_buf_import_modifiers")) {
-    eglTerminate(dpy);
     return out;
   }
   auto queryFn = reinterpret_cast<PFNEGLQUERYDMABUFMODIFIERSEXTPROC>(
       eglGetProcAddress("eglQueryDmaBufModifiersEXT"));
   if (!queryFn) {
-    eglTerminate(dpy);
     return out;
   }
   EGLint count = 0;
@@ -123,7 +121,6 @@ inline std::vector<uint64_t> queryDmaBufModifiers(uint32_t drmFormat) {
       out.assign(mods.begin(), mods.begin() + std::min(got, count));
     }
   }
-  eglTerminate(dpy);
   return out;
 }
 #else
