@@ -707,17 +707,23 @@ ApplicationWindow {
                     }
 
                     // Pure black removes the usual page/shell contrast. Draw
-                    // the page's existing silhouette above its contents, with
-                    // no input handlers and no chrome in fullscreen playback.
-                    Rectangle {
+                    // top/left divider above its contents. Clip the other edges
+                    // outside the page so they don't double the window border.
+                    // No input handlers or chrome in fullscreen playback.
+                    Item {
                         anchors.fill: parent
                         z: 1
                         visible: Theme.amoled && !playerPage.playerFullscreen
-                        color: "transparent"
-                        topLeftRadius: 26
-                        bottomRightRadius: Theme.windowRadius
-                        border.width: 1
-                        border.color: Theme.borderColor
+                        clip: true
+
+                        Rectangle {
+                            width: parent.width + border.width
+                            height: parent.height + border.width
+                            color: "transparent"
+                            topLeftRadius: 26
+                            border.width: 1
+                            border.color: Theme.borderColor
+                        }
                     }
                 }
             }
