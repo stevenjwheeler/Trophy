@@ -748,6 +748,53 @@ TEST_F(RecordingCardBindingTest, FailedListPreviewFallsBackUntilNextHover) {
   exerciseFailedPreview(true);
 }
 
+TEST_F(RecordingCardBindingTest, LiveGridIconFollowsCurrentGameAndModelRefresh) {
+  CardManagerFake manager;
+  manager.gameName = "Game";
+  CardIconFake detector;
+  detector.iconPath = tempDir.filePath("live-app.png");
+  QImage image(48, 48, QImage::Format_ARGB32);
+  image.fill(Qt::green);
+  ASSERT_TRUE(image.save(detector.iconPath));
+  engine.rootContext()->setContextProperty("recordingManager", &manager);
+  engine.rootContext()->setContextProperty("gameDetector", &detector);
+
+  QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("ActiveRecordingCard.qml")));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> card(component.create());
+  ASSERT_NE(card, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(card.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setWidth(340);
+  item->setHeight(280);
+  auto *icon = card->findChild<QQuickItem *>("liveGridGameIcon");
+  ASSERT_NE(icon, nullptr);
+  for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+    QTest::qWait(10);
+  ASSERT_TRUE(icon->isVisible());
+  QTest::qWait(50);
+  EXPECT_EQ(icon->width(), 40);
+  EXPECT_EQ(icon->height(), 40);
+
+  manager.gameName = "Other";
+  emit manager.changed();
+  QTest::qWait(50);
+  EXPECT_FALSE(icon->isVisible());
+
+  detector.iconPath = tempDir.filePath("missing.png");
+  manager.gameName = "Game";
+  emit manager.changed();
+  QTest::qWait(100);
+  EXPECT_FALSE(icon->isVisible());
+  detector.iconPath = tempDir.filePath("live-app.png");
+  detector.model.clear();
+  for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+    QTest::qWait(10);
+  EXPECT_TRUE(icon->isVisible());
+}
+
 TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
   const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
   const QString otherPath = createVideo("Other_2026-01-15_20-30-00.mkv");

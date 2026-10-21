@@ -150,33 +150,47 @@ Rectangle {
         }
 
         // --- INFO SECTION (same structure as RecordingCard) ---
-        ColumnLayout {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: Theme.spacingSmall
-            spacing: 2
 
-            Label {
+            ColumnLayout {
                 Layout.fillWidth: true
-                text: recordingManager ? (recordingManager.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
-                color: Theme.textColor
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Bold
-                elide: Text.ElideRight
+                Layout.fillHeight: true
+                spacing: 2
+
+                Label {
+                    Layout.fillWidth: true
+                    text: recordingManager ? (recordingManager.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
+                    color: Theme.textColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Bold
+                    elide: Text.ElideRight
+                }
+
+                Label {
+                    text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeTiny
+                }
+
+                Label {
+                    objectName: "liveRecordingStatus"
+                    text: qsTr("In Progress")
+                    color: Theme.primaryColor
+                    font.pixelSize: Theme.fontSizeTiny
+                    Layout.alignment: Qt.AlignBottom
+                }
             }
 
-            Label {
-                text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
-                color: Theme.textSecondaryColor
-                font.pixelSize: Theme.fontSizeTiny
-            }
-
-            Label {
-                objectName: "liveRecordingStatus"
-                text: qsTr("In Progress")
-                color: Theme.primaryColor
-                font.pixelSize: Theme.fontSizeTiny
-                Layout.alignment: Qt.AlignBottom
+            RecordingGameIcon {
+                objectName: "liveGridGameIcon"
+                gameName: recordingManager ? recordingManager.currentGameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.leftMargin: Theme.spacingSmall
+                Layout.alignment: Qt.AlignVCenter
             }
         }
     }
