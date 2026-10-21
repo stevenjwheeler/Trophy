@@ -448,7 +448,7 @@ endif()
 
 add_executable(test_ReplayManager test_ReplayManager.cpp)
 target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
+target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
 gtest_discover_tests(test_ReplayManager)
 
 add_executable(test_RecordingSession test_RecordingSession.cpp)

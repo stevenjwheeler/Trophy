@@ -186,6 +186,7 @@ private:
 
   RecordingState m_state = RecordingState::Idle;
   QString m_currentGameName;
+  QVariantMap m_detectedGameInfo;
   QString m_currentFilePath;
   unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;

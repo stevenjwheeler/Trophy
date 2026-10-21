@@ -157,6 +157,16 @@ uint GameDetectionService::steamAppIdForPid(qint64 pid) {
   return 0;
 }
 
+QVariantMap GameDetectionService::captureIdentityInfo(const QString &gameName) const {
+  if (!isGameRunning() || gameName != m_currentGameName || m_currentGameKey.isEmpty())
+    return {};
+  QVariantMap info{{"detectedGameKey", m_currentGameKey},
+                   {"detectedGamePid", m_currentGamePid}};
+  const auto steamId = steamAppIdFromAppId(m_currentGameKey);
+  if (steamId) info["detectedSteamAppId"] = QString::number(steamId);
+  return info;
+}
+
 uint GameDetectionService::steamAppIdFromAppId(const QString &appId) {
   static const QRegularExpression re("^steam_app_(\\d+)$",
                                      QRegularExpression::CaseInsensitiveOption);

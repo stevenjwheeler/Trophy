@@ -13,6 +13,8 @@
 #include <gtest/gtest.h>
 #include <future>
 #include <mutex>
+#include <cmath>
+#include <limits>
 #include <thread>
 #include <tuple>
 
@@ -129,6 +131,121 @@ TEST(AudioHealthTest, SemanticNameReportsBoundSourceName) {
   EXPECT_EQ(mixer.semanticSourceName(0), "Desktop Audio");
   EXPECT_EQ(mixer.semanticSourceName(2), "USB Microphone");
   EXPECT_TRUE(mixer.semanticSourceName(1).isEmpty());
+}
+
+TEST(AudioSignalStatsTest, WindowsWeightSamplePowerAndExpireWithoutNewBuffers) {
+  AudioSignalStats stats;
+  const int64_t now = 10000000;
+  EXPECT_FALSE(stats.summary(now).received);
+  stats.record(now, 1.0, 1.0, 2, 1);
+  stats.record(now, 0.5, 0.5, 2, 0);
+  auto recent = stats.summary(now);
+  EXPECT_TRUE(recent.received);
+  EXPECT_TRUE(recent.recent);
+  EXPECT_DOUBLE_EQ(recent.peak, 1.0);
+  EXPECT_DOUBLE_EQ(recent.rms, std::sqrt(1.5 / 4));
+  EXPECT_TRUE(recent.clipping);
+  EXPECT_EQ(recent.clippedSamples, 1);
+  auto stalled = stats.summary(now + 1000000);
+  EXPECT_FALSE(stalled.recent);
+  EXPECT_TRUE(stalled.held);
+  EXPECT_EQ(stalled.ageMs, 1000);
+  EXPECT_DOUBLE_EQ(stalled.heldPeak, 1.0);
+  auto expired = stats.summary(now + 5000000);
+  EXPECT_FALSE(expired.held);
+  EXPECT_FALSE(expired.clipping);
+  EXPECT_EQ(expired.totalClippedSamples, 1);
+  // High callback cadence does not shorten either time window.
+  for (int i = 0; i < 10000; ++i) stats.record(now + 7000000, 0.1, 0.02, 2, 0);
+  auto silentThenQuiet = stats.summary(now + 7000000);
+  EXPECT_DOUBLE_EQ(silentThenQuiet.peak, 0.1);
+  EXPECT_NEAR(silentThenQuiet.rms, 0.1, 1e-10);
+  EXPECT_EQ(silentThenQuiet.totalClippedSamples, 1);
+}
+
+TEST(AudioSignalStatsTest, ConcurrentPublicationKeepsSnapshotsFinite) {
+  AudioSignalStats stats;
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    for (int i = 0; i < 10000; ++i) stats.record(10000000, 0.5, 0.5, 2, 0);
+    done = true;
+  });
+  do {
+    const auto summary = stats.summary(10000000);
+    if (summary.recent) {
+      EXPECT_DOUBLE_EQ(summary.peak, 0.5);
+      EXPECT_DOUBLE_EQ(summary.rms, 0.5);
+    }
+  } while (!done);
+  writer.join();
+}
+
+TEST(AudioHealthTest, DiagnosticsUsePostMutePcmAndResetOnSourceReplacement) {
+  AudioMixer mixer(48000, 2);
+  auto mic = std::make_unique<FakeAudioSource>(IAudioSource::SourceType::Microphone, "mic");
+  auto *rawMic = mic.get();
+  mixer.addSource(std::move(mic), 1); // Mic is logical role 2, not Voice.
+  ASSERT_TRUE(mixer.startAll());
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(2)["received"].toBool());
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(2).contains("peak"));
+  const float samples[] = {0.5f, -0.25f, 0.0f, 1.25f};
+  rawMic->emitAudio(samples, 2);
+  const auto signal = mixer.semanticAudioDiagnostics(2);
+  EXPECT_TRUE(signal["received"].toBool());
+  EXPECT_DOUBLE_EQ(signal["peak"].toDouble(), 1.25);
+  EXPECT_DOUBLE_EQ(signal["rms"].toDouble(), std::sqrt(1.875 / 4));
+  EXPECT_EQ(signal["fullScaleSamplesTotal"].toULongLong(), 1);
+  EXPECT_TRUE(signal["clippingRisk"].toBool());
+  EXPECT_TRUE(signal.contains("lastBufferAgeMs"));
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(1)["received"].toBool());
+  mixer.setSemanticTrackMuted(2, true);
+  EXPECT_DOUBLE_EQ(mixer.semanticAudioDiagnostics(2)["peak"].toDouble(), 0);
+  std::vector<float> delivered;
+  mixer.setTrackAudioCallback([&](int, const float *pcm, int frames, int, int channels) {
+    delivered.assign(pcm, pcm + frames * channels);
+  });
+  rawMic->emitAudio(samples, 2);
+  ASSERT_EQ(delivered.size(), 4);
+  for (float sample : delivered) EXPECT_FLOAT_EQ(sample, 0);
+  EXPECT_FLOAT_EQ(samples[3], 1.25f); // borrowed PCM was not modified
+  const auto muted = mixer.semanticAudioDiagnostics(2);
+  EXPECT_TRUE(muted["received"].toBool());
+  EXPECT_TRUE(muted["muted"].toBool());
+  EXPECT_DOUBLE_EQ(muted["rms"].toDouble(), 0);
+  EXPECT_DOUBLE_EQ(muted["peakHold"].toDouble(), 1.25); // historical, not current output
+  EXPECT_EQ(muted["fullScaleSamplesTotal"].toULongLong(), 1);
+  const auto retired = rawMic->snapshotCallback();
+  auto replacement = std::make_unique<FakeAudioSource>(IAudioSource::SourceType::Microphone, "new mic");
+  auto *rawReplacement = replacement.get();
+  mixer.addSource(std::move(replacement), 1);
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(2)["received"].toBool());
+  retired(AudioFrame{samples, 2, 2, 48000, 0});
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(2)["received"].toBool());
+  const float silence[] = {0, 0};
+  rawReplacement->emitAudio(silence, 1);
+  EXPECT_TRUE(mixer.semanticAudioDiagnostics(2)["received"].toBool());
+  EXPECT_DOUBLE_EQ(mixer.semanticAudioDiagnostics(2)["peak"].toDouble(), 0);
+  EXPECT_EQ(mixer.semanticAudioDiagnostics(2)["fullScaleSamplesTotal"].toULongLong(), 0);
+  mixer.removeSource(1);
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(2)["received"].toBool());
+}
+
+TEST(AudioHealthTest, NonFiniteSamplesDoNotPoisonSignalMeasurements) {
+  AudioMixer mixer(48000, 2);
+  auto source = std::make_unique<FakeAudioSource>(IAudioSource::SourceType::ApplicationAudio, "game");
+  auto *raw = source.get();
+  mixer.addSource(std::move(source), 0);
+  ASSERT_TRUE(mixer.startAll());
+  raw->emitAudio(nullptr, 0);
+  EXPECT_FALSE(mixer.semanticAudioDiagnostics(0)["received"].toBool());
+  const float pcm[] = {std::numeric_limits<float>::quiet_NaN(),
+                       std::numeric_limits<float>::infinity(),
+                       -std::numeric_limits<float>::infinity(), 0.5f};
+  raw->emitAudio(pcm, 2);
+  auto signal = mixer.semanticAudioDiagnostics(0);
+  EXPECT_DOUBLE_EQ(signal["peak"].toDouble(), 0.5);
+  EXPECT_DOUBLE_EQ(signal["rms"].toDouble(), 0.25);
+  EXPECT_FALSE(signal["clippingRisk"].toBool());
 }
 
 // All gates self-release on timeout so even a failed assertion can join
@@ -381,6 +498,8 @@ TEST_F(AudioMixerTest, SemanticRolesKeepMergedMicAndLateVoiceIndependent) {
   EXPECT_TRUE(mixer.isTrackMuted(2));
   rawVoice->emitAudio(samples, 1);
   EXPECT_FLOAT_EQ(delivered[2], 0.0f);
+  EXPECT_NEAR(mixer.semanticAudioDiagnostics(2)["peak"].toDouble(), 0.4, 1e-6);
+  EXPECT_DOUBLE_EQ(mixer.semanticAudioDiagnostics(1)["peak"].toDouble(), 0.0);
   EXPECT_GT(mixer.semanticTrackLevel(2), 0.0f);
   mixer.setSemanticTrackMuted(2, true);
   mixer.setSemanticTrackMuted(1, false);

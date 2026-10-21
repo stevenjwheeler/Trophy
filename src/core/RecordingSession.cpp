@@ -10,6 +10,7 @@
 #include "audio/AudioMixer.h"
 #include "audio/PipeWireAudioSource.h"
 #include "capture/IVideoCaptureSource.h"
+#include "encoding/FFmpegEncoder.h"
 #include "encoding/IEncoder.h"
 #include "muxing/IMuxer.h"
 
@@ -107,6 +108,25 @@ bool RecordingSession::start() {
 
   // Initialize state BEFORE starting any threads or callbacks
   m_frameCount = 0;
+  m_deliveredFrames = 0;
+  m_dmaBufDelivered = 0;
+  m_inputWidth = 0;
+  m_inputHeight = 0;
+  m_encodeCalls = 0;
+  m_encodeTimeUs = 0;
+  m_recentEncodeTimes.clear();
+  m_queueDepth = 0;
+  m_peakQueueDepth = 0;
+  m_transport = 0;
+  m_transportChanges = 0;
+  m_shmTransitions = 0;
+  m_outputPayloadBytes = 0;
+  m_audioStreamInfo.clear();
+  m_recentRates.clear();
+  m_rateDelivered = m_ratePayload = 0;
+  const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
+  m_rateAccepted = ffmpeg ? ffmpeg->acceptedFrames() : 0;
+  m_rateSampleUs = nowUs();
   m_audioHistoryStarted = false;
   m_usedSystemAudio = false;
   m_usedGameAudio = false;
@@ -209,6 +229,10 @@ bool RecordingSession::start() {
           qDebug() << "Added separate audio stream" << idx << "for"
                    << trackNames[i];
           m_trackToStreamMap[i] = idx;
+          m_audioStreamInfo.append(QVariantMap{
+              {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
+              {"sampleRate", s.sampleRate}, {"channels", s.channels},
+              {"bitrateKbps", s.bitrate}});
         }
       }
 
@@ -289,8 +313,13 @@ bool RecordingSession::start() {
         s.bitrate = audioConfig.bitrate;
         s.extraData = m_mergedEncoder->extraData();
         int idx = m_muxer->addStream(s);
-        if (idx >= 0)
+        if (idx >= 0) {
           qDebug() << "Added merged audio stream" << idx;
+          m_audioStreamInfo.append(QVariantMap{
+              {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
+              {"sampleRate", s.sampleRate}, {"channels", s.channels},
+              {"bitrateKbps", s.bitrate}});
+        }
       }
 
       m_audioCallbackRegistration = m_audioMixer->setTrackAudioCallback(
@@ -386,6 +415,7 @@ bool RecordingSession::start() {
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
         m_videoQueue.emplace(frame);
+        noteQueueDepth();
         m_queueCv.notify_one();
       } else {
         qWarning() << "Video queue full, dropping frame";
@@ -493,11 +523,68 @@ QJsonObject RecordingSession::audioHistory() const {
 }
 
 QVariantMap RecordingSession::captureHealth() const {
+  const auto now = nowUs();
   QVariantMap result{{"session", m_outputPath},
                      {"hasVideo", m_videoStartWallUs.load() >= 0},
                      {"queueDrops", QVariant::fromValue(m_queueDrops.load())},
                      {"desktopFallback", !m_desktopAudio && m_gameIsFallback},
                      {"desktopAudio", m_desktopAudio}};
+  result["deliveredFrames"] = m_deliveredFrames.load();
+  result["dmaBufFrames"] = m_dmaBufDelivered.load();
+  result["inputWidth"] = m_inputWidth.load();
+  result["inputHeight"] = m_inputHeight.load();
+  result["videoPackets"] = m_frameCount.load();
+  result["bytesWritten"] = m_bytesWritten.load();
+  result["videoSeconds"] = std::max(qint64(0), videoPositionMs()) / 1000.0;
+  result["separateAudio"] = m_separateAudioTracks;
+  result["audioBitrateKbps"] = m_audioBitrate;
+  result["audioStreams"] = m_audioStreamInfo;
+  if (m_running && m_sessionStartMs >= 0)
+    result["sessionSeconds"] = std::max(int64_t(0), now / 1000 - m_sessionStartMs) / 1000.0;
+  result["queueDepth"] = m_queueDepth.load();
+  result["peakQueueDepth"] = m_peakQueueDepth.load();
+  result["queueCapacity"] = int(MAX_QUEUE_SIZE);
+  const int transport = m_transport.load();
+  if (transport) result["transport"] = transport == 2 ? "dma-buf" : "shm";
+  result["transportChanges"] = m_transportChanges.load();
+  result["shmTransitions"] = m_shmTransitions.load();
+  if (m_capture) {
+    result["captureBackend"] = m_capture->name();
+    result["sourceLabel"] = m_capture->sourceLabel();
+    result["sourceAppId"] = m_capture->sourceProcessName();
+    if (m_capture->sourcePid()) result["sourcePid"] = m_capture->sourcePid();
+  }
+  const auto timing = m_recentEncodeTimes.summary(now);
+  result["recentEncodeSamples"] = int(timing.count);
+  if (timing.count) {
+    result["recentEncodeAverageMs"] = timing.averageMs;
+    result["recentEncodeMaximumMs"] = timing.maximumMs;
+    result["recentEncodeP95Ms"] = timing.p95Ms;
+  }
+  sampleCaptureRates(result, now);
+  const auto calls = m_encodeCalls.load();
+  if (calls > 0)
+    result["averageEncodeMs"] = double(m_encodeTimeUs.load()) / calls / 1000.0;
+  if (m_encoder) {
+    const auto config = m_encoder->config();
+    result["encoder"] = m_encoder->name();
+    result["outputWidth"] = config.width;
+    result["outputHeight"] = config.height;
+    result["targetFps"] = config.fps;
+    result["bitrateKbps"] = config.bitrate;
+    result["rateControlMode"] = config.useVBR ? "VBR" : "CBR";
+    result["preset"] = config.preset;
+    result["keyframeSeconds"] = config.keyframeInterval;
+    if (auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder)) {
+      result["acceptedFrames"] = QVariant::fromValue(ffmpeg->acceptedFrames());
+      result["encoderDrops"] = QVariant::fromValue(ffmpeg->droppedFrames());
+      result["eglImportFrames"] = QVariant::fromValue(ffmpeg->eglImportFrames());
+      result["hwMappedFrames"] = QVariant::fromValue(ffmpeg->zeroCopyFrames());
+      result["vaapiVppFrames"] = QVariant::fromValue(ffmpeg->vaapiVppFrames());
+      result["gpuScaledFrames"] = QVariant::fromValue(ffmpeg->gpuScaledFrames());
+      result["cpuInputFrames"] = QVariant::fromValue(ffmpeg->fallbackFrames());
+    }
+  }
   for (int role = 0; role < AudioMixer::kTrackCount; ++role) {
     QString status = m_audioMixer ? m_audioMixer->semanticSourceStatus(role)
                                  : QStringLiteral("unavailable");
@@ -525,8 +612,48 @@ QVariantMap RecordingSession::captureHealth() const {
     }
     result[QStringLiteral("audio%1").arg(role)] = status;
     result[QStringLiteral("audio%1Name").arg(role)] = sourceName;
+    // A suppressed Voice source is part of System, not a separately
+    // measurable signal. Never relabel Mic's physical slot as Voice.
+    const bool separateSignal = role != 1 ||
+        (!m_voiceChatApp.isEmpty() && !m_desktopAudio && !m_gameIsFallback);
+    result[QStringLiteral("audio%1Signal").arg(role)] = m_audioMixer && separateSignal
+        ? m_audioMixer->semanticAudioDiagnostics(role) : QVariantMap{};
   }
   return result;
+}
+
+void RecordingSession::sampleCaptureRates(QVariantMap &result, int64_t now) const {
+  const auto delivered = m_deliveredFrames.load();
+  const auto payload = m_outputPayloadBytes.load();
+  const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
+  const qint64 accepted = ffmpeg ? ffmpeg->acceptedFrames() : 0;
+  const auto elapsed = now - m_rateSampleUs;
+  const bool stale = elapsed > 5000000;
+  if (m_rateSampleUs >= 0 && elapsed >= 1000000 && !stale) {
+    const double seconds = elapsed / 1000000.0;
+    m_recentRates["actualCaptureFps"] = std::max(qint64(0), delivered - m_rateDelivered) / seconds;
+    if (ffmpeg)
+      m_recentRates["actualEncodeFps"] = std::max(qint64(0), accepted - m_rateAccepted) / seconds;
+    m_recentRates["actualOutputKbps"] = std::max(qint64(0), payload - m_ratePayload) * 0.008 / seconds;
+    m_recentRates["rateWindowSeconds"] = seconds;
+  }
+  if (m_rateSampleUs < 0 || elapsed < 0 || elapsed >= 1000000) {
+    // Returning to the Dashboard after a long absence needs a fresh
+    // baseline, not a many-minute average presented as a recent rate.
+    if (elapsed < 0 || stale) m_recentRates.clear();
+    m_rateSampleUs = now;
+    m_rateDelivered = delivered;
+    m_rateAccepted = accepted;
+    m_ratePayload = payload;
+  }
+  for (auto it = m_recentRates.cbegin(); it != m_recentRates.cend(); ++it)
+    result[it.key()] = it.value();
+}
+
+void RecordingSession::noteQueueDepth() {
+  const int depth = int(m_videoQueue.size());
+  m_queueDepth = depth;
+  m_peakQueueDepth = std::max(m_peakQueueDepth.load(), depth);
 }
 
 bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
@@ -537,6 +664,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
   std::lock_guard<std::mutex> lock(m_queueMutex);
   if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
     m_videoQueue.push(std::move(frame));
+    noteQueueDepth();
     // Success logs at 60fps; throttle unless TROPHY_VIDEO_DEBUG is set.
     static std::atomic<uint64_t> s_pushed{0};
     const uint64_t n = ++s_pushed;
@@ -548,6 +676,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
     return true;
   }
   qDebug() << "pushQueuedFrame: queue full, dropping frame";
+  noteQueueDepth();
   ++m_queueDrops;
   return false;
 }
@@ -729,12 +858,25 @@ void RecordingSession::encodingLoop() {
       if (!m_videoQueue.empty()) {
         frame = std::move(m_videoQueue.front());
         m_videoQueue.pop();
+        noteQueueDepth();
         haveFrame = true;
       }
     }
 
     EncodedPacket packet;
-    if (haveFrame && m_encoder->encodeFrame(frame, packet)) {
+    bool producedPacket = false;
+    if (haveFrame) {
+      // Host wall time, including conversion/import and driver waits. Count
+      // buffered calls too: false is not proof that the input was dropped.
+      const auto begin = std::chrono::steady_clock::now();
+      producedPacket = m_encoder->encodeFrame(frame, packet);
+      const auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - begin).count();
+      m_encodeTimeUs += durationUs;
+      m_recentEncodeTimes.record(nowUs(), durationUs);
+      ++m_encodeCalls;
+    }
+    if (producedPacket) {
       packet.streamIndex = 0;
       if (writeOutputPacket(packet)) {
         m_bytesWritten = m_muxer->bytesWritten();
@@ -758,6 +900,16 @@ void RecordingSession::encodingLoop() {
 }
 
 void RecordingSession::noteCapturedVideo(const VideoFrame &frame) {
+  const int transport = frame.isDmaBuf ? 2 : 1;
+  const int previous = m_transport.exchange(transport);
+  if (previous && previous != transport) {
+    ++m_transportChanges;
+    if (transport == 1) ++m_shmTransitions;
+  }
+  ++m_deliveredFrames;
+  if (frame.isDmaBuf) ++m_dmaBufDelivered;
+  m_inputWidth = frame.width;
+  m_inputHeight = frame.height;
   const int64_t wall = nowUs();
   int64_t expected = -1;
   m_videoStartWallUs.compare_exchange_strong(expected, wall);
@@ -906,6 +1058,7 @@ bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
     m_outputFailed = true;
     return false;
   }
+  m_outputPayloadBytes += qint64(packet.data.size());
   return true;
 }
 

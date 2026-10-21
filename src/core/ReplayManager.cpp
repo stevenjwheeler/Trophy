@@ -93,6 +93,7 @@ double ReplayManager::elapsedSec() const {
 QVariantMap ReplayManager::captureHealth() const {
   if (!isActive() || !m_session) return {};
   auto result = m_session->captureHealth();
+  result.insert(m_detectedGameInfo);
   result["mode"] = QStringLiteral("replay");
   const int target = m_settings ? m_settings->clipBufferSeconds() : 30;
   result["bufferTargetSeconds"] = target;
@@ -102,6 +103,11 @@ QVariantMap ReplayManager::captureHealth() const {
   for (const auto &segment : m_segments) buffered += segment.durationSec;
   for (const auto &segment : m_retiringSegments) buffered += segment->segment.durationSec;
   result["bufferSeconds"] = std::min(double(target), buffered);
+  result["retainedVideoSeconds"] = buffered;
+  result["dvrSessionSeconds"] = elapsedSec();
+  result["retainedSegments"] = int(m_segments.size() + m_retiringSegments.size())
+      + (m_session->videoPositionMs() >= 0 ? 1 : 0);
+  result["retiringSegments"] = int(m_retiringSegments.size());
   return result;
 }
 
@@ -270,6 +276,7 @@ void ReplayManager::clearSegments() {
 
 bool ReplayManager::beginCapture() {
   m_captureIdentity = m_gameDetector ? m_gameDetector->captureKeyForGame(m_gameName) : m_gameName;
+  m_detectedGameInfo = m_gameDetector ? m_gameDetector->captureIdentityInfo(m_gameName) : QVariantMap{};
   m_capture = m_captureFactory ? m_captureFactory() : CaptureFactory::createBestSource();
   if (!m_capture) {
     qWarning() << "Replay DVR: no capture source";

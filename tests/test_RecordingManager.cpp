@@ -207,6 +207,18 @@ protected:
     f.close();
   }
 
+  QVariantMap diagnosticHealth(RecordingManager &recorder) {
+    // Exercise the real snapshot publication without constructing a codec.
+    const auto state = recorder.m_state;
+    recorder.m_session = std::make_unique<RecordingSession>(
+        "unused.mkv", recorder.m_captureSource.get(), nullptr, nullptr, nullptr, false, 128, 0);
+    recorder.m_state = RecordingManager::RecordingState::Recording;
+    const auto result = recorder.captureHealth();
+    recorder.m_state = state;
+    recorder.m_session.reset();
+    return result;
+  }
+
   void bookmarkLifecycle() {
     createDummyFile("bookmarked.mkv", 64);
     const QString path = tempDir.filePath("bookmarked.mkv");
@@ -773,6 +785,48 @@ TEST_F(RecordingManagerTest, StaleRestoreSettlesBeforeReauthorizationAndRetry) {
   EXPECT_EQ(started.count(), 0);
   EXPECT_EQ(errors.count(), 0);
   recorder.stopRecording();
+}
+
+TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
+  SettingsManager settings;
+  settings.setRecordingsPath(tempDir.path());
+  StorageManager storage(tempDir.path());
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor);
+  detector.addToWhitelist("steam_app_1422450", "Deadlock");
+  detector.addToWhitelist("steam_app_999", "Deadlock");
+  WindowInfo window;
+  window.pid = 61010; window.appId = "steam_app_1422450";
+  window.focused = window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameName(), "Deadlock");
+  EXPECT_TRUE(detector.captureIdentityInfo("Another game").isEmpty());
+  RecordingManager recorder;
+  recorder.setSettingsManager(&settings);
+  recorder.setStorageManager(&storage);
+  recorder.setGameDetectionService(&detector);
+  QPointer<PendingCapture> capture;
+  installPendingCapture(recorder, capture);
+  recorder.startRecording("Deadlock");
+  ASSERT_FALSE(capture.isNull());
+  const auto first = diagnosticHealth(recorder);
+  EXPECT_EQ(first["detectedGameKey"].toString(), "steam_app_1422450");
+  EXPECT_EQ(first["detectedSteamAppId"].toString(), "1422450");
+  EXPECT_EQ(first["detectedGamePid"].toLongLong(), 61010);
+  EXPECT_FALSE(first.contains("sourcePid")); // never pretend this came from the portal
+  detector.addToBlacklist("steam_app_1422450");
+  window.pid = 61011; window.appId = "steam_app_999";
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameKey(), "steam_app_999");
+  EXPECT_EQ(diagnosticHealth(recorder)["detectedGameKey"], first["detectedGameKey"]);
+  EXPECT_EQ(diagnosticHealth(recorder)["detectedGamePid"], first["detectedGamePid"]);
+  recorder.stopRecording();
+  ASSERT_TRUE(waitForIdle(recorder));
+  recorder.startRecording(""); // a picker could choose something other than the detected game
+  EXPECT_FALSE(diagnosticHealth(recorder).contains("detectedGameKey"));
+  recorder.stopRecording();
+  ASSERT_TRUE(waitForIdle(recorder));
 }
 
 TEST_F(RecordingManagerTest, RestoreTokenCallbacksKeepOriginatingIdentity) {

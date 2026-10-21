@@ -28,6 +28,7 @@
 #include "capture/IVideoCaptureSource.h"
 #include "core/RecordingSession.h"
 #include "encoding/IEncoder.h"
+#include "encoding/FFmpegEncoder.h"
 #include "muxing/IMuxer.h"
 
 extern "C" {
@@ -61,6 +62,19 @@ public:
     VideoFrame frame{};
     frame.timestamp = timestamp;
     session.noteCapturedVideo(frame);
+  }
+  static void delivered(RecordingSession &session, bool dmaBuf, int width, int height) {
+    VideoFrame frame{};
+    frame.width = width;
+    frame.height = height;
+    frame.isDmaBuf = dmaBuf;
+    session.noteCapturedVideo(frame);
+  }
+  static bool output(RecordingSession &session, int stream, size_t bytes) {
+    EncodedPacket packet;
+    packet.streamIndex = stream;
+    packet.data.resize(bytes);
+    return session.writeOutputPacket(packet);
   }
   static bool overflowQueue(RecordingSession &session) {
     session.m_running = true;
@@ -317,14 +331,18 @@ TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
   EXPECT_FALSE(session.captureHealth()["hasVideo"].toBool());
   EXPECT_FALSE(RecordingSessionTestPeer::overflowQueue(session));
   EXPECT_EQ(session.captureHealth()["queueDrops"].toULongLong(), 1);
+  EXPECT_EQ(session.captureHealth()["queueDepth"].toInt(), 30);
+  EXPECT_EQ(session.captureHealth()["peakQueueDepth"].toInt(), 30);
   session.setGameIsFallback(true);
   session.setVoiceChatApp("Discord");
   EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
   EXPECT_EQ(session.captureHealth()["audio1"].toString(), "desktop-mix-unavailable");
+  EXPECT_TRUE(session.captureHealth()["audio1Signal"].toMap().isEmpty());
   // Capture health names the bound identity, not just a generic "connected".
   EXPECT_EQ(session.captureHealth()["audio1Name"].toString(), "Discord");
   mixer.setSemanticTrackMuted(2, true);
   EXPECT_EQ(session.captureHealth()["audio2"].toString(), "muted");
+  EXPECT_TRUE(session.captureHealth()["audio2Signal"].toMap()["muted"].toBool());
   session.setGameIsFallback(false);
   EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
   // Marking a node bound is not proof the source is actually capturing.
@@ -340,6 +358,207 @@ TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
   session.setDesktopAudio(true);
   EXPECT_TRUE(session.captureHealth()["desktopAudio"].toBool());
   EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
+}
+
+TEST(RecordingSessionHealthTest, LiveStatisticsIncludeBufferedCallsAndResetOnRestart) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  EncoderConfig config;
+  config.width = 1280;
+  config.height = 720;
+  config.fps = 30;
+  config.bitrate = 8000;
+  config.useVBR = false;
+  encoder.initialize(config);
+  RecordingSession session("stats.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 128, 0);
+  EXPECT_FALSE(session.captureHealth().contains("averageEncodeMs"));
+  EXPECT_FALSE(session.captureHealth().contains("encoderDrops"));
+  ASSERT_TRUE(session.start());
+  VideoFrame frame{};
+  frame.width = 640;
+  frame.height = 360;
+  frame.timestamp = 1000000;
+  // False means buffered, not necessarily a dropped frame.
+  encoder.emitPackets = false;
+  capture.fire(frame);
+  session.stop();
+  const auto stats = session.captureHealth();
+  EXPECT_EQ(stats["deliveredFrames"].toLongLong(), 1);
+  EXPECT_EQ(stats["dmaBufFrames"].toLongLong(), 0);
+  EXPECT_EQ(stats["inputWidth"].toInt(), 640);
+  EXPECT_EQ(stats["inputHeight"].toInt(), 360);
+  EXPECT_EQ(stats["outputWidth"].toInt(), 1280);
+  EXPECT_EQ(stats["outputHeight"].toInt(), 720);
+  EXPECT_EQ(stats["targetFps"].toInt(), 30);
+  EXPECT_EQ(stats["bitrateKbps"].toInt(), 8000);
+  EXPECT_EQ(stats["rateControlMode"].toString(), "CBR");
+  EXPECT_EQ(stats["videoPackets"].toLongLong(), 0);
+  EXPECT_EQ(stats["queueDrops"].toLongLong(), 0);
+  EXPECT_TRUE(stats.contains("averageEncodeMs"));
+  EXPECT_GE(stats["averageEncodeMs"].toDouble(), 0);
+  ASSERT_TRUE(session.start());
+  EXPECT_EQ(session.captureHealth()["deliveredFrames"].toLongLong(), 0);
+  EXPECT_FALSE(session.captureHealth().contains("averageEncodeMs"));
+  EXPECT_FALSE(session.captureHealth().contains("transport"));
+  session.stop();
+}
+
+TEST(RecordingSessionHealthTest, RatesTransportAndQueueUseObservedCounters) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  RecordingSession session("rates.mkv", &capture, &encoder, &muxer,
+                           nullptr, false, 128, 0);
+  auto now = std::make_shared<std::atomic<int64_t>>(5000000);
+  RecordingSessionTestPeer::clock(session, now);
+  ASSERT_TRUE(session.start());
+  EXPECT_FALSE(session.captureHealth().contains("actualCaptureFps"));
+  EXPECT_EQ(session.captureHealth()["queueDepth"].toInt(), 0);
+  EXPECT_EQ(session.captureHealth()["queueCapacity"].toInt(), 30);
+  EXPECT_TRUE(session.captureHealth()["audioStreams"].toList().isEmpty());
+  for (int i = 0; i < 10; ++i)
+    RecordingSessionTestPeer::delivered(session, true, 1280, 720);
+  EXPECT_EQ(session.captureHealth()["transport"].toString(), "dma-buf");
+  EXPECT_EQ(session.captureHealth()["transportChanges"].toInt(), 0);
+  ASSERT_TRUE(RecordingSessionTestPeer::output(session, 0, 2000));
+  ASSERT_TRUE(RecordingSessionTestPeer::output(session, 1, 1000));
+  now->fetch_add(2000000);
+  const auto active = session.captureHealth();
+  EXPECT_DOUBLE_EQ(active["actualCaptureFps"].toDouble(), 5.0);
+  EXPECT_DOUBLE_EQ(active["actualOutputKbps"].toDouble(), 12.0);
+  EXPECT_DOUBLE_EQ(active["rateWindowSeconds"].toDouble(), 2.0);
+  EXPECT_DOUBLE_EQ(active["sessionSeconds"].toDouble(), 2.0);
+  // A generic encoder's packet/no-packet result cannot prove acceptance.
+  EXPECT_FALSE(active.contains("actualEncodeFps"));
+  EXPECT_EQ(session.captureHealth()["actualCaptureFps"], active["actualCaptureFps"]);
+  RecordingSessionTestPeer::delivered(session, false, 640, 360);
+  auto fallback = session.captureHealth();
+  EXPECT_EQ(fallback["transport"].toString(), "shm");
+  EXPECT_EQ(fallback["shmTransitions"].toInt(), 1);
+  EXPECT_EQ(fallback["inputWidth"].toInt(), 640);
+  RecordingSessionTestPeer::delivered(session, false, 640, 360);
+  EXPECT_EQ(session.captureHealth()["transportChanges"].toInt(), 1);
+  RecordingSessionTestPeer::delivered(session, true, 1280, 720);
+  EXPECT_EQ(session.captureHealth()["transportChanges"].toInt(), 2);
+  now->fetch_add(1000000);
+  EXPECT_DOUBLE_EQ(session.captureHealth()["actualCaptureFps"].toDouble(), 3.0);
+  now->fetch_add(1000000);
+  auto stalled = session.captureHealth();
+  EXPECT_DOUBLE_EQ(stalled["actualCaptureFps"].toDouble(), 0.0);
+  EXPECT_DOUBLE_EQ(stalled["actualOutputKbps"].toDouble(), 0.0);
+  now->fetch_add(6000000); // returning to the Dashboard after a long absence
+  EXPECT_FALSE(session.captureHealth().contains("actualCaptureFps"));
+  now->fetch_add(1000000);
+  EXPECT_DOUBLE_EQ(session.captureHealth()["actualCaptureFps"].toDouble(), 0.0);
+  session.stop();
+  ASSERT_TRUE(session.start());
+  EXPECT_FALSE(session.captureHealth().contains("actualCaptureFps"));
+  EXPECT_EQ(session.captureHealth()["transportChanges"].toInt(), 0);
+  session.stop();
+}
+
+TEST(RecordingSessionDiagnosticsTest, RecentTimingPercentilesExpireAndStayBounded) {
+  EncodeTimingWindow timings;
+  const int64_t now = 10000000;
+  EXPECT_EQ(timings.summary(now).count, 0);
+  for (int i = 1; i <= 100; ++i) timings.record(now, i * 1000);
+  const auto summary = timings.summary(now);
+  EXPECT_EQ(summary.count, 100);
+  EXPECT_DOUBLE_EQ(summary.averageMs, 50.5);
+  EXPECT_DOUBLE_EQ(summary.maximumMs, 100.0);
+  EXPECT_DOUBLE_EQ(summary.p95Ms, 95.0);
+  EXPECT_EQ(timings.summary(now + EncodeTimingWindow::windowUs).count, 0);
+  EXPECT_EQ(timings.summary(now - 1).count, 0);
+  for (size_t i = 0; i < EncodeTimingWindow::capacity + 20; ++i)
+    timings.record(now + 1, 2000);
+  EXPECT_EQ(timings.summary(now + 1).count, EncodeTimingWindow::capacity);
+  EXPECT_DOUBLE_EQ(timings.summary(now + 1).p95Ms, 2.0);
+  timings.clear();
+  EXPECT_EQ(timings.summary(now + 1).count, 0);
+}
+
+TEST(RecordingSessionDiagnosticsTest, TimingPublicationSupportsConcurrentSnapshots) {
+  EncodeTimingWindow timings;
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    for (int i = 0; i < 10000; ++i) timings.record(10000000, i);
+    done = true;
+  });
+  do {
+    const auto summary = timings.summary(10000000);
+    EXPECT_LE(summary.count, EncodeTimingWindow::capacity);
+    EXPECT_LE(summary.averageMs, summary.maximumMs);
+    EXPECT_LE(summary.p95Ms, summary.maximumMs);
+  } while (!done);
+  writer.join();
+  EXPECT_EQ(timings.summary(10000000).count, EncodeTimingWindow::capacity);
+}
+
+TEST(RecordingSessionHealthTest, EncodedRateIncludesAcceptedInputsBeforePacketOutput) {
+  if (!avcodec_find_encoder_by_name("libx264")) GTEST_SKIP() << "x264 unavailable";
+  FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "libx264");
+  EncoderConfig config;
+  config.width = config.height = 64;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeCapture capture;
+  FakeMuxer muxer;
+  RecordingSession session("encoded-rate.mkv", &capture, &encoder, &muxer,
+                           nullptr, false, 128, 0);
+  auto now = std::make_shared<std::atomic<int64_t>>(5000000);
+  RecordingSessionTestPeer::clock(session, now);
+  ASSERT_TRUE(session.start());
+  std::vector<uint8_t> pixels(64 * 64 * 4, 80);
+  VideoFrame frame{};
+  frame.data = pixels.data(); frame.width = frame.height = 64;
+  frame.stride = 64 * 4; frame.pixelFormat = AV_PIX_FMT_RGBA;
+  capture.fire(frame);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (!encoder.acceptedFrames() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_EQ(encoder.acceptedFrames(), 1);
+  now->fetch_add(1000000);
+  const auto health = session.captureHealth();
+  EXPECT_DOUBLE_EQ(health["actualCaptureFps"].toDouble(), 1.0);
+  EXPECT_DOUBLE_EQ(health["actualEncodeFps"].toDouble(), 1.0);
+  EXPECT_EQ(health["acceptedFrames"].toLongLong(), 1);
+  session.stop();
+  ASSERT_TRUE(encoder.initialize(config));
+  EXPECT_EQ(encoder.acceptedFrames(), 0);
+}
+
+TEST(RecordingSessionHealthTest, AudioFormatsAndSourceAreBoundPipelineData) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC)) GTEST_SKIP() << "AAC unavailable";
+  class NamedCapture : public FakeCapture {
+    QString sourceLabel() const override { return "Captured window"; }
+    QString sourceProcessName() const override { return "org.example.Game"; }
+    uint32_t sourcePid() const override { return 42; }
+  } capture;
+  for (bool separate : {true, false}) {
+    AudioMixer mixer(44100, 1);
+    FakeVideoEncoder encoder;
+    FakeMuxer muxer;
+    RecordingSession session("audio-format.mkv", &capture, &encoder, &muxer,
+                             &mixer, separate, 128, 0);
+    ASSERT_TRUE(session.start());
+    const auto health = session.captureHealth();
+    const auto streams = health["audioStreams"].toList();
+    ASSERT_EQ(streams.size(), separate ? 3 : 1);
+    for (const auto &stream : streams) {
+      const auto info = stream.toMap();
+      EXPECT_EQ(info["codec"].toString(), "AAC");
+      EXPECT_EQ(info["sampleRate"].toInt(), 44100);
+      EXPECT_EQ(info["channels"].toInt(), 1);
+      EXPECT_EQ(info["bitrateKbps"].toInt(), 128);
+      EXPECT_GT(info["stream"].toInt(), 0);
+    }
+    EXPECT_EQ(health["sourceLabel"].toString(), "Captured window");
+    EXPECT_EQ(health["sourceAppId"].toString(), "org.example.Game");
+    EXPECT_EQ(health["sourcePid"].toInt(), 42);
+    EXPECT_EQ(health["separateAudio"].toBool(), separate);
+    session.stop();
+  }
 }
 
 class FakeAudioSource : public IAudioSource {

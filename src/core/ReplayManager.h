@@ -112,6 +112,7 @@ private slots:
 private:
   GameDetectionService *m_gameDetector = nullptr; // owner outlives this manager
   QString m_captureIdentity;
+  QVariantMap m_detectedGameInfo;
   enum class State { Idle, StartingCapture, Running, Stopping };
 
   void setState(State s);

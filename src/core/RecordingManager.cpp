@@ -48,7 +48,10 @@ bool RecordingManager::addBookmark() {
 }
 
 QVariantMap RecordingManager::captureHealth() const {
-  return isRecording() && m_session ? m_session->captureHealth() : QVariantMap{};
+  if (!isRecording() || !m_session) return {};
+  auto result = m_session->captureHealth();
+  result.insert(m_detectedGameInfo);
+  return result;
 }
 
 RecordingManager::RecordingManager(QObject *parent) : QObject(parent) {
@@ -141,6 +144,7 @@ void RecordingManager::startRecording(const QString &gameName,
   m_cancelInitializing = false;
   m_pendingRestoreAuthorization.clear();
   m_pendingRestoreIdentity.clear();
+  m_detectedGameInfo.clear();
   ++m_pipelineGeneration;
   m_recordingFailed = false;
 
@@ -212,6 +216,8 @@ void RecordingManager::startRecording(const QString &gameName,
   const QString tokenKey = m_gameDetector
                                ? m_gameDetector->captureKeyForGame(m_currentGameName)
                                : m_currentGameName;
+  if (!m_isManualRecording && m_gameDetector)
+    m_detectedGameInfo = m_gameDetector->captureIdentityInfo(m_currentGameName);
   connect(m_captureSource.get(), &IVideoCaptureSource::ready, this,
           [this, attemptSource, attemptGeneration]() {
             if (attemptGeneration == m_pipelineGeneration && attemptSource &&

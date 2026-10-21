@@ -61,6 +61,9 @@ public:
   int64_t vaapiVppFrames() const { return m_vaapiVppFrames.load(); }
   int64_t fallbackFrames() const { return m_fallbackFrames.load(); }
   int64_t droppedFrames() const { return m_droppedFrames.load(); }
+  // Inputs accepted by avcodec_send_frame, including delayed output. This
+  // is not packet count and excludes rejected/buffered-send failures.
+  int64_t acceptedFrames() const { return m_frameCount.load(); }
 
 private:
   friend class FFmpegEncoderTestAccess;
@@ -87,7 +90,7 @@ private:
   AVBufferRef *m_hwDeviceCtx = nullptr;  // VA-API / CUDA device
   AVBufferRef *m_hwFramesCtx = nullptr;
 
-  int64_t m_frameCount = 0;
+  std::atomic<int64_t> m_frameCount{0};
   int64_t m_firstTimestamp = -1;
   bool m_initialized = false;
 

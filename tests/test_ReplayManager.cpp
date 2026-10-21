@@ -25,6 +25,8 @@
 #include "core/StorageManager.h"
 #include "settings/SettingsManager.h"
 #include "encoding/IEncoder.h"
+#include "detection/GameDetectionService.h"
+#include "detection/WaylandWindowMonitor.h"
 #include "muxing/IMuxer.h"
 
 using namespace TrophyBackend;
@@ -215,6 +217,40 @@ protected:
     mgr.m_state = ReplayManager::State::Running;
   }
   QString setupKey(ReplayManager &mgr) { return mgr.audioSetupKey(); }
+  void beginDiagnosticCapture(ReplayManager &mgr, SettingsManager &settings,
+                              GameDetectionService &detector) {
+    mgr.m_settings = &settings;
+    mgr.m_gameDetector = &detector;
+    mgr.m_gameName = "Deadlock";
+    mgr.m_captureFactory = [] { return std::make_unique<ReplayFakeCapture>(); };
+    ASSERT_TRUE(mgr.beginCapture());
+    mgr.m_session = std::make_unique<RecordingSession>(
+        "unused.mkv", mgr.m_capture.get(), nullptr, nullptr, nullptr, false, 128, 0);
+    mgr.m_state = ReplayManager::State::Running;
+  }
+  void verifyCoverageDiagnostics() {
+    ReplayManager mgr;
+    mgr.m_state = ReplayManager::State::Running;
+    mgr.m_dvrClock.start();
+    mgr.m_session = std::make_unique<RecordingSession>(
+        "not-started.mkv", nullptr, nullptr, nullptr, nullptr, false, 128, 0);
+    mgr.m_segments = {{"retained.mkv", 0, 60}};
+    auto retiring = std::make_unique<ReplayManager::RetiringSegment>();
+    retiring->segment = {"retiring.mkv", 60, 10};
+    mgr.m_retiringSegments.push_back(std::move(retiring));
+    const auto health = mgr.captureHealth();
+    EXPECT_DOUBLE_EQ(health["bufferSeconds"].toDouble(), 30.0);
+    EXPECT_DOUBLE_EQ(health["retainedVideoSeconds"].toDouble(), 70.0);
+    EXPECT_EQ(health["retainedSegments"].toInt(), 2); // no delivered current video yet
+    EXPECT_EQ(health["retiringSegments"].toInt(), 1);
+    EXPECT_GE(health["dvrSessionSeconds"].toDouble(), 0.0);
+    // These synthetic retirement entries have no owned native work.
+    mgr.m_retiringSegments.clear();
+    mgr.m_segments.clear();
+    mgr.m_session.reset();
+    mgr.m_state = ReplayManager::State::Idle;
+    EXPECT_TRUE(mgr.captureHealth().isEmpty());
+  }
   ReplayFakeCapture *replaceCapture(ReplayManager &mgr) {
     mgr.m_capture = std::make_unique<ReplayFakeCapture>();
     mgr.m_gameName = "Replacement";
@@ -576,6 +612,36 @@ using TrophyBackend::ReplayManagerTest;
 static QList<Seg> threeSegments() {
   // 60s segments starting at 0/60/120.
   return {{"s0.mkv", 0.0, 60.0}, {"s1.mkv", 60.0, 60.0}, {"s2.mkv", 120.0, 60.0}};
+}
+
+TEST_F(ReplayManagerTest, DiagnosticIdentitySurvivesANamesakeDetectionChange) {
+  SettingsManager settings;
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor);
+  detector.addToWhitelist("steam_app_1422450", "Deadlock");
+  detector.addToWhitelist("steam_app_999", "Deadlock");
+  WindowInfo window;
+  window.pid = 61010; window.appId = "steam_app_1422450";
+  window.focused = window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameName(), "Deadlock");
+  ReplayManager mgr;
+  beginDiagnosticCapture(mgr, settings, detector);
+  const auto first = mgr.captureHealth();
+  EXPECT_EQ(first["detectedSteamAppId"].toString(), "1422450");
+  EXPECT_EQ(first["detectedGamePid"].toLongLong(), 61010);
+  EXPECT_FALSE(first.contains("sourcePid"));
+  detector.addToBlacklist("steam_app_1422450");
+  window.pid = 61011; window.appId = "steam_app_999";
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameKey(), "steam_app_999");
+  EXPECT_EQ(mgr.captureHealth()["detectedGameKey"], first["detectedGameKey"]);
+  EXPECT_EQ(mgr.captureHealth()["detectedGamePid"], first["detectedGamePid"]);
+}
+
+TEST_F(ReplayManagerTest, CoverageDiagnosticsIncludeRetiringButNotEmptyCurrentSegment) {
+  verifyCoverageDiagnostics();
 }
 
 TEST_F(ReplayManagerTest, FailedPacketWriteIsNotEnlistedForReplay) {

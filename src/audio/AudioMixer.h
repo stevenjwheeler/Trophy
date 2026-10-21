@@ -6,6 +6,8 @@
  */
 
 #pragma once
+#include "AudioSignalStats.h"
+#include <QVariantMap>
 
 #include <QObject>
 #include <QString>
@@ -94,6 +96,9 @@ public:
   // health ("connected to <name>"). Empty when no source is bound. Never
   // performs a native query; returns the source's recorded display name.
   QString semanticSourceName(int role) const;
+  // Post-mute source PCM, before session gating/mixing/encoding. Receipt
+  // age is independent of signal amplitude and source connection state.
+  QVariantMap semanticAudioDiagnostics(int role) const;
 
   // Audio level metering (0.0 - 1.0)
   Q_INVOKABLE float getTrackLevel(int trackIndex) const;
@@ -151,6 +156,7 @@ signals:
 private:
   friend class AudioMixerTestPeer;
   struct SourceCallbackRegistration {
+    AudioSignalStats signalStats;
     std::atomic<bool> accepting{true};
     std::mutex mutex;
     std::condition_variable drained;
