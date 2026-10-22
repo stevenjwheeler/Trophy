@@ -1,6 +1,7 @@
 /* Real PlayerPage engine load with controlled probe delivery, no media I/O. */
 #include <QGuiApplication>
 #include <QColor>
+#include <QImage>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -86,11 +87,23 @@ signals:
   void filmstripReady(const QString &path, const QStringList &thumbs);
 };
 
+class PlayerGameDetectorFake : public QObject {
+  Q_OBJECT
+  Q_PROPERTY(QObject *gamesModel READ gamesModel CONSTANT)
+public:
+  QString iconUrl;
+  QObject *gamesModel() const { return nullptr; }
+  Q_INVOKABLE QString iconSourceForGame(const QString &name) const {
+    return name == "Game" ? iconUrl : QString{};
+  }
+};
+
 class PlayerProbeTest : public ::testing::Test {
 protected:
   PlayerWaveformFake waveform;
   PlayerLibraryFake library;
   PlayerFilmstripFake filmstrip;
+  PlayerGameDetectorFake detector;
   QQmlEngine engine;
   QQuickWindow window;
   std::unique_ptr<QQuickItem> page;
@@ -108,6 +121,7 @@ protected:
     engine.rootContext()->setContextProperty("waveformCache", &waveform);
     engine.rootContext()->setContextProperty("recordingLibrary", &library);
     engine.rootContext()->setContextProperty("filmstripCache", &filmstrip);
+    engine.rootContext()->setContextProperty("gameDetector", &detector);
     QQmlComponent component(&engine, QUrl::fromLocalFile(PLAYER_QML_FILE));
     ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
     QObject *created = component.create();
@@ -141,6 +155,39 @@ protected:
     return nullptr;
   }
 };
+
+TEST_F(PlayerProbeTest, HeaderIconSitsLeftOfTitleAndCollapsesWhenUnavailable) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  QImage image(40, 40, QImage::Format_RGB32);
+  image.fill(Qt::green);
+  const QString iconPath = dir.filePath("game.png");
+  ASSERT_TRUE(image.save(iconPath));
+  detector.iconUrl = QUrl::fromLocalFile(iconPath).toString();
+  library.hasEntry = true;
+  library.entry.insert("gameName", "Game");
+  open("/fake/game.mkv");
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *icon = findVisual(page.get(), "playerGameIcon");
+  auto *title = findVisual(page.get(), "playerTitleBlock");
+  ASSERT_NE(icon, nullptr);
+  ASSERT_NE(title, nullptr);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return icon->isVisible() && icon->width() == 40; }));
+  EXPECT_EQ(icon->height(), 40);
+  EXPECT_LE(icon->x() + icon->width(), title->x());
+  EXPECT_NEAR(icon->y() + icon->height() / 2, title->y() + title->height() / 2, 1);
+  const qreal withIcon = title->x();
+
+  library.entry.insert("gameName", "Missing icon");
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !icon->isVisible() && title->x() < withIcon; }));
+  EXPECT_TRUE(icon->property("source").toUrl().isEmpty());
+  close();
+  library.hasEntry = false;
+  open("/fake/unknown.mkv");
+  EXPECT_FALSE(icon->isVisible());
+}
 
 TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   open("/fake/same.mkv");

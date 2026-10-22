@@ -675,7 +675,7 @@ Page {
         anchors.margins: playerPage.playerFullscreen ? 0 : Theme.spacingLarge
         spacing: Theme.spacingMedium
 
-        // Header: back, title, time
+        // Header: back, game icon, title/date, time
         RowLayout {
             Layout.fillWidth: true
             // Hidden in fullscreen: just the video and its
@@ -688,7 +688,16 @@ Page {
                 onClicked: playerPage.close()
             }
 
+            RecordingGameIcon {
+                objectName: "playerGameIcon"
+                gameName: playerPage.infoRec ? playerPage.infoRec.gameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.alignment: Qt.AlignVCenter
+            }
+
             ColumnLayout {
+                objectName: "playerTitleBlock"
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 0
