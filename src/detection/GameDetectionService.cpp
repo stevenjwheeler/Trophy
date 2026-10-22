@@ -1,4 +1,5 @@
 #include "GameDetectionService.h"
+#include "PrerequisiteInstallers.h"
 #include "DefaultAppCatalog.h"
 #include "GameWhitelist.h"
 #include "WaylandWindowMonitor.h"
@@ -280,7 +281,8 @@ GameDetectionService::resolveReporterIdentity(const QString &reporter,
   };
   const auto helper = [](const QString &name) {
     const QString key = GameWhitelist::normalizeKey(name);
-    return QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
+    return prerequisiteInstallerNames().contains(key) ||
+           QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
                        "steam-runtime-launcher-service", "pressure-vessel-wrap",
                        "d3ddriverquery", "d3ddriverquery64", "steam gpu query",
                        "wineopenxr test instance", "hellovr_vulkan", "xalia",

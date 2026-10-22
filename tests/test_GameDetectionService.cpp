@@ -547,6 +547,33 @@ TEST_F(GameDetectionServiceTest, HelperSteamEnvironmentDoesNotMakeGame) {
                 "", "", true);
 }
 
+TEST_F(GameDetectionServiceTest, PrerequisiteInstallersIgnoredBeforeSteamIdentity) {
+  const QStringList installers{
+      "VC_REDIST.X86.EXE", "vc_redist.x64.exe", "vc_redist.arm64.exe",
+      "vcredist_x86.exe", "vcredist_x64.exe", "vcredist_arm64.exe",
+      "vcredist_ia64.exe", "DXSETUP.EXE"};
+  for (const QString &installer : installers) {
+    SCOPED_TRACE(installer.toStdString());
+    for (uint steamId : {0u, 493520u}) {
+      checkIdentity("steam_proton", "/usr/bin/wine64",
+                    {"wine64", "Z:\\Steamworks Shared\\_CommonRedist\\" + installer},
+                    steamId, "", "", true, "/compatdata/493520/pfx");
+      checkIdentity("steam_proton", "/games/" + installer, {}, steamId,
+                    "", "", true);
+      checkIdentity(installer, "/games/game.exe", {}, steamId, "", "", true);
+    }
+  }
+}
+
+TEST_F(GameDetectionServiceTest, PrerequisiteFilterDoesNotExcludeGamesOrGenericSetup) {
+  for (const QString &executable : {QString("Game.exe"), QString("setup.exe"),
+                                    QString("vc_redist.x64-adventure.exe")}) {
+    checkIdentity("steam_proton", "/usr/bin/wine64",
+                  {"wine64", "C:\\Games\\" + executable}, 493520,
+                  "steam_app_493520", "steam_proton");
+  }
+}
+
 TEST_F(GameDetectionServiceTest, BackgroundReporterCannotStealVisibleGame) {
   auto currentWindow = snapshotFor(6301, true, true);
   monitor.ingestSnapshot(currentWindow);
@@ -1315,7 +1342,8 @@ TEST_F(GameDetectionServiceTest, DefaultRowsConsolidateAndSearchTheirIdentifiers
   auto *model = service->gamesModel();
   const QList<QPair<QString, QString>> groups{
       {"obs", "obs64"}, {"signal", "signal-desktop"},
-      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"}};
+      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"},
+      {"vc_redist", "vc_redist.x86"}};
   for (const auto &[canonical, legacy] : groups) {
     SCOPED_TRACE(legacy.toStdString());
     int count = 0;

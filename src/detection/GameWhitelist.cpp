@@ -24,6 +24,8 @@ QStringList GameWhitelist::defaultBlacklistEntries() {
   // browsers, chat, media, creative tools, terminals and file managers —
   // the usual false positives (GPU-accelerated, often focused/fullscreen).
   return {
+      "vc_redist",
+      "dxsetup",
       "xalia",
       "steam",
       "discord",
