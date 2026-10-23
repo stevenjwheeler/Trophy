@@ -234,18 +234,19 @@ Rectangle {
                                         TrophySlider {
                                             id: mainStorageSlider
                                             Layout.fillWidth: true
-                                            from: 0; to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500; stepSize: 0.1
+                                            from: 0; to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500; stepSize: 1
+                                            snapMode: Slider.SnapAlways
                                             value: settingsManager ? (settingsManager.maxStorageSize / (1024 * 1024 * 1024)) : 50
                                             onMoved: {
                                                 if (!pressed && settingsManager)
-                                                    settingsManager.maxStorageSize = Math.round(value * 1024 * 1024 * 1024);
+                                                    settingsManager.maxStorageSize = Math.round(value) * 1024 * 1024 * 1024;
                                             }
                                             onPressedChanged: {
                                                 if (!pressed && settingsManager)
-                                                    settingsManager.maxStorageSize = Math.round(value * 1024 * 1024 * 1024);
+                                                    settingsManager.maxStorageSize = Math.round(value) * 1024 * 1024 * 1024;
                                             }
                                         }
-                                        Label { text: mainStorageSlider.value === 0 ? qsTr("No Limit") : mainStorageSlider.value < 1 ? mainStorageSlider.value.toFixed(1) + " GB" : Math.round(mainStorageSlider.value) + " GB"; color: Theme.textColor; font.weight: Font.Medium; Layout.preferredWidth: 70 }
+                                        Label { text: mainStorageSlider.value === 0 ? qsTr("No Limit") : Math.round(mainStorageSlider.value) + " GB"; color: Theme.textColor; font.weight: Font.Medium; Layout.preferredWidth: 70 }
                                     }
                                     RowLayout {
                                         spacing: Theme.spacingMedium

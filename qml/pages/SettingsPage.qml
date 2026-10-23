@@ -123,7 +123,8 @@ Page {
             return;
         }
 
-        var bytes = Math.round(valueGB * 1024 * 1024 * 1024);
+        valueGB = Math.round(valueGB);
+        var bytes = valueGB * 1024 * 1024 * 1024;
         if (isCurrentUsageAbove(bytes)) {
             pendingStorageLimitGB = valueGB;
             var autoCleanupActive = storageManager.autoDeleteOldest;
@@ -936,7 +937,8 @@ Page {
                                 // Upper bound is the drive holding the
                                 // recordings (0 = unknown → legacy 500 GB cap).
                                 to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500
-                                stepSize: 0.1
+                                stepSize: 1
+                                snapMode: Slider.SnapAlways
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
                                 onPressedChanged: {
                                     if (!pressed && settingsManager)
@@ -945,7 +947,7 @@ Page {
                             }
 
                             ValuePill {
-                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : storageSlider.value >= 1024 ? (storageSlider.value / 1024).toFixed(1) + " TB" : storageSlider.value < 1 ? storageSlider.value.toFixed(1) + " GB" : Math.round(storageSlider.value) + " GB"
+                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : Math.round(storageSlider.value) + " GB"
                             }
                         }
                     }
