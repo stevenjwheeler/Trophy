@@ -421,7 +421,7 @@ RecordingManager::lookupAudioPreparation(AudioPreparation input) {
             hint, &input.gameNodeName, &input.gameSerial);
     }
     if (!input.voiceApp.isEmpty())
-      input.voiceNode = PipeWireAudioSource::findNodeByProcessName(
+      input.voiceNode = PipeWireAudioSource::findNodeByBinary(
           input.voiceApp, &input.voiceNodeName, &input.voiceSerial);
   }
 #endif
@@ -778,7 +778,7 @@ bool RecordingManager::buildPipeline() {
         if (nodeId != 0xFFFFFFFF && !gameIsFallback) {
           voiceTrack = isSeparate ? 1 : nextContiguous++;
           auto voiceSrc = PipeWireAudioSource::createApplicationSource(
-              nodeId, vcNodeName, vcSerial);
+              nodeId, vcNodeName, vcSerial, vcApp);
           voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
           m_audioMixer->addSourceAsync(std::move(voiceSrc), voiceTrack);
           activeSources++;

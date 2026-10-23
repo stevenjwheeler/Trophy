@@ -613,7 +613,7 @@ ReplayManager::lookupDvrNodes(uint32_t gamePid, const QStringList &gameHints,
   }
   out.gameFound = (out.gameNodeId != 0xFFFFFFFFu);
   if (!voiceApp.isEmpty()) {
-    out.voiceNodeId = PipeWireAudioSource::findNodeByProcessName(
+    out.voiceNodeId = PipeWireAudioSource::findNodeByBinary(
         voiceApp, &out.voiceNodeName, &out.voiceNodeSerial);
     out.voiceFound = (out.voiceNodeId != 0xFFFFFFFFu);
   }
@@ -773,7 +773,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
       if (createSources) {
         auto voiceSrc = PipeWireAudioSource::createApplicationSource(
             lookup.voiceNodeId, lookup.voiceNodeName,
-            lookup.voiceNodeSerial);
+            lookup.voiceNodeSerial, vcApp);
         voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
         m_audioMixer->addSourceAsync(std::move(voiceSrc), voiceTrack);
       }

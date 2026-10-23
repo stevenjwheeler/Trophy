@@ -175,8 +175,9 @@ private:
   void checkForNewAudioNodes();
   void deliverAudioLookups();
   using AudioNodeResult = AudioMixer::NodeLookupResult;
-  using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &)>;
-  static AudioNodeResult lookupAudioNode(uint32_t pid, const QStringList &hints);
+  using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &, bool)>;
+  static AudioNodeResult lookupAudioNode(uint32_t pid, const QStringList &hints,
+                                        bool exactBinary);
   AudioNodeLookup m_audioNodeLookup = lookupAudioNode;
   struct AudioLookupOperation {
     std::future<AudioNodeResult> worker;

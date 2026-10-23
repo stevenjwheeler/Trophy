@@ -1123,14 +1123,16 @@ void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
   operation.generation = m_audioLookupGeneration;
   operation.game = isFallback != nullptr;
   operation.worker = std::async(std::launch::async,
-                               [lookup = m_audioNodeLookup, pid, hints] {
-    return lookup(pid, hints);
+                               [lookup = m_audioNodeLookup, pid, hints,
+                                exactBinary = !operation.game] {
+    return lookup(pid, hints, exactBinary);
   });
   m_audioLookupTimer->start();
 }
 
 RecordingSession::AudioNodeResult
-RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
+RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints,
+                                  bool exactBinary) {
 
   // Fresh lookup: PID first (exact), then name hints in order.
   uint32_t nodeId = PW_ID_ANY;
@@ -1143,8 +1145,9 @@ RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
     for (const QString &hint : hints) {
       if (hint.isEmpty())
         continue;
-      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
-                                                          &nodeSerial);
+      nodeId = exactBinary
+                   ? PipeWireAudioSource::findNodeByBinary(hint, &nodeName, &nodeSerial)
+                   : PipeWireAudioSource::findNodeByProcessName(hint, &nodeName, &nodeSerial);
       if (nodeId != PW_ID_ANY)
         break;
     }
@@ -1152,6 +1155,7 @@ RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
 #else
   Q_UNUSED(pid);
   Q_UNUSED(hints);
+  Q_UNUSED(exactBinary);
 #endif
 
   return {nodeId, nodeName, nodeSerial};
@@ -1191,9 +1195,12 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   if (track < 0 || track >= kAudioTrackCount || !m_audioMixer)
     return;
   if (nodeId == PW_ID_ANY) {
-    // No live node. A previous bind died with its stream (Electron /
-    // Proton streams are recreated constantly) — forget it so the next
-    // appearance re-binds instead of being skipped as "connected".
+    // Missing Voice must be silent, including an in-flight start or a source
+    // already marked disconnected by a previous query. Unpublish immediately;
+    // the mixer's owned worker drains callbacks and native resources. Keep
+    // Game's intentional desktop fallback / existing recovery policy intact.
+    if (!isFallback)
+      m_audioMixer->removeSourceAsync(track);
     if (m_sourceConnected[track]) {
       qDebug() << "Audio node vanished for track" << track
                << "- will re-bind on return";
@@ -1232,9 +1239,11 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   // (Re)bind — replaces monitor fallback or a dead stream generation.
   // Startup skew is handled downstream instead (audio gate + encoder
   // start offsets), so binds happen the moment a node is usable.
-  m_audioMixer->addSourceAsync(PipeWireAudioSource::createApplicationSource(
-                              nodeId, nodeName, nodeSerial),
-                          track);
+  auto source = PipeWireAudioSource::createApplicationSource(
+      nodeId, nodeName, nodeSerial, isFallback ? QString() : m_voiceChatApp);
+  source->setStreamName(isFallback ? QStringLiteral("trophy-game")
+                                   : QStringLiteral("trophy-voice"));
+  m_audioMixer->addSourceAsync(std::move(source), track);
   m_sourceConnected[track] = true;
   m_boundSerial[track] = nodeSerial;
   // A new source restarts this track's origin measurement: the encoder

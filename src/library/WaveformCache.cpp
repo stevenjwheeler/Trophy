@@ -36,13 +36,13 @@ namespace {
 // Peaks are computed at a low mono rate: plenty for drawing,
 // far less decode + resample work than full-rate stereo.
 constexpr int kPeakRate = 8000;
-// Max-abs is accumulated per block, then reduced to buckets —
-// no reliance on container duration (which can be NOPTS).
+// Max-abs is accumulated in timeline-positioned blocks, then reduced against
+// one shared file span. Missing timestamps fall back to contiguous samples.
 constexpr int kBlockSamples = 256;
 constexpr int kMaxTracks = 32; // same bound as the sidecar schema
 constexpr quint32 kCacheMagic = 0x54504b31; // "TPK1"
-// v1 normalized arbitrarily small noise to full height. Regenerate those peaks.
-constexpr quint32 kCacheVersion = 2;
+// v3 preserves leading silence, internal gaps and unequal stream durations.
+constexpr quint32 kCacheVersion = 3;
 // Keep ordinary audio legible without making near-silence look loud:
 // normalization may boost by at most 20 dB (10x).
 constexpr float kNormalizationFloor = 0.1f;
@@ -63,15 +63,20 @@ struct TrackDecoder {
   int capacity = 0;
   bool ok = false;
   QVector<float> blocks;
-  float blockMax = 0.0f;
-  int blockFill = 0;
+  qint64 position = 0;
+  qint64 end = 0;
+  bool positioned = false;
+  AVRational timeBase{0, 1};
+  int64_t originUs = 0;
   qint64 samples = 0;
   qint64 drainSamples = 0;
   // Explicit limits bound malformed frames, resampler buffering and history.
   static constexpr int kMaxFrameSamples = 1 << 20;
   static constexpr qint64 kMaxSamples = qint64(kPeakRate) * 60 * 60 * 24;
 
-  explicit TrackDecoder(const AVCodecParameters *par) {
+  explicit TrackDecoder(const AVStream *stream, int64_t origin)
+      : timeBase(stream->time_base), originUs(origin) {
+    const auto *par = stream->codecpar;
     const AVCodec *codec = avcodec_find_decoder(par->codec_id);
     if (!codec)
       return;
@@ -130,12 +135,16 @@ struct TrackDecoder {
         ok = false;
         return 0;
       }
-      blockMax = qMax(blockMax, std::fabs(values[i]));
-      if (++blockFill == kBlockSamples) {
-        blocks.append(blockMax);
-        blockMax = 0.0f;
-        blockFill = 0;
+      const qint64 at = position++;
+      if (at < 0) continue; // Encoder preroll before the common file origin.
+      if (at >= kMaxSamples) {
+        ok = false;
+        return 0;
       }
+      const auto block = at / kBlockSamples;
+      if (block >= blocks.size()) blocks.resize(block + 1);
+      blocks[block] = qMax(blocks[block], std::fabs(values[i]));
+      end = qMax(end, at + 1);
     }
     return got;
   }
@@ -154,9 +163,41 @@ struct TrackDecoder {
         for (int i = 0; i < planes; ++i)
           if (!frame->extended_data[i])
             ok = false;
-        if (ok)
+        if (ok) {
+          if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+            const auto timestampUs = av_rescale_q(frame->best_effort_timestamp,
+                                                 timeBase, AV_TIME_BASE_Q);
+            // Validate before arithmetic/rescaling: malformed timestamps must
+            // not allocate unbounded histories or overflow subtraction.
+            const long double delta = static_cast<long double>(timestampUs) - originUs;
+            if (delta < -24LL * 60 * 60 * AV_TIME_BASE ||
+                delta > 24LL * 60 * 60 * AV_TIME_BASE) {
+              ok = false;
+              av_frame_unref(frame);
+              break;
+            }
+            const auto deltaUs = static_cast<int64_t>(delta);
+            const qint64 at = av_rescale_q(deltaUs,
+                AV_TIME_BASE_Q, AVRational{1, kPeakRate}) -
+                swr_get_delay(swr, kPeakRate);
+            // Container quantization and sample-rate rounding are not gaps.
+            // Keep SWR's buffered tail on the previous segment when a real
+            // discontinuity occurs, then place this frame at its timestamp.
+            if (!positioned || std::abs(at - position) > kBlockSamples) {
+              if (positioned) {
+                while (ok && convert(nullptr, 0) > 0) {}
+                swr_close(swr);
+                if (swr_init(swr) < 0) ok = false;
+              }
+              position = av_rescale_q(deltaUs,
+                  AV_TIME_BASE_Q, AVRational{1, kPeakRate});
+              positioned = true;
+            }
+          }
+          if (ok)
           convert(const_cast<const uint8_t **>(frame->extended_data),
                   frame->nb_samples);
+        }
       }
       av_frame_unref(frame);
     }
@@ -185,22 +226,24 @@ struct TrackDecoder {
       ok = false;
   }
 
-  QVector<float> finish() {
+  void drain() {
+    if (ok) while (ok && convert(nullptr, 0) > 0) {}
+  }
+
+  QVector<float> finish(qint64 timelineSamples) {
     if (!ok)
       return {};
-    while (ok && convert(nullptr, 0) > 0) {
-    }
-    if (!ok)
-      return {};
-    if (blockFill)
-      blocks.append(blockMax);
     if (blocks.isEmpty())
       return {};
+    // Do not stretch a short/late stream to fill the file. Empty buckets are
+    // actual silence in the common video/player timeline.
+    const qint64 totalBlocks = (timelineSamples + kBlockSamples - 1) / kBlockSamples;
     QVector<float> peaks(WaveformCache::kBuckets);
     float globalMax = 0.0f;
     for (int b = 0; b < peaks.size(); ++b) {
-      const qsizetype from = (qint64(b) * blocks.size()) / peaks.size();
-      const qsizetype to = (qint64(b + 1) * blocks.size()) / peaks.size();
+      const qsizetype from = (qint64(b) * totalBlocks) / peaks.size();
+      const qsizetype to = qMin<qint64>(blocks.size(),
+          (qint64(b + 1) * totalBlocks) / peaks.size());
       float maximum = 0.0f;
       for (qsizetype i = from; i < to; ++i)
         maximum = qMax(maximum, blocks[i]);
@@ -234,7 +277,8 @@ QVector<QVector<float>> decodeAllPeaks(
     if (ctx->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
       continue;
     streamToTrack[i] = static_cast<int>(states.size());
-    states.push_back(std::make_unique<TrackDecoder>(ctx->streams[i]->codecpar));
+    const int64_t origin = ctx->start_time == AV_NOPTS_VALUE ? 0 : ctx->start_time;
+    states.push_back(std::make_unique<TrackDecoder>(ctx->streams[i], origin));
   }
   stats.tracks = static_cast<int>(states.size());
   QVector<QVector<float>> tracks(stats.tracks);
@@ -264,6 +308,11 @@ QVector<QVector<float>> decodeAllPeaks(
   }
   av_packet_free(&packet);
   stats.cleanEof = result == AVERROR_EOF;
+  qint64 timelineSamples = 0;
+  if (ctx->duration > 0 && ctx->duration != AV_NOPTS_VALUE &&
+      ctx->duration <= 24LL * 60 * 60 * AV_TIME_BASE)
+    timelineSamples = av_rescale_q(ctx->duration, AV_TIME_BASE_Q,
+                                   AVRational{1, kPeakRate});
   for (int t = 0; t < stats.tracks; ++t) {
     auto &state = *states[t];
     if (stats.cleanEof && state.ok) {
@@ -271,9 +320,15 @@ QVector<QVector<float>> decodeAllPeaks(
       state.send(nullptr);
       if (state.ok) {
         ++stats.resamplerDrains;
-        tracks[t] = state.finish();
+        state.drain();
       }
     }
+    timelineSamples = qMax(timelineSamples, state.end);
+  }
+  for (int t = 0; t < stats.tracks; ++t) {
+    auto &state = *states[t];
+    if (stats.cleanEof && state.ok)
+      tracks[t] = state.finish(timelineSamples);
     stats.samples += state.samples;
     stats.drainSamples += state.drainSamples;
     stats.blocks += state.blocks.size();

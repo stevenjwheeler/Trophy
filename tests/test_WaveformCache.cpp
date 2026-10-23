@@ -111,33 +111,64 @@ protected:
     return m;
   }
 
-  // Independent ffmpeg decode/resample reference, reduced by the documented
-  // 256-sample max-abs / 8000-bucket rule. Not the production implementation.
-  QVariantList reference(const QString &path, int track, qint64 *sampleCount) {
-    QProcess proc;
-    proc.start("ffmpeg", {"-v", "error", "-i", path, "-map",
-                         QString("0:a:%1").arg(track), "-ac", "1", "-ar",
-                         "8000", "-f", "f32le", "pipe:1"});
-    if (!proc.waitForFinished(30000) || proc.exitCode() != 0)
+  // Independent CLI decodes for continuous-track fixtures. Place PCM at each
+  // stream's recorded start and reduce every lane against a shared file span.
+  // The discontinuous fixture below separately verifies internal gaps.
+  QVariantList reference(const QString &path, int track, qint64 *sampleCount,
+                         qint64 *positionedBlocks = nullptr) {
+    AVFormatContext *ctx = nullptr;
+    if (avformat_open_input(&ctx, path.toUtf8().constData(), nullptr, nullptr) < 0)
       return {};
-    const QByteArray raw = proc.readAllStandardOutput();
+    if (avformat_find_stream_info(ctx, nullptr) < 0) {
+      avformat_close_input(&ctx);
+      return {};
+    }
+    QVector<QByteArray> decoded;
+    QVector<qint64> starts;
+    qint64 timeline = ctx->duration > 0 ? av_rescale_q(ctx->duration,
+        AV_TIME_BASE_Q, AVRational{1, 8000}) : 0;
+    const auto origin = ctx->start_time == AV_NOPTS_VALUE ? 0 : ctx->start_time;
+    for (unsigned i = 0; i < ctx->nb_streams; ++i) {
+      const auto *stream = ctx->streams[i];
+      if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+      QProcess proc;
+      proc.start("ffmpeg", {"-v", "error", "-i", path, "-map",
+                           QString("0:%1").arg(i), "-ac", "1", "-ar",
+                           "8000", "-f", "f32le", "pipe:1"});
+      if (!proc.waitForFinished(30000) || proc.exitCode() != 0) {
+        avformat_close_input(&ctx);
+        return {};
+      }
+      decoded.append(proc.readAllStandardOutput());
+      const qint64 offset = stream->start_time == AV_NOPTS_VALUE ? 0 :
+          av_rescale_q(av_rescale_q(stream->start_time, stream->time_base,
+                                    AV_TIME_BASE_Q) - origin,
+                       AV_TIME_BASE_Q, AVRational{1, 8000});
+      starts.append(offset);
+      timeline = std::max(timeline, offset + qint64(decoded.last().size() / sizeof(float)));
+    }
+    avformat_close_input(&ctx);
+    const auto &raw = decoded[track];
     *sampleCount = raw.size() / sizeof(float);
     QVector<float> blocks;
-    for (qint64 first = 0; first < *sampleCount; first += 256) {
-      float maximum = 0;
-      for (qint64 i = first; i < qMin(first + 256, *sampleCount); ++i) {
-        float value;
-        std::memcpy(&value, raw.constData() + i * sizeof(float), sizeof(float));
-        maximum = std::max(maximum, std::fabs(value));
-      }
-      blocks.append(maximum);
+    const auto end = starts[track] + *sampleCount;
+    blocks.resize((end + 255) / 256);
+    if (positionedBlocks) *positionedBlocks = blocks.size();
+    for (qint64 i = 0; i < *sampleCount; ++i) {
+      const auto at = starts[track] + i;
+      if (at < 0) continue;
+      float value;
+      std::memcpy(&value, raw.constData() + i * sizeof(float), sizeof(float));
+      blocks[at / 256] = std::max(blocks[at / 256], std::fabs(value));
     }
+    const auto totalBlocks = (timeline + 255) / 256;
     QVariantList result;
     double maximum = 0;
     for (int b = 0; b < WaveformCache::kBuckets; ++b) {
       float value = 0;
-      for (qsizetype i = qint64(b) * blocks.size() / WaveformCache::kBuckets;
-           i < qint64(b + 1) * blocks.size() / WaveformCache::kBuckets; ++i)
+      for (qsizetype i = qint64(b) * totalBlocks / WaveformCache::kBuckets;
+           i < std::min<qint64>(blocks.size(),
+               qint64(b + 1) * totalBlocks / WaveformCache::kBuckets); ++i)
         value = std::max(value, blocks[i]);
       result.append(double(value));
       maximum = std::max(maximum, double(value));
@@ -296,6 +327,8 @@ TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
       "-c:a", "pcm_f32le"});
   if (path.isEmpty())
     GTEST_SKIP() << "ffmpeg unavailable or render failed";
+  for (quint32 legacyVersion : {1u, 2u}) {
+  SCOPED_TRACE(legacyVersion);
   const QString sidecar = tempDir.path() + "/.thumbnails/legacy.peaks";
   ASSERT_TRUE(QDir().mkpath(QFileInfo(sidecar).absolutePath()));
   QFile file(sidecar);
@@ -304,7 +337,7 @@ TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
   data.setVersion(QDataStream::Qt_6_0);
   data.setFloatingPointPrecision(QDataStream::SinglePrecision);
   const QFileInfo source(path);
-  data << quint32(0x54504b31) << quint32(1) << source.size()
+  data << quint32(0x54504b31) << legacyVersion << source.size()
        << source.lastModified().toSecsSinceEpoch() << qint32(1)
        << qint32(WaveformCache::kBuckets);
   for (int b = 0; b < WaveformCache::kBuckets; ++b)
@@ -325,7 +358,43 @@ TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
   quint32 magic = 0, version = 0;
   updated >> magic >> version;
   EXPECT_EQ(magic, 0x54504b31u);
-  EXPECT_EQ(version, 2u);
+  EXPECT_EQ(version, 3u);
+  }
+}
+
+TEST_F(WaveformCacheTest, DelayedShortTrackAndInternalGapsUseSharedVideoTimeline) {
+  const QString path = render("timeline.mkv", {
+      "-f", "lavfi", "-i", "color=c=black:s=32x32:r=10:d=8",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
+      "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=4",
+      "-filter_complex", "[2:a]aselect='lt(t,1)+gte(t,3)',asetpts=PTS+2/TB[late]",
+      "-map", "0:v", "-map", "1:a", "-map", "[late]",
+      "-c:v", "ffv1", "-c:a", "pcm_f32le"});
+  if (path.isEmpty()) GTEST_SKIP() << "ffmpeg unavailable or render failed";
+  WaveformCache cache;
+  QSignalSpy spy(&cache, &WaveformCache::peaksReady);
+  cache.requestPeaks(path, 0);
+  cache.requestPeaks(path, 1);
+  QElapsedTimer timer;
+  timer.start();
+  while (spy.size() < 2 && timer.elapsed() < 10000) spy.wait(500);
+  ASSERT_EQ(spy.size(), 2);
+  QVariantList primary, late;
+  for (const auto &args : spy)
+    (args[1].toInt() == 0 ? primary : late) = args[2].toList();
+  ASSERT_EQ(late.size(), WaveformCache::kBuckets);
+  ASSERT_EQ(primary.size(), late.size());
+  const auto maximum = [&](double start, double end) {
+    double value = 0;
+    for (int i = int(start / 8 * late.size()); i < int(end / 8 * late.size()); ++i)
+      value = std::max(value, late[i].toDouble());
+    return value;
+  };
+  EXPECT_EQ(maximum(0, 1.8), 0.0); // Leading silence, not stretched to t=0.
+  EXPECT_GT(maximum(2.2, 2.8), 0.5);
+  EXPECT_EQ(maximum(3.2, 4.8), 0.0); // Preserve the discontinuity's silence.
+  EXPECT_GT(maximum(5.2, 5.8), 0.5);
+  EXPECT_EQ(maximum(6.2, 7.8), 0.0); // Ends early, not stretched to file EOF.
 }
 
 TEST_F(WaveformCacheTest, CacheWrittenAndReused) {
@@ -437,7 +506,7 @@ TEST_F(WaveformCacheTest, BoundedMalformedPeakCacheCorpusRegeneratesFinitePeaks)
     data.setFloatingPointPrecision(QDataStream::SinglePrecision);
     const qint32 count = variant == 0 ? 0 : variant == 1 ? -1 :
                          variant == 2 ? 33 : 1;
-    data << quint32(0x54504b31) << quint32(2) << source.size()
+    data << quint32(0x54504b31) << quint32(3) << source.size()
          << source.lastModified().toSecsSinceEpoch() << count
          << qint32(WaveformCache::kBuckets);
     for (int b = 0; b < WaveformCache::kBuckets; ++b)
@@ -520,19 +589,21 @@ TEST_F(WaveformCacheTest, SinglePassMixedRatesDelayedShortAndSilentStreams) {
       continue;
     }
     qint64 samples = 0;
-    const QVariantList expected = reference(path, track, &samples);
+    qint64 positionedBlocks = 0;
+    const QVariantList expected = reference(path, track, &samples, &positionedBlocks);
     ASSERT_EQ(actual.size(), WaveformCache::kBuckets);
     ASSERT_EQ(expected.size(), actual.size());
     totalSamples += samples;
-    expectedBlocks += (samples + 255) / 256;
+    expectedBlocks += positionedBlocks;
     for (int b = 0; b < actual.size(); ++b)
       EXPECT_NEAR(actual[b].toDouble(), expected[b].toDouble(), 0.0001)
           << "track=" << track << " bucket=" << b;
   }
   EXPECT_EQ(stats.samples, totalSamples);
   EXPECT_EQ(stats.blocks, expectedBlocks);
-  // History scales with mono blocks, not full-rate PCM or retained packets.
-  EXPECT_LE(stats.blocks, stats.samples / 256 + stats.tracks);
+  // History scales with the shared timeline (including leading silence), not
+  // full-rate PCM or retained packets. This fixture spans one second.
+  EXPECT_LE(stats.blocks, stats.tracks * ((8000 + 255) / 256));
   EXPECT_LE(stats.blockCapacity, stats.blocks * 2 + stats.tracks * 16);
   EXPECT_LE(stats.outputCapacity, qint64(4096) * stats.tracks);
   RecordProperty("demux_reads", int(stats.reads));

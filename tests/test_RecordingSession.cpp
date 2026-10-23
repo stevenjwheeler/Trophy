@@ -100,12 +100,16 @@ public:
   static void deliverSameNode(RecordingSession &session) {
     session.applyAppTrackNode(0, 23, "game-node", "123", nullptr);
   }
+  static void missingNode(RecordingSession &session, int track, bool game) {
+    session.applyAppTrackNode(track, 0xffffffffu, {}, {},
+                              game ? &session.m_gameIsFallback : nullptr);
+  }
   static void checkNodes(RecordingSession &session) {
     session.checkForNewAudioNodes();
   }
   static void setLookup(RecordingSession &session,
                        std::function<uint32_t()> lookup) {
-    session.m_audioNodeLookup = [lookup](uint32_t, const QStringList &) {
+    session.m_audioNodeLookup = [lookup](uint32_t, const QStringList &, bool) {
       return RecordingSession::AudioNodeResult{lookup(), "old-node", "old-serial"};
     };
   }
@@ -1109,6 +1113,33 @@ TEST(RecordingSessionTest, TerminalSourceErrorRebindsUnchangedNodeSerial) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   EXPECT_TRUE(oldDestroyed); // node still exists, but the capture died
+}
+
+TEST(RecordingSessionTest, MissingVoiceRetiresSourceEvenAfterDisconnectedFlagCleared) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  AudioMixer mixer(48000, 2);
+  bool retired = false, gameRetired = false;
+  auto voice = std::make_unique<FakeAudioSource>();
+  voice->destroyed = &retired;
+  mixer.addSource(std::move(voice), 1);
+  auto game = std::make_unique<FakeAudioSource>();
+  game->destroyed = &gameRetired;
+  mixer.addSource(std::move(game), 0);
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                           &mixer, true, 128, 3, {});
+  session.markSourceConnected(1);
+  session.forgetTrack(1); // Old bug only forgot flags and retained native source.
+  RecordingSessionTestPeer::missingNode(session, 1, false);
+  RecordingSessionTestPeer::missingNode(session, 0, true);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (mixer.sourceOperationPending(1) && std::chrono::steady_clock::now() < deadline) {
+    QCoreApplication::processEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(retired);
+  EXPECT_FALSE(gameRetired); // No removal of the Game/desktop fallback leg.
 }
 
 TEST(RecordingSessionTest, MissingMergedSourceCannotStallOrGrowOtherTrack) {

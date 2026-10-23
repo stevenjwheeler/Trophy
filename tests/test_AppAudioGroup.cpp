@@ -3,6 +3,10 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
 #include <QTest>
+#include <QProcess>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <atomic>
@@ -29,6 +33,36 @@ bool waitFor(const std::function<bool()> &predicate) {
     QTest::qWait(10);
   }
   return predicate();
+}
+
+uint32_t privateCaptureNode(const QString &name) {
+  QProcess dump;
+  dump.start("pw-dump", {});
+  if (!dump.waitForFinished(5000) || dump.exitCode() != 0) return PW_ID_ANY;
+  for (const auto &value : QJsonDocument::fromJson(dump.readAllStandardOutput()).array()) {
+    const auto object = value.toObject();
+    const auto props = object["info"].toObject()["props"].toObject();
+    if (object["type"].toString() == QLatin1String(PW_TYPE_INTERFACE_Node) &&
+        (props["node.name"].toString() == name ||
+         props["media.name"].toString() == name))
+      return object["id"].toInt();
+  }
+  return PW_ID_ANY;
+}
+
+uint32_t privatePort(uint32_t node, const QString &direction) {
+  QProcess dump;
+  dump.start("pw-dump", {});
+  if (!dump.waitForFinished(5000) || dump.exitCode() != 0) return PW_ID_ANY;
+  for (const auto &value : QJsonDocument::fromJson(dump.readAllStandardOutput()).array()) {
+    const auto object = value.toObject();
+    const auto props = object["info"].toObject()["props"].toObject();
+    if (object["type"].toString() == QLatin1String(PW_TYPE_INTERFACE_Port) &&
+        props["node.id"].toVariant().toUInt() == node &&
+        props["port.direction"].toString() == direction)
+      return object["id"].toInt();
+  }
+  return PW_ID_ANY;
 }
 
 struct PlaybackClient {
@@ -70,12 +104,14 @@ struct PlaybackClient {
     pw_context_destroy(context);
     pw_thread_loop_destroy(loop);
   }
-  Stream *add(float value, const char *app = "Outlast fixture") {
+  Stream *add(float value, const char *app = "Outlast fixture",
+              const char *binary = "game-fixture") {
     auto s = std::make_unique<Stream>();
     s->value = value;
     pw_thread_loop_lock(loop);
     s->stream = pw_stream_new(core, "group-playback", pw_properties_new(
         PW_KEY_NODE_NAME, app, PW_KEY_APP_NAME, app,
+        PW_KEY_APP_PROCESS_BINARY, binary,
         PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
         PW_KEY_TARGET_OBJECT, "group-test-sink", nullptr));
     static const pw_stream_events events = [] {
@@ -160,5 +196,123 @@ TEST(AppAudioGroupTest, SilentFirstStreamIncludesLateSiblingAndMixesOnOneClock) 
   game.add(0.25f);
   ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.35f) < 0.001f; }));
   capture->stop();
+}
+
+TEST(AppAudioGroupTest, VoiceUsesExactBinaryAndNeverGroupsUnrelatedChromium) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "voice-group-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient playback;
+  auto *discord = playback.add(0.1f, "Chromium", "Discord");
+  playback.add(0.7f, "Chromium", "VRChat.exe");
+  playback.add(0.6f, "Discord", "DiscordHelper");
+  QString nodeName, serial;
+  const auto id = PipeWireAudioSource::findNodeByBinary("discord", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName, serial, "Discord");
+  std::atomic<float> latest{-1};
+  std::atomic<bool> unrelated{false};
+  capture->setCallback([&](const AudioFrame &frame) {
+    latest = frame.samples[0];
+    if (frame.samples[0] > 0.4f) unrelated = true;
+  });
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.1f) < 0.001f; }));
+  playback.add(0.2f, "Chromium", "dIsCoRd");
+  ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.3f) < 0.001f; }));
+  playback.remove(discord);
+  QTest::qWait(200);
+  EXPECT_FALSE(unrelated.load());
+  capture->stop();
+  EXPECT_EQ(PipeWireAudioSource::findNodeByBinary("NotDiscord"), PW_ID_ANY);
+}
+
+TEST(AppAudioGroupTest, ActualLinkFromSecondGameNodeIntoVoiceIsRejected) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "voice-wrong-link-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient playback;
+  playback.add(0.1f, "Chromium", "Discord");
+  playback.add(0.0f, "VRChat.exe", "VRChat.exe");
+  auto *secondGame = playback.add(0.7f, "VRChat.exe", "VRChat.exe");
+  QString nodeName, serial;
+  const auto id = PipeWireAudioSource::findNodeByBinary("Discord", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName, serial, "Discord");
+  capture->setStreamName("trophy-test-voice");
+  std::atomic<int> callbacks{0};
+  std::atomic<bool> wrongAudio{false};
+  capture->setCallback([&](const AudioFrame &frame) {
+    ++callbacks;
+    if (frame.samples[0] > 0.4f) wrongAudio = true;
+  });
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(waitFor([&] { return callbacks.load() > 0; }));
+  const auto input = privateCaptureNode("trophy-test-voice");
+  ASSERT_NE(input, PW_ID_ANY);
+  pw_thread_loop_lock(playback.loop);
+  const auto output = pw_stream_get_node_id(secondGame->stream);
+  pw_thread_loop_unlock(playback.loop);
+  const auto outputPort = privatePort(output, "out");
+  const auto inputPort = privatePort(input, "in");
+  ASSERT_NE(outputPort, PW_ID_ANY);
+  ASSERT_NE(inputPort, PW_ID_ANY);
+  // Emulate the observed qpwgraph arrangement, not just target properties:
+  // the second VRChat playback node is linked directly into Trophy Voice.
+  pw_thread_loop_lock(playback.loop);
+  auto *props = pw_properties_new(nullptr, nullptr);
+  pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%u", output);
+  pw_properties_setf(props, PW_KEY_LINK_OUTPUT_PORT, "%u", outputPort);
+  pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%u", input);
+  pw_properties_setf(props, PW_KEY_LINK_INPUT_PORT, "%u", inputPort);
+  auto *link = static_cast<pw_proxy *>(pw_core_create_object(playback.core,
+      "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &props->dict, 0));
+  pw_properties_free(props);
+  pw_thread_loop_unlock(playback.loop);
+  ASSERT_NE(link, nullptr);
+  EXPECT_TRUE(waitFor([&] { return !capture->isCapturing(); }));
+  const auto stopped = callbacks.load();
+  QTest::qWait(100);
+  EXPECT_EQ(callbacks.load(), stopped);
+  EXPECT_FALSE(wrongAudio.load());
+  pw_thread_loop_lock(playback.loop);
+  pw_proxy_destroy(link);
+  pw_thread_loop_unlock(playback.loop);
+  capture->stop();
+}
+
+TEST(AppAudioGroupTest, WrongBinaryOrStaleSerialNeverDeliversGameAudioToVoice) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "voice-identity-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient playback;
+  playback.add(0.7f, "Chromium", "VRChat.exe");
+  QString nodeName, serial;
+  const auto id = PipeWireAudioSource::findNodeByBinary("VRChat.exe", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  for (bool staleSerial : {false, true}) {
+    SCOPED_TRACE(staleSerial);
+    auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName,
+        staleSerial ? QStringLiteral("999999999") : serial,
+        staleSerial ? QString() : QStringLiteral("Discord"));
+    std::atomic<int> callbacks{0};
+    capture->setCallback([&](const AudioFrame &) { ++callbacks; });
+    ASSERT_TRUE(capture->initialize({}));
+    if (capture->start())
+      EXPECT_TRUE(waitFor([&] { return !capture->isCapturing(); }));
+    EXPECT_EQ(callbacks.load(), 0);
+    capture->stop();
+  }
 }
 } // namespace

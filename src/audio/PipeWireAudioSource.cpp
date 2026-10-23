@@ -7,6 +7,7 @@
 
 #include "PipeWireAudioSource.h"
 #include "AppAudioGroup.h"
+#include "ApplicationAudioIdentity.h"
 
 #include <QDebug>
 #include <QList>
@@ -76,6 +77,15 @@ struct PipeWireAudioSource::Private {
 
     if (self->failed.load(std::memory_order_acquire))
       return;
+    if (self->appGroup && !self->appGroup->acceptsAudio()) {
+      // Still dequeue/return producer buffers while registry verification is
+      // pending. Never deliver unverified PCM to the mixer/encoder.
+      if (auto *buffer = self->q->m_operations.dequeueBuffer(self->stream))
+        self->q->m_operations.queueBuffer(self->stream, buffer);
+      if (self->appGroup->rejectedRoute())
+        self->fail(QStringLiteral("Application audio link does not match the pinned app"));
+      return;
+    }
     struct pw_buffer *b = self->q->m_operations.dequeueBuffer(self->stream);
     if (!b)
       return;
@@ -152,7 +162,7 @@ struct PipeWireAudioSource::Private {
                      << "but WirePlumber set:" << gotTarget
                      << "(node.target:" << gotNode << ")";
         } else {
-          qDebug() << "Routing confirmed [" << self->q->m_displayName << "]"
+          qDebug() << "Routing requested [" << self->q->m_displayName << "]"
                    << "— target.object:" << gotTarget
                    << "node.target:" << gotNode;
         }
@@ -660,6 +670,7 @@ namespace {
 
 struct InfoMatchRequest {
   QString hintLower;      // product-name hint, lowercased (empty if unused)
+  bool exactBinary = false;
   uint32_t pid = 0;       // PID hint (0 if unused)
   bool gatherAll = false; // collect every candidate instead of first match
   QVariantList apps;      // gatherAll results: {name, binary, nodeId}
@@ -702,6 +713,11 @@ static bool infoPropsMatch(const struct spa_dict *props,
   }
   if (req->hintLower.isEmpty())
     return false;
+  if (req->exactBinary) {
+    const char *binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY);
+    return binary && detail::matchesAudioBinary(QString::fromUtf8(binary),
+                                                req->hintLower);
+  }
   auto matches = [&](const char *key) {
     const char *s = spa_dict_lookup(props, key);
     return s && QString(s).toLower().contains(req->hintLower);
@@ -878,8 +894,10 @@ static void runInfoMatch(InfoMatchRequest &req) {
         auto contains = [&](const QString &s) {
           return !s.isEmpty() && s.toLower().contains(req.hintLower);
         };
-        hit = contains(n.binary) || contains(n.appName) ||
-              contains(n.nodeName) || contains(n.appId);
+        hit = req.exactBinary
+                  ? detail::matchesAudioBinary(n.binary, req.hintLower)
+                  : contains(n.binary) || contains(n.appName) ||
+                        contains(n.nodeName) || contains(n.appId);
       }
       if (hit) {
         hitId = id;
@@ -988,6 +1006,18 @@ uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
   return req.foundId;
 }
 
+uint32_t PipeWireAudioSource::findNodeByBinary(const QString &binary,
+                                             QString *outNodeName,
+                                             QString *outSerial) {
+  InfoMatchRequest req;
+  req.hintLower = binary.toLower();
+  req.exactBinary = true;
+  runInfoMatch(req);
+  if (outNodeName) *outNodeName = req.foundName;
+  if (outSerial) *outSerial = req.foundSerial;
+  return req.foundId;
+}
+
 // ---------------------------------------------------------------------------
 // Audio app enumeration
 // ---------------------------------------------------------------------------
@@ -1090,13 +1120,15 @@ void PipeWireAudioSource::resolveDeviceTarget() {
 
 std::unique_ptr<PipeWireAudioSource>
 PipeWireAudioSource::createApplicationSource(uint32_t nodeId,
-                                             const QString &nodeName,
-                                             const QString &serial) {
+                                              const QString &nodeName,
+                                              const QString &serial,
+                                              const QString &expectedBinary) {
   auto src =
       std::make_unique<PipeWireAudioSource>(SourceType::ApplicationAudio);
   src->m_targetNodeId = nodeId;
   src->m_targetNodeName = nodeName;
   src->m_targetSerial = serial;
+  src->m_expectedBinary = expectedBinary;
   src->m_identifier = nodeName.isEmpty() ? QString::number(nodeId) : nodeName;
   src->m_displayName =
       QString("Application Audio (%1)")
@@ -1205,8 +1237,8 @@ PipeWireAudioSource::Operations PipeWireAudioSource::realOperations() {
       pw_stream_dequeue_buffer, pw_stream_queue_buffer, pw_stream_get_properties,
       [](PipeWireAudioSource *source) {
         source->d->appGroup = std::make_unique<AppAudioGroup>(
-            source->d->core, source->d->stream, source->m_targetNodeId,
-            source->m_targetSerial);
+             source->d->core, source->d->stream, source->m_targetNodeId,
+            source->m_targetSerial, source->m_expectedBinary);
       }};
 }
 
@@ -1318,6 +1350,8 @@ bool PipeWireAudioSource::start() {
   if (m_type == SourceType::ApplicationAudio && m_targetNodeId != PW_ID_ANY) {
     // ApplicationAudio captures the OUTPUT side of the target app's stream
     setProperty(PW_KEY_STREAM_CAPTURE_SINK, "true");
+    setProperty("node.dont-fallback", "true");
+    setProperty("node.dont-move", "true");
 
     // Serial first (unambiguous), then name — never a bare numeric ID:
     // WirePlumber reads target.object as a serial and IDs collide with
