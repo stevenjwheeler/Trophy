@@ -8,6 +8,7 @@ T.Dialog {
     id: control
 
     property string message: ""
+    property string warningMessage: ""
     property bool showDontAsk: false
     property alias dontAskChecked: dontAskCheckbox.checked
     property string confirmText: qsTr("Confirm")
@@ -98,6 +99,31 @@ T.Dialog {
             color: _textMuted
             lineHeight: 1.2
             font.pixelSize: Theme.fontSizeNormal
+        }
+
+        Rectangle {
+            objectName: "dialogWarningBox"
+            visible: control.warningMessage.length > 0
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spacingLarge
+            Layout.rightMargin: Theme.spacingLarge
+            implicitHeight: warningLabel.implicitHeight + Theme.spacingMedium * 2
+            radius: Theme.radiusSmall
+            color: Theme.withOpacity(Theme.warningColor, 0.06)
+            border.color: Theme.warningColor
+            border.width: 1
+
+            Label {
+                id: warningLabel
+                objectName: "dialogWarningText"
+                anchors.fill: parent
+                anchors.margins: Theme.spacingMedium
+                text: control.warningMessage
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Theme.warningColor
+                font.pixelSize: Theme.fontSizeNormal
+            }
         }
 
         // Action Row

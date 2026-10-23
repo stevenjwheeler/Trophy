@@ -179,9 +179,20 @@ ApplicationWindow {
             window.clearSelection();
     }
 
+    function protectedCaptureCount(paths) {
+        let count = 0;
+        for (let i = 0; i < paths.length; ++i) {
+            const rec = window.recordingLibrary ? window.recordingLibrary.getRecording(paths[i]) : null;
+            if (rec && rec.protectedFromCleanup)
+                ++count;
+        }
+        return count;
+    }
+
     function deleteSelected() {
         if (selectedRecordings.length > 0) {
-            if (window.skipDeleteConfirmation) {
+            bulkDeleteDialog.protectedCount = protectedCaptureCount(selectedRecordings);
+            if (window.skipDeleteConfirmation && bulkDeleteDialog.protectedCount === 0) {
                 performDeleteSelected();
             } else {
                 bulkDeleteDialog.open();
@@ -245,7 +256,8 @@ ApplicationWindow {
     }
 
     function confirmDelete(filePath, fileName) {
-        if (window.skipDeleteConfirmation) {
+        deleteDialog.captureProtected = protectedCaptureCount([filePath]) > 0;
+        if (window.skipDeleteConfirmation && !deleteDialog.captureProtected) {
             if (window.storageManager) {
                 window.queueDeletion([filePath]);
             }
@@ -839,30 +851,34 @@ ApplicationWindow {
         id: deleteDialog
         property string filePath: ""
         property string fileName: ""
+        property bool captureProtected: false
         title: qsTr("Delete Recording")
         message: qsTr("Delete '%1'? You will have 10 seconds to Undo in the app before permanent deletion.").arg(fileName)
+        warningMessage: captureProtected ? qsTr("This capture is protected from auto-cleanup. Deleting it manually will still permanently remove it after the Undo period.") : ""
         confirmText: qsTr("Delete")
         confirmColor: Theme.errorColor
-        showDontAsk: true
+        showDontAsk: !captureProtected
         onAccepted: {
             if (window.storageManager) {
                 window.queueDeletion([filePath]);
             }
-            if (deleteDialog.dontAskChecked)
+            if (deleteDialog.showDontAsk && deleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
         }
     }
 
     TrophyDialog {
         id: bulkDeleteDialog
+        property int protectedCount: 0
         title: qsTr("Delete Selected Recordings")
         message: qsTr("Delete %1 captures? You will have 10 seconds to Undo in the app before permanent deletion.").arg(window.selectedRecordings.length)
+        warningMessage: protectedCount > 0 ? qsTr("Protected captures selected: %1. Protection only prevents auto-cleanup. Deleting them manually will still permanently remove them after the Undo period.").arg(protectedCount) : ""
         confirmText: qsTr("Delete All")
         confirmColor: Theme.errorColor
-        showDontAsk: true
+        showDontAsk: protectedCount === 0
         onAccepted: {
             performDeleteSelected();
-            if (bulkDeleteDialog.dontAskChecked)
+            if (bulkDeleteDialog.showDontAsk && bulkDeleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
         }
     }

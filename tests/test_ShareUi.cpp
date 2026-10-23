@@ -132,6 +132,70 @@ protected:
     ASSERT_TRUE(bool(object)) << component.errorString().toStdString();
   }
 };
+TEST_F(SharingUiTest, ProtectedDeleteWarningWrapsAndCollapsesWhenUnused) {
+  create("../controls/TrophyDialog.qml", {{"title", "Delete Recording"},
+      {"message", "Delete this capture?"}, {"warningMessage", "This capture is protected from auto-cleanup. Deleting it manually will still permanently remove it after the Undo period."}});
+  ASSERT_TRUE(object);
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+  auto *box = object->findChild<QQuickItem *>("dialogWarningBox");
+  auto *label = object->findChild<QQuickItem *>("dialogWarningText");
+  ASSERT_TRUE(box);
+  ASSERT_TRUE(label);
+  ASSERT_TRUE(wait([&] { return box->isVisible() && label->height() > 0; }));
+  EXPECT_GT(box->height(), label->height());
+  EXPECT_GT(label->property("lineCount").toInt(), 1);
+  const double warningHeight = object->property("implicitHeight").toDouble();
+  object->setProperty("warningMessage", "");
+  ASSERT_TRUE(wait([&] { return !box->isVisible() && object->property("implicitHeight").toDouble() < warningHeight; }));
+  object->setProperty("warningMessage", "Protected captures selected: 2.");
+  EXPECT_TRUE(wait([&] { return box->isVisible(); }));
+}
+
+TEST_F(SharingUiTest, ProtectedDeletesCannotSkipConfirmation) {
+  QFile source(QString(SHARING_QML_DIR) + "/../main.qml");
+  ASSERT_TRUE(source.open(QIODevice::ReadOnly));
+  const QString qml = QString::fromUtf8(source.readAll());
+  // Exercise the actual main-window functions without starting application services.
+  auto function = [&](const QString &name) {
+    const auto start = qml.indexOf("    function " + name + "(");
+    const auto end = qml.indexOf("\n    }", start);
+    return qml.mid(start, end + 6 - start);
+  };
+  auto result = engine.evaluate(QStringLiteral(R"JS(
+    var queued = 0;
+    var selectedRecordings = ["plain"];
+    var deleteDialog = { opened: 0, open: function() { ++this.opened; } };
+    var bulkDeleteDialog = { opened: 0, open: function() { ++this.opened; } };
+    var window = {
+      skipDeleteConfirmation: true, storageManager: {},
+      recordingLibrary: { getRecording: function(path) {
+        return path === "missing" ? null : { protectedFromCleanup: path === "protected" };
+      } },
+      queueDeletion: function() { ++queued; }
+    };
+    function performDeleteSelected() { ++queued; }
+  )JS") + function("protectedCaptureCount") + function("confirmDelete") + function("deleteSelected") + QStringLiteral(R"JS(
+    confirmDelete("plain", "Plain");
+    if (queued !== 1 || deleteDialog.opened !== 0) throw Error("plain skip");
+    confirmDelete("protected", "Protected");
+    if (queued !== 1 || deleteDialog.opened !== 1 || !deleteDialog.captureProtected) throw Error("protected single");
+    deleteSelected();
+    if (queued !== 2 || bulkDeleteDialog.opened !== 0) throw Error("plain bulk skip");
+    selectedRecordings = ["plain", "protected", "protected", "missing"];
+    deleteSelected();
+    if (queued !== 2 || bulkDeleteDialog.opened !== 1 || bulkDeleteDialog.protectedCount !== 2) throw Error("protected bulk");
+    window.skipDeleteConfirmation = false;
+    confirmDelete("plain", "Plain");
+    if (deleteDialog.opened !== 2 || deleteDialog.captureProtected) throw Error("stale single warning");
+    selectedRecordings = ["plain"];
+    deleteSelected();
+    if (bulkDeleteDialog.opened !== 2 || bulkDeleteDialog.protectedCount !== 0) throw Error("stale bulk warning");
+    true;
+  )JS"));
+  ASSERT_FALSE(result.isError()) << result.toString().toStdString();
+  EXPECT_TRUE(result.toBool());
+}
+
 TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   create("../controls/VoiceAppComboBox.qml", {{"savedApp", "Discord"}});
   ASSERT_TRUE(object);
