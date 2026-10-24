@@ -7,6 +7,7 @@
 #include <tuple>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <memory>
 #include <cstring>
 
@@ -72,6 +73,37 @@ protected:
     return "";
   }
 };
+
+TEST(EncoderRateTest, UncappedRetainsOneHundredFpsPacketTimestamps) {
+  if (!avcodec_find_encoder_by_name("libx264"))
+    GTEST_SKIP() << "libx264 unavailable";
+  FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "libx264");
+  EncoderConfig config;
+  config.width = config.height = 64;
+  config.fps = 0;
+  config.preset = "ultrafast";
+  ASSERT_TRUE(encoder.initialize(config));
+  EXPECT_EQ(encoder.fps(), 0);
+  std::vector<uint8_t> pixels(64 * 64 * 4, 128);
+  VideoFrame frame{};
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.data = pixels.data();
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  std::vector<int64_t> timestamps;
+  for (int i = 0; i < 100; ++i) {
+    frame.timestamp = 1000000 + int64_t(i) * 10000;
+    EncodedPacket packet;
+    if (encoder.encodeFrame(frame, packet))
+      timestamps.push_back(packet.pts);
+  }
+  std::vector<EncodedPacket> tail;
+  encoder.flush(tail);
+  for (const auto &packet : tail) timestamps.push_back(packet.pts);
+  std::sort(timestamps.begin(), timestamps.end());
+  ASSERT_EQ(timestamps.size(), 100u);
+  for (int i = 0; i < 100; ++i) EXPECT_EQ(timestamps[i], i * 10);
+}
 
 TEST_P(EncoderMatrixTest, FullPipelineTest) {
   const auto &params = GetParam();

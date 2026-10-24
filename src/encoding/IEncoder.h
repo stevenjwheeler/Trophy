@@ -34,7 +34,7 @@ struct EncodedPacket {
 struct EncoderConfig {
   int width = 1920;
   int height = 1080;
-  int fps = 60;
+  int fps = 60; // 0 = uncapped capture; codec uses a nominal 60 FPS hint.
   int bitrate = 15000;      // kbps
   int maxBitrate = 20000;   // kbps, for VBR
   QString preset = "fast";  // Encoder-specific preset

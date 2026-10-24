@@ -161,6 +161,7 @@ private:
   // Caller holds m_mergeMutex; silence fills missing slots after bounded grace.
   void drainMergedAudio(int channels, bool flushTail = false);
   void noteCapturedVideo(const VideoFrame &frame);
+  bool admitVideoFrame(int64_t timestampUs); // Capture callback only.
   void noteQueueDepth(); // caller holds m_queueMutex
   void sampleCaptureRates(QVariantMap &result, int64_t now) const;
   bool advanceMergedClock(bool finalDrain = false);
@@ -248,6 +249,9 @@ private:
   std::atomic<int64_t> m_firstCapturedVideoTimestampUs{-1};
   std::atomic<int64_t> m_capturedVideoTimelineUs{-1};
   int64_t m_videoFrameDurationUs = 0; // Immutable after start, before worker creation.
+  int m_videoTargetFps = 1;
+  int64_t m_videoRateOriginUs = -1;
+  int64_t m_videoRateSlot = -1;
 
   std::atomic<bool> m_running{false};
   std::atomic<bool> m_outputFailed{false};

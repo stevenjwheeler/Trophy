@@ -259,7 +259,7 @@ Page {
                         [qsTr("Transport changes"), root.captureInfoValue("transportChanges")],
                         [qsTr("DMA-BUF → SHM changes"), root.captureInfoValue("shmTransitions")],
                         [qsTr("Encoder / codec"), root.captureInfoValue("encoder")],
-                        [qsTr("Target frame rate"), root.captureInfoValue("targetFps", " fps")],
+                        [qsTr("Target frame rate"), root.captureStatus.targetFps === 0 ? qsTr("Uncapped") : root.captureInfoValue("targetFps", " fps")],
                         [qsTr("Actual capture frame rate"), root.captureInfoNumber("actualCaptureFps", 1, " fps")],
                         [qsTr("Actual encode frame rate"), root.captureInfoNumber("actualEncodeFps", 1, " fps")],
                         [qsTr("Target video bitrate"), root.captureInfoBitrate("bitrateKbps")],
@@ -1357,7 +1357,7 @@ Page {
                         Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0; Layout.minimumHeight: 18; verticalAlignment: Text.AlignVCenter }
                         Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 1 }
                         Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 0; Layout.alignment: Qt.AlignVCenter }
-                        Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
+                        Label { text: settingsManager ? (settingsManager.fps === 0 ? "∞" : settingsManager.fps.toString()) : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
 
                         Item {
                             Layout.row: 1; Layout.column: 2; Layout.rowSpan: 3

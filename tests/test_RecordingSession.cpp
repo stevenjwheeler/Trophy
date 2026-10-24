@@ -12,6 +12,7 @@
 #include <QSize>
 #include <QSignalSpy>
 #include <QTimer>
+#include <QTemporaryFile>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -43,6 +44,9 @@ class RecordingSessionTestPeer {
 public:
   static void clock(RecordingSession &session, std::shared_ptr<std::atomic<int64_t>> now) {
     session.m_clockNowUs = [now] { return now->load(); };
+  }
+  static bool admit(RecordingSession &session, int64_t timestamp) {
+    return session.admitVideoFrame(timestamp);
   }
   static void disableDrift(RecordingSession &session) {
     for (auto &corrector : session.m_driftCorrectors) corrector.reset();
@@ -198,8 +202,9 @@ public:
     m_config = config;
     return true;
   }
-  bool encodeFrame(const VideoFrame &, EncodedPacket &packet) override {
+  bool encodeFrame(const VideoFrame &frame, EncodedPacket &packet) override {
     if (encodeGate) encodeGate();
+    timestamps.push_back(frame.timestamp); // Read only after session.stop() joins.
     ++m_frames;
     packet.data = {1};
     return emitPackets;
@@ -213,6 +218,7 @@ public:
     return 1;
   }
   bool emitPackets = false;
+  std::vector<int64_t> timestamps;
   bool emitFlushPacket = false;
   std::function<void()> encodeGate;
   EncoderType type() const override { return EncoderType::Software_x264; }
@@ -321,6 +327,125 @@ private:
   bool m_releaseAudio = false;
   int m_finalizations = 0;
 };
+
+TEST(RecordingSessionTest, VideoRateLimitUsesCaptureSlotsWithoutDriftOrCatchup) {
+  for (const auto [inputFps, targetFps] :
+       {std::pair{100, 60}, {144, 60}, {240, 60}, {60, 60},
+        {30, 60}, {144, 144}, {100, 30}}) {
+    FakeCapture capture;
+    FakeVideoEncoder encoder;
+    EncoderConfig config;
+    config.fps = targetFps;
+    ASSERT_TRUE(encoder.initialize(config));
+    FakeMuxer muxer;
+    RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                             nullptr, true, 192, 0);
+    ASSERT_TRUE(session.start());
+    constexpr int64_t origin = 123456789;
+    int accepted = 0;
+    for (int i = 0; i < inputFps * 10; ++i)
+      accepted += RecordingSessionTestPeer::admit(
+          session, origin + int64_t(i) * 1000000 / inputFps);
+    // The last input may occupy the slot centred on the 10-second boundary.
+    const int expected = std::min(inputFps, targetFps) * 10;
+    EXPECT_GE(accepted, expected) << inputFps << " -> " << targetFps;
+    EXPECT_LE(accepted, expected + 1) << inputFps << " -> " << targetFps;
+    EXPECT_TRUE(RecordingSessionTestPeer::admit(session, origin + 20000000));
+    EXPECT_FALSE(RecordingSessionTestPeer::admit(session, origin + 20000000));
+    EXPECT_FALSE(RecordingSessionTestPeer::admit(session, origin + 20000001));
+    EXPECT_FALSE(RecordingSessionTestPeer::admit(session, origin));
+    session.stop();
+    ASSERT_TRUE(session.start());
+    EXPECT_TRUE(RecordingSessionTestPeer::admit(session, origin));
+    session.stop();
+  }
+}
+
+TEST(RecordingSessionTest, CaptureRateLimitPrecedesSoftwareQueueAndPreservesTimestamps) {
+  for (const auto [fps, dispatched] : {std::pair{60, false}, std::pair{60, true},
+                                     std::pair{0, false}, std::pair{0, true}}) {
+    FakeCapture capture;
+    FakeVideoEncoder encoder;
+    EncoderConfig config;
+    config.fps = fps;
+    ASSERT_TRUE(encoder.initialize(config));
+    FakeMuxer muxer;
+    RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                             nullptr, true, 192, 0);
+    if (dispatched)
+      session.setFrameDispatcher(std::make_shared<FrameDispatcher>());
+    ASSERT_TRUE(session.start());
+    std::vector<uint8_t> pixels(64 * 64 * 4);
+    VideoFrame frame{};
+    frame.data = pixels.data();
+    frame.width = frame.height = 64;
+    frame.stride = 64 * 4;
+    frame.pixelFormat = AV_PIX_FMT_BGRA;
+    for (int64_t timestamp : {1000000, 1001000, 1002000, 1020000, 1021000, 1040000}) {
+      frame.timestamp = timestamp;
+      capture.fire(frame);
+    }
+    session.stop();
+    const std::vector<int64_t> expected = fps == 0
+        ? std::vector<int64_t>{1000000, 1001000, 1002000, 1020000, 1021000, 1040000}
+        : std::vector<int64_t>{1000000, 1020000, 1040000};
+    EXPECT_EQ(encoder.timestamps, expected);
+    EXPECT_EQ(session.videoPositionMs(), 40);
+    EXPECT_EQ(session.captureHealth().value("queueDrops").toULongLong(), 0u);
+    EXPECT_EQ(session.captureHealth().value("targetFps").toInt(), fps);
+  }
+}
+
+TEST(RecordingSessionTest, DmaBufRateLimitPrecedesDispatchAndReleasesProducerLeases) {
+  class Sink : public IFrameSink {
+  public:
+    bool tryEnqueue(FrameDescriptor &&frame) override {
+      timestamps.push_back(frame.pts);
+      EXPECT_GE(frame.fd, 0);
+      EXPECT_TRUE(frame.bufferLease);
+      return true;
+    }
+    std::vector<uint64_t> timestamps;
+  };
+  for (int fps : {60, 0}) {
+    FakeCapture capture;
+    FakeVideoEncoder encoder;
+    EncoderConfig config;
+    config.fps = fps;
+    ASSERT_TRUE(encoder.initialize(config));
+    FakeMuxer muxer;
+    RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                             nullptr, true, 192, 0);
+    auto dispatcher = std::make_shared<FrameDispatcher>();
+    auto sink = std::make_shared<Sink>();
+    dispatcher->registerSink(sink);
+    session.setFrameDispatcher(dispatcher);
+    ASSERT_TRUE(session.start());
+    QTemporaryFile file; // Descriptor ownership only, not native GPU import.
+    ASSERT_TRUE(file.open());
+    for (int i = 0; i < 1000; ++i) {
+      VideoFrame frame{};
+      frame.isDmaBuf = true;
+      frame.dmaBufFd = file.handle();
+      frame.width = frame.height = 64;
+      frame.timestamp = 1000000 + int64_t(i) * 10000;
+      auto lease = std::make_shared<int>(i);
+      std::weak_ptr<int> weak = lease;
+      frame.bufferLease = lease;
+      capture.fire(frame);
+      frame.bufferLease.reset();
+      lease.reset();
+      EXPECT_TRUE(weak.expired());
+    }
+    session.stop();
+    ASSERT_EQ(sink->timestamps.size(), fps == 0 ? 1000u : 600u);
+    EXPECT_EQ(sink->timestamps.front(), 1000000u);
+    for (size_t i = 1; i < sink->timestamps.size(); ++i) {
+      EXPECT_GT(sink->timestamps[i], sink->timestamps[i - 1]);
+      EXPECT_EQ((sink->timestamps[i] - 1000000) % 10000, 0u);
+    }
+  }
+}
 
 TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
   AudioMixer mixer(48000, 2);

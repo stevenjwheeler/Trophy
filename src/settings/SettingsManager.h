@@ -155,7 +155,7 @@ public:
 
   QString resolution() const { return m_videoResolution; }
 
-  int fps() const { return m_fps; }
+  int fps() const { return m_fps; } // 0 = uncapped
   void setFps(int fps);
 
   int autoResolutionWidth() const { return m_autoResolutionWidth; }

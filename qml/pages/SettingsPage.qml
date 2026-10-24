@@ -412,13 +412,44 @@ Page {
                         }
                     }
 
+                    SettingStack {
+                        id: sizeEstimate
+                        objectName: "recordingSizeEstimate"
+                        // Separate game capture reserves all three encoded streams,
+                        // even without a running voice app. Desktop always mixes.
+                        readonly property int audioTracks: settingsManager && settingsManager.audioMode !== "desktop" && settingsManager.separateAudioTracks ? 3 : 1
+                        readonly property real totalKbps: bitrateSlider.value + audioTracks * 192
+                        readonly property real bytesPerMinute: totalKbps * 1000 / 8 * 60
+
+                        function formatEstimate(bytes) {
+                            return bytes >= 1000000000 ? (bytes / 1000000000).toFixed(1) + " GB"
+                                                       : (bytes / 1000000).toFixed(0) + " MB";
+                        }
+
+                        label: qsTr("Estimated File Size")
+                        help: qsTr("Actual file size may vary.")
+
+                        Label {
+                            objectName: "recordingSizeEstimateText"
+                            Layout.fillWidth: true
+                            text: qsTr("1 minute: ~%1  •  10 minutes: ~%2  •  1 hour: ~%3")
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute))
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute * 10))
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute * 60))
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
                     SettingRow {
                         label: qsTr("Frame Rate")
-                        help: qsTr("60 FPS is the standard for gameplay. Higher rates look smoother but increase file size.")
+                        help: qsTr("Caps recording FPS, choose ∞ for uncapped capture. Higher FPS limits will use more processing power.")
 
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Layout.preferredWidth: fpsSegments.implicitWidth + 8
+                            objectName: "recordingFrameRate"
                             Layout.preferredHeight: 36
                             radius: 18
                             color: Theme.withOpacity(Theme.textColor, 0.06)
@@ -433,19 +464,20 @@ Page {
                                 spacing: 2
 
                                 Repeater {
-                                    model: [30, 60, 120, 144]
+                                    model: [30, 60, 120, 144, 0]
 
                                     Rectangle {
+                                        objectName: "recordingFps" + modelData
                                         property bool isChecked: settingsManager ? settingsManager.fps === modelData : false
 
-                                        Layout.preferredWidth: 72
+                                        Layout.preferredWidth: 56
                                         Layout.preferredHeight: 28
                                         radius: 14
                                         color: isChecked ? Theme.primaryColor : "transparent"
 
                                         Label {
                                             anchors.centerIn: parent
-                                            text: modelData
+                                            text: modelData === 0 ? "∞" : modelData
                                             font.pixelSize: Theme.fontSizeSmall
                                             font.weight: isChecked ? Font.Medium : Font.Normal
                                             color: isChecked ? "white" : Theme.textSecondaryColor

@@ -153,7 +153,10 @@ bool RecordingSession::start() {
   for (auto &buffer : m_trackAccumulators) buffer.clear();
   m_firstCapturedVideoTimestampUs.store(-1);
   m_capturedVideoTimelineUs.store(-1);
-  m_videoFrameDurationUs = 1000000LL / std::max(1, m_encoder->fps());
+  m_videoTargetFps = m_encoder->fps();
+  m_videoFrameDurationUs = 1000000LL / (m_videoTargetFps > 0 ? m_videoTargetFps : 60);
+  m_videoRateOriginUs = -1;
+  m_videoRateSlot = -1;
   for (auto &applied : m_trackOffsetApplied)
     applied.store(false);
   m_mergedOffsetApplied.store(false);
@@ -412,6 +415,9 @@ bool RecordingSession::start() {
       // clips then carry full video with ~10s-short audio.
       noteCapturedVideo(frame);
 
+      if (!admitVideoFrame(frame.timestamp))
+        return;
+
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
         m_videoQueue.emplace(frame);
@@ -431,6 +437,9 @@ bool RecordingSession::start() {
       // is dropped downstream (unpairable head content); late audio
       // tracks offset to this origin instead.
       noteCapturedVideo(frame);
+
+      if (!admitVideoFrame(frame.timestamp))
+        return;
 
       // Build a FrameDescriptor and dispatch (non-blocking)
       FrameDescriptor fd;
@@ -897,6 +906,30 @@ void RecordingSession::encodingLoop() {
   }
 
   qDebug() << "Encoding thread stopped";
+}
+
+bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
+  if (m_videoTargetFps == 0)
+    return true; // Explicit uncapped mode retains the original pass-through behaviour.
+  if (timestampUs < 0)
+    return false;
+  if (m_videoRateOriginUs < 0)
+    m_videoRateOriginUs = timestampUs;
+  if (timestampUs < m_videoRateOriginUs)
+    return false;
+
+  // One input per target-FPS time slot, rounded to the nearest slot so
+  // microsecond truncation/jitter at native 60/144 Hz doesn't halve the rate.
+  // Anchor to capture time, not the last accepted frame: 100 -> 60 must not
+  // become 50 FPS, nor should stalls create a backlog of catch-up frames.
+  // av_rescale_rnd avoids overflow and accumulated integer-period drift.
+  const int64_t slot = av_rescale_rnd(timestampUs - m_videoRateOriginUs,
+                                     m_videoTargetFps, 1000000, AV_ROUND_NEAR_INF);
+  if (slot <= m_videoRateSlot)
+    return false;
+  m_videoRateSlot = slot;
+  // Never rewrite timestamps: audio and retained video share the original clock.
+  return true;
 }
 
 void RecordingSession::noteCapturedVideo(const VideoFrame &frame) {

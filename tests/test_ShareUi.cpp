@@ -350,6 +350,74 @@ TEST_F(SharingUiTest, DmaBufOptionsDisableForSoftwareWithoutChangingSavedPrefere
   }
 }
 
+TEST_F(SharingUiTest, RecordingSizeEstimateFollowsBitrateAndEffectiveAudioLayout) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto marker = page.indexOf("objectName: \"recordingSizeEstimate\"");
+  ASSERT_GE(marker, 0);
+  const auto start = page.lastIndexOf("SettingStack {", marker);
+  int depth = 0;
+  QString source;
+  for (auto i = page.indexOf('{', start); i < page.size(); ++i) {
+    if (page[i] == '{') ++depth;
+    if (page[i] == '}' && --depth == 0) {
+      source = page.mid(start, i - start + 1);
+      break;
+    }
+  }
+  ASSERT_FALSE(source.isEmpty());
+  const auto stackStart = page.indexOf("component SettingStack:");
+  const auto stackEnd = page.indexOf("component ValuePill:", stackStart);
+  ASSERT_GE(stackStart, 0); ASSERT_GT(stackEnd, stackStart);
+  const auto stackType = page.mid(stackStart, stackEnd - stackStart);
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../controls"
+    import "../styles"
+    Item {
+      width: 700; height: 240
+      QtObject { id: settingsManager; objectName: "preferences"
+        property string audioMode: "game"
+        property bool separateAudioTracks: true
+      }
+      QtObject { id: bitrateSlider; objectName: "bitrate"
+        property real value: 15000
+      }
+  )") + stackType + "ColumnLayout { width: parent.width\n" + source + "}}" ).toUtf8(),
+      QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/SizeEstimateProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *preferences = object->findChild<QObject *>("preferences");
+  auto *bitrate = object->findChild<QObject *>("bitrate");
+  auto *estimate = object->findChild<QObject *>("recordingSizeEstimate");
+  auto *text = object->findChild<QObject *>("recordingSizeEstimateText");
+  ASSERT_NE(preferences, nullptr); ASSERT_NE(bitrate, nullptr);
+  ASSERT_NE(estimate, nullptr); ASSERT_NE(text, nullptr);
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 3);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 116820000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 minute: ~117 MB"));
+  EXPECT_TRUE(text->property("text").toString().contains("10 minutes: ~1.2 GB"));
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~7.0 GB"));
+  preferences->setProperty("audioMode", "desktop");
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 1);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 113940000);
+  preferences->setProperty("audioMode", "game");
+  preferences->setProperty("separateAudioTracks", false);
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 1);
+  bitrate->setProperty("value", 2000);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 16440000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~986 MB"));
+  preferences->setProperty("separateAudioTracks", true);
+  bitrate->setProperty("value", 50000);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 379320000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~22.8 GB"));
+}
+
 TEST_F(SharingUiTest, AudioOptionsArePairedButtonsWithLiveStateAndRecordingLock) {
   QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
   ASSERT_TRUE(file.open(QIODevice::ReadOnly));
@@ -421,6 +489,70 @@ TEST_F(SharingUiTest, AudioOptionsArePairedButtonsWithLiveStateAndRecordingLock)
   }
   EXPECT_EQ(preferences->property("audioMode").toString(), "game");
   EXPECT_TRUE(preferences->property("separateAudioTracks").toBool());
+}
+
+TEST_F(SharingUiTest, FrameRateOffersUncappedAndRetainsRecordingLock) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto marker = page.indexOf("objectName: \"recordingFrameRate\"");
+  ASSERT_GE(marker, 0);
+  const auto start = page.lastIndexOf("Rectangle {", marker);
+  QString source;
+  int depth = 0;
+  for (auto i = page.indexOf('{', start); i < page.size(); ++i) {
+    if (page[i] == '{') ++depth;
+    if (page[i] == '}' && --depth == 0) {
+      source = page.mid(start, i - start + 1);
+      break;
+    }
+  }
+  ASSERT_FALSE(source.isEmpty());
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../styles"
+    Item {
+      width: 700; height: 100
+      QtObject { id: settingsManager; objectName: "preferences"; property int fps: 60 }
+      QtObject { id: recordingManager; objectName: "recorder"; property bool isRecording: false }
+      RowLayout { anchors.fill: parent
+  )") + source + "}}").toUtf8(),
+      QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/FrameRateProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *preferences = object->findChild<QObject *>("preferences");
+  auto *recorder = object->findChild<QObject *>("recorder");
+  auto *row = object->findChild<QQuickItem *>("recordingFrameRate");
+  ASSERT_NE(preferences, nullptr); ASSERT_NE(recorder, nullptr); ASSERT_NE(row, nullptr);
+  const auto findButton = [&](const QString &name, auto &&self, QQuickItem *item) -> QQuickItem * {
+    if (item->objectName() == name) return item;
+    for (auto *child : item->childItems())
+      if (auto *found = self(name, self, child)) return found;
+    return nullptr;
+  };
+  auto *uncapped = findButton("recordingFps0", findButton, row);
+  auto *fixed = findButton("recordingFps60", findButton, row);
+  ASSERT_NE(uncapped, nullptr); ASSERT_NE(fixed, nullptr);
+  ASSERT_TRUE(wait([&] { return uncapped->width() > 0; }));
+  const auto click = [&](QQuickItem *button) {
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+        button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+  };
+  click(uncapped);
+  EXPECT_EQ(preferences->property("fps").toInt(), 0);
+  EXPECT_TRUE(uncapped->property("isChecked").toBool());
+  recorder->setProperty("isRecording", true);
+  EXPECT_FALSE(row->isEnabled());
+  click(fixed);
+  EXPECT_EQ(preferences->property("fps").toInt(), 0);
+  recorder->setProperty("isRecording", false);
+  click(fixed);
+  EXPECT_EQ(preferences->property("fps").toInt(), 60);
+  EXPECT_TRUE(fixed->property("isChecked").toBool());
 }
 
 TEST_F(SharingUiTest, ShareDialogHasVisibleControlsAndPassesAudioSelection) {

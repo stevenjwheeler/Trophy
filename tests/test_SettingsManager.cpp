@@ -617,6 +617,18 @@ TEST_F(SettingsManagerTest, LegacyContainerPreferenceIsIgnoredAndNotPersisted) {
   EXPECT_EQ(video.value("fps").toInt(), 30);
 }
 
+TEST_F(SettingsManagerTest, UncappedFpsPersistsAndRestoresFixedLimit) {
+  QSignalSpy spy(mgr.get(), &SettingsManager::fpsChanged);
+  mgr->setFps(0);
+  EXPECT_EQ(spy.count(), 1);
+  auto restored = std::make_unique<SettingsManager>();
+  restored->load();
+  EXPECT_EQ(restored->fps(), 0);
+  restored->setFps(60);
+  mgr->load();
+  EXPECT_EQ(mgr->fps(), 60);
+}
+
 TEST_F(SettingsManagerTest, SaveLoadRoundTrip) {
   // Modify settings
   mgr->setVideoBitrate(25000);

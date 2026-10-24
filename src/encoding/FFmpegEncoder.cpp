@@ -667,10 +667,13 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   m_codecCtx->width = config.width;
   m_codecCtx->height = config.height;
   m_codecCtx->time_base = {1, 1000};
-  m_codecCtx->framerate = {config.fps, 1};
+  // Uncapped input retains capture timestamps. Codecs still need a positive
+  // nominal rate for rate control and frame-count-based GOP configuration.
+  const int nominalFps = config.fps > 0 ? config.fps : 60;
+  m_codecCtx->framerate = {nominalFps, 1};
   // Honor the per-pipeline keyframe interval (DVR segments use 1s for
   // tight clip cuts; recordings keep the 2s default). Was hardcoded.
-  m_codecCtx->gop_size = config.fps * std::max(1, config.keyframeInterval);
+  m_codecCtx->gop_size = nominalFps * std::max(1, config.keyframeInterval);
 
   if (isHardwareEncoder()) {
     m_codecCtx->pix_fmt = m_codecName.contains("nvenc") ? AV_PIX_FMT_CUDA : AV_PIX_FMT_VAAPI;

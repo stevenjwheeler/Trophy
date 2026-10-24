@@ -10,6 +10,8 @@ With DVR enabled and ready, the clip shortcut saves recent gameplay from the rep
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+**Settings → Frame Rate** limits full recordings and DVR without limiting the game's FPS. Choose **∞ (Uncapped)** to keep every delivered frame instead. Uncapped capture can increase processing load; the actual rate depends on the game, compositor and encoder. Fixed limits skip excess frames without speeding up playback or changing audio timing. Capture Info can therefore show capture FPS above the selected limit while encode FPS stays near it; intentional rate limiting is not a queue-overflow drop.
+
 The Dashboard shows source connection/mute status, audio levels, approximate replay-buffer fill, and warnings for sustained video-queue drops. Connected does not necessarily mean audible; check the meters and play back a short test recording after changing your setup.
 
 While recording or DVR is active, click **ⓘ** beside the recording control for live **Capture Info**:
