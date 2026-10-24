@@ -105,7 +105,7 @@ TEST_F(SettingsManagerTest, ShareExportFolderPersistsAndResets) {
 }
 
 TEST_F(SettingsManagerTest, CustomizationDefaultsAndRoundTrip) {
-  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->themeMode(), "amoled");
   EXPECT_EQ(mgr->accentColor(), "rose");
   QSignalSpy modeChanged(mgr.get(), &SettingsManager::themeModeChanged);
   QSignalSpy accentChanged(mgr.get(), &SettingsManager::accentColorChanged);
@@ -142,17 +142,17 @@ TEST_F(SettingsManagerTest, CustomizationLoadFallbacksAndResetNotify) {
     file.write(QJsonDocument(QJsonObject{{"customization", customization}}).toJson());
     file.close();
     mgr->load();
-    EXPECT_EQ(mgr->themeMode(), "dark");
+    EXPECT_EQ(mgr->themeMode(), "amoled");
     EXPECT_EQ(mgr->accentColor(), "rose");
   }
   EXPECT_EQ(modeChanged.count(), 2);
   EXPECT_EQ(accentChanged.count(), 2);
-  mgr->setThemeMode("amoled");
+  mgr->setThemeMode("dark");
   mgr->setAccentColor("purple");
   modeChanged.clear();
   accentChanged.clear();
   mgr->resetToDefaults();
-  EXPECT_EQ(mgr->themeMode(), "dark");
+  EXPECT_EQ(mgr->themeMode(), "amoled");
   EXPECT_EQ(mgr->accentColor(), "rose");
   EXPECT_EQ(modeChanged.count(), 1);
   EXPECT_EQ(accentChanged.count(), 1);

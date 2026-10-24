@@ -60,8 +60,10 @@ Item {
   std::unique_ptr<QObject> probe(component.create());
   ASSERT_NE(probe, nullptr) << component.errorString().toStdString();
   auto color = [&](const char *name) { return probe->property(name).value<QColor>(); };
-  EXPECT_EQ(color("background"), QColor("#1a1a2e"));
+  EXPECT_EQ(color("background"), QColor("#000000"));
+  EXPECT_EQ(color("accent"), QColor("#e94560"));
   probe->setProperty("preferences", QVariant::fromValue(static_cast<QObject *>(&settings)));
+  EXPECT_EQ(color("background"), QColor("#1a1a2e"));
   // Repeater delegates belong to the visual tree, not necessarily the
   // QObject ownership tree used by findChild().
   auto findSwatch = [](auto &&self, QQuickItem *item, const QString &name) -> QQuickItem * {
@@ -117,7 +119,7 @@ Item {
     EXPECT_TRUE(swatch->property("selected").toBool());
   }
   probe->setProperty("preferences", QVariant::fromValue(static_cast<QObject *>(nullptr)));
-  EXPECT_EQ(color("background"), QColor("#1a1a2e"));
+  EXPECT_EQ(color("background"), QColor("#000000"));
   EXPECT_EQ(color("accent"), QColor("#e94560"));
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
 }

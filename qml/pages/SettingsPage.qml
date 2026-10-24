@@ -252,15 +252,15 @@ Page {
 
                     SettingRow {
                         label: qsTr("Theme")
-                        help: qsTr("Default keeps the classic navy palette. Charcoal is neutral gray. AMOLED uses a pure-black background.")
+                        help: qsTr("Original keeps the classic navy palette. Charcoal is neutral gray. AMOLED is the default and uses a pure-black background.")
 
                         TrophyComboBox {
                             id: themeModeBox
                             objectName: "themeModeBox"
                             Layout.preferredWidth: 200
                             property var values: ["dark", "charcoal", "amoled"]
-                            model: [qsTr("Default"), qsTr("Charcoal"), qsTr("AMOLED")]
-                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 0
+                            model: [qsTr("Original"), qsTr("Charcoal"), qsTr("AMOLED")]
+                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 2
                             onActivated: settingsManager.themeMode = values[currentIndex]
                         }
                     }

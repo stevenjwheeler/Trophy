@@ -134,10 +134,10 @@ void SettingsManager::load() {
   m_shareExportWatermark = general["shareExportWatermark"].toBool(true);
 
   const QJsonObject customization = root["customization"].toObject();
-  m_themeMode = customization["themeMode"].toString("dark");
+  m_themeMode = customization["themeMode"].toString("amoled");
   m_accentColor = customization["accentColor"].toString("rose");
   if (!validThemeMode(m_themeMode))
-    m_themeMode = "dark";
+    m_themeMode = "amoled";
   if (!validAccentColor(m_accentColor))
     m_accentColor = "rose";
 
@@ -415,7 +415,7 @@ void SettingsManager::loadDefaults() {
   m_libraryListView = false;
   m_shareExportFolder.clear();
   m_shareExportWatermark = true;
-  m_themeMode = "dark";
+  m_themeMode = "amoled";
   m_accentColor = "rose";
 }
 

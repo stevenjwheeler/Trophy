@@ -16,7 +16,7 @@ QtObject {
     // This also covers Theme imports through local component directories.
     // Standalone components/tests without a settings context keep defaults.
     property var settings: typeof settingsManager !== "undefined" && settingsManager !== null ? settingsManager : null
-    readonly property string mode: settings ? settings.themeMode : "dark"
+    readonly property string mode: settings ? settings.themeMode : "amoled"
     readonly property string accentName: settings ? settings.accentColor : "rose"
     readonly property bool amoled: mode === "amoled"
     readonly property bool neutral: mode === "charcoal" || amoled

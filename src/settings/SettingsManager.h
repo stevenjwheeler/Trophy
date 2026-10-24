@@ -392,7 +392,7 @@ private:
   bool m_libraryListView = false;
   QString m_shareExportFolder;
   bool m_shareExportWatermark = true;
-  QString m_themeMode = "dark";
+  QString m_themeMode = "amoled";
   QString m_accentColor = "rose";
   
   // Wayland Restore Tokens
