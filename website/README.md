@@ -26,6 +26,15 @@ Open <http://localhost:8080>. You can also open `index.html` directly.
    selecting the branch you want to publish. The `github-pages` environment's
    deployment branch rules must permit that branch.
 
+Published releases also refresh the deployment. Before uploading, the workflow
+resolves the latest stable release's AppImage, native packages, archive, and
+checksums using its read-only GitHub token. It writes direct asset links into the
+published HTML; visitors need no API access or JavaScript to download. A release
+must contain all five expected assets before deployment can succeed. If assets
+are uploaded after the release is published, run the workflow again afterward.
+Release downloads in a private repository require visitor access to that repo;
+public Pages hosting does not make private release assets public.
+
 The expected project URL is <https://stevenjwheeler.github.io/Trophy/>. Creating
 these files does not itself enable Pages or publish anything. The workflow uploads
 only `website/`; application code and the rest of the repository are not published.
@@ -39,7 +48,11 @@ only `website/`; application code and the rest of the repository are not publish
   without JavaScript; keep its delays and keyframe percentages in sync if adding
   phrases. Reduced motion shows a static headline, and assistive technology gets
   one complete, non-changing heading. Rotation timers stop in hidden tabs.
-- The download button points to GitHub's latest release, not a hardcoded version.
+- AppImage buttons directly download the release asset; the secondary hero button
+  goes to the native-package/archive/source options. Checked-in links use the
+  verified v0.9.6 assets as a local/no-build baseline. Pages replaces these with
+  latest-release URLs on each deployment. Keep `data-release-asset` markers and
+  the workflow's expected link count in sync when changing download links.
 - Documentation links point to `main` on GitHub; adjust them if the default branch
   changes.
 - Screenshot assets are copies of `docs/images/dashboard-grid.png`,

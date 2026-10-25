@@ -7,6 +7,8 @@ on:
       - 'website/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -28,8 +30,43 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
       - name: Configure Pages
         uses: actions/configure-pages@v5
+      - name: Resolve latest release downloads
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { data: release } = await github.rest.repos.getLatestRelease(context.repo);
+            const patterns = {
+              appimage: /^Trophy-.*-x86_64\.AppImage$/,
+              deb: /^Trophy-.*-amd64\.deb$/,
+              rpm: /^Trophy-.*-x86_64\.rpm$/,
+              archive: /^Trophy-.*\.tar\.xz$/,
+              checksums: /^SHA256SUMS$/,
+            };
+            const downloads = {};
+            for (const [key, pattern] of Object.entries(patterns)) {
+              const asset = release.assets.find(a => a.state === 'uploaded' && pattern.test(a.name));
+              if (!asset) throw new Error(`Latest release is missing ${key}; keeping the previous site deployment.`);
+              const url = new URL(asset.browser_download_url);
+              if (url.protocol !== 'https:' || url.hostname !== 'github.com') {
+                throw new Error(`Unexpected asset host for ${key}`);
+              }
+              downloads[key] = url.href.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+            }
+            const page = fs.readFileSync('website/index.html', 'utf8');
+            let updated = 0;
+            const rendered = page.replace(/<a\b[^>]*\bdata-release-asset="([^"]+)"[^>]*>/g, (tag, key) => {
+              if (!downloads[key]) throw new Error(`Unknown download key: ${key}`);
+              updated++;
+              return tag.replace(/href="[^"]*"/, `href="${downloads[key]}"`);
+            });
+            if (updated !== 6) throw new Error(`Expected six download links, found ${updated}`);
+            fs.writeFileSync('website/index.html', rendered);
+            core.info(`Resolved ${updated} download links from ${release.tag_name}`);
       - name: Upload static website
         uses: actions/upload-pages-artifact@v3
         with:
