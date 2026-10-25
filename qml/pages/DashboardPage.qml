@@ -529,8 +529,11 @@ Page {
         if (!seconds || seconds <= 0)
             return "00:00";
 
-        var m = Math.floor(seconds / 60);
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
         var s = seconds % 60;
+        if (h > 0)
+            return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
         return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
     }
 

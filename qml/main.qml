@@ -587,8 +587,11 @@ ApplicationWindow {
                                 text: {
                                     var durMs = window.recordingManager ? window.recordingManager.recordingDuration : 0;
                                     var dur = Math.floor(durMs / 1000);
-                                    var m = Math.floor(dur / 60);
+                                    var h = Math.floor(dur / 3600);
+                                    var m = Math.floor((dur % 3600) / 60);
                                     var s = dur % 60;
+                                    if (h > 0)
+                                        return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
                                     return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
                                 }
                                 color: "white"

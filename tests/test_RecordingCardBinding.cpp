@@ -1119,6 +1119,49 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   EXPECT_NEAR(card->height(), 80, 1);
 }
 
+TEST_F(RecordingCardBindingTest, DashboardActivityDurationIncludesHours) {
+  for (const auto *name : {"recordingLibrary", "settingsManager", "storageManager",
+                           "replayManager", "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto dashboardUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, dashboardUrl);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  for (const auto &[seconds, expected] : QList<QPair<int, QString>>{
+           {0, "00:00"}, {65, "1:05"}, {3599, "59:59"}, {3600, "1:00:00"},
+           {3723, "1:02:03"}, {36000, "10:00:00"}}) {
+    QQmlExpression expression(engine.rootContext(), page.get(),
+                              QStringLiteral("formatDuration(%1)").arg(seconds));
+    EXPECT_EQ(expression.evaluate().toString(), expected);
+    EXPECT_FALSE(expression.hasError());
+  }
+}
+
+TEST_F(RecordingCardBindingTest, RecordingPillDurationIncludesHours) {
+  // Exercise the actual binding without starting the application's services.
+  const auto mainUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl("../main.qml"));
+  QFile file(mainUrl.toLocalFile());
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const QString source = QString::fromUtf8(file.readAll());
+  const auto start = source.indexOf("var durMs =");
+  ASSERT_GE(start, 0);
+  const auto end = source.indexOf('}', start);
+  ASSERT_GT(end, start);
+  QString binding = source.mid(start, end - start);
+  binding.replace("window.recordingManager", "recordingManager");
+  for (const auto &[ms, expected] : QList<QPair<qint64, QString>>{
+           {0, "0:00"}, {65999, "1:05"}, {3599000, "59:59"}, {3600000, "1:00:00"},
+           {3723000, "1:02:03"}, {36000000, "10:00:00"}}) {
+    manager.duration = ms;
+    QQmlExpression expression(engine.rootContext(), nullptr,
+                              "(function() {" + binding + "})()");
+    EXPECT_EQ(expression.evaluate().toString(), expected);
+    EXPECT_FALSE(expression.hasError()) << expression.error().toString().toStdString();
+  }
+}
+
 TEST_F(RecordingCardBindingTest, DashboardStorageAndActivityIgnoreLibraryFilters) {
   createVideo("Game_2026-01-15_20-30-00.mkv");
   createVideo("Other_2026-01-15_20-31-00.mkv");
