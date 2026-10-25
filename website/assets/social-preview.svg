@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#e94560"/><stop offset="1" stop-color="#ff6b6b"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#e94560" stop-opacity=".22"/><stop offset="1" stop-color="#e94560" stop-opacity="0"/></radialGradient>
+    <clipPath id="screen"><rect x="726" y="194" width="420" height="280" rx="12"/></clipPath>
+  </defs>
+  <rect width="1200" height="630" fill="#111218"/>
+  <ellipse cx="930" cy="338" rx="360" ry="280" fill="url(#glow)"/>
+  <g transform="translate(72 60)">
+    <circle cx="28" cy="28" r="28" fill="url(#brand)"/>
+    <circle cx="28" cy="28" r="11" fill="#fff"/>
+    <path fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="2" d="M15 21q-4 0-4 4v8q0 4 4 4h4l2-4 2 4h10l2-4 2 4h4q4 0 4-4v-8q0-4-4-4Z"/>
+  </g>
+  <text x="146" y="100" fill="#f5f3f0" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="36">Trophy</text>
+  <text x="72" y="254" fill="#f5f3f0" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="76" letter-spacing="-4">Capture the</text>
+  <text x="72" y="350" fill="#ff617d" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="86" letter-spacing="-4">good parts.</text>
+  <text x="76" y="423" fill="#b4b3c0" font-family="DejaVu Sans, sans-serif" font-size="22">Free, open-source game recording</text>
+  <text x="76" y="456" fill="#b4b3c0" font-family="DejaVu Sans, sans-serif" font-size="22">for Linux on Wayland.</text>
+  <rect x="726" y="194" width="420" height="280" rx="12" fill="#000"/>
+  <image x="726" y="194" width="420" height="280" xlink:href="dashboard-grid.png" clip-path="url(#screen)"/>
+  <rect x="726" y="194" width="420" height="280" rx="12" fill="none" stroke="#41404e"/>
+  <text x="76" y="560" fill="#ff617d" font-family="DejaVu Sans Mono, monospace" font-size="21">gettrophy.app</text>
+  <text x="1146" y="560" text-anchor="end" fill="#b4b3c0" font-family="DejaVu Sans, sans-serif" font-size="16">RECORD · REPLAY · SHARE</text>
+</svg>
