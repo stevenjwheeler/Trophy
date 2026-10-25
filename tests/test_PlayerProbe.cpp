@@ -175,14 +175,25 @@ TEST_F(PlayerProbeTest, HeaderIconSitsLeftOfTitleAndCollapsesWhenUnavailable) {
   ASSERT_NE(icon, nullptr);
   ASSERT_NE(title, nullptr);
   ASSERT_TRUE(QTest::qWaitFor([&] { return icon->isVisible() && icon->width() == 40; }));
+  // Image readiness can precede the RowLayout's next polish. In particular,
+  // the title can still occupy its no-icon position when visibility flips.
+  // Settle that layout before capturing the baseline for the collapse check.
+  icon->parentItem()->ensurePolished();
+  ASSERT_TRUE(QTest::qWaitFor([&] {
+    return icon->x() > 0 && icon->x() + icon->width() <= title->x();
+  })) << "Visible game icon was not laid out before the title";
   EXPECT_EQ(icon->height(), 40);
   EXPECT_LE(icon->x() + icon->width(), title->x());
   EXPECT_NEAR(icon->y() + icon->height() / 2, title->y() + title->height() / 2, 1);
   const qreal withIcon = title->x();
 
   library.entry.insert("gameName", "Missing icon");
-  ASSERT_TRUE(QTest::qWaitFor([&] { return !icon->isVisible() && title->x() < withIcon; }));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !icon->isVisible(); }))
+      << "Game icon stayed visible after its source was removed";
   EXPECT_TRUE(icon->property("source").toUrl().isEmpty());
+  ASSERT_TRUE(QTest::qWaitFor([&] { return title->x() < withIcon; }))
+      << "Title did not reclaim the hidden icon's space: before=" << withIcon
+      << ", after=" << title->x();
   close();
   library.hasEntry = false;
   open("/fake/unknown.mkv");
