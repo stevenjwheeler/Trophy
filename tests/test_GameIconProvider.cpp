@@ -21,6 +21,8 @@
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QSignalSpy>
+#include <QPointer>
 #include <gtest/gtest.h>
 #include <functional>
 #include <memory>
@@ -653,9 +655,18 @@ QtObject {
   const QColor active = prompt->property("color").value<QColor>();
   EXPECT_GT(active.alpha(), 0);
   EXPECT_EQ(block->property("color").value<QColor>().alpha(), 0);
+  auto *list = find(page, "gamesList");
+  ASSERT_NE(list, nullptr);
+  const QPointF listPosition = list->mapToScene(QPointF());
+  const QSizeF listSize = list->size();
+  const double scrollPosition = list->property("contentY").toDouble();
   for (auto *pole : {block, prompt}) {
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
         pole->mapToScene(QPointF(pole->width() / 2, pole->height() / 2)).toPoint());
+    QTest::qWait(20);
+    EXPECT_EQ(list->mapToScene(QPointF()), listPosition);
+    EXPECT_EQ(list->size(), listSize);
+    EXPECT_EQ(list->property("contentY").toDouble(), scrollPosition);
   }
   EXPECT_EQ(detector->property("blockCalls").toInt(), 1);
   EXPECT_EQ(detector->property("promptCalls").toInt(), 1);
@@ -666,6 +677,99 @@ QtObject {
   for (const auto &warning : warnings)
     EXPECT_FALSE(warning.contains("ReferenceError") || warning.contains("TypeError"))
         << warning.toStdString();
+}
+
+TEST_F(GameIconTest, StateOnlyGameUpdatesPreserveModelAndFilteredIndices) {
+  GameListEntry first, second;
+  first.key = first.display = "First";
+  second.key = second.display = "Second";
+  GameListModel model;
+  model.setEntries({first, second});
+  GameListFilterModel filtered;
+  filtered.setSourceModel(&model);
+  QSignalSpy resets(&model, &QAbstractItemModel::modelReset);
+  QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
+  QSignalSpy filteredResets(&filtered, &QAbstractItemModel::modelReset);
+  QPersistentModelIndex retained(filtered.index(1, 0));
+  for (int state : {2, 0, 2, 0}) {
+    second.listed = state;
+    model.setEntries({first, second});
+    EXPECT_TRUE(retained.isValid());
+    EXPECT_EQ(retained.data(GameListModel::ListedRole).toInt(), state);
+  }
+  EXPECT_EQ(resets.size(), 0);
+  EXPECT_EQ(filteredResets.size(), 0);
+  EXPECT_EQ(changes.size(), 4);
+  model.setEntries({first, second});
+  EXPECT_EQ(changes.size(), 4); // Identical rebuilds are silent.
+  second.hasToken = true;
+  second.tokenKey = "Second";
+  second.section = "Ready to capture";
+  model.setEntries({first, second});
+  EXPECT_EQ(retained.data(GameListModel::TokenKeyRole).toString(), "Second");
+  EXPECT_EQ(resets.size(), 0);
+  model.setEntries({second, first}); // Real reorder still resets safely.
+  EXPECT_EQ(resets.size(), 1);
+  EXPECT_FALSE(retained.isValid());
+  model.setEntries({first});
+  EXPECT_EQ(resets.size(), 2);
+}
+
+TEST_F(GameIconTest, PromptBlockRebuildKeepsScrolledFilteredPageAndDelegate) {
+  QList<GameListEntry> entries;
+  for (int i = 0; i < 40; ++i) {
+    GameListEntry entry;
+    entry.key = entry.display = QString("Game %1").arg(i, 2, 10, QLatin1Char('0'));
+    entry.section = "Apps";
+    entries.append(entry);
+  }
+  GameListModel model;
+  model.setEntries(entries);
+  GameListFilterModel filtered;
+  filtered.setSourceModel(&model);
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&filtered))},
+      {"gameFilterText", ""}, {"showDefaultExclusions", false}});
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  window.resize(1113, 700);
+  page->setParentItem(window.contentItem());
+  page->setSize({1113, 700});
+  window.show();
+  auto *list = page->findChild<QQuickItem *>("gamesList");
+  ASSERT_NE(list, nullptr);
+  ASSERT_TRUE(waitUntil([&] { return list->property("contentHeight").toDouble() > 2000; }));
+  list->setProperty("contentY", 700);
+  QTest::qWait(50);
+  const double scroll = list->property("contentY").toDouble();
+  ASSERT_GT(scroll, 500);
+  const QPointF position = list->mapToScene(QPointF());
+  const QSizeF size = list->size();
+  QPointer<QQuickItem> row;
+  std::function<void(QQuickItem *)> findRow = [&](QQuickItem *item) {
+    if (item->property("entryKey").toString() == "Game 12") row = item;
+    for (auto *child : item->childItems()) findRow(child);
+  };
+  findRow(list);
+  ASSERT_FALSE(row.isNull());
+  QSignalSpy resets(&filtered, &QAbstractItemModel::modelReset);
+  for (int state : {2, 0, 2, 0}) {
+    entries[12].listed = state;
+    model.setEntries(entries); // Same production rebuild entry point as detection actions.
+    QTest::qWait(30);
+    ASSERT_FALSE(row.isNull());
+    EXPECT_EQ(row->property("entryListed").toInt(), state);
+    EXPECT_EQ(list->property("contentY").toDouble(), scroll);
+    EXPECT_EQ(list->mapToScene(QPointF()), position);
+    EXPECT_EQ(list->size(), size);
+  }
+  EXPECT_EQ(resets.size(), 0);
 }
 } // namespace
 

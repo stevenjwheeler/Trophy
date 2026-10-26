@@ -33,13 +33,14 @@ struct GameListEntry {
   QString tokenKey;      // exact settings-map key for withdrawal
   QString section;      // list grouping: Now playing / Ready to capture
                         // / Apps
+  bool operator==(const GameListEntry &) const = default;
 };
 
 /**
  * @brief Dumb QML-facing list model; GameDetectionService owns the
  * instances and rebuilds their content whenever detection state or the
- * user lists change. Lists are tiny (tens of rows), so full resets are
- * cheaper than diffing and keep QML bindings trivial.
+ * user lists change. Stable ordered identities update in place so state-only
+ * changes preserve delegates and scrolling. Membership/order changes reset.
  */
 class GameListModel : public QAbstractListModel {
   Q_OBJECT
@@ -64,6 +65,20 @@ public:
   explicit GameListModel(QObject *parent = nullptr) : QAbstractListModel(parent) {}
 
   void setEntries(QList<GameListEntry> entries) {
+    bool sameKeys = entries.size() == m_entries.size();
+    for (qsizetype i = 0; sameKeys && i < entries.size(); ++i)
+      sameKeys = entries.at(i).key == m_entries.at(i).key;
+    if (sameKeys) {
+      QList<int> changedRows;
+      for (qsizetype i = 0; i < entries.size(); ++i) {
+        if (entries.at(i) != m_entries.at(i))
+          changedRows.append(static_cast<int>(i));
+      }
+      m_entries = std::move(entries);
+      for (int row : changedRows)
+        emit dataChanged(index(row), index(row));
+      return;
+    }
     beginResetModel();
     m_entries = std::move(entries);
     endResetModel();

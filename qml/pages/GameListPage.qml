@@ -18,13 +18,6 @@ Page {
     // Explicit dependency; this default preserves engine/creation-context hosts.
     property var detector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
 
-    property string statusMessage: ""
-
-    function flash(message) {
-        root.statusMessage = message
-        statusTimer.restart()
-    }
-
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.spacingLarge
@@ -64,23 +57,6 @@ Page {
                 onClicked: addGameDialog.open()
             }
 
-        }
-
-        // Transient action feedback
-        Label {
-            Layout.fillWidth: true
-            text: root.statusMessage
-            color: Theme.textMutedColor
-            font.pixelSize: Theme.fontSizeSmall
-            visible: text !== ""
-        }
-
-        Timer {
-            id: statusTimer
-
-            interval: 4000
-            repeat: false
-            onTriggered: root.statusMessage = ""
         }
 
         // List options: count + default-exclusions toggle
@@ -137,6 +113,7 @@ Page {
 
                 ListView {
                     id: gamesList
+                    objectName: "gamesList"
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -174,10 +151,6 @@ Page {
                         entryTokenKey: model.tokenKey || ""
                         entryIconSource: model.iconSource || ""
                         entryIdentifiers: model.identifiers || []
-                        onNotice: function(text) {
-                            root.statusMessage = text
-                            statusTimer.restart()
-                        }
                     }
 
                 }
@@ -209,6 +182,7 @@ Page {
         property var allWindows: []
         property string searchQuery: ""
         property var pickedWindow: null
+        property string errorMessage: ""
         readonly property var shownWindows: allWindows.filter(function(w) {
             if (searchQuery === "")
                 return true
@@ -228,7 +202,7 @@ Page {
                 return
             const key = ((pickedWindow.class || pickedWindow.title) || "").trim()
             if (key === "") {
-                root.flash(qsTr("That window has no usable key."))
+                errorMessage = qsTr("That window has no usable key.")
                 return
             }
             const display = displayField.text.trim() || pickedWindow.title || key
@@ -236,7 +210,7 @@ Page {
             if (ok) {
                 addGameDialog.close()
             } else {
-                root.flash(qsTr("That game is already listed."))
+                errorMessage = qsTr("That game is already listed.")
             }
         }
 
@@ -245,6 +219,7 @@ Page {
         height: 600
         anchors.centerIn: Overlay.overlay
         onOpened: {
+            errorMessage = ""
             pickedWindow = null
             searchQuery = ""
             processSearch.text = ""
@@ -266,6 +241,15 @@ Page {
 
         contentItem: ColumnLayout {
             spacing: 0
+
+            Label {
+                Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                text: addGameDialog.errorMessage
+                visible: text !== ""
+                color: Theme.errorColor
+                wrapMode: Text.WordWrap
+            }
 
             // Title + search
             RowLayout {
@@ -575,7 +559,6 @@ Page {
         property url entryIconSource: ""
         property var entryIdentifiers: []
 
-        signal notice(string text)
 
         height: 60
 
@@ -738,12 +721,8 @@ Page {
                     visible: gameItem.entryHasToken
                     text: qsTr("Withdraw")
                     onClicked: {
-                        const tokenKey = entryTokenKey, name = entryDisplay, running = entryRunning
+                        const tokenKey = entryTokenKey
                         settingsManager.removeRestoreToken(tokenKey)
-                        if (running)
-                            gameItem.notice(qsTr("Silent capture withdrawn for %1 — takes effect the next time it launches.").arg(name))
-                        else
-                            gameItem.notice(qsTr("Silent capture withdrawn for %1 — back to prompt.").arg(name))
                     }
                 }
 
@@ -751,18 +730,10 @@ Page {
                     visible: !gameItem.entryHasToken
                     blocked: gameItem.entryListed === 2
                     onPromptSelected: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.unblockGame(key))
-                            gameItem.notice(qsTr("%1 will prompt on detection.").arg(name))
-                        else
-                            gameItem.notice(qsTr("%1 already prompts.").arg(name))
+                        gameDetector.unblockGame(gameItem.entryKey)
                     }
                     onBlockSelected: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.moveToBlacklist(key))
-                            gameItem.notice(qsTr("Blocked %1.").arg(name))
-                        else
-                            gameItem.notice(qsTr("%1 is already blocked.").arg(name))
+                        gameDetector.moveToBlacklist(gameItem.entryKey)
                     }
                 }
 
@@ -771,11 +742,7 @@ Page {
                     text: qsTr("×")
                     implicitWidth: 30
                     onClicked: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.forgetGame(key))
-                            gameItem.notice(qsTr("Removed %1.").arg(name))
-                        else
-                            gameItem.notice(qsTr("Nothing to remove."))
+                        gameDetector.forgetGame(gameItem.entryKey)
                     }
                 }
 

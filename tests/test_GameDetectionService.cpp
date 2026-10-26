@@ -1439,6 +1439,28 @@ TEST_F(GameDetectionServiceTest, CustomEntriesStickWithoutRules) {
   EXPECT_FALSE(service->addCustomGame("  ", "blank", false));
 }
 
+TEST_F(GameDetectionServiceTest, PromptBlockActionsKeepExistingGameModelRows) {
+  ASSERT_TRUE(service->addCustomGame("scroll-fixture", "Scroll Fixture", false));
+  auto *model = service->gamesModel();
+  QPersistentModelIndex retained;
+  for (int row = 0; row < model->rowCount(); ++row) {
+    const auto index = model->index(row, 0);
+    if (index.data(GameListModel::KeyRole).toString() == "scroll-fixture")
+      retained = index;
+  }
+  ASSERT_TRUE(retained.isValid());
+  QSignalSpy resets(model, &QAbstractItemModel::modelReset);
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    ASSERT_TRUE(service->moveToBlacklist("scroll-fixture"));
+    ASSERT_TRUE(retained.isValid());
+    EXPECT_EQ(retained.data(GameListModel::ListedRole).toInt(), 2);
+    ASSERT_TRUE(service->unblockGame("scroll-fixture"));
+    ASSERT_TRUE(retained.isValid());
+    EXPECT_NE(retained.data(GameListModel::ListedRole).toInt(), 2);
+  }
+  EXPECT_EQ(resets.size(), 0);
+}
+
 TEST_F(GameDetectionServiceTest, SteamGameKeyForm) {
   EXPECT_FALSE(service->addSteamGame(0, "Zero"));
   EXPECT_TRUE(service->addSteamGame(1422450, "Deadlock"));
