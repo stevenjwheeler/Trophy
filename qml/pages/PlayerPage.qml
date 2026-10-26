@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../controls"
 import "../styles"
 import "../views"
@@ -15,6 +16,9 @@ import QtQuick.Layouts
 
 Page {
     id: playerPage
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var filmstrips: typeof filmstripCache !== "undefined" ? filmstripCache : null // qmllint disable unqualified
+    property var library: typeof recordingLibrary !== "undefined" ? recordingLibrary : null // qmllint disable unqualified
 
     property string filePath: ""
     property string fileTitle: ""
@@ -1783,8 +1787,8 @@ Page {
         function refresh() {
             thumbs = []
             stripDone = false
-            if (filePath !== "" && typeof filmstripCache !== "undefined" && filmstripCache !== null)
-                filmstripCache.requestThumbs(filePath, stripCount)
+            if (filePath !== "" && playerPage.filmstrips !== null)
+                playerPage.filmstrips.requestThumbs(filePath, stripCount)
         }
 
         height: laneHeight
@@ -1801,7 +1805,7 @@ Page {
         onFilePathChanged: vlane.refresh()
 
         Connections {
-            target: filmstripCache
+            target: playerPage.filmstrips
             function onFilmstripReady(readyPath, readyPaths) {
                 if (readyPath === vlane.filePath) {
                     vlane.thumbs = readyPaths
@@ -1844,6 +1848,9 @@ Page {
                     model: vlane.thumbs
 
                     Image {
+                        required property int index
+                        required property var modelData
+                        objectName: "filmstripThumb" + index
                         // Positioned by slice start, not the
                         // grab's center time: each thumb covers
                         // its own [i/count, (i+1)/count] slice,
@@ -1859,7 +1866,7 @@ Page {
                         x: (vlane.viewSpanMs > 0 ? (thumbStart - vlane.viewStartMs) / vlane.viewSpanMs * stripArea.width : 0) + 1
                         width: (vlane.viewSpanMs > 0 ? thumbSpan / vlane.viewSpanMs * stripArea.width : 0) - 2
                         height: stripArea.height
-                        source: recordingLibrary.localFileUrl(modelData)
+                        source: playerPage.library.localFileUrl(modelData)
                         fillMode: Image.PreserveAspectCrop
                         visible: vlane.viewSpanMs > 0 && x + width > 0 && x < stripArea.width
                     }
@@ -2025,18 +2032,19 @@ Page {
     // library entry so probe NOTIFYs refresh them; every row guards a
     // null entry (unknown file) with a fallback.
     component InfoRow: RowLayout {
+        id: infoRow
         property string rowName: ""
         property string rowValue: ""
         Layout.fillWidth: true
         spacing: Theme.spacingMedium
         Label {
-            text: rowName
+            text: infoRow.rowName
             color: Theme.textSecondaryColor
             font.pixelSize: Theme.fontSizeSmall
             Layout.preferredWidth: 110
         }
         Label {
-            text: rowValue
+            text: infoRow.rowValue
             color: Theme.textColor
             font.pixelSize: Theme.fontSizeSmall
             Layout.fillWidth: true

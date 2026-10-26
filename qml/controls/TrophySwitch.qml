@@ -1,7 +1,6 @@
 import "../styles"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 Switch {
     id: control
@@ -22,8 +21,8 @@ Switch {
         x: control.leftPadding
         y: parent.height / 2 - height / 2
         radius: 11
-        color: control.checked ? _accent : Qt.rgba(_text.r, _text.g, _text.b, 0.1)
-        border.color: control.hovered ? _accent : "transparent"
+        color: control.checked ? control._accent : Qt.rgba(control._text.r, control._text.g, control._text.b, 0.1)
+        border.color: control.hovered ? control._accent : "transparent"
         border.width: 1
 
         // The "Knob"
@@ -35,7 +34,7 @@ Switch {
             width: 16
             height: 16
             radius: 8
-            color: control.checked ? "#ffffff" : _text
+            color: control.checked ? "#ffffff" : control._text
             // Slight size pulse when clicked
             scale: control.pressed ? 0.9 : 1
 
@@ -70,7 +69,7 @@ Switch {
     contentItem: Label {
         text: control.text
         font: control.font
-        color: control.checked ? _text : Theme.textMutedColor
+        color: control.checked ? control._text : Theme.textMutedColor
         verticalAlignment: Text.AlignVCenter
         leftPadding: control.indicator.width + control.spacing
     }

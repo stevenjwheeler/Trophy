@@ -10,6 +10,8 @@
 
 Keep the AppImage at a stable location if you enable launch-at-login. For a native prefix install, see [building from source](development.md).
 
+CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
+
 ### Verify the download
 
 Download the release's `SHA256SUMS` beside the AppImage, then run:
@@ -18,7 +20,7 @@ Download the release's `SHA256SUMS` beside the AppImage, then run:
 sha256sum -c SHA256SUMS
 ```
 
-The matching AppImage should report `OK`. This checks the file against the published checksum; an unsigned checksum alone does not prove publisher identity or authenticity.
+The matching downloaded file should report `OK`; entries for packages you did not download may report missing files. This checks the file against the published checksum; an unsigned checksum alone does not prove publisher identity or authenticity.
 
 ## Desktop requirements
 
@@ -27,6 +29,8 @@ The matching AppImage should report `OK`. This checks the file against the publi
 - Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported.
 
 The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
+
+If the captured window changes size, Trophy keeps the recording's output canvas fixed, fitting the picture with black bars as needed. Supported NVIDIA and VA-API paths perform resize work on the GPU; unsupported DMA-BUF imports can request shared-memory fallback. Software encoding uses shared-memory capture. VA-API resize is implemented but still needs real AMD/Intel hardware validation.
 
 Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and Sway. These do not all have equivalent live verification: KDE/KWin with NVIDIA has live capture evidence; GNOME helper installation/capture and Hyprland/Sway behavior still need broader real-session verification. Hardware encoding support likewise does not guarantee every DMA-BUF capture path works.
 

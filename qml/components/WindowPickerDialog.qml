@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import "../controls"
 import "../styles"
 import QtQuick
@@ -6,6 +7,8 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var windowSource: typeof windowService !== "undefined" ? windowService : null // qmllint disable unqualified
 
     signal windowSelected(var windowId, string title)
 
@@ -14,8 +17,8 @@ Dialog {
     height: 600
     anchors.centerIn: Overlay.overlay
     onOpened: {
-        if (typeof windowService !== "undefined" && windowService)
-            listView.model = windowService.getVisibleWindows();
+        if (root.windowSource)
+            listView.model = root.windowSource.getVisibleWindows();
 
     }
 
@@ -45,8 +48,9 @@ Dialog {
 
         // Divider
         Rectangle {
+            objectName: "windowPickerTopDivider"
             Layout.fillWidth: true
-            height: 1
+            implicitHeight: 1
             color: Theme.dividerColor
         }
 
@@ -58,15 +62,17 @@ Dialog {
             Layout.fillHeight: true
             Layout.margins: Theme.spacingSmall
             clip: true
-            model: (typeof windowService !== "undefined" && windowService) ? windowService.getVisibleWindows() : []
+            model: root.windowSource ? root.windowSource.getVisibleWindows() : []
             spacing: 2
 
             delegate: ItemDelegate {
+                id: windowDelegate
+                required property var modelData
                 width: listView.width
                 height: 50
                 padding: 0
                 onClicked: {
-                    root.windowSelected(modelData.id, modelData.title);
+                    root.windowSelected(windowDelegate.modelData.id, windowDelegate.modelData.title);
                     root.close();
                 }
 
@@ -80,7 +86,7 @@ Dialog {
                         spacing: 2
 
                         Label {
-                            text: modelData.title || qsTr("Untitled Window")
+                            text: windowDelegate.modelData.title || qsTr("Untitled Window")
                             color: Theme.textColor
                             font.weight: Font.Medium
                             elide: Text.ElideRight
@@ -88,7 +94,7 @@ Dialog {
                         }
 
                         Label {
-                            text: modelData.class || ""
+                            text: windowDelegate.modelData.class || ""
                             color: Theme.textMutedColor
                             font.pixelSize: Theme.fontSizeSmall
                             elide: Text.ElideRight
@@ -100,7 +106,7 @@ Dialog {
                 }
 
                 background: Rectangle {
-                    color: parent.highlighted ? Theme.withOpacity(Theme.primaryColor, 0.2) : (parent.hovered ? Theme.cardHoverColor : "transparent")
+                    color: windowDelegate.highlighted ? Theme.withOpacity(Theme.primaryColor, 0.2) : (windowDelegate.hovered ? Theme.cardHoverColor : "transparent")
                     radius: Theme.radiusSmall
                 }
 
@@ -112,8 +118,9 @@ Dialog {
 
         // Divider
         Rectangle {
+            objectName: "windowPickerBottomDivider"
             Layout.fillWidth: true
-            height: 1
+            implicitHeight: 1
             color: Theme.dividerColor
         }
 

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../controls"
 import "../styles"
 import QtQuick
@@ -14,6 +15,8 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var detector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
 
     property string statusMessage: ""
 
@@ -48,10 +51,10 @@ Page {
 
                 Layout.preferredWidth: 220
                 placeholderText: qsTr("Search games…")
-                text: gameDetector ? gameDetector.gameFilterText : ""
+                text: root.detector ? root.detector.gameFilterText : ""
                 onSearchTextChanged: function(query) {
-                    if (gameDetector)
-                        gameDetector.gameFilterText = query
+                    if (root.detector)
+                        root.detector.gameFilterText = query
                 }
             }
 
@@ -102,10 +105,10 @@ Page {
             }
 
             TrophySwitch {
-                checked: gameDetector ? gameDetector.showDefaultExclusions : false
+                checked: root.detector ? root.detector.showDefaultExclusions : false
                 onToggled: {
-                    if (gameDetector)
-                        gameDetector.showDefaultExclusions = checked
+                    if (root.detector)
+                        root.detector.showDefaultExclusions = checked
                 }
             }
 
@@ -140,11 +143,12 @@ Page {
                     clip: true
                     spacing: Theme.spacingSmall
                     visible: count > 0
-                    model: gameDetector ? gameDetector.gamesModel : null
+                    model: root.detector ? root.detector.gamesModel : null
                     ScrollBar.vertical: TrophyScrollBar { id: gamesScrollBar }
 
                     section.property: "section"
                     section.delegate: Label {
+                        required property string section
                         width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         text: section
                         color: Theme.textMutedColor
@@ -158,6 +162,7 @@ Page {
                     }
 
                     delegate: GameListItem {
+                        required property var model
                         width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         entryKey: model.key || ""
                         entryDisplay: model.display || ""
@@ -291,8 +296,9 @@ Page {
 
             // Divider
             Rectangle {
+                objectName: "gamePickerTopDivider"
                 Layout.fillWidth: true
-                height: 1
+                implicitHeight: 1
                 color: Theme.dividerColor
             }
 
@@ -308,6 +314,8 @@ Page {
                 spacing: 2
 
                 delegate: ItemDelegate {
+                    id: processDelegate
+                    required property var modelData
                     width: processList.width
                     height: 50
                     padding: 0
@@ -324,8 +332,9 @@ Page {
                         spacing: Theme.spacingSmall
 
                         Rectangle {
-                            width: 36
-                            height: 36
+                            objectName: "pickerIconTile"
+                            Layout.preferredWidth: 36
+                            Layout.preferredHeight: 36
                             radius: Theme.radiusSmall
                             color: Theme.surfaceColor
                             Layout.alignment: Qt.AlignVCenter
@@ -402,8 +411,9 @@ Page {
 
             // Divider
             Rectangle {
+                objectName: "gamePickerBottomDivider"
                 Layout.fillWidth: true
-                height: 1
+                implicitHeight: 1
                 color: Theme.dividerColor
             }
 
@@ -596,8 +606,9 @@ Page {
             spacing: Theme.spacingMedium
 
             Rectangle {
-                width: 40
-                height: 40
+                objectName: "gameIconTile"
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
                 radius: Theme.radiusSmall
                 color: Theme.surfaceColor
                 Layout.alignment: Qt.AlignVCenter

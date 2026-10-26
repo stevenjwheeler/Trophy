@@ -13,6 +13,9 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var updates: typeof updateChecker !== "undefined" ? updateChecker : null // qmllint disable unqualified
+    property string appVersion: typeof AppVersion !== "undefined" ? AppVersion : "" // qmllint disable unqualified
 
     signal reportBugRequested()
 
@@ -25,22 +28,23 @@ Page {
     // Release page behind the "Version X is available"
     // verdict, which opens it on click.
     property string updateReleaseUrl: ""
+    readonly property Flickable scrollContent: infoScroll.contentItem as Flickable
 
     Connections {
-        target: updateChecker
+        target: root.updates
         function onCheckFinished(newerAvailable, latestVersion, releaseUrl) {
-            updateChecking = false
-            updateNewer = newerAvailable
-            updateReleaseUrl = newerAvailable ? releaseUrl : ""
+            root.updateChecking = false
+            root.updateNewer = newerAvailable
+            root.updateReleaseUrl = newerAvailable ? releaseUrl : ""
             if (newerAvailable) {
                 // Names both versions (they differ) and stays up:
                 // it's actionable.
                 updateDismissTimer.stop()
-                updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, AppVersion)
+                root.updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, root.appVersion)
             } else {
                 // The badge right above already shows the
                 // version; this confirmation fades shortly.
-                updateStatus = qsTr("You're on the latest version.")
+                root.updateStatus = qsTr("You're on the latest version.")
                 updateDismissTimer.restart()
             }
         }
@@ -125,7 +129,7 @@ Page {
                     Label {
                         id: versionText
                         anchors.centerIn: parent
-                        text: AppVersion
+                        text: root.appVersion
                         color: "white"
                         font.pixelSize: Theme.fontSizeSmall
                         font.weight: Font.Medium
@@ -176,7 +180,7 @@ Page {
                         enabled: typeof updateChecker !== "undefined"
                         onTapped: {
                             root.updateChecking = true
-                            updateChecker.checkNow()
+                            root.updates.checkNow()
                         }
                     }
                 }
@@ -499,7 +503,7 @@ Page {
         anchors.rightMargin: infoScroll.ScrollBar.vertical.width
         anchors.bottom: infoScroll.bottom
         height: Theme.spacingLarge * 2
-        opacity: Math.max(0, Math.min(1, (infoScroll.contentItem.contentHeight - infoScroll.contentItem.height - infoScroll.contentItem.contentY) / height))
+        opacity: root.scrollContent ? Math.max(0, Math.min(1, (root.scrollContent.contentHeight - root.scrollContent.height - root.scrollContent.contentY) / height)) : 0
         visible: opacity > 0
         gradient: Gradient {
             GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }

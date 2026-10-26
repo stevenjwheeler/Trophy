@@ -15,6 +15,8 @@ import QtQuick.Dialogs
 
 Rectangle {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
 
     anchors.fill: parent
     color: Theme.withOpacity(Theme.backgroundColor, 0.95)
@@ -309,7 +311,7 @@ Rectangle {
                                                 return 0;
                                             })()
                                         }
-                                        onActivated: if (settingsManager && currentIndex < devices.length) settingsManager.microphoneDevice = devices[currentIndex].id
+                                        onActivated: if (root.preferences && currentIndex < devices.length) root.preferences.microphoneDevice = devices[currentIndex].id
                                     }
                                     Label { text: qsTr("Audio Capture Mode"); font.weight: Font.Bold; color: Theme.textColor }
                                     RowLayout {

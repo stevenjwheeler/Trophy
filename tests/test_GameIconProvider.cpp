@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -31,6 +32,13 @@ class GameIconTest : public testing::Test {
 protected:
   QTemporaryDir temp;
   QString root() const { return temp.path(); }
+  template<class Predicate> bool waitUntil(Predicate condition) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!condition() && timer.elapsed() < 2000)
+      QTest::qWait(1);
+    return condition();
+  }
   void write(const QString &relative, const QByteArray &bytes) {
     const QString path = root() + '/' + relative;
     ASSERT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
@@ -512,6 +520,74 @@ TEST_F(GameIconTest, RealGamesPageShowsIconAndKeepsMissingLetterTile) {
   EXPECT_EQ(subtitles[3]->property("text").toString(), "Default exclusion · 4 identifiers");
   EXPECT_EQ(QQmlProperty(subtitles[3], "ToolTip.text", qmlContext(subtitles[3])).read().toString(),
             "obs\nobs64\nobs-studio\ncom.obsproject.studio");
+}
+TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
+  GameListEntry first;
+  first.key = first.display = "First";
+  GameListEntry second;
+  second.key = second.display = "Second";
+  GameListModel model;
+  model.setEntries({first, second});
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))},
+      {"gameFilterText", ""}, {"showDefaultExclusions", false}});
+  engine.rootContext()->setContextProperty("windowService", QVariant::fromValue<QObject *>(nullptr));
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  page->setParentItem(window.contentItem());
+  window.show();
+  auto *dialog = object->findChild<QObject *>("addGameDialog");
+  ASSERT_NE(dialog, nullptr);
+  auto *content = dialog->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  auto items = [](QQuickItem *rootItem, const QString &name) {
+    QList<QQuickItem *> found;
+    std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+      if (item->objectName() == name) found.append(item);
+      for (auto *child : item->childItems()) visit(child);
+    };
+    visit(rootItem);
+    return found;
+  };
+  auto checkTiles = [&](QQuickItem *rootItem, const QString &name, int size) {
+    ASSERT_TRUE(waitUntil([&] { return items(rootItem, name).size() == 2; }));
+    for (auto *tile : items(rootItem, name)) {
+      EXPECT_EQ(QQmlProperty(tile, "Layout.preferredWidth", qmlContext(tile)).read().toInt(), size);
+      EXPECT_EQ(QQmlProperty(tile, "Layout.preferredHeight", qmlContext(tile)).read().toInt(), size);
+      EXPECT_TRUE(waitUntil([&] { return tile->width() == size && tile->height() == size; }));
+    }
+  };
+  const QVariantList windows{
+      QVariantMap{{"title", "First window"}, {"class", "first"}},
+      QVariantMap{{"title", "Second window"}, {"class", "second"}}};
+  for (const QSize &size : {QSize(1113, 700), QSize(800, 650), QSize(1280, 800)}) {
+    window.resize(size);
+    page->setSize(size);
+    checkTiles(page, "gameIconTile", 40);
+    dialog->setProperty("width", size.width() > 1000 ? 620 : 520);
+    ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+    ASSERT_TRUE(waitUntil([&] { return dialog->property("opened").toBool(); }));
+    // Opening with no native window service leaves an empty model safely.
+    EXPECT_TRUE(dialog->property("allWindows").toList().isEmpty());
+    for (const auto *name : {"gamePickerTopDivider", "gamePickerBottomDivider"}) {
+      auto *divider = object->findChild<QQuickItem *>(name);
+      ASSERT_NE(divider, nullptr);
+      EXPECT_EQ(divider->implicitHeight(), 1);
+      EXPECT_TRUE(waitUntil([&] { return divider->height() == 1 && divider->width() > 400; }));
+    }
+    ASSERT_TRUE(dialog->setProperty("allWindows", windows));
+    checkTiles(content, "pickerIconTile", 36);
+    ASSERT_TRUE(dialog->setProperty("allWindows", QVariantList{}));
+    ASSERT_TRUE(waitUntil([&] { return items(content, "pickerIconTile").isEmpty(); }));
+    ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+    ASSERT_TRUE(waitUntil([&] { return !dialog->property("visible").toBool(); }));
+  }
 }
 } // namespace
 

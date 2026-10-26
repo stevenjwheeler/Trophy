@@ -695,6 +695,37 @@ TEST_F(PipeWireAudioSourceTest, NativeProcessNullDequeueNeverQueues) {
   EXPECT_EQ(lifecycle.queues, 0);
 }
 
+TEST_F(PipeWireAudioSourceTest, NativeMalformedBuffersAreReturnedAndNextBufferRecovers) {
+  ASSERT_TRUE(source.initialize(AudioConfig{}));
+  ASSERT_TRUE(source.start());
+  Buffer b;
+  pw_buffer native{};
+  lifecycle.buffer = &native;
+  int deliveries = 0;
+  source.setCallback([&](const AudioFrame &) { ++deliveries; });
+  // Enter through the registered native listener, not just processBuffer:
+  // rejected input must not leak a dequeued producer buffer or kill capture.
+  for (int malformed = 0; malformed < 4; ++malformed) {
+    SCOPED_TRACE(malformed);
+    native.buffer = malformed == 0 ? nullptr : &b.buffer;
+    b.buffer.datas = malformed == 1 ? nullptr : &b.data;
+    b.data.chunk = malformed == 2 ? nullptr : &b.chunk;
+    b.chunk.size = malformed == 3 ? sizeof(b.samples) + 1 : sizeof(b.samples);
+    lifecycle.events->process(lifecycle.userdata);
+    EXPECT_EQ(deliveries, 0);
+    EXPECT_EQ(lifecycle.dequeues, malformed + 1);
+    EXPECT_EQ(lifecycle.queues, malformed + 1);
+    EXPECT_TRUE(source.isCapturing());
+    EXPECT_TRUE(lifecycle.errors.isEmpty());
+  }
+  b.chunk.size = sizeof(b.samples);
+  lifecycle.events->process(lifecycle.userdata);
+  EXPECT_EQ(deliveries, 1);
+  EXPECT_EQ(lifecycle.dequeues, 5);
+  EXPECT_EQ(lifecycle.queues, 5);
+  EXPECT_FLOAT_EQ(source.peakLevel(), 1.0f);
+}
+
 TEST_F(PipeWireAudioSourceTest, StopWaitsForEnteredNativeProcessAndBufferReturn) {
   ASSERT_TRUE(source.initialize(AudioConfig{}));
   ASSERT_TRUE(source.start());

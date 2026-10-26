@@ -70,3 +70,4 @@ patch.diff
 
 # --- Agent working notes (local only, never commit) ---
 AGENTS.md
+/lint-triage.md

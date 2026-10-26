@@ -795,6 +795,37 @@ TEST_F(RecordingCardBindingTest, LiveGridIconFollowsCurrentGameAndModelRefresh) 
   EXPECT_TRUE(icon->isVisible());
 }
 
+TEST_F(RecordingCardBindingTest, ExplicitCardDependenciesOverrideCreationContextAndStayReactive) {
+  const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
+  RecordingLibrary library(tempDir.path());
+  CardWindowFake explicitWindow;
+  for (const QString &file : {QString("RecordingCard.qml"), QString("RecordingListItem.qml")}) {
+    QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl(file)));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> card(component.createWithInitialProperties({
+        {"recording", QVariant::fromValue(library.getRecording(path))},
+        {"library", QVariant::fromValue(&library)},
+        {"hostWindow", QVariant::fromValue(&explicitWindow)}}));
+    ASSERT_NE(card, nullptr) << component.errorString().toStdString();
+    auto *item = qobject_cast<QQuickItem *>(card.get());
+    ASSERT_NE(item, nullptr);
+    item->setParentItem(window.contentItem());
+    item->setWidth(680);
+    explicitWindow.toggleSelection(path);
+    EXPECT_TRUE(card->property("isSelected").toBool());
+    windowFake.toggleSelection(path); // The old context must not take control.
+    explicitWindow.clearSelection();
+    EXPECT_FALSE(card->property("isSelected").toBool());
+    auto *lock = card->findChild<QObject *>("captureProtectionButton");
+    ASSERT_NE(lock, nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(lock, "clicked"));
+    EXPECT_EQ(explicitWindow.protectionPath, path);
+    EXPECT_TRUE(windowFake.protectionPath.isEmpty());
+    windowFake.clearSelection();
+  }
+  waitForProbes();
+}
+
 TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
   const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
   const QString otherPath = createVideo("Other_2026-01-15_20-30-00.mkv");

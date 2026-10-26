@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import "../styles"
 import QtQuick
 import QtQuick.Controls
@@ -58,7 +59,7 @@ Item {
         }
         onAccepted: {
             if (dropdown.visible && resultsList.currentIndex !== -1) {
-                var res = resultsModel.get(resultsList.currentIndex);
+                const res = resultsModel.get(resultsList.currentIndex);
                 root.resultSelected({
                     "type": res.type,
                     "title": res.title,
@@ -126,14 +127,18 @@ Item {
             boundsMovement: Flickable.FollowBoundsBehavior
 
             delegate: Item {
+                id: resultDelegate
+                required property int index
+                required property var model
+                objectName: "searchResult" + index
                 width: resultsList.width
                 height: 50
 
                 Rectangle {
                     anchors.fill: parent
                     radius: 6
-                    color: (mouseArea.containsMouse || resultsList.currentIndex === index) ? Theme.surfaceColor : "transparent"
-                    border.color: resultsList.currentIndex === index ? Theme.primaryColor : "transparent"
+                    color: (mouseArea.containsMouse || resultsList.currentIndex === resultDelegate.index) ? Theme.surfaceColor : "transparent"
+                    border.color: resultsList.currentIndex === resultDelegate.index ? Theme.primaryColor : "transparent"
                     border.width: 1
 
                     RowLayout {
@@ -149,7 +154,7 @@ Item {
                             Layout.preferredHeight: 8
                             Layout.alignment: Qt.AlignVCenter
                             radius: 4
-                            color: model.type === "clip" ? Theme.primaryColor : Theme.secondaryColor
+                            color: resultDelegate.model.type === "clip" ? Theme.primaryColor : Theme.secondaryColor
                         }
 
                         ColumnLayout {
@@ -160,7 +165,7 @@ Item {
                             Label {
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignLeft
-                                text: model.title
+                                text: resultDelegate.model.title
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.weight: Font.Medium
                                 color: Theme.textColor
@@ -170,7 +175,7 @@ Item {
                             Label {
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignLeft
-                                text: model.subtitle
+                                text: resultDelegate.model.subtitle
                                 font.pixelSize: Theme.fontSizeTiny
                                 color: Theme.textSecondaryColor
                                 elide: Text.ElideRight
@@ -188,11 +193,11 @@ Item {
                     hoverEnabled: true
                     onClicked: {
                         root.resultSelected({
-                            "type": model.type,
-                            "title": model.title,
-                            "subtitle": model.subtitle,
-                            "targetIndex": model.targetIndex,
-                            "section": model.section || ""
+                            "type": resultDelegate.model.type,
+                            "title": resultDelegate.model.title,
+                            "subtitle": resultDelegate.model.subtitle,
+                            "targetIndex": resultDelegate.model.targetIndex,
+                            "section": resultDelegate.model.section || ""
                         });
                     }
                 }

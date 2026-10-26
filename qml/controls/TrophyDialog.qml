@@ -34,7 +34,7 @@ T.Dialog {
     background: Rectangle {
         color: Theme.cardColor || "#212121"
         radius: Theme.radiusLarge
-        border.color: Theme.withOpacity(_text, 0.1)
+        border.color: Theme.withOpacity(control._text, 0.1)
         border.width: 1
     }
 
@@ -86,7 +86,7 @@ T.Dialog {
             Layout.fillWidth: true
             Layout.margins: Theme.spacingLarge
             Layout.bottomMargin: 0
-            color: _text
+            color: control._text
         }
 
         // Message
@@ -96,7 +96,7 @@ T.Dialog {
             Layout.topMargin: Theme.spacingMedium
             text: control.message
             wrapMode: Text.WordWrap
-            color: _textMuted
+            color: control._textMuted
             lineHeight: 1.2
             font.pixelSize: Theme.fontSizeNormal
         }
@@ -149,8 +149,8 @@ T.Dialog {
                     y: (dontAskCheckbox.availableHeight - height) / 2
                     radius: 6
                     // SAFE COLORS: Use the local _accent property
-                    color: dontAskCheckbox.checked ? _accent : "transparent"
-                    border.color: dontAskCheckbox.checked ? _accent : Theme.withOpacity(_text, 0.2)
+                    color: dontAskCheckbox.checked ? control._accent : "transparent"
+                    border.color: dontAskCheckbox.checked ? control._accent : Theme.withOpacity(control._text, 0.2)
 
                     Text {
                         text: "✓"
@@ -171,7 +171,7 @@ T.Dialog {
                 contentItem: Text {
                     text: dontAskCheckbox.text
                     font.pixelSize: Theme.fontSizeSmall
-                    color: _textMuted
+                    color: control._textMuted
                     // Add padding to make room for the indicator
                     leftPadding: dontAskCheckbox.indicator.width + dontAskCheckbox.spacing
                     verticalAlignment: Text.AlignVCenter

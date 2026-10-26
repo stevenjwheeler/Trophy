@@ -12,6 +12,8 @@ import QtQuick.Layouts
 
 Rectangle {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
 
     radius: Theme.radiusMedium
     color: Theme.cardColor
@@ -142,7 +144,7 @@ Rectangle {
                     id: durationLabel
 
                     anchors.centerIn: parent
-                    text: recordingManager ? formatDuration(recordingManager.recordingDuration) : "0:00"
+                    text: root.recorder ? root.formatDuration(root.recorder.recordingDuration) : "0:00"
                     color: "white"
                     font.pixelSize: Theme.fontSizeTiny
                 }
@@ -162,7 +164,7 @@ Rectangle {
 
                 Label {
                     Layout.fillWidth: true
-                    text: recordingManager ? (recordingManager.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
+                    text: root.recorder ? (root.recorder.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
                     color: Theme.textColor
                     font.pixelSize: Theme.fontSizeSmall
                     font.weight: Font.Bold
@@ -170,7 +172,7 @@ Rectangle {
                 }
 
                 Label {
-                    text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
+                    text: root.recorder ? (root.formatDuration(root.recorder.recordingDuration) + " • " + root.formatSize(root.recorder.recordingSize)) : ""
                     color: Theme.textSecondaryColor
                     font.pixelSize: Theme.fontSizeTiny
                 }
@@ -186,7 +188,7 @@ Rectangle {
 
             RecordingGameIcon {
                 objectName: "liveGridGameIcon"
-                gameName: recordingManager ? recordingManager.currentGameName : ""
+                gameName: root.recorder ? root.recorder.currentGameName : ""
                 Layout.preferredWidth: 40
                 Layout.preferredHeight: 40
                 Layout.leftMargin: Theme.spacingSmall

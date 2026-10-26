@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../styles"
 import QtQuick
 import QtQuick.Controls
@@ -15,6 +16,9 @@ Rectangle {
     id: root
 
     property var recording: null
+    // Creation-context dependencies stay live and can be supplied by a host.
+    property var hostWindow: typeof window !== "undefined" ? window : null // qmllint disable unqualified
+    property var library: typeof recordingLibrary !== "undefined" ? recordingLibrary : null // qmllint disable unqualified
     property bool isAdaptive: true
     property int cardIndex: -1
     readonly property bool hovered: hoverHandler.hovered
@@ -36,7 +40,7 @@ Rectangle {
         if (!previewController)
             return
         if (previewEligible)
-            previewController.request(previewSurface, recordingLibrary.localFileUrl(previewPath))
+            previewController.request(previewSurface, root.library.localFileUrl(previewPath))
         else
             previewController.release(previewSurface)
     }
@@ -49,8 +53,8 @@ Rectangle {
         if (requestedController)
             requestedController.release(previewSurface)
     }
-    property bool isSelected: window.selectedRecordings && recording && window.selectedRecordings.indexOf(recording.filePath) !== -1
-    property bool isSelectionModeActive: window.selectedRecordings && window.selectedRecordings.length > 0
+    property bool isSelected: !!(root.hostWindow && root.hostWindow.selectedRecordings && recording && root.hostWindow.selectedRecordings.indexOf(recording.filePath) !== -1)
+    property bool isSelectionModeActive: !!(root.hostWindow && root.hostWindow.selectedRecordings && root.hostWindow.selectedRecordings.length > 0)
     // Clips read as "<game> Clip" with a badge; full recordings show
     // the game name with a recording badge. The container tag wins and
     // survives renames; the filename suffix covers older files and the
@@ -97,11 +101,11 @@ Rectangle {
                 if (root.recording) {
                     if (mouse.modifiers & Qt.ShiftModifier) {
                         // Shift+click: range select
-                        window.shiftSelectRange(root.cardIndex);
+                        root.hostWindow.shiftSelectRange(root.cardIndex);
                     } else {
                         // Regular click in selection mode: toggle this item
-                        window.toggleSelection(root.recording.filePath);
-                        window.lastSelectedIndex = root.cardIndex;
+                        root.hostWindow.toggleSelection(root.recording.filePath);
+                        root.hostWindow.lastSelectedIndex = root.cardIndex;
                     }
                 }
             } else {
@@ -141,7 +145,7 @@ Rectangle {
                 }
                 Image {
                     anchors.fill: parent
-                    source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
+                    source: root.recording && root.recording.thumbnailPath ? root.library.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
                     fillMode: Image.PreserveAspectCrop
                     opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
                     scale: root.hovered ? 1.05 : 1.0
@@ -182,6 +186,7 @@ Rectangle {
                     spacing: 10
 
                     RoundButton {
+                        id: playButton
                         width: 42; height: 42
                         icon.source: "qrc:/icons/play.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
                         Accessible.name: qsTr("Play")
@@ -191,16 +196,17 @@ Rectangle {
                         onClicked: root.play()
                         background: Rectangle {
                             radius: 21
-                            color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor
-                            border.color: parent.hovered ? "#ffffffff" : "#00ffffff"
+                            color: playButton.hovered ? Theme.primaryHoverColor : Theme.primaryColor
+                            border.color: playButton.hovered ? "#ffffffff" : "#00ffffff"
                             border.width: 1.5
-                            scale: parent.hovered ? 1.1 : 1.0
+                            scale: playButton.hovered ? 1.1 : 1.0
                             Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                             Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
+                        id: shareButton
                         objectName: "gridShareExport"
                         width: 42; height: 42
                         icon.source: "qrc:/icons/share.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
@@ -211,16 +217,17 @@ Rectangle {
                         onClicked: root.shareRequested()
                         background: Rectangle {
                             radius: 21
-                            color: parent.hovered ? "#e6353f5c" : "#b31a2238"
-                            border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                            color: shareButton.hovered ? "#e6353f5c" : "#b31a2238"
+                            border.color: shareButton.hovered ? "#b3ffffff" : "#59ffffff"
                             border.width: 1.5
-                            scale: parent.hovered ? 1.08 : 1.0
+                            scale: shareButton.hovered ? 1.08 : 1.0
                             Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                             Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
+                        id: renameButton
                         width: 42; height: 42
                         icon.source: "qrc:/icons/edit.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
                         Accessible.name: qsTr("Rename")
@@ -230,16 +237,17 @@ Rectangle {
                         onClicked: root.renameRequested()
                         background: Rectangle {
                             radius: 21
-                            color: parent.hovered ? "#e6353f5c" : "#b31a2238"
-                            border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                            color: renameButton.hovered ? "#e6353f5c" : "#b31a2238"
+                            border.color: renameButton.hovered ? "#b3ffffff" : "#59ffffff"
                             border.width: 1.5
-                            scale: parent.hovered ? 1.08 : 1.0
+                            scale: renameButton.hovered ? 1.08 : 1.0
                             Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                             Behavior on color { ColorAnimation { duration: 150 } }
                         }
                     }
 
                     RoundButton {
+                        id: deleteButton
                         width: 42; height: 42
                         icon.source: "qrc:/icons/trash.svg"; icon.color: "white"; icon.width: 20; icon.height: 20
                         Accessible.name: qsTr("Delete")
@@ -249,10 +257,10 @@ Rectangle {
                         onClicked: root.deleteRequested()
                         background: Rectangle {
                             radius: 21
-                            color: parent.hovered ? Theme.errorColor : "#b31a2238"
-                            border.color: parent.hovered ? "#ffffffff" : "#59ffffff"
+                            color: deleteButton.hovered ? Theme.errorColor : "#b31a2238"
+                            border.color: deleteButton.hovered ? "#ffffffff" : "#59ffffff"
                             border.width: 1.5
-                            scale: parent.hovered ? 1.08 : 1.0
+                            scale: deleteButton.hovered ? 1.08 : 1.0
                             Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                             Behavior on color { ColorAnimation { duration: 150 } }
                         }
@@ -268,7 +276,7 @@ Rectangle {
                 radius: 4; color: "#CC000000"
                 Label {
                     id: durationLabel; anchors.centerIn: parent
-                    text: root.recording ? formatDuration(root.recording.duration) : ""
+                    text: root.recording ? root.formatDuration(root.recording.duration) : ""
                     color: "white"; font.pixelSize: Theme.fontSizeTiny
                 }
             }
@@ -299,7 +307,7 @@ Rectangle {
 
                     Label {
                         objectName: "gridMetadata"
-                        text: root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : ""
+                        text: root.recording ? "• " + root.formatDuration(root.recording.duration) + " • " + root.formatSize(root.recording.size) : ""
                         font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor
                         elide: Text.ElideRight; Layout.fillWidth: true
                     }
@@ -370,11 +378,11 @@ Rectangle {
                 if (root.recording) {
                     if (mouse.modifiers & Qt.ShiftModifier) {
                         // Shift+click: range select
-                        window.shiftSelectRange(root.cardIndex);
+                        root.hostWindow.shiftSelectRange(root.cardIndex);
                     } else {
                         // Regular click: toggle this item
-                        window.toggleSelection(root.recording.filePath);
-                        window.lastSelectedIndex = root.cardIndex;
+                        root.hostWindow.toggleSelection(root.recording.filePath);
+                        root.hostWindow.lastSelectedIndex = root.cardIndex;
                     }
                 }
             }
@@ -402,7 +410,7 @@ Rectangle {
         Accessible.name: qsTr("Protect from auto-cleanup")
         ToolTip.text: protectionOn ? qsTr("Protected from auto-cleanup — click to unprotect") : qsTr("Protect from auto-cleanup (manual deletion still allowed)")
         ToolTip.visible: hovered
-        onClicked: { if (root.recording) window.toggleCaptureProtection(root.recording.filePath) }
+            onClicked: { if (root.recording) root.hostWindow.toggleCaptureProtection(root.recording.filePath) }
         background: Rectangle {
             radius: 12
             color: protectionButton.protectionOn ? Theme.primaryColor : "#80000000"

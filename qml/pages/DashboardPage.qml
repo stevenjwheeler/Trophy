@@ -16,6 +16,12 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
+    property var feed: typeof activityFeed !== "undefined" ? activityFeed : null // qmllint disable unqualified
+    property var replay: typeof replayManager !== "undefined" ? replayManager : null // qmllint disable unqualified
+    property var storage: typeof storageManager !== "undefined" ? storageManager : null // qmllint disable unqualified
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
 
     property bool libraryListView: false
     property var captureStatus: ({})
@@ -1610,24 +1616,24 @@ Page {
             }
         }
     }
-    Connections { target: recordingManager; function onStateChanged() { activityModel.updateActivity() } }
+    Connections { target: root.recorder; function onStateChanged() { activityModel.updateActivity() } }
     Connections {
-        target: activityFeed
+        target: root.feed
         function onEventsChanged() { activityModel.updateActivity() }
     }
     Connections {
-        target: replayManager
+        target: root.replay
         function onReplaySaved(filePath, seconds) {
             var secs = Math.max(1, Math.round(seconds))
             var span = secs === 1 ? qsTr("Last 1 second") : qsTr("Last %1 seconds").arg(secs)
-            var game = (replayManager && replayManager.currentGame) || qsTr("Unknown Game")
+            var game = (root.replay && root.replay.currentGame) || qsTr("Unknown Game")
             root.pushActivityEvent("clip", "blue", qsTr("Clip saved: %1").arg(game), span, filePath)
         }
     }
     Connections {
-        target: storageManager
+        target: root.storage
         function onStorageLimitReached() {
-            var auto = settingsManager ? settingsManager.autoDeleteOldest : false
+            var auto = root.preferences ? root.preferences.autoDeleteOldest : false
             root.pushActivityEvent("storage", "red", qsTr("Storage Full"), auto ? qsTr("Over limit — oldest files will be auto-deleted") : qsTr("Over limit — enable auto-cleanup or free space manually"))
         }
         function onStorageLimitCannotCleanup() {

@@ -216,6 +216,41 @@ TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   EXPECT_EQ(waveform.requests, 2);
 }
 
+TEST_F(PlayerProbeTest, BoundFilmstripDelegatesKeepIndicesAcrossRefreshZoomAndReopen) {
+  window.show();
+  const QString path = "/fake/filmstrip.mkv";
+  for (int reopen = 0; reopen < 2; ++reopen) {
+    open(path);
+    page->setVisible(true); // main.qml reveals the page after open(), including reopen.
+    auto *lane = findVisual(page.get(), "playerVideoLane");
+    ASSERT_NE(lane, nullptr);
+    lane->setProperty("playDuration", 60000);
+    lane->setProperty("viewStartMs", 0);
+    lane->setProperty("viewSpanMs", 60000);
+    emit filmstrip.filmstripReady(path, {"/fake/one.jpg", "/fake/two.jpg", "/fake/three.jpg"});
+    ASSERT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb2") != nullptr; }));
+    for (int index = 0; index < 3; ++index) {
+      auto *thumb = findVisual(lane, QString("filmstripThumb%1").arg(index));
+      ASSERT_NE(thumb, nullptr);
+      EXPECT_EQ(thumb->property("index").toInt(), index);
+      EXPECT_EQ(thumb->property("thumbStart").toDouble(), index * 20000);
+      EXPECT_EQ(thumb->property("thumbSpan").toDouble(), 20000);
+    }
+    lane->setProperty("viewStartMs", 30000);
+    lane->setProperty("viewSpanMs", 30000);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(findVisual(lane, "filmstripThumb0")->isVisible());
+    EXPECT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb2")->isVisible(); }));
+    emit filmstrip.filmstripReady(path, {"/fake/replacement.jpg"});
+    ASSERT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb1") == nullptr; }));
+    auto *replacement = findVisual(lane, "filmstripThumb0");
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_EQ(replacement->property("modelData").toString(), "/fake/replacement.jpg");
+    EXPECT_EQ(replacement->property("thumbSpan").toDouble(), 60000);
+    close();
+  }
+}
+
 TEST_F(PlayerProbeTest, SeekAfterEndResumesButPausedSeekStaysPaused) {
   const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
   if (ffmpeg.isEmpty()) GTEST_SKIP() << "ffmpeg fixture tool unavailable";

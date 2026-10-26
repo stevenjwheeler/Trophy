@@ -64,6 +64,8 @@ During a full recording, click **Bookmark moment** or press the clip/bookmark sh
 
 In the player, click a yellow marker on any lane to jump to its stored time. The bookmark list offers Jump, Remove, and **Clip ±15 s**. Clip selects an editable range; it does not save immediately. Bookmarks do not protect a capture from cleanup.
 
+After recording, seek to a moment in the player and use **Add bookmark at current position** in the tracks toolbar. These bookmarks use the same saved list and timeline markers.
+
 ## Export and copy
 
 Choose **Share** in the player, or select library captures and choose **Export → Share-ready MP4**.
@@ -74,6 +76,8 @@ Choose **Share** in the player, or select library captures and choose **Export �
 4. Start the export. Progress and cancellation appear in background toasts.
 
 For batches, quality and destination apply to all captures, while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
+
+**Animated Trophy watermark** is on by default in share options, and your choice is remembered. It is burned into re-encoded MP4 share copies only; recordings and original-file copies keep their original pixels.
 
 Exports use software H.264/YUV420P with fast-start MP4 and optional AAC audio, at up to 60fps. They never upscale or modify the original. Export is **whole-file**: snip first to share only a range. Size targets are approximate, not guaranteed upload limits. HDR-to-SDR conversion is unsupported; known HDR input is rejected.
 
@@ -87,6 +91,8 @@ Set your recording folder, storage limit, and automatic-cleanup preference in Se
 
 Click a capture's **padlock** to protect it from automatic cleanup, and use **Protected only** in the filter to find protected items. Protection does not prevent explicit deletion or stop files counting toward storage usage. If no eligible space remains, increase the limit or unprotect/delete captures; Trophy does not remove protection to make room.
 
+Deleting protected captures always asks for confirmation, even if you skipped ordinary deletion confirmations. Confirmed deletion still provides the Undo period below.
+
 Manual deletion hides captures immediately and provides **10 seconds to Undo** before permanent deletion starts. Each batch has its own toast. Files still occupy disk space during that grace period. Quitting cancels uncommitted batches; hiding to the tray does not. Automatic cleanup is permanent and has no Undo.
 
 ### Back up your library metadata
@@ -99,6 +105,6 @@ The **`.thumbnails/` directory** contains disposable thumbnails, filmstrips, wav
 
 ## Appearance and closing
 
-Settings offers Default, Charcoal, and AMOLED themes, accent colors, and launch/tray preferences.
+Settings offers Original (formerly Default), Charcoal, and AMOLED themes, accent colors, and launch/tray preferences. New settings default to AMOLED with the Rose accent.
 
 The window close action and **Ctrl+Q** follow Trophy's close policy, including close-to-tray behavior and active-recording confirmation. Hiding the window is not quitting the app. Use the tray's Quit action when you intend to exit completely.

@@ -19,6 +19,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <tuple>
 #include <gtest/gtest.h>
 
 #include "capture/WaylandPortalCapture.h"
@@ -84,6 +85,11 @@ private:
     if (m_mode == stage + "Empty") {
       setDelayedReply(true);
       connection().send(message().createReply());
+      return QDBusObjectPath("/");
+    }
+    if (m_mode == stage + "WrongType") {
+      setDelayedReply(true);
+      connection().send(message().createReply(QVariantList{QStringLiteral("not an object path")}));
       return QDBusObjectPath("/");
     }
     return QDBusObjectPath(path);
@@ -579,6 +585,94 @@ TEST_F(WaylandPortalCaptureTest, StopDuringSourceSelectionIgnoresOldResponse) {
   EXPECT_FALSE(starting(capture));
   EXPECT_FALSE(watchdogActive(capture));
   EXPECT_TRUE(pendingPath(capture).isEmpty());
+}
+
+// Exercise method failures at every asynchronous stage, not just CreateSession
+// and SelectSources. A retry must advance through a real bus response, and a
+// session already created must be closed exactly once.
+class PortalMethodFailureTest : public WaylandPortalCaptureTest,
+                                public ::testing::WithParamInterface<std::tuple<const char *, const char *>> {};
+
+TEST_P(PortalMethodFailureTest, ClearsAttemptClosesSessionAndAllowsRetry) {
+  if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
+  const auto [stageName, failureName] = GetParam();
+  const QString stage = QString::fromLatin1(stageName);
+  control("Configure", {stage + QString::fromLatin1(failureName)});
+  WaylandPortalCapture capture;
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  QSignalSpy started(&capture, &IVideoCaptureSource::captureStarted);
+  capture.requestScreenShare();
+  if (stage != "CreateSession") {
+    const QString create = pendingPath(capture);
+    control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+    if (stage == "Start") {
+      ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+      control("Respond", {pendingPath(capture), 0u, QVariantMap{}});
+    }
+  }
+  ASSERT_TRUE(waitUntil([&] { return errors.count() == 1; }));
+  EXPECT_FALSE(starting(capture));
+  EXPECT_FALSE(watchdogActive(capture));
+  EXPECT_TRUE(pendingPath(capture).isEmpty());
+  EXPECT_EQ(started.count(), 0);
+  const int expectedCloses = stage == "CreateSession" ? 0 : 1;
+  ASSERT_TRUE(waitUntil([&] {
+    return control("SessionCloseCount", {}).arguments().value(0).toInt() == expectedCloses;
+  }));
+  timeout(capture);
+  EXPECT_EQ(errors.count(), 1); // No duplicate error after terminal failure.
+  control("Configure", {""});
+  capture.requestScreenShare();
+  ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+  // Prove the retry advances, rather than merely exposing a predicted path.
+  const QString retry = pendingPath(capture);
+  control("Respond", {retry, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+  ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+  EXPECT_EQ(errors.count(), 1);
+  capture.stopCapture();
+  ASSERT_TRUE(waitUntil([&] {
+    return control("SessionCloseCount", {}).arguments().value(0).toInt() == expectedCloses + 1;
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(EveryStage, PortalMethodFailureTest,
+    ::testing::Combine(::testing::Values("CreateSession", "SelectSources", "Start"),
+                       ::testing::Values("Error", "Empty", "WrongType")));
+
+TEST_F(WaylandPortalCaptureTest, StartRejectionOfSavedTokenCannotRestartPickerOrConsumeRetry) {
+  if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
+  WaylandPortalCapture capture;
+  restore(capture);
+  QSignalSpy stale(&capture, &IVideoCaptureSource::restoreTokenStale);
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  QSignalSpy started(&capture, &IVideoCaptureSource::captureStarted);
+  capture.requestScreenShare();
+  control("Respond", {pendingPath(capture), 0u, QVariantMap{{"session_handle", "/test/session"}}});
+  ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+  control("Respond", {pendingPath(capture), 0u, QVariantMap{}});
+  ASSERT_TRUE(waitUntil([&] { return captureStageIsStart(capture); }));
+  const QString rejected = pendingPath(capture);
+  control("Respond", {rejected, 2u, QVariantMap{}});
+  ASSERT_TRUE(waitUntil([&] { return stale.count() == 1; }));
+  EXPECT_EQ(stale.first()[0].toString(), "saved-token");
+  EXPECT_FALSE(starting(capture));
+  EXPECT_TRUE(pendingPath(capture).isEmpty());
+  EXPECT_FALSE(watchdogActive(capture));
+  EXPECT_EQ(errors.count(), 0);
+  EXPECT_EQ(started.count(), 0);
+  // Session retirement is the owner's job on stale-token delivery.
+  capture.stopCapture();
+  ASSERT_TRUE(waitUntil([] {
+    return control("SessionCloseCount", {}).arguments().value(0).toInt() == 1;
+  }));
+  capture.requestScreenShare(); // Explicit new attempt only.
+  const QString retry = pendingPath(capture);
+  control("Respond", {rejected, 0u, QVariantMap{}});
+  control("Respond", {retry, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+  ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+  EXPECT_EQ(stale.count(), 1);
+  EXPECT_EQ(errors.count(), 0);
+  EXPECT_EQ(started.count(), 0);
 }
 
 #include "test_WaylandPortalCapture.moc"

@@ -77,12 +77,12 @@ Rectangle {
 
     function stop() {
         mediaPlayer.stop();
-        if (typeof videoOutput.clearOutput === "function")
-            videoOutput.clearOutput();
+        if (typeof videoSurface.clearOutput === "function")
+            videoSurface.clearOutput();
     }
 
     function snapshot(filePath) {
-        videoOutput.grabToImage(function(result) {
+        videoSurface.grabToImage(function(result) {
             root.snapshotSaved(filePath, result.saveToFile(filePath))
         })
     }
@@ -109,7 +109,7 @@ Rectangle {
         // audio-only pipeline per track (true per-track mute),
         // so this output stays silent.
         autoPlay: false
-        videoOutput: videoOutput
+        videoOutput: videoSurface
         onErrorOccurred: function(error, errorString) {
             console.error("Video playback error:", errorString);
         }
@@ -117,15 +117,15 @@ Rectangle {
     }
 
     VideoOutput {
-        id: videoOutput
+        id: videoSurface
         objectName: "playerVideoOutput"
 
         anchors.fill: parent
         // Qt 6.9+ clears the output at EOF by default. Keep the final
         // decoded frame instead; older Qt versions lack this policy API.
         Component.onCompleted: {
-            if (typeof videoOutput.endOfStreamPolicy !== "undefined")
-                videoOutput.endOfStreamPolicy = VideoOutput.KeepLastFrame
+            if (typeof videoSurface.endOfStreamPolicy !== "undefined")
+                videoSurface.endOfStreamPolicy = VideoOutput.KeepLastFrame
         }
     }
 
@@ -163,8 +163,8 @@ Rectangle {
         color: "#CC000000"
         // Match the video area's rounding so the bar never
         // squares off the bottom corners while visible.
-        bottomLeftRadius: playerFullscreen ? 0 : Theme.radiusMedium
-        bottomRightRadius: playerFullscreen ? 0 : Theme.radiusMedium
+        bottomLeftRadius: root.playerFullscreen ? 0 : Theme.radiusMedium
+        bottomRightRadius: root.playerFullscreen ? 0 : Theme.radiusMedium
         opacity: root.controlsShown || !mediaPlayer.playing ? 1 : 0
 
         // The bar stays up while the cursor is over it —
@@ -205,7 +205,7 @@ Rectangle {
 
             // Time display
             Label {
-                text: formatTime(mediaPlayer.position) + " / " + formatTime(mediaPlayer.duration)
+                text: root.formatTime(mediaPlayer.position) + " / " + root.formatTime(mediaPlayer.duration)
                 color: "white"
                 font.pixelSize: Theme.fontSizeSmall
                 font.family: "monospace"

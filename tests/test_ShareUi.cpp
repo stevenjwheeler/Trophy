@@ -196,6 +196,68 @@ TEST_F(SharingUiTest, ProtectedDeletesCannotSkipConfirmation) {
   EXPECT_TRUE(result.toBool());
 }
 
+TEST_F(SharingUiTest, ComboPopupAppearanceTracksVisibilityWithoutChangingSelection) {
+  for (const bool voice : {false, true}) {
+    SCOPED_TRACE(voice ? "saved voice app" : "ordinary combo");
+    create(voice ? "../controls/VoiceAppComboBox.qml" : "../controls/TrophyComboBox.qml",
+        voice ? QVariantMap{{"savedApp", "Discord"}, {"x", 50}, {"y", 50}}
+              : QVariantMap{{"model", QStringList{"One", "Two"}}, {"currentIndex", 1}, {"x", 50}, {"y", 50}});
+    ASSERT_TRUE(object);
+    auto *popup = object->property("popup").value<QObject *>();
+    auto *indicator = object->property("indicator").value<QQuickItem *>();
+    ASSERT_NE(popup, nullptr);
+    ASSERT_NE(indicator, nullptr);
+    QTest::mouseMove(&window, QPoint(1000, 750));
+    ASSERT_TRUE(wait([&] { return !object->property("hovered").toBool() &&
+        object->property("currentIndex").toInt() == 1 && indicator->rotation() == 0; }));
+    const auto closedColor = indicator->property("color").value<QColor>();
+    const auto accent = object->property("_accent").value<QColor>();
+    EXPECT_NE(closedColor, accent);
+    QSignalSpy activated(object.get(), SIGNAL(activated(int)));
+    std::unique_ptr<QSignalSpy> selected;
+    if (voice) selected = std::make_unique<QSignalSpy>(object.get(), SIGNAL(appSelected(QString)));
+    for (int reopen = 0; reopen < 2; ++reopen) {
+      ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+      ASSERT_TRUE(wait([&] { return popup->property("visible").toBool() &&
+          indicator->rotation() == 180 && indicator->property("color").value<QColor>() == accent; }));
+      if (voice && reopen == 0) {
+        object->setProperty("apps", QVariantList{QVariantMap{{"name", "Discord Voice"}, {"binary", "discord"}}});
+        ASSERT_TRUE(wait([&] { return object->property("displayText").toString() == "Discord Voice"; }));
+      }
+      ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+      ASSERT_TRUE(wait([&] { return !popup->property("visible").toBool() &&
+          indicator->rotation() == 0 && indicator->property("color").value<QColor>() == closedColor; }));
+      EXPECT_EQ(object->property("currentIndex").toInt(), 1);
+      EXPECT_TRUE(activated.isEmpty());
+      if (voice) {
+        EXPECT_EQ(object->property("savedApp").toString(), "Discord");
+        EXPECT_TRUE(selected->isEmpty());
+      }
+    }
+    object.reset();
+    QCoreApplication::processEvents();
+  }
+}
+
+TEST_F(SharingUiTest, WindowPickerDividersKeepImplicitSizeAcrossResizeAndReopen) {
+  create("WindowPickerDialog.qml", {});
+  ASSERT_TRUE(object);
+  for (const QSize &size : {QSize(500, 600), QSize(620, 680), QSize(500, 600)}) {
+    object->setProperty("width", size.width());
+    object->setProperty("height", size.height());
+    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+    ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+    for (const auto *name : {"windowPickerTopDivider", "windowPickerBottomDivider"}) {
+      auto *divider = object->findChild<QQuickItem *>(name);
+      ASSERT_NE(divider, nullptr);
+      EXPECT_EQ(divider->implicitHeight(), 1);
+      ASSERT_TRUE(wait([&] { return divider->height() == 1 && divider->width() > 400; }));
+    }
+    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "close"));
+    ASSERT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
+  }
+}
+
 TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   create("../controls/VoiceAppComboBox.qml", {{"savedApp", "Discord"}});
   ASSERT_TRUE(object);
@@ -224,6 +286,46 @@ TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   ASSERT_TRUE(object);
   ASSERT_TRUE(wait([&] { return object->property("currentIndex").toInt() == 1; }));
   EXPECT_EQ(object->property("displayText").toString(), "Discord");
+}
+
+TEST_F(SharingUiTest, BoundSearchDelegatesKeepRolesAcrossModelReplacementAndClicks) {
+  create("../controls/TrophySearchBox.qml", {{"width", 400}, {"x", 50}, {"y", 50}});
+  ASSERT_TRUE(object);
+  auto *popup = object->property("dropdown").value<QObject *>();
+  ASSERT_NE(popup, nullptr);
+  QSignalSpy selected(object.get(), SIGNAL(resultSelected(QVariant)));
+  ASSERT_TRUE(selected.isValid());
+  auto replace = [&](bool reverse) {
+    QQmlExpression expression(qmlContext(object.get()), object.get(),
+        QStringLiteral("searchResults.clear(); searchResults.append(%1); searchResults.append(%2)")
+            .arg(reverse ? "{type:'setting',title:'Video',subtitle:'Settings',targetIndex:2,section:'Video Recording'}"
+                         : "{type:'clip',title:'Game',subtitle:'Capture',targetIndex:7,section:''}")
+            .arg(reverse ? "{type:'clip',title:'Game',subtitle:'Capture',targetIndex:7,section:''}"
+                         : "{type:'setting',title:'Video',subtitle:'Settings',targetIndex:2,section:'Video Recording'}"));
+    expression.evaluate();
+    EXPECT_FALSE(expression.hasError()) << expression.error().toString().toStdString();
+  };
+  for (const bool reverse : {false, true}) {
+    replace(reverse);
+    ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+    auto *content = popup->property("contentItem").value<QQuickItem *>();
+    ASSERT_NE(content, nullptr);
+    ASSERT_TRUE(wait([&] { return popup->property("opened").toBool() &&
+        findItem(content, "searchResult1") != nullptr; }));
+    auto *row = findItem(content, "searchResult1");
+    ASSERT_TRUE(wait([&] { return row->width() > 0 && row->height() == 50; }));
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+        row->mapToScene(QPointF(row->width() / 2, row->height() / 2)).toPoint());
+    ASSERT_TRUE(wait([&] { return selected.size() == 1; }));
+    const auto value = selected.takeFirst()[0];
+    const auto result = value.canConvert<QJSValue>() ? value.value<QJSValue>().toVariant().toMap() : value.toMap();
+    EXPECT_EQ(result.value("type").toString(), reverse ? "clip" : "setting");
+    EXPECT_EQ(result.value("title").toString(), reverse ? "Game" : "Video");
+    EXPECT_EQ(result.value("targetIndex").toInt(), reverse ? 7 : 2);
+    EXPECT_EQ(result.value("section").toString(), reverse ? "" : "Video Recording");
+    ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+    ASSERT_TRUE(wait([&] { return !popup->property("visible").toBool(); }));
+  }
 }
 
 TEST_F(SharingUiTest, VoiceAppOnlyExplicitValidActivationChangesPreference) {

@@ -1,7 +1,5 @@
 import "../styles"
 import QtQuick
-import QtQuick.Controls
-import QtQuick.Layouts
 import QtQuick.Templates as T
 
 T.Button {
@@ -56,7 +54,7 @@ T.Button {
                 // Color overlay - when isBright, use white; otherwise use text color
                 Rectangle {
                     anchors.fill: img
-                    color: control.isBright ? "#ffffff" : _text
+                    color: control.isBright ? "#ffffff" : control._text
                     opacity: 0
                     visible: false
                 }
@@ -66,7 +64,7 @@ T.Button {
             Text {
                 text: control.text
                 font: control.font
-                color: control.isBright ? "#ffffff" : _text
+                color: control.isBright ? "#ffffff" : control._text
                 visible: control.text !== ""
                 anchors.verticalCenter: parent.verticalCenter
 

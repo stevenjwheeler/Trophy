@@ -14,6 +14,9 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
+    property var audioDevices: typeof audioDeviceEnumerator !== "undefined" ? audioDeviceEnumerator : null // qmllint disable unqualified
 
     // Refresh live choices on open; the voice picker retains the saved app
     // independently because apps publish audio streams on demand.
@@ -792,8 +795,8 @@ Page {
                             }
 
                             onActivated: {
-                                if (settingsManager && audioDeviceEnumerator && currentIndex < devices.length) {
-                                    settingsManager.microphoneDevice = devices[currentIndex].id;
+                                if (root.preferences && root.audioDevices && currentIndex < devices.length) {
+                                    root.preferences.microphoneDevice = devices[currentIndex].id;
                                 }
                             }
                         }

@@ -10,7 +10,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import QtQuick.Dialogs
 
 ApplicationWindow {
     id: window
@@ -103,7 +102,7 @@ ApplicationWindow {
         if (lastSelectedIndex === -1 || !recordingLibrary) {
             // First selection in this sequence - just toggle normally
             if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
-                var recording = recordingLibrary.get(currentIndex);
+                const recording = recordingLibrary.get(currentIndex);
                 if (recording) {
                     toggleSelection(recording.filePath);
                     lastSelectedIndex = currentIndex;
@@ -117,9 +116,9 @@ ApplicationWindow {
         var temp = selectedRecordings.slice();
 
         // Select all items in the range
-        for (var i = startIdx; i <= endIdx; i++) {
+        for (let i = startIdx; i <= endIdx; i++) {
             if (recordingLibrary && i >= 0 && i < recordingLibrary.count) {
-                var rec = recordingLibrary.get(i);
+                const rec = recordingLibrary.get(i);
                 if (rec && temp.indexOf(rec.filePath) === -1) {
                     temp.push(rec.filePath);
                 }
@@ -244,7 +243,7 @@ ApplicationWindow {
         var title = filePath;
         var dateStr = "";
         if (window.recordingLibrary) {
-            var rec = window.recordingLibrary.getRecording(filePath);
+            const rec = window.recordingLibrary.getRecording(filePath);
             if (rec) {
                 title = rec.gameName || rec.fileName || filePath;
                 if (rec.date)
@@ -285,7 +284,7 @@ ApplicationWindow {
         }
         var idx = selectedRecordings.indexOf(renameDialog.filePath);
         if (idx !== -1) {
-            var temp = selectedRecordings.slice();
+            const temp = selectedRecordings.slice();
             temp[idx] = newPath;
             selectedRecordings = temp;
         }
@@ -332,14 +331,14 @@ ApplicationWindow {
 
         // Search clips
         if (recordingLibrary) {
-            for (var i = 0; i < recordingLibrary.count; i++) {
-                var clip = recordingLibrary.get(i);
+            for (let i = 0; i < recordingLibrary.count; i++) {
+                const clip = recordingLibrary.get(i);
                 if (!clip) continue;
 
-                var gameName = (clip.gameName || "").toLowerCase();
-                var fileName = (clip.fileName || "").toLowerCase();
+                const gameName = (clip.gameName || "").toLowerCase();
+                const fileName = (clip.fileName || "").toLowerCase();
                 
-                var match = gameName.includes(lowerQuery) ||
+                const match = gameName.includes(lowerQuery) ||
                             fileName.includes(lowerQuery) ||
                             matchesDate(clip.date, lowerQuery);
 
@@ -369,9 +368,9 @@ ApplicationWindow {
             { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
 
-        for (var j = 0; j < settings.length; j++) {
-            var setting = settings[j];
-            var settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
+        for (let j = 0; j < settings.length; j++) {
+            const setting = settings[j];
+            const settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
                                (setting.keywords || []).some(k => { const kw = (k || "").toLowerCase(); return kw.includes(lowerQuery) || lowerQuery.includes(kw); });
 
             if (settingMatch) {
@@ -390,7 +389,7 @@ ApplicationWindow {
 
     function handleSearchResult() {
         if (globalSearchBox.searchResults.count > 0) {
-            var firstResult = globalSearchBox.searchResults.get(0);
+            const firstResult = globalSearchBox.searchResults.get(0);
             navigateToResult(firstResult);
         }
         globalSearchBox.text = "";

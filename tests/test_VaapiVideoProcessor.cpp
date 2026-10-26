@@ -165,3 +165,27 @@ TEST(VaapiVideoProcessorTest, MissingEntryPointsAndEmptyPoolsFailWithoutNativeCa
   EXPECT_FALSE(processor.initialize(nullptr, 640, 360, targets));
   EXPECT_TRUE(fake.calls.empty());
 }
+
+TEST(VaapiVideoProcessorTest, RepeatedDestroyFailureCannotAccumulateBuffersOrSubmitMoreWork) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  fake.failAt = "destroy-buffer";
+  EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+  const auto firstCalls = fake.calls;
+  for (int retry = 0; retry < 3; ++retry) {
+    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+    EXPECT_EQ(fake.calls.back(), "destroy-buffer");
+    EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "buffer"), 1);
+    EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "begin"), 1);
+    EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "sync-output"), 1);
+  }
+  EXPECT_EQ(fake.calls.size(), firstCalls.size() + 3);
+  EXPECT_FALSE(processor.error().isEmpty());
+  fake.failAt.clear();
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+  EXPECT_TRUE(processor.error().isEmpty());
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "buffer"), 2);
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "begin"), 2);
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "context"), 1);
+}

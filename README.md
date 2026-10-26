@@ -64,6 +64,8 @@ chmod +x Trophy-<version>-x86_64.AppImage
 ./Trophy-<version>-x86_64.AppImage
 ```
 
+CI also produces `.tar.xz`, `.deb`, and `.rpm` packages. Check the release assets for available downloads and see the [installation guide](docs/getting-started.md) and [packaging notes](packaging/README.md) for details.
+
 Replace `<version>` with the downloaded version. The setup wizard walks you through desktop integration, audio, and shortcuts. Game capture requires your authorization through the system portal.
 
 [Getting started](docs/getting-started.md) · [User guide](docs/user-guide.md) · [Build from source](docs/development.md)
