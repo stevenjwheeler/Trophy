@@ -589,6 +589,84 @@ TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
     ASSERT_TRUE(waitUntil([&] { return !dialog->property("visible").toBool(); }));
   }
 }
+
+TEST_F(GameIconTest, BoundPromptBlockPolesKeepLabelsStylingAndClickRouting) {
+  GameListEntry entry;
+  entry.key = entry.display = "Game";
+  GameListModel model;
+  model.setEntries({entry});
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  QQmlComponent fake(&engine);
+  fake.setData(R"(import QtQml
+QtObject {
+  property var gamesModel
+  property string gameFilterText: ""
+  property bool showDefaultExclusions: false
+  property int promptCalls: 0
+  property int blockCalls: 0
+  property string lastKey: ""
+  function unblockGame(key) { lastKey = key; promptCalls++; return true }
+  function moveToBlacklist(key) { lastKey = key; blockCalls++; return true }
+})", QUrl());
+  std::unique_ptr<QObject> detector(fake.createWithInitialProperties({
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))}}));
+  ASSERT_NE(detector, nullptr) << fake.errorString().toStdString();
+  engine.rootContext()->setContextProperty("gameDetector", detector.get());
+  QStringList warnings;
+  QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+      [&](const QList<QQmlError> &errors) {
+        for (const auto &error : errors) warnings.append(error.toString());
+      });
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  window.resize(1113, 700);
+  page->setParentItem(window.contentItem());
+  page->setSize({1113, 700});
+  window.show();
+  std::function<QQuickItem *(QQuickItem *, const QString &)> find =
+      [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+    if (item->objectName() == name) return item;
+    for (auto *child : item->childItems())
+      if (auto *found = find(child, name)) return found;
+    return nullptr;
+  };
+  ASSERT_TRUE(waitUntil([&] { return find(page, "blockPole") != nullptr; }));
+  auto *prompt = find(page, "promptPole");
+  auto *block = find(page, "blockPole");
+  ASSERT_NE(prompt, nullptr);
+  ASSERT_NE(block, nullptr);
+  ASSERT_TRUE(waitUntil([&] { return block->width() > 0 && block->isVisible(); }));
+  auto label = [](QQuickItem *pole) -> QObject * {
+    for (auto *child : pole->childItems())
+      if (child->property("text").isValid()) return child;
+    return nullptr;
+  };
+  ASSERT_NE(label(prompt), nullptr);
+  ASSERT_NE(label(block), nullptr);
+  EXPECT_EQ(label(prompt)->property("text").toString(), "Prompt");
+  EXPECT_EQ(label(block)->property("text").toString(), "Block");
+  const QColor active = prompt->property("color").value<QColor>();
+  EXPECT_GT(active.alpha(), 0);
+  EXPECT_EQ(block->property("color").value<QColor>().alpha(), 0);
+  for (auto *pole : {block, prompt}) {
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+        pole->mapToScene(QPointF(pole->width() / 2, pole->height() / 2)).toPoint());
+  }
+  EXPECT_EQ(detector->property("blockCalls").toInt(), 1);
+  EXPECT_EQ(detector->property("promptCalls").toInt(), 1);
+  EXPECT_EQ(detector->property("lastKey").toString(), "Game");
+  ASSERT_TRUE(prompt->parentItem()->parentItem()->setProperty("blocked", true));
+  EXPECT_EQ(prompt->property("color").value<QColor>().alpha(), 0);
+  EXPECT_GT(block->property("color").value<QColor>().alpha(), 0);
+  for (const auto &warning : warnings)
+    EXPECT_FALSE(warning.contains("ReferenceError") || warning.contains("TypeError"))
+        << warning.toStdString();
+}
 } // namespace
 
 int main(int argc, char **argv) {

@@ -515,26 +515,29 @@ Page {
                 ]
 
                 Rectangle {
+                    id: pole
+                    required property var modelData
+                    objectName: modelData.blocked ? "blockPole" : "promptPole"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     radius: 4
                     color: {
-                        const active = (duoSwitch.blocked === modelData.blocked)
+                        const active = (duoSwitch.blocked === pole.modelData.blocked)
                         if (!active)
                             return "transparent"
-                        return modelData.blocked ? Qt.alpha(Theme.errorColor, 0.25)
+                        return pole.modelData.blocked ? Qt.alpha(Theme.errorColor, 0.25)
                                                  : Qt.alpha(Theme.successColor, 0.15)
                     }
 
                     Label {
                         anchors.centerIn: parent
-                        text: modelData.label
+                        text: pole.modelData.label
                         font.pixelSize: Theme.fontSizeSmall
-                        font.weight: duoSwitch.blocked === modelData.blocked ? Font.Bold : Font.Normal
+                        font.weight: duoSwitch.blocked === pole.modelData.blocked ? Font.Bold : Font.Normal
                         color: {
-                            if (duoSwitch.blocked !== modelData.blocked)
+                            if (duoSwitch.blocked !== pole.modelData.blocked)
                                 return Theme.textMutedColor
-                            return modelData.blocked ? Theme.errorColor : Theme.successColor
+                            return pole.modelData.blocked ? Theme.errorColor : Theme.successColor
                         }
                     }
 
@@ -543,7 +546,7 @@ Page {
                     }
                     TapHandler {
                         onTapped: {
-                            if (modelData.blocked)
+                            if (pole.modelData.blocked)
                                 duoSwitch.blockSelected()
                             else
                                 duoSwitch.promptSelected()
