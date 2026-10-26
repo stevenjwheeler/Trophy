@@ -44,6 +44,7 @@ public:
   void prepareStopCapture() override;
   void finishStopCapture() override;
   bool isCapturing() const override;
+  CaptureErrorKind lastErrorKind() const override { return m_lastErrorKind; }
   CaptureCapabilities capabilities() const override;
   QSize nativeResolution() const override;
   QString name() const override { return "Wayland Portal Capture"; }
@@ -73,6 +74,9 @@ private slots:
   void onStartCallFinished(QDBusPendingCallWatcher *watcher,
                            quint64 generation);
   void onStartWatchdogTimeout();
+  void onPortalSessionClosed(const QVariantMap &details);
+  void onPortalOwnerChanged(const QString &service, const QString &oldOwner,
+                           const QString &newOwner);
 
 private:
   friend class WaylandPortalCaptureTest;
@@ -84,16 +88,23 @@ private:
   // indicator tracks); stopping PipeWire alone leaves the session — and
   // its indicator — alive forever.
   void closePortalSession();
+  void portalSessionLost(const QString &reason, CaptureErrorKind kind = CaptureErrorKind::Other);
   bool startPipeWireStream(uint32_t nodeId);
   void stopPipeWireStream();
   void postNativeReady(quint64 generation);
-  void postNativeError(const QString &error, quint64 generation);
+  void postNativeError(const QString &error, quint64 generation,
+                       CaptureErrorKind kind = CaptureErrorKind::Other);
+  CaptureErrorKind m_lastErrorKind = CaptureErrorKind::Other;
 
   static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error);
   static void on_stream_param_changed(void *data, unsigned int id, const struct spa_pod *param);
   static void on_stream_process(void *data);
+  static void on_core_error(void *data, uint32_t id, int sequence, int result,
+                            const char *message);
+  static void on_registry_global_remove(void *data, uint32_t id);
 
   QString m_sessionHandle;
+  QString m_sessionOwner;
   QString m_requestHandle;
   QString m_restoreToken;
   // True when this capture attempt started with a saved restore token.
@@ -121,6 +132,9 @@ private:
   pw_stream *m_pw_stream = nullptr;
   bool m_pw_loopStarted = false;
   spa_hook m_pw_stream_listener;
+  spa_hook m_pw_core_listener{};
+  pw_registry *m_pw_registry = nullptr;
+  spa_hook m_pw_registry_listener{};
 
   FrameCallback m_callback;
   // Guards m_callback: setFrameCallback (GUI thread, incl. session

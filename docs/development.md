@@ -84,6 +84,70 @@ HOME="$test_root/home" \
 
 For AppImage payload/startup smoke checks and reporter ABI inspection, see [packaging notes](../packaging/README.md). Those checks have narrower scope than live recording tests.
 
+### Isolated service, format and permission tests
+
+The portal and application-audio suites can exercise service loss without
+restarting your desktop services:
+
+```sh
+ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
+    -R 'WaylandPortalCaptureTest|EveryStage/PortalMethodFailureTest|AppAudioGroupTest.PrivatePipeWire|RecordingFailureTest'
+```
+
+- Portal integration uses a private D-Bus with service activation disabled.
+  Tests send session-closure signals, terminate their fake portal, check stale
+  responses/native-event rejection, and create a new session afterward. The
+  active-session fixture emulates the final native-video startup boundary; it
+  does not capture a real compositor or exercise a permission dialog.
+- Application audio uses a private PipeWire daemon, WirePlumber's policy-only
+  profile and a null sink. Tests remove/recreate playback sources and stop/restart
+  only the launcher's owned services, checking real PCM delivery, error handling,
+  callback retirement and fresh-source recovery. Hardware monitors and system-bus
+  access are disabled, and host PipeWire socket overrides are removed.
+- Native audio needs Python, `pipewire`, `wireplumber` 0.5+, `pw-cli`, `pw-dump`
+  and `dbus-run-session`; it skips explicitly when these are unavailable. Use
+  CTest/the provided launchers, not private-test environment markers on your
+  normal session bus. These suites alone do not use the reporter socket.
+- `RecordingFailureTest` runs synthetic SHM video and a tone through the real
+  private PipeWire graph, fake portal, recording/DVR managers and software
+  H.264/AAC/MKV pipeline. Merged/separate cases cover portal closure, portal
+  service exit and PipeWire daemon exit during recording, startup and DVR
+  handoff. Tests decode retained recordings and recovered recordings/clips,
+  check stream timestamps, video dimensions and non-silent decoded PCM, and verify cleanup,
+  no false save signal, stale-reply rejection and saved-token preservation.
+  Additional recording/DVR groups renegotiate native SHM video dimensions/FPS
+  (including odd sizes and restoration), recreate audio playback at 44.1/96/48kHz
+  and mono/stereo, and check decoded colors, aspect padding, replacement tones
+  and resumed audio timing. Audio recreation tests normal source rebinding,
+  not in-place renegotiation of an application's fixed client format. DVR tests
+  rotate across changes and decode the combined clip, rejecting decoder errors
+  as well as invalid API results.
+  Permission cases close the fake portal grant, reject a saved token at
+  SelectSources/Start, cancel an explicit authorization attempt, and revoke
+  the actual capture client's read permission for the granted PipeWire node.
+  They check partial-file/cache cleanup, explicit retry and no automatic picker.
+  Token removal on reauthorization is modeled by test signal handlers; these
+  fixtures do not instantiate the desktop Application/permission dialog or
+  modify the real portal permission store.
+  The game-exit group removes the real SHM video producer before/after an
+  owned test process exits, and separately revokes read access while that
+  process stays alive. Confirmed targeted-game exit must publish Saved, not
+  an error; a living game's permission loss still fails. Capture drains
+  immediately, with at most five seconds of owner-thread grace to classify
+  ambiguous source/session disappearance. Service and output failures are
+  not treated as normal game exit. These are controlled lifecycle identities,
+  not a live game/compositor shutdown test.
+  These tests also need the software H.264/AAC codecs and skip if unavailable.
+  Run the individual CTest groups: each private-service child has a 90-second
+  deadline, so combining all pipeline cases in one launcher is unsupported.
+
+Recovery in these fixtures means a fresh explicitly requested capture, not a
+claim of automatic recording resumption. The source-only suites do not verify
+complete media files; the recording fixture does, for its synthetic software
+pipeline. Real portal UI/permission-store behavior, GPU/DMA-BUF driver resets,
+additional native scheduling/format combinations and suspend/resume still need
+separate integration and hardware/session checks.
+
 ## Contributing
 
 Issues, focused pull requests, and documentation improvements are welcome. For fixes, include reproduction steps and a regression test where practical. Describe what you verified, and distinguish automated coverage from live desktop/game testing.

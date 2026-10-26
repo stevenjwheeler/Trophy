@@ -156,3 +156,24 @@ TEST_F(AudioDriftCorrectorTest, InvalidInputIsSafe) {
   EXPECT_EQ(corr.process(sine.data(), 0, out), 0);
   EXPECT_EQ(corr.process(sine.data(), -5, out), 0);
 }
+
+TEST_F(AudioDriftCorrectorTest, ExplicitResetMatchesFreshServoWithoutOldPcm) {
+  auto corrector = makeCorrector();
+  ASSERT_TRUE(corrector.valid());
+  run(corrector, kRate, 1.0);
+  nowExactUs += 2000000;
+  corrector.reset();
+  ASSERT_TRUE(corrector.valid());
+  auto fresh = makeCorrector();
+  ASSERT_TRUE(fresh.valid());
+  std::vector<float> silence(kChunk * kChannels, 0);
+  for (int block = 0; block < 20; ++block) {
+    const float *resetOutput = nullptr, *freshOutput = nullptr;
+    const int resetFrames = corrector.process(silence.data(), kChunk, resetOutput);
+    const int freshFrames = fresh.process(silence.data(), kChunk, freshOutput);
+    ASSERT_EQ(resetFrames, freshFrames);
+    for (int i = 0; i < resetFrames * kChannels; ++i)
+      EXPECT_FLOAT_EQ(resetOutput[i], freshOutput[i]);
+    nowExactUs += kChunk * 1000000.0 / kRate;
+  }
+}

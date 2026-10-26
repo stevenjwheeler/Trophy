@@ -59,7 +59,10 @@ struct ReplaySegment {
  * segment's first GOP, whose head keyframe lacks a demuxable DTS), never
  * undershoots it. Per-stream output timestamps must be non-decreasing,
  * so packets older than the high-water mark (overlap between rotated
- * segments) are dropped.
+ * segments) are dropped. Later segment heads with missing DTS are recovered
+ * from bounded lookahead and known decode durations; if a reference keyframe
+ * cannot be retained, video waits for the next safe GOP rather than copying
+ * dependent pictures without their references; that fallback may leave a gap.
  */
 class ReplayClipper {
   friend struct ReplayClipperTestAccess;

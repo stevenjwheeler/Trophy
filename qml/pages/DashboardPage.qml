@@ -82,14 +82,17 @@ Page {
             : qsTr("%1 s ago · no recent buffers").arg((age / 1000).toFixed(1));
     }
 
-    component CaptureInfoRow: ColumnLayout {
+    component CaptureInfoRow: Item {
         id: infoRow
         property string rowName: ""
         property string rowValue: ""
         Layout.fillWidth: true
-        spacing: Theme.spacingSmall
+        // The outer layout owns width. Do not propagate the inner layout's
+        // width-dependent text hints back into that same layout negotiation.
+        implicitHeight: infoContent.implicitHeight + Theme.spacingSmall + 1
         RowLayout {
-            Layout.fillWidth: true
+            id: infoContent
+            width: infoRow.width
             Label {
                 text: infoRow.rowName
                 color: Theme.textSecondaryColor
@@ -104,7 +107,12 @@ Page {
                 horizontalAlignment: Text.AlignRight
             }
         }
-        Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Theme.borderColor }
+        Rectangle {
+            y: infoContent.height + Theme.spacingSmall
+            width: infoRow.width
+            height: 1
+            color: Theme.borderColor
+        }
     }
     property int dropWarningTicks: 0
     function updateCaptureStatus() {

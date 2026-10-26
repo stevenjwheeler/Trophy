@@ -7,6 +7,9 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QFile>
+#include <QSaveFile>
+#include <QElapsedTimer>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <atomic>
@@ -63,6 +66,26 @@ uint32_t privatePort(uint32_t node, const QString &direction) {
       return object["id"].toInt();
   }
   return PW_ID_ANY;
+}
+
+bool privateServices(const QByteArray &command) {
+  const QString directory = qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_CONTROL");
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1" || directory.isEmpty())
+    return false;
+  QFile::remove(directory + "/reply");
+  QSaveFile request(directory + "/request");
+  if (!request.open(QIODevice::WriteOnly) || request.write(command) != command.size() ||
+      !request.commit())
+    return false;
+  // The launcher only controls its owned private children, never a host PID.
+  QElapsedTimer deadline;
+  deadline.start();
+  while (deadline.elapsed() < 15000) {
+    QFile reply(directory + "/reply");
+    if (reply.open(QIODevice::ReadOnly) && reply.readAll() == command) return true;
+    QTest::qWait(10);
+  }
+  return false;
 }
 
 struct PlaybackClient {
@@ -314,5 +337,92 @@ TEST(AppAudioGroupTest, WrongBinaryOrStaleSerialNeverDeliversGameAudioToVoice) {
     EXPECT_EQ(callbacks.load(), 0);
     capture->stop();
   }
+}
+
+TEST(AppAudioGroupTest, RemovedPrimaryCannotAdoptReplacementWithoutFreshIdentity) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "source-replacement-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient playback;
+  auto *original = playback.add(0.1f, "Replacement fixture", "replacement-fixture");
+  QString nodeName, serial;
+  const auto id = PipeWireAudioSource::findNodeByBinary("replacement-fixture", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName, serial, "replacement-fixture");
+  std::atomic<int> callbacks{0};
+  std::atomic<bool> replacementLeaked{false};
+  capture->setCallback([&](const AudioFrame &frame) {
+    ++callbacks;
+    if (frame.samples[0] > 0.2f) replacementLeaked = true;
+  });
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(waitFor([&] { return callbacks.load() > 0; }));
+  playback.remove(original);
+  playback.add(0.4f, "Replacement fixture", "replacement-fixture");
+  QTest::qWait(200);
+  capture->stop();
+  const auto stopped = callbacks.load();
+  QTest::qWait(100);
+  EXPECT_EQ(callbacks.load(), stopped);
+  EXPECT_FALSE(replacementLeaked.load());
+  QString newName, newSerial;
+  const auto newId = PipeWireAudioSource::findNodeByBinary("replacement-fixture", &newName, &newSerial);
+  ASSERT_NE(newId, PW_ID_ANY);
+  ASSERT_NE(newSerial, serial);
+  auto recovered = PipeWireAudioSource::createApplicationSource(newId, newName, newSerial, "replacement-fixture");
+  std::atomic<float> latest{-1};
+  recovered->setCallback([&](const AudioFrame &frame) { latest = frame.samples[0]; });
+  ASSERT_TRUE(recovered->initialize({}));
+  ASSERT_TRUE(recovered->start());
+  ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.4f) < 0.001f; }));
+  recovered->stop();
+}
+
+TEST(AppAudioGroupTest, PrivateDaemonExitRetiresCaptureAndFreshDaemonCanCaptureAgain) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1" ||
+      qEnvironmentVariableIsEmpty("TROPHY_PRIVATE_PIPEWIRE_CONTROL"))
+    GTEST_SKIP() << "Requires the private PipeWire control launcher";
+  int argc = 1;
+  char name[] = "daemon-recovery-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  auto playback = std::make_unique<PlaybackClient>();
+  playback->add(0.15f, "Daemon fixture", "daemon-fixture");
+  QString nodeName, serial;
+  const auto id = PipeWireAudioSource::findNodeByBinary("daemon-fixture", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName, serial, "daemon-fixture");
+  std::atomic<int> callbacks{0}, errors{0};
+  QObject::connect(capture.get(), &PipeWireAudioSource::captureError,
+      capture.get(), [&](const QString &) { ++errors; }, Qt::DirectConnection);
+  capture->setCallback([&](const AudioFrame &) { ++callbacks; });
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(waitFor([&] { return callbacks.load() > 0; }));
+  ASSERT_TRUE(privateServices("stop"));
+  ASSERT_TRUE(waitFor([&] { return !capture->isCapturing() && errors.load() > 0; }));
+  capture->stop();
+  const int stopped = callbacks.load();
+  QTest::qWait(100);
+  EXPECT_EQ(callbacks.load(), stopped);
+  EXPECT_EQ(errors.load(), 1); // Stream/core notifications coalesce.
+  capture.reset();
+  playback.reset();
+  ASSERT_TRUE(privateServices("start"));
+  PlaybackClient freshPlayback;
+  freshPlayback.add(0.25f, "Daemon fixture", "daemon-fixture");
+  const auto freshId = PipeWireAudioSource::findNodeByBinary("daemon-fixture", &nodeName, &serial);
+  ASSERT_NE(freshId, PW_ID_ANY);
+  auto recovered = PipeWireAudioSource::createApplicationSource(freshId, nodeName, serial, "daemon-fixture");
+  std::atomic<float> latest{-1};
+  recovered->setCallback([&](const AudioFrame &frame) { latest = frame.samples[0]; });
+  ASSERT_TRUE(recovered->initialize({}));
+  ASSERT_TRUE(recovered->start());
+  ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.25f) < 0.001f; }));
+  recovered->stop();
 }
 } // namespace

@@ -264,16 +264,30 @@ bool RecordingSession::start() {
             }
             // Delivery evidence is not inferred from nonzero levels.
             if (samples && frameCount > 0) m_audioReceived[trackIndex].store(true);
-            // Latch audio origin; a track starting after the first video
-            // frame gets a one-time encoder offset so origins agree.
+            // Initial feed and source replacement both need a truthful origin.
+            // Preserve old buffered PCM before advancing a resumed track's
+            // timestamps; a one-shot initial offset cannot represent outages.
             const int64_t inputNowUs = nowUs();
             if (!m_trackOffsetApplied[trackIndex].load()) {
               const int64_t videoStart = m_videoStartWallUs.load();
               if (videoStart >= 0 && inputNowUs > videoStart && m_audioMixer) {
-                m_audioEncoders[trackIndex]->setStartOffsetSamples(
-                    (inputNowUs - videoStart) * m_audioMixer->sampleRate() /
-                    1000000LL);
+                std::vector<EncodedPacket> pending;
+                if (!m_audioEncoders[trackIndex]->advanceToSamplePosition(
+                        (inputNowUs - videoStart) * m_audioMixer->sampleRate() / 1000000LL,
+                        pending)) {
+                  m_outputFailed.store(true);
+                  return;
+                }
+                for (auto &oldPacket : pending) {
+                  const int stream = m_trackToStreamMap[trackIndex];
+                  if (stream >= 0) {
+                    oldPacket.streamIndex = stream;
+                    writeOutputPacket(oldPacket);
+                  }
+                }
+                m_bytesWritten = m_muxer->bytesWritten();
               }
+              if (m_driftCorrectors[trackIndex]) m_driftCorrectors[trackIndex]->reset();
               m_trackOffsetApplied[trackIndex].store(true);
             }
             // Lock the track to the wall clock before encoding (timestamps
@@ -1279,9 +1293,8 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   m_audioMixer->addSourceAsync(std::move(source), track);
   m_sourceConnected[track] = true;
   m_boundSerial[track] = nodeSerial;
-  // A new source restarts this track's origin measurement: the encoder
-  // offset below is one-shot, and a stale flag would pin a previous
-  // source's origin onto new content (constant file-wide skew).
+  // A new source restarts this track's origin measurement so its first
+  // callback preserves any outage with a forward timestamp discontinuity.
   m_trackOffsetApplied[track].store(false);
   if (isFallback)
     *isFallback = false;

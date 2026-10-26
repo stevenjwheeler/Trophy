@@ -263,6 +263,42 @@ bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
   return false;
 }
 
+bool AudioEncoder::advanceToSamplePosition(int64_t position, std::vector<EncodedPacket> &packets) {
+  if (!m_initialized || position < 0) return false;
+  const int channels = m_frame->ch_layout.nb_channels;
+  const int64_t buffered = m_accumBuffer.size() / channels;
+  if (position <= m_sampleCount + m_startOffset + buffered) return true;
+  auto receive = [&] {
+    while (true) {
+      const int result = avcodec_receive_packet(m_codecCtx, m_packet);
+      if (result == AVERROR(EAGAIN)) return true;
+      if (result < 0) return false;
+      EncodedPacket packet;
+      if (!processPacket(m_packet, packet)) return false;
+      packets.push_back(std::move(packet));
+    }
+  };
+  const size_t frameSamples = size_t(m_requiredFrameSize) * channels;
+  while (!m_accumBuffer.empty()) {
+    if (m_accumBuffer.size() < frameSamples) m_accumBuffer.resize(frameSamples, 0.0f);
+    if (av_frame_make_writable(m_frame) < 0) return false;
+    writeFrameSamples();
+    m_frame->nb_samples = m_requiredFrameSize;
+    m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) / m_codecCtx->sample_rate;
+    int result;
+    while ((result = avcodec_send_frame(m_codecCtx, m_frame)) == AVERROR(EAGAIN)) {
+      if (!receive()) return false;
+    }
+    if (result < 0) return false;
+    m_sampleCount += m_requiredFrameSize;
+    m_accumBuffer.erase(m_accumBuffer.begin(), m_accumBuffer.begin() + frameSamples);
+    if (!receive()) return false;
+  }
+  m_startOffset += std::max(int64_t(0), position - m_sampleCount - m_startOffset);
+  m_offsetApplied = true;
+  return true;
+}
+
 int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
   if (!m_initialized) {
     return 0;

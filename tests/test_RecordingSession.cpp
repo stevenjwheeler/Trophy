@@ -101,6 +101,9 @@ public:
     session.m_sourceConnected[0] = true;
     session.m_boundSerial[0] = "123";
   }
+  static void discontinuity(RecordingSession &session, int track) {
+    session.m_trackOffsetApplied[track].store(false);
+  }
   static void deliverSameNode(RecordingSession &session) {
     session.applyAppTrackNode(0, 23, "game-node", "123", nullptr);
   }
@@ -1238,6 +1241,66 @@ TEST(RecordingSessionTest, TerminalSourceErrorRebindsUnchangedNodeSerial) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   EXPECT_TRUE(oldDestroyed); // node still exists, but the capture died
+}
+
+TEST(RecordingSessionTest, InitialPinnedSerialDetectsRecreationBeforeFirstLookup) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  AudioMixer mixer(48000, 2);
+  bool oldDestroyed = false;
+  auto source = std::make_unique<FakeAudioSource>();
+  auto *old = source.get();
+  old->destroyed = &oldDestroyed;
+  mixer.addSource(std::move(source), 0);
+  ASSERT_TRUE(old->start());
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, &mixer, true, 128, 3, {});
+  session.markSourceConnected(0, "original-serial");
+  EXPECT_EQ(session.audioRoutingState().boundSerial[0], "original-serial");
+  RecordingSessionTestPeer::deliverSameNode(session); // Lookup now returns a new serial: 123.
+  ASSERT_TRUE(settleMixerSources(mixer));
+  EXPECT_TRUE(oldDestroyed);
+  EXPECT_EQ(session.audioRoutingState().boundSerial[0], "123");
+  // Mixer was never started: replacement remains uninitialized, no host daemon.
+}
+
+TEST(RecordingSessionTest, SeparateTrackRebindKeepsOutageOnOriginalTimeline) {
+  if (!haveAac()) GTEST_SKIP() << "AAC unavailable";
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  AudioMixer mixer(48000, 2);
+  auto source = std::make_unique<FakeAudioSource>();
+  auto *audio = source.get();
+  mixer.addSource(std::move(source), 0);
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, &mixer, true, 128, 1, {});
+  auto clock = std::make_shared<std::atomic<int64_t>>(1000000);
+  RecordingSessionTestPeer::clock(session, clock);
+  ASSERT_TRUE(session.start());
+  ASSERT_TRUE(settleMixerSources(mixer));
+  RecordingSessionTestPeer::disableDrift(session);
+  RecordingSessionTestPeer::videoTime(session, 5000000);
+  std::vector<float> samples(1024 * 2, 0.2f);
+  for (int i = 0; i < 4; ++i) audio->fire(samples.data(), i == 3 ? 137 : 1024);
+  clock->store(3000000);
+  RecordingSessionTestPeer::discontinuity(session, 0);
+  for (int i = 0; i < 5; ++i) {
+    audio->fire(samples.data(), 1024);
+    clock->fetch_add(21333);
+  }
+  session.stop();
+  const auto pts = muxer.audioPts();
+  ASSERT_FALSE(pts.empty());
+  EXPECT_GT(pts.back(), 2000);
+  EXPECT_LT(pts.back(), 2200);
+  int old = 0;
+  int64_t last = INT64_MIN;
+  for (auto timestamp : pts) {
+    EXPECT_GE(timestamp, last); last = timestamp;
+    if (timestamp < 200) ++old;
+    else { EXPECT_GE(timestamp, 1970); }
+  }
+  EXPECT_GE(old, 3);
 }
 
 TEST(RecordingSessionTest, MissingVoiceRetiresSourceEvenAfterDisconnectedFlagCleared) {

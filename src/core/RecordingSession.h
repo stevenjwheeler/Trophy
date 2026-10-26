@@ -129,9 +129,11 @@ public:
   bool pushQueuedFrame(QueuedFrame &&frame);
 
   // Mark a track as already having a source so the node-check timer won't re-add it
-  void markSourceConnected(int trackIndex) {
-    if (trackIndex >= 0 && trackIndex < kAudioTrackCount)
+  void markSourceConnected(int trackIndex, const QString &serial = {}) {
+    if (trackIndex >= 0 && trackIndex < kAudioTrackCount) {
       m_sourceConnected[trackIndex] = true;
+      if (!serial.isEmpty()) m_boundSerial[trackIndex] = serial;
+    }
   }
   // Forget a track's bind (used when the user retargets mid-session: the
   // old source is removed and the retry hunts the new identity).

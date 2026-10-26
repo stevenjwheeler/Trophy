@@ -1,4 +1,4 @@
-"""Run the native group regression without touching the user's audio graph."""
+"""Run native audio regressions against owned, hardware-free private services."""
 import json
 import os
 from pathlib import Path
@@ -19,7 +19,9 @@ if not match or tuple(map(int, match.groups())) < (0, 5):
     sys.exit(77)
 if os.environ.get("TROPHY_PRIVATE_AUDIO_BUS") != "1":
     env = dict(os.environ, TROPHY_PRIVATE_AUDIO_BUS="1")
-    sys.exit(subprocess.call(["dbus-run-session", "--", sys.executable, __file__, *sys.argv[1:]], env=env))
+    config = Path(__file__).with_name("private-session-bus.conf")
+    sys.exit(subprocess.call(["dbus-run-session", "--config-file=" + str(config),
+                             "--", sys.executable, __file__, *sys.argv[1:]], env=env))
 
 with tempfile.TemporaryDirectory(prefix="trophy-audio-group-") as root:
     env = dict(os.environ, XDG_RUNTIME_DIR=root, XDG_CONFIG_HOME=root + "/config",
@@ -32,10 +34,24 @@ with tempfile.TemporaryDirectory(prefix="trophy-audio-group-") as root:
         env.pop(key, None)
     processes = []
     logs = []
+    control = Path(root) / "test-control"
+    control.mkdir()
+    env["TROPHY_PRIVATE_PIPEWIRE_CONTROL"] = str(control)
     result = 1
-    try:
+    def stop_services():
+        for process in reversed(processes):
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        processes.clear()
+
+    def start_services():
         for tool in ("pipewire", "wireplumber"):
-            log = open(Path(root) / (tool + ".log"), "w+")
+            log = open(Path(root) / (tool + f"-{len(logs)}.log"), "w+")
             logs.append(log)
             # Policy only: never enumerate/open ALSA, Bluetooth or cameras.
             command = [tool, "--profile=policy"] if tool == "wireplumber" else [tool]
@@ -61,15 +77,38 @@ with tempfile.TemporaryDirectory(prefix="trophy-audio-group-") as root:
                         "media.class=Audio/Sink audio.position=[ FL FR ] node.driver=true "
                         "node.always-process=true object.linger=true }"],
                        env=env, check=True, timeout=5)
-        result = subprocess.call(sys.argv[1:], env=env)
+    child = None
+    try:
+        start_services()
+        child = subprocess.Popen(sys.argv[1:], env=env)
+        deadline = time.monotonic() + 90
+        while child.poll() is None:
+            if time.monotonic() > deadline:
+                raise RuntimeError("private audio test timed out")
+            request = control / "request"
+            if request.exists():
+                command = request.read_text().strip()
+                request.unlink()
+                # Only these launcher-owned Popen objects can be stopped. No
+                # PID supplied by a test, host socket or system service is used.
+                if command == "stop":
+                    stop_services()
+                elif command == "start" and not processes:
+                    start_services()
+                else:
+                    raise RuntimeError("invalid private-service request: " + command)
+                (control / "reply").write_text(command)
+            time.sleep(0.01)
+        result = child.returncode
     finally:
-        for process in reversed(processes):
-            process.terminate()
+        if child is not None and child.poll() is None:
+            child.terminate()
             try:
-                process.wait(timeout=5)
+                child.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                child.kill()
+                child.wait(timeout=5)
+        stop_services()
         if result:
             for log in logs:
                 log.seek(0)

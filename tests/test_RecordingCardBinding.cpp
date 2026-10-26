@@ -165,7 +165,9 @@ protected:
         [this](const QList<QQmlError> &errors) {
           for (const auto &error : errors) {
             if (error.description().contains("ReferenceError") ||
-                error.description().contains("TypeError"))
+                error.description().contains("TypeError") ||
+                error.description().contains("recursive rearrange", Qt::CaseInsensitive) ||
+                error.description().contains("Binding loop", Qt::CaseInsensitive))
               scriptErrors.append(error.toString());
           }
         });
@@ -1148,6 +1150,76 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   QTest::qWait(260);
   EXPECT_FALSE(health->isVisible());
   EXPECT_NEAR(card->height(), 80, 1);
+}
+
+TEST_F(RecordingCardBindingTest, CaptureInfoRowsSettleAcrossLiveUpdatesAndResizing) {
+  for (const auto *name : {"recordingLibrary", "settingsManager", "storageManager",
+                           "replayManager", "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto url = QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, url);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(page.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(1280, 800));
+  auto *timer = page->findChild<QObject *>("captureStatusTimer");
+  ASSERT_NE(timer, nullptr);
+  timer->setProperty("running", false);
+  auto *dialog = page->findChild<QObject *>("captureInfoDialog");
+  ASSERT_NE(dialog, nullptr);
+  QVariantMap status{{"mode", "recording"}, {"session", "layout-fixture"},
+                     {"hasVideo", true}, {"encoder", "h264_nvenc"},
+                     {"inputWidth", 1920}, {"inputHeight", 1080},
+                     {"outputWidth", 1920}, {"outputHeight", 1080},
+                     {"actualCaptureFps", 59.9}, {"actualEncodeFps", 59.8},
+                     {"audioStreams", QVariantList{QVariantMap{{"stream", 1}, {"codec", "AAC"},
+                       {"sampleRate", 48000}, {"channels", 2}}}},
+                     {"sourceLabel", QString(180, 'W')},
+                     {"detectedGameKey", QString(200, 'x')}};
+  page->setProperty("captureStatus", status);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  for (int section : {0, 1, 2, 0}) {
+    dialog->setProperty("section", section);
+    for (int width : {1280, 720, 480, 900, 1280}) {
+      window.resize(width, 800);
+      item->setSize(QSizeF(width, 800));
+      status["actualOutputKbps"] = width * 17;
+      status["encoder"] = width % 3 ? "h264_nvenc" : QString(140, 'E');
+      status["audioStreams"] = QVariantList{QVariantMap{{"stream", 1},
+        {"codec", width % 3 ? "AAC" : QString(120, 'A')}, {"sampleRate", 48000}, {"channels", 2}}};
+      page->setProperty("captureStatus", status);
+      QTest::qWait(35);
+      auto *content = dialog->property("contentItem").value<QQuickItem *>();
+      ASSERT_NE(content, nullptr);
+      int rows = 0;
+      std::function<void(QQuickItem *)> inspect = [&](QQuickItem *parent) {
+        if (parent->property("rowName").isValid() && parent->isVisible()) {
+          ++rows;
+          EXPECT_GT(parent->width(), 100);
+          EXPECT_GT(parent->height(), 10);
+          EXPECT_LE(parent->width(), content->width() + 1);
+          const QSizeF settled = parent->size();
+          QCoreApplication::processEvents();
+          EXPECT_EQ(parent->size(), settled);
+          for (auto *child : parent->childItems())
+            if (child->isVisible()) {
+              EXPECT_GE(child->y(), 0);
+              EXPECT_LE(child->y() + child->height(), parent->height() + 1);
+            }
+        }
+        for (auto *child : parent->childItems()) inspect(child);
+      };
+      inspect(content);
+      EXPECT_GT(rows, 0);
+    }
+  }
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+  QTest::qWait(50);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  QTest::qWait(50);
 }
 
 TEST_F(RecordingCardBindingTest, DashboardActivityDurationIncludesHours) {

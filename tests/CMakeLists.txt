@@ -400,12 +400,12 @@ find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
     # Fake portal owns the desktop portal name only on a private bus.
     set_property(TARGET test_WaylandPortalCapture PROPERTY TEST_LAUNCHER
-        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+        "${TROPHY_DBUS_RUN_SESSION};--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf;--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
 endif()
 gtest_discover_tests(test_WaylandPortalCapture)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
     add_test(NAME WaylandPortalCaptureTest.PrivateBusIntegration
-        COMMAND "${TROPHY_DBUS_RUN_SESSION}" --
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" "--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf" --
             "${CMAKE_COMMAND}" -E env TROPHY_PRIVATE_PORTAL_TESTS=1
             $<TARGET_FILE:test_WaylandPortalCapture>)
 endif()
@@ -457,7 +457,17 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
             $<TARGET_FILE:test_AppAudioGroup>)
     set_tests_properties(AppAudioGroupTest.PrivatePipeWire PROPERTIES
-        SKIP_RETURN_CODE 77 TIMEOUT 45)
+        SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_executable(test_RecordingFailureIntegration test_RecordingFailureIntegration.cpp)
+    target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
+        Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
+    foreach(case IN ITEMS NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit)
+        add_test(NAME RecordingFailureTest.${case}
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
+                $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
+        set_tests_properties(RecordingFailureTest.${case} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endforeach()
 endif()
 
 add_executable(test_ReplayManager test_ReplayManager.cpp)

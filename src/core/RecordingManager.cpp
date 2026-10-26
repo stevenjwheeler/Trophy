@@ -140,6 +140,9 @@ void RecordingManager::startRecording(const QString &gameName,
   }
 
   m_isManualRecording = gameName.isEmpty();
+  m_captureGameName = gameName;
+  m_pendingCaptureError.clear();
+  m_stopNativeSettled = false;
   m_captureReadyForPipeline = false;
   m_cancelInitializing = false;
   m_pendingRestoreAuthorization.clear();
@@ -228,7 +231,7 @@ void RecordingManager::startRecording(const QString &gameName,
           [this, attemptSource, attemptGeneration](const QString &error) {
             if (attemptGeneration == m_pipelineGeneration && attemptSource &&
                 attemptSource == m_captureSource.get())
-              onEncodingError(error);
+              onCaptureError(error);
           }, Qt::QueuedConnection);
 
   // Connect restore token update to save it for this game.
@@ -452,6 +455,10 @@ void RecordingManager::pollOperations() {
     m_stopFinalizationSucceeded = m_stopFinalizationWorker.get();
     finishStoppedRecording();
   }
+  if (m_state == RecordingState::Stopping && m_stopNativeSettled) {
+    finishStoppedRecording();
+    if (m_state == RecordingState::Stopping) return;
+  }
   if (!m_audioPreparationWorker.valid()) {
     m_operationTimer->stop();
     return;
@@ -563,6 +570,27 @@ void RecordingManager::stopRecording() {
 void RecordingManager::finishStoppedRecording() {
   if (m_state != RecordingState::Stopping)
     return;
+  m_stopNativeSettled = true;
+  if (!m_pendingCaptureError.isEmpty() && !m_recordingFailed) {
+    if (capturedGameHasEnded()) {
+      qInfo() << "Captured game ended; completing recording normally";
+      m_pendingCaptureError.clear();
+    } else if (!m_shuttingDown && m_captureEndGrace.elapsed() < m_captureEndGraceMs) {
+      // Native consumers have already drained. Give the detector/process exit
+      // a bounded chance to confirm window shutdown before publishing Saved
+      // or Error; do not keep recording dead video during that grace period.
+      m_operationTimer->setInterval(100);
+      m_operationTimer->start();
+      return;
+    } else {
+      const auto error = std::exchange(m_pendingCaptureError, {});
+      m_recordingFailed = true;
+      qCritical() << "Pipeline error:" << error;
+      emit recordingError(error);
+    }
+  }
+  m_pendingCaptureError.clear();
+  m_operationTimer->setInterval(10);
   const qint64 settledSizeBytes = m_session ? m_session->bytesWritten()
                                            : (m_muxer ? m_muxer->bytesWritten() : 0);
 
@@ -909,13 +937,13 @@ bool RecordingManager::buildPipeline() {
   m_session->setDesktopAudio(m_preparedAudio.mode == "desktop");
 
 #ifdef HAVE_PIPEWIRE
-  // True app binds adopt their serial on the first retry tick (so later
-  // stream generations read as new). Fallback monitor is never marked —
+  // Pin the serial used to create each source now: a node can be recreated
+  // before the first retry tick. Fallback monitor is never marked —
   // the retry replaces it with the real node on appearance.
   if (gameSourceAdded)
-    m_session->markSourceConnected(0);
+    m_session->markSourceConnected(0, m_preparedAudio.gameSerial);
   if (vcSourceAdded && voiceTrack >= 0)
-    m_session->markSourceConnected(voiceTrack);
+    m_session->markSourceConnected(voiceTrack, m_preparedAudio.voiceSerial);
 #endif
 
   // Connect error signals
@@ -1146,6 +1174,37 @@ void RecordingManager::updateProgress() {
   }
 
   emit progressUpdated(recordingDuration(), recordingSize());
+}
+
+bool RecordingManager::capturedGameHasEnded() const {
+  if (!m_gameDetector || m_isManualRecording || m_captureGameName != m_currentGameName)
+    return false;
+  const auto key = m_detectedGameInfo.value("detectedGameKey").toString();
+  if (key.isEmpty() || m_detectedGameInfo.value("detectedGamePid").toLongLong() <= 0)
+    return false;
+  if (m_gameDetector->currentGameKey() != key)
+    return true; // The detector has already retired this pinned identity.
+  // Same-identity PID handoff must not mistake a dead launcher for game exit.
+  const auto pid = m_gameDetector->currentGamePid();
+  return pid > 0 && !GameDetectionService::processExists(pid);
+}
+
+void RecordingManager::onCaptureError(const QString &error) {
+  // A queued source-loss event may trail an explicit stop/gameClosed. Output
+  // failures still use onEncodingError and cannot be hidden by this guard.
+  if (m_state == RecordingState::Stopping || m_state == RecordingState::Idle)
+    return;
+  if (m_state == RecordingState::Recording && m_captureSource &&
+      m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceUnavailable &&
+      !m_isManualRecording && m_gameDetector && m_captureGameName == m_currentGameName &&
+      !m_detectedGameInfo.value("detectedGameKey").toString().isEmpty() &&
+      m_detectedGameInfo.value("detectedGamePid").toLongLong() > 0) {
+    m_pendingCaptureError = error;
+    m_captureEndGrace.start();
+    stopRecording();
+    return;
+  }
+  onEncodingError(error);
 }
 
 void RecordingManager::onEncodingError(const QString &error) {

@@ -166,6 +166,13 @@ private:
   void beginAudioPreparation();
   void completePipelineAndStart();
   void finishStoppedRecording();
+  void onCaptureError(const QString &error);
+  bool capturedGameHasEnded() const;
+  QString m_captureGameName;
+  QString m_pendingCaptureError;
+  QElapsedTimer m_captureEndGrace;
+  int m_captureEndGraceMs = 5000;
+  bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;
   qint64 m_stopSizeBytes = 0;

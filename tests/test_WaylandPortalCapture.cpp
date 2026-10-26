@@ -15,6 +15,7 @@
 #include <QElapsedTimer>
 #include <QThread>
 #include <QSignalSpy>
+#include <QTest>
 #include <condition_variable>
 #include <chrono>
 #include <thread>
@@ -58,6 +59,11 @@ public slots:
   void Respond(const QString &path, uint response, const QVariantMap &results) {
     auto msg = QDBusMessage::createSignal(path, "org.freedesktop.portal.Request", "Response");
     msg.setArguments({response, results});
+    QDBusConnection::sessionBus().send(msg);
+  }
+  void CloseSession(const QString &path) {
+    auto msg = QDBusMessage::createSignal(path, "org.freedesktop.portal.Session", "Closed");
+    msg.setArguments({QVariantMap{}});
     QDBusConnection::sessionBus().send(msg);
   }
 private:
@@ -110,7 +116,8 @@ int main(int argc, char **argv) {
     if (!bus.registerService("org.freedesktop.portal.Desktop") ||
         !bus.registerObject("/org/freedesktop/portal/desktop", &portal,
                             QDBusConnection::ExportAllSlots) ||
-        !bus.registerObject("/test/session", &session, QDBusConnection::ExportAllSlots))
+         !bus.registerObject("/test/session", &session, QDBusConnection::ExportAllSlots) ||
+         !bus.registerObject("/test/retry", &session, QDBusConnection::ExportAllSlots))
       return 2;
     return app.exec();
   }
@@ -244,6 +251,31 @@ protected:
     WaylandPortalCapture::on_stream_state_changed(&capture,
         PW_STREAM_STATE_STREAMING, PW_STREAM_STATE_ERROR, "retired native error");
   }
+  static void coreError(WaylandPortalCapture &capture, uint32_t id, int error) {
+    WaylandPortalCapture::on_core_error(&capture, id, 0, error, "injected disconnect");
+  }
+  static void node(WaylandPortalCapture &capture, int id) { capture.m_pipewireNodeId = id; }
+  static void removeNode(WaylandPortalCapture &capture, uint32_t id) {
+    WaylandPortalCapture::on_registry_global_remove(&capture, id);
+  }
+  static void activatePortalOnly(WaylandPortalCapture &capture) {
+    // Exercise real D-Bus session lifecycle without claiming native video
+    // negotiation: only the final PipeWire-start boundary is emulated here.
+    capture.clearStartGuard();
+    capture.m_capturing = true;
+    enableNative(capture, capture.m_startGeneration);
+  }
+  void createPortalSession(WaylandPortalCapture &capture,
+                           const QString &session = QStringLiteral("/test/session")) {
+    CaptureConfig config;
+    config.useDmaBuf = false;
+    ASSERT_TRUE(capture.initialize(config));
+    ASSERT_TRUE(capture.startCapture());
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+    ASSERT_EQ(control("Respond", {pendingPath(capture), 0u,
+        QVariantMap{{"session_handle", session}}}).type(), QDBusMessage::ReplyMessage);
+    ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+  }
 };
 } // namespace TrophyBackend
 
@@ -261,6 +293,140 @@ static const auto *portalTestEnvironment =
     testing::AddGlobalTestEnvironment(new PortalTestEnvironment);
 
 using namespace TrophyBackend;
+
+TEST_F(WaylandPortalCaptureTest, GrantedNodeRemovalIgnoresOtherNodesAndRetiredGenerations) {
+  WaylandPortalCapture capture;
+  simulateCapturing(capture, 7);
+  enableNative(capture, 7);
+  node(capture, 101);
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  QSignalSpy ready(&capture, &IVideoCaptureSource::ready);
+  removeNode(capture, 202);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(errors.size(), 0);
+  EXPECT_TRUE(capture.isCapturing());
+  removeNode(capture, 101);
+  removeNode(capture, 101);
+  ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_EQ(capture.lastErrorKind(), IVideoCaptureSource::CaptureErrorKind::SourceUnavailable);
+  EXPECT_FALSE(capture.isCapturing());
+  EXPECT_FALSE(capture.startCapture());
+  capture.stopCapture();
+  simulateCapturing(capture, 12);
+  enableNative(capture, 12);
+  node(capture, 303);
+  removeNode(capture, 101);
+  postNative(capture, 7);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(capture.isCapturing());
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_EQ(ready.size(), 0);
+  capture.stopCapture();
+  removeNode(capture, 303);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(errors.size(), 1);
+}
+
+TEST_F(WaylandPortalCaptureTest, NativeCoreAndStreamLossRetireOnceButObjectErrorsDoNot) {
+  WaylandPortalCapture capture;
+  simulateCapturing(capture, 7);
+  enableNative(capture, 7);
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  QSignalSpy ready(&capture, &IVideoCaptureSource::ready);
+  coreError(capture, 42, -EINVAL);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(capture.isCapturing());
+  EXPECT_EQ(errors.size(), 0);
+  coreError(capture, PW_ID_CORE, -EPIPE);
+  nativeError(capture);
+  postNative(capture, 7);
+  ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_EQ(capture.lastErrorKind(), IVideoCaptureSource::CaptureErrorKind::Other);
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(capture.isCapturing());
+  EXPECT_TRUE(retiring(capture));
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_EQ(ready.size(), 0);
+  EXPECT_FALSE(capture.startCapture());
+  capture.stopCapture();
+  CaptureConfig config;
+  config.useDmaBuf = false;
+  EXPECT_TRUE(capture.initialize(config));
+}
+
+TEST_F(WaylandPortalCaptureTest, PortalClosedDuringSelectionRejectsLateResponseAndAllowsRetry) {
+  if (!startFake()) GTEST_SKIP() << "Requires private fake portal";
+  WaylandPortalCapture capture;
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  createPortalSession(capture);
+  const QString oldRequest = pendingPath(capture);
+  control("CloseSession", {"/test/session"});
+  ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_FALSE(starting(capture));
+  EXPECT_FALSE(watchdogActive(capture));
+  EXPECT_FALSE(capture.isCapturing());
+  EXPECT_FALSE(capture.startCapture()); // Native retirement must finish first.
+  capture.stopCapture();
+  ASSERT_TRUE(capture.startCapture());
+  const auto retry = pendingPath(capture);
+  control("Respond", {oldRequest, 0u, QVariantMap{}});
+  QTest::qWait(20);
+  EXPECT_EQ(pendingPath(capture), retry);
+  EXPECT_EQ(errors.size(), 1);
+  capture.stopCapture();
+}
+
+TEST_F(WaylandPortalCaptureTest, ActivePortalClosureIgnoresWrongPathSenderAndRetiredNativeEvents) {
+  if (!startFake()) GTEST_SKIP() << "Requires private fake portal";
+  WaylandPortalCapture capture;
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  QSignalSpy ready(&capture, &IVideoCaptureSource::ready);
+  createPortalSession(capture);
+  activatePortalOnly(capture);
+  const auto activeGeneration = generation(capture);
+  control("CloseSession", {"/test/unrelated"});
+  auto foreign = QDBusMessage::createSignal("/test/session", "org.freedesktop.portal.Session", "Closed");
+  foreign.setArguments({QVariantMap{}});
+  QDBusConnection::sessionBus().send(foreign);
+  QTest::qWait(20);
+  EXPECT_TRUE(capture.isCapturing());
+  EXPECT_EQ(errors.size(), 0);
+  control("CloseSession", {"/test/session"});
+  ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_FALSE(capture.isCapturing());
+  EXPECT_FALSE(capture.startCapture());
+  control("CloseSession", {"/test/session"});
+  postNative(capture, activeGeneration);
+  QTest::qWait(20);
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_EQ(ready.size(), 0);
+  capture.stopCapture();
+  createPortalSession(capture, "/test/retry");
+  control("CloseSession", {"/test/session"});
+  QTest::qWait(20);
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_TRUE(starting(capture));
+  capture.stopCapture();
+}
+
+TEST_F(WaylandPortalCaptureTest, ActivePortalServiceExitReportsOnceAndReplacementCanCreateSession) {
+  if (!startFake()) GTEST_SKIP() << "Requires private fake portal";
+  WaylandPortalCapture capture;
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  createPortalSession(capture);
+  activatePortalOnly(capture);
+  fake.kill();
+  ASSERT_TRUE(fake.waitForFinished(3000));
+  ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_FALSE(capture.isCapturing());
+  EXPECT_FALSE(watchdogActive(capture));
+  capture.stopCapture();
+  ASSERT_TRUE(startFake());
+  createPortalSession(capture);
+  EXPECT_TRUE(starting(capture));
+  EXPECT_EQ(errors.size(), 1);
+  capture.stopCapture();
+}
 
 TEST_F(WaylandPortalCaptureTest, StoppedCaptureRejectsLateMetadata) {
   WaylandPortalCapture capture;

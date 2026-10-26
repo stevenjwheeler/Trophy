@@ -395,7 +395,13 @@ bool ReplayManager::switchSegment() {
     return false;
 
   EncoderConfig enc;
-  QSize native = m_capture->nativeResolution();
+  // A live source may resize between rotations. Keep the capture's original
+  // encoded canvas so retained segments stay stream-copy compatible; only a
+  // fresh capture chooses a new native canvas. Each encoder still fit/pads
+  // the delivered frames into that fixed output size.
+  QSize native = m_session && m_encoder
+                     ? QSize(m_encoder->width(), m_encoder->height())
+                     : m_capture->nativeResolution();
   enc.width = native.width();
   enc.height = native.height();
   if (enc.width % 2 != 0)
@@ -484,9 +490,9 @@ bool ReplayManager::switchSegment() {
   newSession->setGameIsFallback(!gameFound);
   newSession->setDesktopAudio(m_settings->audioMode() == "desktop");
   if (gameFound)
-    newSession->markSourceConnected(0);
+    newSession->markSourceConnected(0, m_lookupCache.gameNodeSerial);
   if (voiceFound && voiceTrack >= 0)
-    newSession->markSourceConnected(voiceTrack);
+    newSession->markSourceConnected(voiceTrack, m_lookupCache.voiceNodeSerial);
   if (!rebuildSources && m_session)
     newSession->inheritAudioRouting(*m_session);
   // No dispatcher: segments ARE the buffer.

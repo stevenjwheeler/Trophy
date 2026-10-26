@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
+#include <QProcess>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -55,6 +56,8 @@ static auto *env =
 // IVideoCaptureSource signal, using the manager's production connections.
 class PendingCapture : public IVideoCaptureSource {
 public:
+  CaptureErrorKind errorKind = CaptureErrorKind::Other;
+  CaptureErrorKind lastErrorKind() const override { return errorKind; }
   CaptureConfig config;
   mutable int resolutionQueries = 0;
   bool initialize(const CaptureConfig &value) override {
@@ -427,6 +430,71 @@ protected:
     };
   }
 
+  void captureEndRace(int scenario) {
+    QProcess game;
+    game.start("sleep", {"30"});
+    ASSERT_TRUE(game.waitForStarted());
+    SettingsManager settings;
+    settings.setRecordingsPath(tempDir.path());
+    StorageManager storage(tempDir.path());
+    WaylandWindowMonitor monitor;
+    GameDetectionService detector;
+    detector.setWindowMonitor(&monitor);
+    detector.addToWhitelist("steam_app_42424242", "Exit fixture");
+    WindowInfo window;
+    window.pid = game.processId(); window.appId = "steam_app_42424242";
+    window.focused = window.fullscreen = true;
+    monitor.ingestSnapshot({window});
+    ASSERT_EQ(detector.currentGameKey(), "steam_app_42424242");
+    ASSERT_EQ(detector.currentGameName(), "Exit fixture");
+    RecordingManager recorder;
+    recorder.setSettingsManager(&settings);
+    recorder.setStorageManager(&storage);
+    recorder.setGameDetectionService(&detector);
+    recorder.m_captureEndGraceMs = 200;
+    QPointer<PendingCapture> capture;
+    installPendingCapture(recorder, capture);
+    recorder.m_pipelineBuilder = [&] {
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 4);
+      return true;
+    };
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
+    recorder.startRecording(scenario == 5 ? QString() : QString("Exit fixture"));
+    ASSERT_FALSE(capture.isNull());
+    recorder.completePipelineAndStart();
+    ASSERT_TRUE(recorder.isRecording());
+    capture->errorKind = scenario == 3 ? IVideoCaptureSource::CaptureErrorKind::Other
+                                     : IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
+    if (scenario == 2) {
+      window.minimized = true;
+      monitor.ingestSnapshot({window});
+      EXPECT_FALSE(detector.hasVisibleWindow()); // Not proof of game exit.
+    }
+    if (scenario == 0 || scenario == 3 || scenario == 4 || scenario == 5) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
+    if (scenario == 6) recorder.stopRecording();
+    emit capture->captureError("source vanished");
+    if (scenario == 7) {
+      QCoreApplication::processEvents();
+      recorder.onEncodingError("output write failed during stop");
+    }
+    if (scenario == 1) QTimer::singleShot(30, &game, [&] { game.terminate(); });
+    ASSERT_TRUE(waitForIdle(recorder));
+    const bool normal = scenario == 0 || scenario == 1 || scenario == 6;
+    EXPECT_EQ(saved.size(), normal ? 1 : 0);
+    EXPECT_EQ(errors.size(), normal ? 0 : 1);
+    EXPECT_EQ(finished.size(), 1);
+    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
+    if (game.state() != QProcess::NotRunning) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
+  }
+
   QString outputPath(RecordingManager &recorder, const QString &game) {
     recorder.m_currentGameName = game;
     return recorder.generateOutputPath();
@@ -786,6 +854,15 @@ TEST_F(RecordingManagerTest, StaleRestoreSettlesBeforeReauthorizationAndRetry) {
   EXPECT_EQ(errors.count(), 0);
   recorder.stopRecording();
 }
+
+TEST_F(RecordingManagerTest, CaptureSourceLossAfterGameExitSavesNormally) { captureEndRace(0); }
+TEST_F(RecordingManagerTest, CaptureSourceLossBeforeGameExitDrainsThenSavesNormally) { captureEndRace(1); }
+TEST_F(RecordingManagerTest, CaptureSourceLossWhileGameLivesStillFails) { captureEndRace(2); }
+TEST_F(RecordingManagerTest, CaptureServiceFailureIsNotHiddenByGameExit) { captureEndRace(3); }
+TEST_F(RecordingManagerTest, CaptureGameExitDoesNotHideFinalizationFailure) { captureEndRace(4); }
+TEST_F(RecordingManagerTest, ManualCaptureSourceLossDoesNotBorrowDetectedGameExit) { captureEndRace(5); }
+TEST_F(RecordingManagerTest, QueuedCaptureLossAfterExplicitStopDoesNotTurnSaveIntoError) { captureEndRace(6); }
+TEST_F(RecordingManagerTest, CaptureGameExitGraceDoesNotHideOutputFailure) { captureEndRace(7); }
 
 TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
   SettingsManager settings;

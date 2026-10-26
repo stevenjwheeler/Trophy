@@ -14,6 +14,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <cmath>
+#include <deque>
+#include <iterator>
 
 #include <limits>
 
@@ -319,8 +321,51 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
     AVPacket *pkt = ops.packetAlloc();
     if (!pkt)
       return fail("cannot allocate input packet");
+    // Matroska omits DTS. Its demuxer can leave the first reorder-delay
+    // packets without DTS even after probing. At a later encoder segment,
+    // dropping that head discards the IDR and corrupts dependent pictures.
+    // Buffer only a bounded head, then backfill decode timestamps from the
+    // first known DTS and actual packet durations, never from reordered PTS.
+    using PacketOwner = std::unique_ptr<AVPacket, void (*)(AVPacket *)>;
+    std::deque<PacketOwner> head;
+    int headResult = 0;
+    if (cutFound) {
+      int64_t headBytes = 0;
+      for (int count = 0; count < 256; ++count) {
+        PacketOwner next(ops.packetAlloc(), [](AVPacket *p) { av_packet_free(&p); });
+        if (!next) { av_packet_free(&pkt); return fail("cannot allocate input packet"); }
+        headResult = ops.readFrame(ctx, next.get());
+        if (headResult < 0) break;
+        headBytes += std::max(next->size, 0);
+        if (headBytes > 32 * 1024 * 1024) {
+          av_packet_free(&pkt);
+          return fail("segment timestamp head exceeds buffer limit");
+        }
+        const bool anchor = next->stream_index == 0 && next->dts != AV_NOPTS_VALUE;
+        head.push_back(std::move(next));
+        if (!anchor) continue;
+        int64_t dts = head.back()->dts;
+        for (auto it = std::next(head.rbegin()); it != head.rend(); ++it) {
+          auto *p = it->get();
+          if (p->stream_index != 0) continue;
+          if (p->duration <= 0 || dts < INT64_MIN + p->duration) break;
+          dts -= p->duration;
+          if (p->dts == AV_NOPTS_VALUE && p->pts != AV_NOPTS_VALUE) p->dts = dts;
+        }
+        break;
+      }
+    }
+    auto readPacket = [&] {
+      if (!head.empty()) {
+        av_packet_move_ref(pkt, head.front().get());
+        head.pop_front();
+        return 0;
+      }
+      return headResult < 0 ? headResult : ops.readFrame(ctx, pkt);
+    };
+    bool segmentVideoStarted = false;
     int readResult = 0;
-    while ((readResult = ops.readFrame(ctx, pkt)) >= 0) {
+    while ((readResult = readPacket()) >= 0) {
       const int si = pkt->stream_index;
       const AVRational inTb = ctx->streams[si]->time_base;
       const AVRational outTb = outCtx->streams[si]->time_base;
@@ -338,6 +383,17 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
         av_packet_unref(pkt);
         continue;
       }
+      if (si == 0 && !segmentVideoStarted) {
+        const int64_t candidateDts = av_rescale_q(
+            dtsUs + offsetUs - timelineOriginUs, AV_TIME_BASE_Q, outTb);
+        // If an overlapping head cannot be retained, wait for another full
+        // GOP rather than copying pictures whose reference IDR was dropped.
+        if (!(pkt->flags & AV_PKT_FLAG_KEY) || candidateDts <= maxDtsOut[si]) {
+          av_packet_unref(pkt);
+          continue;
+        }
+        segmentVideoStarted = true;
+      }
       if (si == 0) {
         // cutKey was collected with equivalent timestamp math; the
         // integer-microsecond rounding on `t` can still miss by ~1ns,
@@ -351,7 +407,7 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
             continue;
           }
         }
-      } else if (!cutFound || t + kCutEpsilonSec < cutKey) {
+      } else if (!segmentVideoStarted || !cutFound || t + kCutEpsilonSec < cutKey) {
         av_packet_unref(pkt);
         continue;
       }
