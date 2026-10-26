@@ -33,6 +33,11 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Independent integer helper revision, not the app/socket protocol version. */
+__attribute__((used, visibility("default")))
+const char trophy_gl_helper_version[] =
+    "TROPHY_HELPER_VERSION:gl:1";
+
 #define SOCKET_PATH "/tmp/trophy-detection.sock"
 
 typedef void (*glx_swap_fn)(void *, unsigned long);

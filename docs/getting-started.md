@@ -12,6 +12,10 @@ Keep the AppImage at a stable location if you enable launch-at-login. For a nati
 
 CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
 
+Current native build targets are Ubuntu 26.04 for DEB/archive and Fedora 44 for
+RPM. These packages are not guaranteed compatible with older releases or other
+Debian/RPM-based distributions.
+
 ### Verify the download
 
 Download the release's `SHA256SUMS` beside the AppImage, then run:

@@ -12,6 +12,7 @@ cmake_install.cmake
 install_manifest.txt
 Makefile
 *.cmake
+!/reporters/i686-linux.cmake
 
 # --- Qt / MOC / RCC / UIC Artifacts ---
 *_autogen/

@@ -1211,6 +1211,12 @@ Page {
                                    : (windowMonitor && windowMonitor.compositorName === "gnome"
                                       ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation. %1").arg(windowMonitor.gnomeHelperStatus) : ""))
 
+                        showVersions: windowMonitor && (windowMonitor.compositorName === "kwin" || windowMonitor.compositorName === "gnome")
+                        bundledVersion: windowMonitor ? windowMonitor.bundledHelperVersion : 0
+                        installedVersion: windowMonitor ? windowMonitor.helperVersion : 0
+                        helperInstalled: windowMonitor && ((windowMonitor.compositorName === "kwin" && windowMonitor.kwinScriptInstalled)
+                                         || (windowMonitor.compositorName === "gnome" && windowMonitor.gnomeHelperInstalled))
+
                         HelperControls {
                             id: windowHelperControls
                             objectName: "gameWindowHelperStatus"
@@ -1243,9 +1249,14 @@ Page {
                     SettingRow {
                         label: qsTr("Vulkan Detection")
                         help: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles.")
+                        showVersions: app !== null
+                        bundledVersion: app ? app.vulkanBundledHelperVersion : 0
+                        installedVersion: app ? app.vulkanHelperVersion : 0
+                        helperInstalled: app && app.vulkanLayerRegistered
 
                         HelperControls {
                             id: vulkanControls
+                            objectName: "vulkanHelperStatus"
                             statusWidth: detectionHelpersCard.statusWidth
                             actionWidth: detectionHelpersCard.actionWidth
                             healthy: app && app.vulkanLayerRegistered
@@ -1275,9 +1286,14 @@ Page {
                                      : qsTr("may cause issues with anti-cheat games"))
                               : qsTr("OpenGL detection helper not found in this install.")
                         rowEnabled: app ? app.glShimAvailable : false
+                        showVersions: app && app.glShimAvailable
+                        bundledVersion: app ? app.glBundledHelperVersion : 0
+                        installedVersion: app ? app.glHelperVersion : 0
+                        helperInstalled: app && app.glShimEnrolled
 
                         HelperControls {
                             id: glControls
+                            objectName: "glHelperStatus"
                             statusWidth: detectionHelpersCard.statusWidth
                             actionWidth: detectionHelpersCard.actionWidth
                             attention: !app || !app.glShimAvailable
@@ -1296,6 +1312,13 @@ Page {
                         }
                     }
 
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Installed versions may not be active until the game, compositor or login session restarts.")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                    }
                 }
 
                 // ================= TRAY =================
@@ -1520,7 +1543,7 @@ Page {
         property real statusWidth: 0
         property real actionWidth: 0
         property bool showAction: true
-        property alias text: helperBadge.text
+        property string text: ""
         property alias healthy: helperBadge.healthy
         property alias attention: helperBadge.attention
         property alias enrolled: helperBadge.enrolled
@@ -1533,6 +1556,7 @@ Page {
 
         HelperStatusBadge {
             id: helperBadge
+            text: helperControls.text
             anchors.right: actionSlot.left
             anchors.rightMargin: helperControls.showAction ? Theme.spacingMedium : 0
             anchors.verticalCenter: parent.verticalCenter
@@ -1619,10 +1643,17 @@ Page {
 
     // Label + help on the left, control right-aligned on the right.
     component SettingRow: ColumnLayout {
+        id: settingRow
         property string label: ""
         property string help: ""
         property int helpTextFormat: Text.AutoText
         property bool rowEnabled: true
+        property bool showVersions: false
+        property bool helperInstalled: false
+        property int bundledVersion: 0
+        property int installedVersion: 0
+        readonly property string versionText: qsTr("Bundled: %1").arg(bundledVersion > 0 ? qsTr("Version %1").arg(bundledVersion) : qsTr("Version unknown"))
+            + (helperInstalled ? " · " + qsTr("Installed: %1").arg(installedVersion > 0 ? qsTr("Version %1").arg(installedVersion) : qsTr("Version unknown")) : "")
         default property alias control: controlHolder.data
 
         Layout.fillWidth: true
@@ -1655,6 +1686,18 @@ Page {
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap
                     visible: help.length > 0
+                }
+
+                Label {
+                    objectName: "helperVersions"
+                    Layout.fillWidth: true
+                    visible: settingRow.showVersions
+                    text: settingRow.versionText
+                    textFormat: Text.PlainText
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                    wrapMode: Text.WordWrap
                 }
             }
 

@@ -20,12 +20,20 @@ namespace TrophyBackend {
  * $XDG_CONFIG_HOME/environment.d/trophy-gl-shim.conf (takes effect on
  * next login). The conf file is the state — no settings flag needed.
  *
- * TROPHY_GL_SHIM_LIB overrides the library lookup (tests, packaging).
+ * TROPHY_GL_SHIM_LIB overrides the native lookup (tests, packaging), and
+ * TROPHY_GL_SHIM_LIB32 can supply a matching i386 companion. Explicit enabling
+ * with both reporters publishes one architecture-selecting global preload;
+ * this is not a per-game setting. Legacy enrollment is never silently migrated.
  */
 class GlShimEnrollment {
 public:
   /** Shipped path to trophy_gl_shim.so, or empty. Read-only lookup. */
   static QString libraryPath();
+  /** Optional same-installation i386 companion; lookup never enrolls it. */
+  static QString libraryPath32();
+  /** Enrolled helper version, or the available helper when not enrolled. */
+  static int helperVersion();
+  static int bundledHelperVersion();
 
   /**
    * Lookup relative to a given application directory (the dev build tree
@@ -52,8 +60,12 @@ public:
    * Bundle-owned helpers are persisted before atomically updating the conf;
    * explicit re-enrollment refreshes older durable versions. */
   static bool setEnrolled(bool enrolled);
-  // Refresh existing consent for a relocated/updated portable bundle only.
+  // Refresh an opted-in architecture pair, or an existing legacy bundle path.
+  // A legacy entry stays legacy until explicit re-enrollment.
   static bool refreshEnrolledBundle();
+
+private:
+  static bool setEnrolledImpl(bool enrolled, bool allowMultilib, const QString &retained32 = {});
 };
 
 } // namespace TrophyBackend

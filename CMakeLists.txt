@@ -426,8 +426,9 @@ set_source_files_properties(qml/styles/Theme.qml
         QT_QML_SINGLETON_TYPE TRUE
 )
 
-# Generates .qmlls.ini files so your IDE/Linter can find the build artifacts
-set(QT_QML_GENERATE_QMLLS_INI ON)
+# Keep IDE support by default, but allow reproducible package/container builds
+# from a read-only source snapshot without trying to write .qmlls.ini there.
+option(QT_QML_GENERATE_QMLLS_INI "Generate source-tree qmlls.ini for IDEs" ON)
 
 # Optional: Forces all QML artifacts into a single folder to simplify pathing
 set(QT_QML_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml)
@@ -614,6 +615,45 @@ install(FILES resources/icons/default-apps/README.md LICENSE
 install(TARGETS trophy_layer trophy_gl_shim
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
 )
+
+# Optional separately built i386 companions. No 32-bit toolchain or runtime is
+# required for ordinary builds. Explicitly opting in also opts the packager into
+# the resulting native package's architecture-specific runtime dependencies.
+set(TROPHY_REPORTERS32_DIR "" CACHE PATH "Directory containing optional i386 reporter shared objects")
+if(TROPHY_REPORTERS32_DIR)
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "i386 reporter companions require an x86_64 application build")
+    endif()
+    foreach(name IN ITEMS libtrophy_layer.so libtrophy_gl_shim.so)
+        set(reporter "${TROPHY_REPORTERS32_DIR}/${name}")
+        if(NOT EXISTS "${reporter}" OR IS_DIRECTORY "${reporter}" OR IS_SYMLINK "${reporter}")
+            message(FATAL_ERROR "Missing or symlinked i386 reporter: ${reporter}")
+        endif()
+        file(SIZE "${reporter}" reporter_size)
+        if(reporter_size LESS 20 OR reporter_size GREATER 16777216)
+            message(FATAL_ERROR "Invalid i386 reporter size: ${reporter}")
+        endif()
+        file(READ "${reporter}" header LIMIT 20 HEX)
+        string(LENGTH "${header}" header_length)
+        if(NOT header_length EQUAL 40 OR NOT header MATCHES "^7f454c46010101")
+            message(FATAL_ERROR "Expected little-endian ELF32 reporter: ${reporter}")
+        endif()
+        string(SUBSTRING "${header}" 32 8 elf_type_machine)
+        if(NOT elf_type_machine STREQUAL "03000300")
+            message(FATAL_ERROR "Expected i386 ET_DYN reporter: ${reporter}")
+        endif()
+    endforeach()
+    add_custom_target(trophy_reporters32 ALL
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/reporters32"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
+            "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
+            "${CMAKE_BINARY_DIR}/reporters32"
+        VERBATIM)
+    install(FILES "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
+                  "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
+        DESTINATION "lib/trophy/reporters32")
+endif()
 install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/vulkan_layer
 )
@@ -649,13 +689,21 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "")
+# dpkg-shlibdeps sees ELF dependencies, not dynamically imported QML modules,
+# image/platform plugins, PipeWire client configuration or the chime utility.
+# A clean --no-install-recommends install must still be able to load the UI.
+string(JOIN ", " CPACK_DEBIAN_PACKAGE_DEPENDS
+    qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts
+    qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtquick-templates
+    qml6-module-qtquick-effects qml6-module-qtmultimedia qml6-module-qtqml-workerscript
+    qt6-wayland qt6-svg-plugins libpipewire-0.3-common pipewire-bin)
 
 # RPM package metadata.
 set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
+set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtdeclarative, qt6-qtmultimedia, qt6-qtwayland, qt6-qtsvg, pipewire-utils")
 
 include(CPack)
 

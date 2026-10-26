@@ -1686,11 +1686,27 @@ bool Application::setGlShimEnrolled(bool enrolled) {
   return ok;
 }
 
+int Application::glHelperVersion() const {
+  return GlShimEnrollment::helperVersion();
+}
+
+int Application::glBundledHelperVersion() const {
+  return GlShimEnrollment::bundledHelperVersion();
+}
+
+int Application::vulkanBundledHelperVersion() const {
+  return VulkanLayer::bundledHelperVersion();
+}
+
+int Application::vulkanHelperVersion() const {
+  return VulkanLayer::helperVersion();
+}
+
 bool Application::setVulkanLayerEnabled(bool enabled) {
   m_settingsManager->setVulkanLayerEnabled(enabled);
   bool ok;
   if (enabled) {
-    m_vulkanLayerRegistered = ensureVulkanLayerRegistered();
+    m_vulkanLayerRegistered = ensureVulkanLayerRegistered(true);
     ok = m_vulkanLayerRegistered;
   } else {
     ok = removeVulkanLayerRegistration();
@@ -1706,8 +1722,8 @@ bool Application::removeVulkanLayerRegistration() {
   return VulkanLayer::removeRegistration();
 }
 
-bool Application::ensureVulkanLayerRegistered() {
-  return VulkanLayer::ensureRegistered();
+bool Application::ensureVulkanLayerRegistered(bool allow32BitMigration) {
+  return VulkanLayer::ensureRegistered(allow32BitMigration);
 }
 
 } // namespace TrophyBackend

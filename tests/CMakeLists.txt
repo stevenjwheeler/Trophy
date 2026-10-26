@@ -63,6 +63,20 @@ find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME AppImageSmokeTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
+    add_test(NAME NativePackageSmokeTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativePackageSmoke.py")
+    add_test(NAME ReporterRuntimeTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterRuntimes.py")
+    add_test(NAME NativeInstallSafetyTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
+    set(multilib_preload_includes)
+    foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
+        list(APPEND multilib_preload_includes --qt-include "${directory}")
+    endforeach()
+    add_test(NAME MultilibPreloadTest.NativeLoaders
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_MultilibPreload.py"
+            --qt-library "$<TARGET_FILE:Qt6::Core>" ${multilib_preload_includes})
+    set_tests_properties(MultilibPreloadTest.NativeLoaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
     add_test(NAME ReporterAbiTest.StaticFixtures
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterAbi.py")
 endif()
@@ -462,7 +476,7 @@ if(Python3_Interpreter_FOUND)
     target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
         Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
-    foreach(case IN ITEMS NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit)
+    foreach(case IN ITEMS NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit TransientDeliveryStall RenegotiatedStalledCapture)
         add_test(NAME RecordingFailureTest.${case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
                 $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
@@ -796,6 +810,12 @@ gtest_discover_tests(test_GlShimEnrollment)
 add_executable(test_GlShimReporter test_GlShimReporter.cpp)
 target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
 gtest_discover_tests(test_GlShimReporter)
+
+add_executable(test_ReporterDlopen test_ReporterDlopen.cpp)
+target_compile_definitions(test_ReporterDlopen PRIVATE TROPHY_GL_SHIM_FILE="$<TARGET_FILE:trophy_gl_shim>")
+target_link_libraries(test_ReporterDlopen PRIVATE GTest::gtest_main dl)
+add_dependencies(test_ReporterDlopen trophy_gl_shim)
+gtest_discover_tests(test_ReporterDlopen)
 
 # --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
 add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp

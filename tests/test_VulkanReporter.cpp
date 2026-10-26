@@ -143,7 +143,7 @@ TEST_F(IsolatedVulkanReporterTest, NullInstanceDoesNotForwardOrReport) {
 TEST_F(IsolatedVulkanReporterTest, FailedCreateDoesNotTrackOrReport) {
   reset(VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(createInstance("Failed game"), VK_ERROR_INITIALIZATION_FAILED);
-  EXPECT_EQ(liveInstance, VK_NULL_HANDLE);
+  EXPECT_EQ(liveInstance, VkInstance{});
   const auto result = snapshot();
   EXPECT_EQ(result.createCalls, 1u);
   EXPECT_EQ(result.destroyCalls, 0u);
@@ -185,7 +185,7 @@ TEST_F(IsolatedVulkanReporterTest, ApplicationNameCannotInjectProtocolLines) {
 
 TEST_F(IsolatedVulkanReporterTest, TrackedInstanceReportsStartAndStopAndForwards) {
   ASSERT_EQ(createInstance("Game: With Colon"), VK_SUCCESS);
-  ASSERT_NE(liveInstance, VK_NULL_HANDLE);
+  ASSERT_NE(liveInstance, VkInstance{});
   const auto handle = liveInstance;
   VkAllocationCallbacks allocator{};
   destroy(handle, &allocator);
@@ -213,7 +213,7 @@ TEST_F(IsolatedVulkanReporterTest, FailedStartSendReconnectsAndResends) {
   ASSERT_NE(failNextSend, nullptr);
   failNextSend();
   ASSERT_EQ(createInstance("Reconnect game"), VK_SUCCESS);
-  ASSERT_NE(liveInstance, VK_NULL_HANDLE);
+  ASSERT_NE(liveInstance, VkInstance{});
   // EPIPE must drop the cached connection; otherwise the watcher sees it as
   // healthy (our recv returns EAGAIN) and never retries the lost START.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);

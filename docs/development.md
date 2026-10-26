@@ -2,6 +2,25 @@
 
 [Back to README](../README.md) · [Packaging notes](../packaging/README.md)
 
+## Detection helper versions
+
+Each detector owns an independent positive integer revision, displayed in
+Settings → Detection Helpers as **Version 1**, **Version 2**, etc. Bump only the
+affected helper when changing it:
+
+- KWin: `KPlugin.Version` in `resources/kwin/trophy-monitor/metadata.json`.
+- GNOME: `version` in `resources/gnome/metadata.json`.
+- Vulkan/OpenGL: the `TROPHY_HELPER_VERSION` data marker in each detector's own
+  `src/vulkan_layer/trophy_layer.cpp` / `src/gl_shim/trophy_gl_shim.c` source.
+
+These revisions are separate from the application version and do not change the
+frozen detection socket protocol. Settings reads installed script metadata and
+enrolled reporter files (or available reporters before enrollment), without
+loading the reporters. Unversioned/invalid files show **Version unknown** rather
+than inheriting the current app's revision. This identifies files, not a running
+game's mapped library or the code currently loaded by the compositor/login.
+Hyprland/Sway use compositor tools, so no Trophy script version is claimed.
+
 ## Dependencies
 
 - CMake 3.21+, a C++20 compiler, and pkg-config.
@@ -57,6 +76,10 @@ cmake --install ../trophy-build --prefix "$HOME/.local"
 
 Use a build directory on a local filesystem if the source is on a cloud/FUSE mount. Such mounts can strip executable permissions or miss timely rebuilds. The sibling directory above is only an example; choose another path when needed.
 
+For read-only source snapshots (for example container package builds), configure
+with `-DQT_QML_GENERATE_QMLLS_INI=OFF` to disable source-tree IDE metadata writes.
+Normal developer builds keep generation enabled by default.
+
 The install includes `libTrophy.so`, reporter libraries, and desktop integration as well as the executable. **Do not copy only the binary.** Ensure `~/.local/bin` is on `PATH` for native CLI shortcuts. Reconfigure after changing branches/commits if you need the displayed configure-time version stamp refreshed.
 
 ## Development and tests
@@ -83,6 +106,25 @@ HOME="$test_root/home" \
 **Quit running Trophy instances before socket tests.** The reporter protocol uses the fixed `/tmp/trophy-detection.sock`; HOME/XDG isolation does not relocate it. Certain integration tests launch their own private D-Bus or PipeWire environment. Hardware and optional-codec tests skip when requirements are unavailable. Passing automated tests does not establish compatibility with every compositor, GPU, or game runtime.
 
 For AppImage payload/startup smoke checks and reporter ABI inspection, see [packaging notes](../packaging/README.md). Those checks have narrower scope than live recording tests.
+
+Package harness regressions can run independently without a build or desktop:
+
+```sh
+python3 tests/test_NativePackageSmoke.py
+python3 tests/test_AppImageSmoke.py
+python3 tests/test_NativeInstallSafety.py
+```
+
+These use synthetic payloads and owned fake processes, not real recording.
+They cover missing/non-executable/escaping payloads, multilib and spaced paths,
+wrong metadata/linkage, failed dependency inspection, unsafe tar extraction,
+and false startup successes including QML binding/layout loops. They are also
+registered with CTest. The install-harness safety cases never invoke a real
+package manager. Real trusted native prefixes/tar.xz and AppImages should
+separately pass their package smoke harness; fixture passes alone are not
+artifact verification. CI additionally builds distro-native DEB/RPM packages
+and checks installation, reinstallation, upgrade and removal in fresh matching
+runtime containers; see [container checks](../packaging/containers/README.md).
 
 ### Isolated service, format and permission tests
 
@@ -137,6 +179,16 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
   ambiguous source/session disappearance. Service and output failures are
   not treated as normal game exit. These are controlled lifecycle identities,
   not a live game/compositor shutdown test.
+  A separate transient-delivery group pauses video, audio, or both without
+  removing nodes or revoking permissions. It requires the same capture/file
+  to resume, one normal save with no reauthorization, a retained decoded video
+  timestamp gap, aligned stream ends and audible resumed PCM. This models
+   producer stalls, not system suspend/resume or compositor/driver recovery.
+   The renegotiated-stall teardown group changes to odd-sized 15fps input,
+   pauses both producer legs, then exercises duplicate manual stop, duplicate
+   portal revocation or manager destruction in merged/separate audio modes.
+   It decodes retained files and a fresh successor-manager recording, checking
+   fixed canvas/stage colors, completion classification and token preservation.
   These tests also need the software H.264/AAC codecs and skip if unavailable.
   Run the individual CTest groups: each private-service child has a 90-second
   deadline, so combining all pipeline cases in one launcher is unsupported.
@@ -148,8 +200,43 @@ pipeline. Real portal UI/permission-store behavior, GPU/DMA-BUF driver resets,
 additional native scheduling/format combinations and suspend/resume still need
 separate integration and hardware/session checks.
 
+### Reporter runtime automation
+
+`packaging/check_reporter_runtimes.py` records a host/explicit-sysroot ABI matrix.
+It checks both reporter and probe dependency closures before opt-in execution:
+
+```bash
+python3 packaging/check_reporter_runtimes.py \
+    /path/to/libtrophy_layer.so /path/to/libtrophy_gl_shim.so \
+    --runtime example=/path/to/materialized/sysroot \
+    --execute-trusted-fixtures --output /tmp/opencode/reporter-runtimes.json
+```
+
+Use only trusted reporter build outputs with the execution flag. The probes
+disable reporting, load/resolve/unload the library without graphics calls, and
+verify loaded objects against the checked provider paths. They never launch
+Steam, pressure-vessel, a game or a driver. Matching multilib compiler support is
+required for ELF32 probes; missing/incompatible providers prevent execution.
+Compatibility negatives are recorded in JSON, not treated as blanket game
+failures. Check per-runtime/per-reporter statuses, not just the tool's exit code.
+The standalone reporter CI jobs use `--require-host-pass` to require their
+matching host ABI and disabled-loader fixtures to pass and upload the matrix.
+This workflow wiring is not evidence of a remote CI execution.
+
+`packaging/materialize_reporter_runtime.py RUNTIME NEW_SCRATCH_DIRECTORY` can
+extract a bounded core-provider subset from an installed Steam content store.
+It checks mtree sizes/SHA256s and copies to a new directory without modifying
+Steam. Missing content stays missing; it never substitutes host libraries.
+This is not a full reconstructed runtime: absent graphics/other dependencies
+can still prevent closure checks. Partial stores and metadata alone do not
+establish runtime compatibility or actual Steam provider selection.
+
 ## Contributing
 
 Issues, focused pull requests, and documentation improvements are welcome. For fixes, include reproduction steps and a regression test where practical. Describe what you verified, and distinguish automated coverage from live desktop/game testing.
 
 The application uses Qt Quick/QML for the interface and C++20 for recording, audio, detection, and library services. Video capture stays PipeWire/portal-based; share export uses native FFmpeg libraries. Preserve user authorization, worker/input lifetimes, and the distinction between disposable caches and durable annotations when changing these paths.
+
+For Qt-free native/i386 reporter builds and their daemon-free fixture suites,
+see [standalone reporters](../reporters/README.md). These do not automatically
+enroll 32-bit helpers in the installed application's existing reporter settings.

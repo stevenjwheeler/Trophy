@@ -31,7 +31,10 @@ class AppImageSmokeTest(unittest.TestCase):
             "print('HOME=' + os.environ['HOME'], flush=True)\n"
             + ("sys.exit(2)\n" if mode == "early-exit" else
                "print('Application initialized successfully', flush=True)\n")
-            + ("print('TypeError: broken delegate', flush=True)\n" if mode == "qml-error" else "")
+             + ("print('TypeError: broken delegate', flush=True)\n" if mode == "qml-error" else "")
+             + ("print('Binding loop detected for property width', flush=True)\n" if mode == "binding-loop" else "")
+             + ("print('Qt Quick Layouts: Detected recursive rearrange. Aborting after two iterations.', flush=True)\n"
+                if mode == "layout-loop" else "")
             + "while True: time.sleep(0.1)\n")
         app.chmod(0o755)
         return app
@@ -53,6 +56,14 @@ class AppImageSmokeTest(unittest.TestCase):
         self.executable("good").rename(fake_image)
         with self.assertRaisesRegex(RuntimeError, "payload is missing"):
             smoke_module.smoke(fake_image, self.log)
+
+    def test_binding_loop_is_not_success(self):
+        with self.assertRaisesRegex(RuntimeError, "QML/platform errors"):
+            smoke_module.smoke(self.executable("binding-loop"), self.log)
+
+    def test_recursive_layout_warning_is_not_success(self):
+        with self.assertRaisesRegex(RuntimeError, "QML/platform errors"):
+            smoke_module.smoke(self.executable("layout-loop"), self.log)
 
 
 if __name__ == "__main__":

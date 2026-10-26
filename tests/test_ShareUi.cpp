@@ -13,6 +13,7 @@
 #include <QTest>
 #include <QSignalSpy>
 #include <QFile>
+#include <QFont>
 #include <memory>
 
 class ExportUiFake : public QObject {
@@ -450,6 +451,53 @@ TEST_F(SharingUiTest, DmaBufOptionsDisableForSoftwareWithoutChangingSavedPrefere
     EXPECT_EQ(writes.size(), 1);
     object.reset();
   }
+}
+
+TEST_F(SharingUiTest, DetectorVersionsAppearBelowDescriptionsAndNotInStatus) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto start = page.indexOf("component HelperControls:");
+  const auto end = page.indexOf("component WarnBanner:", start);
+  ASSERT_GE(start, 0); ASSERT_GT(end, start);
+  const auto rowStart = page.indexOf("component SettingRow:");
+  const auto rowEnd = page.indexOf("component SettingStack:", rowStart);
+  ASSERT_GE(rowStart, 0); ASSERT_GT(rowEnd, rowStart);
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../styles"
+    Item { width: 700; height: 120
+  )") + page.mid(start, end - start) + page.mid(rowStart, rowEnd - rowStart) + R"(
+    HelperControls { objectName: "badge"; showAction: false
+      statusWidth: badgeWidth; text: "Enrolled"
+    }
+    SettingRow { objectName: "versions"; width: 500
+      label: "Vulkan Detection"; help: "Description"
+      showVersions: true; bundledVersion: 12; installedVersion: 1
+    }
+    })").toUtf8(), QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/DetectorBadgeProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *badge = object->findChild<QQuickItem *>("badge");
+  ASSERT_NE(badge, nullptr);
+  EXPECT_EQ(badge->property("text").toString(), "Enrolled");
+  auto *versions = object->findChild<QQuickItem *>("versions");
+  ASSERT_NE(versions, nullptr);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12");
+  versions->setProperty("helperInstalled", true);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12 · Installed: Version 1");
+  auto *label = versions->findChild<QQuickItem *>("helperVersions");
+  ASSERT_NE(label, nullptr);
+  EXPECT_TRUE(label->property("font").value<QFont>().bold());
+  versions->setProperty("installedVersion", 0);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12 · Installed: Version unknown");
+  badge->setProperty("text", "Installed · Working");
+  EXPECT_EQ(badge->property("text").toString(), "Installed · Working");
+  EXPECT_GE(badge->implicitWidth(), badge->property("badgeWidth").toDouble());
 }
 
 TEST_F(SharingUiTest, RecordingSizeEstimateFollowsBitrateAndEffectiveAudioLayout) {

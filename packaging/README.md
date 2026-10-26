@@ -12,6 +12,17 @@ and its host dependencies.
 - `Trophy-<version>-amd64.deb`: native Debian-family package.
 - `Trophy-<version>-x86_64.rpm`: native RPM-family package.
 
+Native CI builds target **Ubuntu 26.04** (DEB/archive) and **Fedora 44** (RPM),
+using each distribution's Qt/FFmpeg packages. They are not universal Debian/RPM
+packages: older distributions and different Qt private ABIs can be incompatible.
+The AppImage uses the separately bundled Qt SDK. See
+[container package checks](containers/README.md) for reproducible build/test commands.
+Headless installation/startup does not establish optional encoder availability.
+In particular, Fedora's official FFmpeg-free build may omit libx264; software
+H.264/share export needs a compatible codec-enabled FFmpeg provider according to
+your distribution's guidance. These tests do not enable third-party repositories
+or establish hardware capture/encoding on the target distribution.
+
 Use the package matching your distribution/architecture and its normal package
 manager for installation. CI normalizes these names and generates `SHA256SUMS`
 for the AppImage and native packages in one combined artifact upload. Check which
@@ -26,6 +37,37 @@ libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`
 for the executable's prefix-relative RUNPATH and `ldd` with
 `LD_LIBRARY_PATH` unset. Native/AppImage AppStream metadata must launch
 `trophy.desktop`.
+
+Check a trusted extracted native prefix/DESTDIR tree or a CPack tar.xz with:
+
+```sh
+python3 packaging/smoke_native.py /path/to/Trophy.tar.xz --log /tmp/trophy-native-smoke.log
+python3 packaging/smoke_native.py /path/to/extracted-root --log /tmp/trophy-prefix-smoke.log
+```
+
+The native checker requires `readelf`, `ldd`, `dbus-run-session` and compatible
+host libraries. Archive extraction requires Python's `tarfile.data_filter`
+(Python 3.12+ or a backport). It checks required application/library/reporter,
+icon/license/helper and metadata files, binary execute/library read permissions, the AppStream
+desktop association, prefix-relative RUNPATH and prefix-local `libTrophy.so`
+resolution with loader overrides cleared. It then uses the isolated startup/QML/
+graceful-shutdown harness below. Tar archives extract under a temporary spaced
+path with traversal/link/device rejection and an extraction budget. This runs
+package code and `ldd`: **only check trusted build artifacts**, not arbitrary
+downloads. Extraction filtering is not a sandbox for executing untrusted code.
+
+CI applies these checks to distro-native tar.xz and extracted DEB/RPM payloads.
+It also installs, reinstalls, upgrades to a test-only later version, checks
+startup, and removes each native package in a fresh matching runtime container.
+Those runtime images contain inspection tools but no preinstalled Qt development
+stack: declared dependencies must provide the QML modules and platform/image
+plugins too. Optional/recommended dependencies are disabled during installation.
+This validates the tested distributions/artifacts, not other distributions,
+live desktop rendering/capture, or successful remote CI execution by itself.
+The package-manager harness refuses to operate outside an explicitly marked
+disposable container; never mount host system/config/runtime directories into it.
+The Vulkan manifest is an enrollment template; explicit enrollment rewrites
+its library path, so a build-tree path in that template is not a smoke failure.
 
 Run a non-capture AppImage smoke test with:
 
@@ -123,3 +165,14 @@ probe binary was run. The current helpers are ELF64/x86_64 and cannot serve
 32-bit processes. Those probes do not establish 32-bit Vulkan dependencies,
 reporter builds, enrollment or game compatibility. No live game, host install,
 SDK installation or compiler/linker ABI workaround was used for these checks.
+
+That paragraph records the earlier host-package snapshot. A separate
+[standalone reporter build](../reporters/README.md) now supports i386/multilib
+compilation and architecture-matched fixture tests without Qt or libvulkan.
+Main builds can optionally include these companions through
+`TROPHY_REPORTERS32_DIR`; no 32-bit toolchain is required by default. Explicit
+re-enrollment through the existing global controls can activate the packaged
+pair. Startup does not silently migrate legacy enrollment, and this is not a
+per-game OpenGL feature. Controlled loader tests do not establish real
+Steam/driver/32-bit game compatibility; verify intended multilib artifacts and
+their runtime dependencies separately.

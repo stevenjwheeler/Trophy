@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Integer helper version lives in this extension's metadata.json (version).
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';

@@ -23,7 +23,8 @@ namespace TrophyBackend {
  * Layouts: dev runs use <appDir>/vulkan_layer/ (manifest + lib side by
  * side); installs use <datadir>/trophy/vulkan_layer/trophy_layer.json
  * with the lib in <libdir>/trophy. Destination is always
- * ~/.local/share/vulkan/implicit_layer.d/trophy_layer.json.
+ * ~/.local/share/vulkan/implicit_layer.d/trophy_layer.json, optionally holding
+ * two architecture-filtered entries after explicit multilib opt-in.
  */
 class VulkanLayer {
 public:
@@ -34,12 +35,18 @@ public:
 
   /** Library matching the source manifest (side-by-side or libdir). */
   static QString libraryPathForSource(const QString &srcManifestPath);
+  /** Optional same-installation i386 companion, never a system-wide search. */
+  static QString libraryPath32ForSource(const QString &srcManifestPath);
 
   /** True when the destination manifest exists and points at a real lib. */
   static bool isRegistered();
+  static bool is32BitRegistered();
+  static int helperVersion();
+  static int bundledHelperVersion();
 
-  /** Opt-in: persist bundle-owned helpers and refresh the manifest atomically. */
-  static bool ensureRegistered();
+  /** Persist bundle-owned helpers and refresh atomically. Startup preserves
+   * legacy consent; only an explicit toggle may first enable a pair. */
+  static bool ensureRegistered(bool allow32BitMigration = false);
 
   /** Remove our destination manifest (opt-out). */
   static bool removeRegistration();
@@ -47,7 +54,8 @@ public:
   /** Structural copy: template manifest + concrete library path. */
   static bool writeManifest(const QString &srcJsonPath,
                             const QString &libraryPath,
-                            const QString &destPath);
+                            const QString &destPath,
+                            const QString &libraryPath32 = {});
 };
 
 } // namespace TrophyBackend

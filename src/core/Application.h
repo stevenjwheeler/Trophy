@@ -65,6 +65,10 @@ class Application : public QApplication {
   Q_PROPERTY(bool glShimAvailable READ glShimAvailable NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimEnrolled READ glShimEnrolled NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimActive READ glShimActive NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int glHelperVersion READ glHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int glBundledHelperVersion READ glBundledHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int vulkanBundledHelperVersion READ vulkanBundledHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int vulkanHelperVersion READ vulkanHelperVersion NOTIFY detectionStatusChanged)
 
 public:
   explicit Application(int &argc, char **argv);
@@ -109,6 +113,10 @@ public:
   bool glShimAvailable() const;
   bool glShimEnrolled() const;
   bool glShimActive() const;
+  int glHelperVersion() const;
+  int glBundledHelperVersion() const;
+  int vulkanBundledHelperVersion() const;
+  int vulkanHelperVersion() const;
   Q_INVOKABLE bool setGlShimEnrolled(bool enrolled);
 
   bool suppressNextStorageNotification() const;
@@ -177,7 +185,7 @@ private:
   friend class ApplicationMediaCacheTest;
   // Registers the Vulkan implicit layer; true when the layer JSON is in
   // place (result cached in m_vulkanLayerRegistered at startup).
-  bool ensureVulkanLayerRegistered();
+  bool ensureVulkanLayerRegistered(bool allow32BitMigration = false);
   // Deletes our layer JSON; true when nothing remains registered.
   bool removeVulkanLayerRegistration();
 

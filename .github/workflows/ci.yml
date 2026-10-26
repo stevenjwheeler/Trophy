@@ -110,14 +110,14 @@ jobs:
         # (a bare daemon is enough; nothing plays audio).
         run: |
           set -e
-          PACKAGES="build-essential cmake ninja-build ccache libfuse2t64 wget \
+          PACKAGES="build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget \
             libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev \
             libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 \
             libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
             libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
             libavutil-dev libswscale-dev libswresample-dev libva-dev \
             libva-drm2 libgtest-dev desktop-file-utils appstream \
-            dpkg-dev rpm"
+            dpkg-dev rpm cpio file"
           for attempt in 1 2 3; do
             echo "apt attempt $attempt/3..."
             if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
@@ -231,21 +231,39 @@ jobs:
           chmod 700 "$XDG_RUNTIME_DIR"
           cd build && ctest --output-on-failure --timeout 300
 
-      - name: Generate packages (tar.xz, deb, rpm)
+      - name: Build and test distro-native packages
         run: |
+          set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cd build
-          cpack -G "TXZ;DEB;RPM" -B "$GITHUB_WORKSPACE/dist"
-          # Remove CPack's working directory so it isn't shipped as an artifact.
-          rm -rf "$GITHUB_WORKSPACE/dist/_CPack_Packages"
-          # Normalize artifact names to the project's release naming scheme.
-          cd "$GITHUB_WORKSPACE/dist"
-          for f in *.deb; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-amd64.deb"; done
-          for f in *.rpm; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-x86_64.rpm"; done
-          for f in *.tar.xz; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}.tar.xz"; done
-          cd "$GITHUB_WORKSPACE"
-          echo "Generated packages:"
-          ls -lh "$GITHUB_WORKSPACE/dist"
+          # Native packages must use distro-provided Qt/FFmpeg, not the
+          # AppImage SDK. Ubuntu-built Qt private ABI is not Fedora's ABI.
+          for profile in ubuntu fedora; do
+            kind=deb
+            [[ "$profile" == fedora ]] && kind=rpm
+            work="$RUNNER_TEMP/trophy-native-$profile"
+            mkdir -p "$work/runtime"
+            # Dependency-only Dockerfiles consume no source/build context.
+            docker build -t "trophy-native-$profile" - < "packaging/containers/$profile.Dockerfile"
+            docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+              --user "$(id -u):$(id -g)" --env "VERSION=$VERSION" \
+              --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+              --mount "type=bind,src=$work,dst=/work" \
+              --mount "type=bind,src=$GITHUB_WORKSPACE/dist,dst=/dist" \
+              "trophy-native-$profile" bash /source/packaging/containers/build.sh "$kind" \
+              > "$work/build.log" 2>&1
+            docker build -t "trophy-runtime-$profile" - < "packaging/containers/$profile-runtime.Dockerfile"
+            packages=("$work/ci-packages"/*."$kind")
+            upgrades=("$work/ci-upgrade"/*."$kind")
+            # Root/package managers exist only inside this fresh container;
+            # source/artifacts are read-only, no host runtime/system mounts.
+            docker run --rm --env TROPHY_PACKAGE_TEST_CONTAINER=1 \
+              --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+              --mount "type=bind,src=$work,dst=/artifacts,readonly" \
+              --mount "type=bind,src=$work/runtime,dst=/evidence" \
+              "trophy-runtime-$profile" python3 /source/packaging/test_native_install.py \
+              "/artifacts/ci-packages/$(basename "${packages[0]}")" \
+              --upgrade "/artifacts/ci-upgrade/$(basename "${upgrades[0]}")" --logs /evidence
+          done
 
       - name: Generate AppImage
         shell: bash
@@ -341,6 +359,9 @@ jobs:
           path: |
             build/Testing/Temporary/LastTest.log
             ${{ runner.temp }}/trophy-appimage-smoke.log
+            ${{ runner.temp }}/trophy-*-smoke.log
+            ${{ runner.temp }}/trophy-native-*/**/*.log
+            ${{ runner.temp }}/trophy-native-*/**/*.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -361,11 +382,68 @@ jobs:
           # are uploaded manually.
           retention-days: 14
 
+  reporters-multilib:
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bits: [32, 64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install reporter build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++-multilib libvulkan-dev libgtest-dev
+      - name: Build architecture-matched reporter fixtures
+        env:
+          BITS: ${{ matrix.bits }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [[ "$BITS" == 32 ]]; then
+            cmake -S /usr/src/googletest -B "$RUNNER_TEMP/gtest32-build" -GNinja \
+              -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DBUILD_GMOCK=OFF \
+              -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gtest32"
+            cmake --build "$RUNNER_TEMP/gtest32-build" --parallel 2
+            cmake --install "$RUNNER_TEMP/gtest32-build"
+            options+=("-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/reporters/i686-linux.cmake"
+                      "-DCMAKE_PREFIX_PATH=$RUNNER_TEMP/gtest32")
+          fi
+          cmake -S reporters -B "$RUNNER_TEMP/reporters$BITS" -GNinja \
+            -DCMAKE_BUILD_TYPE=Release "${options[@]}"
+          cmake --build "$RUNNER_TEMP/reporters$BITS" --parallel 2
+          # Fake native/socket operations only: no game, desktop enrollment,
+          # graphics driver or host detection socket is contacted.
+          ctest --test-dir "$RUNNER_TEMP/reporters$BITS" --output-on-failure \
+            --timeout 60 --output-junit "$RUNNER_TEMP/reporters$BITS.xml"
+      - name: Check reporter ABI and disabled host runtime loading
+        env:
+          BITS: ${{ matrix.bits }}
+        run: |
+          python3 packaging/check_reporter_runtimes.py \
+            "$RUNNER_TEMP/reporters$BITS/libtrophy_layer.so" \
+            "$RUNNER_TEMP/reporters$BITS/libtrophy_gl_shim.so" \
+            --execute-trusted-fixtures --require-host-pass \
+            --output "$RUNNER_TEMP/reporters$BITS-runtime.json"
+      - name: Upload reporter test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-reporters-${{ matrix.bits }}-diagnostics
+          path: |
+            ${{ runner.temp }}/reporters${{ matrix.bits }}.xml
+            ${{ runner.temp }}/reporters${{ matrix.bits }}-runtime.json
+            ${{ runner.temp }}/reporters${{ matrix.bits }}/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   comment-pr:
-    needs: build-and-test
+    needs: [build-and-test, reporters-multilib]
     # Only celebrate green builds: without the result check a failed run
     # still posted "Build Ready!".
-    if: github.event_name == 'pull_request' && needs.build-and-test.result == 'success'
+    if: github.event_name == 'pull_request' && needs.build-and-test.result == 'success' && needs.reporters-multilib.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

@@ -13,11 +13,14 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QStandardPaths>
 #include <QSaveFile>
 
 #include "detection/ShippedLibDirs.h"
 #include "detection/PersistentReporterLib.h"
+#include "detection/ReporterArchitecture.h"
+#include "detection/DetectorVersion.h"
 
 namespace TrophyBackend {
 
@@ -25,6 +28,29 @@ namespace {
 constexpr const char *kLayerName = "VK_LAYER_TROPHY_detection";
 constexpr const char *kFileName = "trophy_layer.json";
 constexpr const char *kLibName = "libtrophy_layer.so";
+
+QJsonDocument readManifest(const QString &path) {
+  const QFileInfo info(path);
+  if (!info.isFile() || info.size() > 1024 * 1024) return {};
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) return {};
+  QJsonParseError error;
+  const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+  return file.error() == QFileDevice::NoError && error.error == QJsonParseError::NoError
+             ? document : QJsonDocument();
+}
+
+QString registeredLibrary(const QString &name) {
+  const auto root = readManifest(VulkanLayer::destManifestPath()).object();
+  QJsonArray entries = root.value("layers").toArray();
+  if (root.value("layer").isObject()) entries.append(root.value("layer"));
+  for (const auto &entry : entries) {
+    const auto layer = entry.toObject();
+    if (layer.value("name").toString() == name)
+      return layer.value("library_path").toString();
+  }
+  return {};
+}
 } // namespace
 
 QString VulkanLayer::destManifestPath() {
@@ -75,84 +101,102 @@ QString VulkanLayer::libraryPathForSource(const QString &srcManifestPath) {
                         srcManifestPath);
 }
 
+QString VulkanLayer::libraryPath32ForSource(const QString &srcManifestPath) {
+  return ReporterArchitecture::companion32(libraryPathForSource(srcManifestPath));
+}
+
 bool VulkanLayer::writeManifest(const QString &srcJsonPath,
                                 const QString &libraryPath,
-                                const QString &destPath) {
-  QFile src(srcJsonPath);
-  if (!src.open(QIODevice::ReadOnly | QIODevice::Text))
-    return false;
-  QJsonParseError err;
-  const QJsonDocument doc =
-      QJsonDocument::fromJson(src.readAll(), &err);
-  if (err.error != QJsonParseError::NoError || !doc.isObject())
+                                const QString &destPath,
+                                const QString &libraryPath32) {
+  const auto doc = readManifest(srcJsonPath);
+  if (!doc.isObject() || !doc.object().value("layer").isObject())
     return false;
 
   QJsonObject root = doc.object();
+  QJsonObject layer = root.value("layer").toObject();
+  if (layer.value("name").toString() != kLayerName) return false;
+  if (!libraryPath32.isEmpty() &&
+      (QFileInfo(libraryPath32).isSymLink() ||
+       ReporterArchitecture::readSharedObject(libraryPath, 64).isEmpty() ||
+       ReporterArchitecture::readSharedObject(libraryPath32, 32).isEmpty()))
+    return false;
   const QString durableLib =
       PersistentReporterLib::install(libraryPath, "libtrophy_layer");
   if (durableLib.isEmpty())
     return false;
-  QJsonObject layer = root.value("layer").toObject();
   layer["library_path"] = durableLib;
-  root["layer"] = layer;
+  root.remove("layers");
+  if (libraryPath32.isEmpty()) {
+    layer.remove("library_arch");
+    root["file_format_version"] = "1.0.0"; // Preserve legacy loader compatibility.
+    root["layer"] = layer;
+  } else {
+    root["file_format_version"] = "1.2.1";
+    layer["library_arch"] = "64";
+    const QString durable32 = PersistentReporterLib::install(libraryPath32, "libtrophy_layer32");
+    if (durable32.isEmpty()) return false;
+    QJsonObject layer32 = layer;
+    layer32["name"] = QString(kLayerName) + "_32";
+    layer32["library_path"] = durable32;
+    layer32["library_arch"] = "32";
+    root.remove("layer");
+    root["layers"] = QJsonArray{layer, layer32};
+  }
+  const QByteArray json = QJsonDocument(root).toJson();
+  const QFileInfo destination(destPath);
+  if ((destination.exists() || destination.isSymLink()) &&
+      (destination.isSymLink() || !destination.isFile() || destination.size() > 1024 * 1024))
+    return false;
+  QFile current(destPath);
+  if (current.open(QIODevice::ReadOnly) && current.readAll() == json)
+    return true;
 
   if (!QDir().mkpath(QFileInfo(destPath).absolutePath()))
     return false;
   QSaveFile dst(destPath);
   if (!dst.open(QIODevice::WriteOnly | QIODevice::Text))
     return false;
-  const QByteArray json = QJsonDocument(root).toJson();
   return dst.write(json) == json.size() && dst.commit();
 }
 
 bool VulkanLayer::isRegistered() {
-  const QString dest = destManifestPath();
-  QFile f(dest);
-  if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-    return false;
-  QJsonParseError err;
-  const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
-  if (err.error != QJsonParseError::NoError || !doc.isObject())
-    return false;
-  const QString lib =
-      doc.object().value("layer").toObject().value("library_path").toString();
-  return !lib.isEmpty() && QFile::exists(lib);
+  const QString library = registeredLibrary(kLayerName);
+  return !library.isEmpty() && QFileInfo(library).isFile();
 }
 
-bool VulkanLayer::ensureRegistered() {
+int VulkanLayer::bundledHelperVersion() {
+  return DetectorVersion::reporter(libraryPathForSource(sourceManifestPath()), "vulkan");
+}
+
+int VulkanLayer::helperVersion() {
+  const QString registered = registeredLibrary(kLayerName);
+  return DetectorVersion::reporter(registered.isEmpty()
+      ? libraryPathForSource(sourceManifestPath()) : registered, "vulkan");
+}
+
+bool VulkanLayer::is32BitRegistered() {
+  const QString library = registeredLibrary(QString(kLayerName) + "_32");
+  return isRegistered() && !ReporterArchitecture::readSharedObject(library, 32).isEmpty();
+}
+
+bool VulkanLayer::ensureRegistered(bool allow32BitMigration) {
   const QString src = sourceManifestPath();
   const QString shippedLib = libraryPathForSource(src);
-  const QString lib = shippedLib.isEmpty()
-                          ? QString()
-                          : PersistentReporterLib::install(shippedLib,
-                                                           "libtrophy_layer");
-  if (src.isEmpty() || lib.isEmpty()) {
+  if (src.isEmpty() || shippedLib.isEmpty() || !QFileInfo(shippedLib).isFile()) {
     qWarning() << "Vulkan layer: shipped manifest/library not found";
     return false;
   }
-  // Existence alone is not enough: after an update the installed lib path
-  // may have moved while the old manifest still points at a present-but-old
-  // copy. Compare the stored path and rewrite on mismatch.
+  // One atomic document publishes both architecture-filtered entries. Pure
+  // status/library lookups never install helpers or grant new enrollment.
   const QString dest = destManifestPath();
-  QFile cur(dest);
-  if (cur.open(QIODevice::ReadOnly | QIODevice::Text)) {
-    QJsonParseError err;
-    const QJsonDocument doc = QJsonDocument::fromJson(cur.readAll(), &err);
-    if (err.error == QJsonParseError::NoError && doc.isObject()) {
-      const QString stored = doc.object()
-                                 .value("layer")
-                                 .toObject()
-                                 .value("library_path")
-                                 .toString();
-      if (stored == lib && QFile::exists(lib))
-        return true; // already correct: no rewrite, no loader churn
-    }
-  }
-  if (!writeManifest(src, lib, dest)) {
+  const bool pairedConsent = !registeredLibrary(QString(kLayerName) + "_32").isEmpty();
+  const QString companion = allow32BitMigration || pairedConsent ? libraryPath32ForSource(src) : QString();
+  if (!writeManifest(src, shippedLib, dest, companion)) {
     qWarning() << "Vulkan layer: cannot write" << dest;
     return false;
   }
-  qInfo() << "Vulkan detection layer registered:" << lib;
+  qInfo() << "Vulkan detection layer registered:" << registeredLibrary(kLayerName);
   return true;
 }
 

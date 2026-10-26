@@ -258,6 +258,13 @@ public:
     video = nullptr;
     pw_thread_loop_unlock(loop);
   }
+  bool setDelivery(bool videoActive, bool audioActive) {
+    pw_thread_loop_lock(loop);
+    videoTimer(videoActive);
+    const int result = pw_stream_set_active(audio, audioActive);
+    pw_thread_loop_unlock(loop);
+    return result >= 0;
+  }
   bool videoMatches(int w, int h, int stage) {
     pw_thread_loop_lock(loop);
     const bool matches = videoFormat.size.width == uint32_t(w) &&
@@ -401,6 +408,8 @@ namespace {
 struct FormatChecks {
   bool videoStages = false, audioStages = false;
   unsigned expectedStages = 0x1f;
+  bool resumedTimeline = false;
+  bool videoStall = false;
 };
 QDBusMessage control(const QString &method, const QVariantList &args = {}) {
   auto call = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop",
@@ -457,6 +466,7 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
   int videoFrames = 0, audioSamples = 0;
   double amplitude = 0;
   double videoEnd = 0, audioEnd = 0;
+  double lastVideoTime = -1, largestVideoGap = 0;
   std::array<int, stageColors.size()> stages{};
   std::vector<float> pcm;
   auto drain = [&](AVCodecContext *codec, bool isVideo) {
@@ -469,9 +479,12 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
         EXPECT_EQ(frame->width, SyntheticMedia::width);
         EXPECT_EQ(frame->height, SyntheticMedia::height);
         EXPECT_GT(frame->data[0][frame->height / 2 * frame->linesize[0] + frame->width / 2], 10);
-        if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-          videoEnd = std::max(videoEnd, frame->best_effort_timestamp *
-              av_q2d(input->streams[video]->time_base) + 1.0/30);
+        if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+          const double timestamp = frame->best_effort_timestamp * av_q2d(input->streams[video]->time_base);
+          if (lastVideoTime >= 0) largestVideoGap = std::max(largestVideoGap, timestamp - lastVideoTime);
+          lastVideoTime = timestamp;
+          videoEnd = std::max(videoEnd, timestamp + 1.0/30);
+        }
         if (checks.videoStages) {
           ASSERT_EQ(frame->format, AV_PIX_FMT_YUV420P);
           const int x = frame->width / 2, y = frame->height / 2;
@@ -504,7 +517,8 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
         if (frame->format == AV_SAMPLE_FMT_FLTP) {
           const auto *samples = reinterpret_cast<const float *>(frame->extended_data[0]);
           for (int i = 0; i < frame->nb_samples; ++i) amplitude += std::abs(samples[i]);
-          if (checks.audioStages) pcm.insert(pcm.end(), samples, samples + frame->nb_samples);
+          if (checks.audioStages || checks.resumedTimeline)
+            pcm.insert(pcm.end(), samples, samples + frame->nb_samples);
         }
       }
       av_frame_unref(frame);
@@ -534,6 +548,15 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
   EXPECT_GT(audioSamples, 1024);
   EXPECT_GT(amplitude, audioSamples * 0.005);
   EXPECT_EQ(diagnostics.errors, 0) << "decoder errors must not silently pass";
+  if (checks.resumedTimeline) {
+    EXPECT_GT(videoEnd, 1.6) << "temporary delivery stalls must not compress the timeline";
+    EXPECT_NEAR(audioEnd, videoEnd, 0.35);
+    ASSERT_GE(pcm.size(), 9600u);
+    double tailAmplitude = 0;
+    for (size_t i = pcm.size() - 9600; i < pcm.size(); ++i) tailAmplitude += std::abs(pcm[i]);
+    EXPECT_GT(tailAmplitude / 9600, 0.02) << "decoded audio must resume, not just end in generated silence";
+    if (checks.videoStall) EXPECT_GT(largestVideoGap, 0.5);
+  }
   if (checks.videoStages) {
     for (size_t stage = 0; stage < stages.size(); ++stage)
       if (checks.expectedStages & (1u << stage))
@@ -926,6 +949,43 @@ protected:
     checkMedia(retry);
   }
 
+  void transientDeliveryStall() {
+    const auto [separate, mode] = GetParam();
+    const bool pauseVideo = mode != 1, pauseAudio = mode != 0;
+    SettingsManager settings;
+    AudioMixer mixer(48000, 2);
+    StorageManager storage(root.path());
+    RecordingManager recorder;
+    configure(settings, recorder, mixer, storage, separate);
+    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
+    recorder.startRecording("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 20; }));
+    const auto path = recorder.currentFilePath();
+    const QPointer<IVideoCaptureSource> capture(recorder.m_captureSource.get());
+    ASSERT_TRUE(media->setDelivery(!pauseVideo, !pauseAudio));
+    // Keep nodes and permissions intact: absence of frames/PCM is not proof
+    // of source retirement, service failure, or permission revocation.
+    const int produced = media->produced.load();
+    QTest::qWait(700);
+    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Recording);
+    EXPECT_EQ(errors.size(), 0); EXPECT_EQ(saved.size(), 0);
+    EXPECT_EQ(recorder.m_captureSource.get(), capture.data());
+    if (pauseVideo) EXPECT_LE(media->produced.load(), produced + 1);
+    ASSERT_TRUE(media->setDelivery(true, true));
+    const auto before = recorder.m_session->frameCount();
+    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= before + 35; }));
+    EXPECT_EQ(started.size(), 1);
+    EXPECT_EQ(recorder.currentFilePath(), path);
+    recorder.stopRecording();
+    ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
+    EXPECT_EQ(saved.size(), 1); EXPECT_EQ(errors.size(), 0); EXPECT_EQ(authorization.size(), 0);
+    EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
+    checkMedia(path, {false, false, 0x1f, true, pauseVideo});
+  }
+
   void nativeGameExit() {
     const auto [separate, timing] = GetParam();
     QProcess game;
@@ -973,6 +1033,71 @@ protected:
       game.terminate();
       ASSERT_TRUE(game.waitForFinished());
     }
+  }
+
+  void formatStallTeardown() {
+    const auto [separate, boundary] = GetParam();
+    SettingsManager settings;
+    AudioMixer mixer(48000, 2);
+    StorageManager storage(root.path());
+    auto recorder = std::make_unique<RecordingManager>();
+    configure(settings, *recorder, mixer, storage, separate);
+    QSignalSpy saved(recorder.get(), &RecordingManager::recordingStopped);
+    QSignalSpy finished(recorder.get(), &RecordingManager::recordingFinished);
+    QSignalSpy errors(recorder.get(), &RecordingManager::recordingError);
+    QSignalSpy authorization(recorder.get(), &RecordingManager::restoreAuthNeeded);
+    recorder->startRecording("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return recorder->m_session && recorder->m_session->frameCount() >= 20; }));
+    const QString path = recorder->currentFilePath();
+    const QPointer<IVideoCaptureSource> capture(recorder->m_captureSource.get());
+    ASSERT_TRUE(media->changeVideo(161, 97, 15, 3));
+    ASSERT_TRUE(waitFor([&] { return media->videoMatches(161, 97, 3); }));
+    const auto before = recorder->m_session->frameCount();
+    ASSERT_TRUE(waitFor([&] { return recorder->m_session->frameCount() >= before + 15; }));
+    ASSERT_TRUE(media->setDelivery(false, false));
+    QTest::qWait(150);
+    EXPECT_EQ(recorder->state(), RecordingManager::RecordingState::Recording);
+    EXPECT_EQ(errors.size(), 0);
+    if (boundary == 2) {
+      // Final destruction must settle native callbacks/encoder flush even
+      // when a renegotiated producer remains alive but delivers no buffers.
+      recorder.reset();
+      EXPECT_EQ(saved.size(), 0); EXPECT_EQ(finished.size(), 0);
+    } else {
+      if (boundary == 0) {
+        recorder->stopRecording();
+        recorder->stopRecording(); // Duplicate user stop cannot double-finalize.
+      } else {
+        ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
+        ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
+      }
+      ASSERT_TRUE(waitFor([&] { return recorder->state() == RecordingManager::RecordingState::Idle; }));
+      EXPECT_EQ(saved.size(), boundary == 0 ? 1 : 0);
+      EXPECT_EQ(finished.size(), 1);
+      EXPECT_EQ(errors.size(), boundary == 0 ? 0 : 1);
+    }
+    EXPECT_TRUE(capture.isNull());
+    EXPECT_EQ(authorization.size(), 0);
+    EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
+    checkMedia(path, {true, false, 0x9});
+    recorder.reset();
+    ASSERT_TRUE(media->changeVideo(160, 96, 30, 0));
+    ASSERT_TRUE(media->setDelivery(true, true));
+    // A fresh manager with the same dependencies must not inherit callbacks,
+    // output exclusions or a failed teardown generation from its predecessor.
+    recorder = std::make_unique<RecordingManager>();
+    configure(settings, *recorder, mixer, storage, separate);
+    QSignalSpy retrySaved(recorder.get(), &RecordingManager::recordingStopped);
+    QSignalSpy retryErrors(recorder.get(), &RecordingManager::recordingError);
+    recorder->startRecording("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return recorder->m_session && recorder->m_session->frameCount() >= 20; }));
+    const QString retry = recorder->currentFilePath();
+    EXPECT_NE(retry, path);
+    recorder->stopRecording();
+    ASSERT_TRUE(waitFor([&] { return recorder->state() == RecordingManager::RecordingState::Idle; }));
+    EXPECT_EQ(retrySaved.size(), 1); EXPECT_EQ(retryErrors.size(), 0);
+    checkMedia(retry);
+    EXPECT_TRUE(QFileInfo::exists(path));
   }
 
   void dvrFormatChanges() {
@@ -1100,6 +1225,8 @@ TEST_P(RecordingManagerTest, DvrHandoffServiceLossCleansCacheAndFreshClipWorks) 
 TEST_P(RecordingManagerTest, NativeFormatChangesPreserveCanvasAndDecodedAudio) { nativeFormatChanges(); }
 TEST_P(RecordingManagerTest, PermissionRevocationStopsAndRequiresExplicitRetry) { permissionRevocation(); }
 TEST_P(RecordingManagerTest, NativeGameExitSavesButLiveGameRevocationFails) { nativeGameExit(); }
+TEST_P(RecordingManagerTest, TransientDeliveryStallResumesWithoutRetiringCapture) { transientDeliveryStall(); }
+TEST_P(RecordingManagerTest, RenegotiatedStalledCaptureSettlesStopFailureAndDestruction) { formatStallTeardown(); }
 TEST_P(RecordingManagerTest, DvrNativeFormatChangesKeepCompatibleSegmentsAndClip) { dvrFormatChanges(); }
 TEST_P(RecordingManagerTest, DvrPermissionRevocationRequiresExplicitRetry) { dvrPermissionRevocation(); }
 INSTANTIATE_TEST_SUITE_P(MergedAndSeparatePortalClosureOwnerExitAndDaemonExit,
