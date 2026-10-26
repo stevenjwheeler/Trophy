@@ -25,6 +25,16 @@ While recording or DVR is active, click **ⓘ** beside the recording control for
 
 Video/session values refresh every second; source signal diagnostics refresh every 100 ms while the Audio tab is open. DVR counters cover the **current segment** and reset at rotation, not the whole replay buffer; DVR session duration and buffer coverage are separate. Source fields may be generic or unreported by the portal. Observed transport changes do not establish why a fallback happened. Encoder-call time is not end-to-end latency, and drop counters do not cover every compositor/PipeWire loss.
 
+## Discord Rich Presence
+
+Enable **Settings → Discord Rich Presence → Enable Rich Presence** to share Trophy's status with the Discord desktop app. It is **off by default** and needs no Discord login or account token in Trophy.
+
+- **Recording** includes an elapsed timer and takes priority over **Instant replay ready** while DVR is running.
+- **Show Game Names** is on by default; turn it off to share only the capture status. While presence and game-name sharing are enabled, Trophy looks up the active Steam game's public hub icon and checks its public image URL. Available game icons appear with a small Trophy badge; otherwise only the Trophy icon appears. No local icons are uploaded. Disabling presence or game names cancels these lookups and hides game artwork.
+- **Show When Idle** is off by default. Enable it to show **Ready to record** even while Trophy is idle in the tray. Otherwise presence disappears when neither recording nor DVR is active.
+
+Discord's activity privacy settings still apply, and Discord controls which activity it displays when games publish their own presence. Trophy reconnects when Discord restarts. Native and standard Flatpak socket locations are checked; sandboxed installations may still need IPC socket access. This does not enable presence in the Discord web client.
+
 ## Audio
 
 Choose **Game** or **Desktop** capture. Game mode supports separate or mixed tracks; Desktop mode mixes audio. Select your microphone and optional voice-chat application in Settings.

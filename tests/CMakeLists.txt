@@ -4,6 +4,20 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_DiscordPresence test_DiscordPresence.cpp
+    test_DiscordGameArtwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DiscordPresence.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DiscordGameArtwork.cpp)
+target_include_directories(test_DiscordPresence PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_DiscordPresence PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Network Qt6::Test)
+gtest_discover_tests(test_DiscordPresence)
+
+add_executable(test_DiscordPresenceUi test_DiscordPresenceUi.cpp)
+target_include_directories(test_DiscordPresenceUi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_DiscordPresenceUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DiscordPresenceUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_DiscordPresenceUi)
+
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)

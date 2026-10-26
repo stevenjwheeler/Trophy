@@ -134,6 +134,10 @@ void SettingsManager::load() {
   m_shareExportWatermark = general["shareExportWatermark"].toBool(true);
 
   const QJsonObject customization = root["customization"].toObject();
+  const QJsonObject discord = root["discord"].toObject();
+  m_discordPresenceEnabled = discord["enabled"].toBool(false);
+  m_discordShowGameNames = discord["showGameNames"].toBool(true);
+  m_discordShowWhenIdle = discord["showWhenIdle"].toBool(false);
   m_themeMode = customization["themeMode"].toString("amoled");
   m_accentColor = customization["accentColor"].toString("rose");
   if (!validThemeMode(m_themeMode))
@@ -210,6 +214,9 @@ void SettingsManager::load() {
   emit replayCachePathChanged();
   emit waylandRestoreTokensChanged();
   emit settingsLoaded();
+  emit discordPresenceEnabledChanged();
+  emit discordShowGameNamesChanged();
+  emit discordShowWhenIdleChanged();
 }
 
 void SettingsManager::save() {
@@ -222,6 +229,9 @@ void SettingsManager::save() {
   }
 
   QJsonObject root;
+  root["discord"] = QJsonObject{{"enabled", m_discordPresenceEnabled},
+                                {"showGameNames", m_discordShowGameNames},
+                                {"showWhenIdle", m_discordShowWhenIdle}};
   root["version"] = SETTINGS_VERSION;
 
   // Video settings
@@ -317,6 +327,9 @@ void SettingsManager::resetToDefaults() {
   save();
 
   // Emit all change signals so the UI updates
+  emit discordPresenceEnabledChanged();
+  emit discordShowGameNamesChanged();
+  emit discordShowWhenIdleChanged();
   emit videoBitrateChanged();
   emit videoResolutionChanged();
   emit fpsChanged();
@@ -363,6 +376,9 @@ void SettingsManager::resetToDefaults() {
 }
 
 void SettingsManager::loadDefaults() {
+  m_discordPresenceEnabled = false;
+  m_discordShowGameNames = true;
+  m_discordShowWhenIdle = false;
   // Video
   m_videoBitrate = 15000;
   m_videoResolution = "native";
@@ -440,6 +456,27 @@ QStringList SettingsManager::availableEncoders() const {
 }
 
 // Property setters with change notification and auto-save
+void SettingsManager::setDiscordPresenceEnabled(bool enabled) {
+  if (m_discordPresenceEnabled == enabled) return;
+  m_discordPresenceEnabled = enabled;
+  save();
+  emit discordPresenceEnabledChanged();
+}
+
+void SettingsManager::setDiscordShowGameNames(bool enabled) {
+  if (m_discordShowGameNames == enabled) return;
+  m_discordShowGameNames = enabled;
+  save();
+  emit discordShowGameNamesChanged();
+}
+
+void SettingsManager::setDiscordShowWhenIdle(bool enabled) {
+  if (m_discordShowWhenIdle == enabled) return;
+  m_discordShowWhenIdle = enabled;
+  save();
+  emit discordShowWhenIdleChanged();
+}
+
 void SettingsManager::setVideoBitrate(int bitrate) {
   if (m_videoBitrate != bitrate) {
     m_videoBitrate = bitrate;

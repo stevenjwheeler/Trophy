@@ -40,6 +40,7 @@ class AutostartManager;
 class ReplayManager;
 class GlobalShortcutManager;
 class ControlServer;
+class DiscordPresence;
 } // namespace TrophyBackend
 
 namespace TrophyBackend {
@@ -169,6 +170,7 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  void updateDiscordPresence();
   // Only successful, finalized outputs are warmed (never active recordings or
   // DVR segments). Reuses the player's cache instances and in-flight jobs.
   void preparePlayerCaches(const QString &filePath);
@@ -196,6 +198,7 @@ private:
   std::unique_ptr<ReplayManager> m_replayManager;
   std::unique_ptr<GlobalShortcutManager> m_shortcutManager;
   std::unique_ptr<ControlServer> m_controlServer;
+  std::unique_ptr<DiscordPresence> m_discordPresence;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
   std::unique_ptr<WaveformCache> m_waveformCache;

@@ -54,6 +54,8 @@ Page {
             card = storageCard;
         else if (sectionTitle === "Notifications")
             card = notificationsCard;
+        else if (sectionTitle === "Discord Rich Presence")
+            card = discordCard;
         else if (sectionTitle === "Game Detection")
             card = detectionCard;
         else if (sectionTitle === "Detection Helpers")
@@ -1097,6 +1099,59 @@ Page {
                                     settingsManager.updateCheckEnabled = checked;
                             }
                         }
+                    }
+                }
+
+                // ================= DISCORD =================
+                SectionCard {
+                    id: discordCard
+                    sectionTitle: qsTr("Discord Rich Presence")
+                    iconSource: "qrc:/icons/social.svg"
+                    description: qsTr("Share your recording status on Discord.")
+
+                    SettingRow {
+                        label: qsTr("Enable Rich Presence")
+                        help: qsTr("Show Recording or Instant replay ready on your Discord profile. No login or account token required.")
+                        TrophySwitch {
+                            objectName: "discordPresenceSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            onToggled: if (settingsManager) settingsManager.discordPresenceEnabled = checked
+                        }
+                    }
+                    SettingRow {
+                        objectName: "discordGameNamesRow"
+                        label: qsTr("Show Game Names")
+                        help: qsTr("Include the game name and public game artwork when available.")
+                        rowEnabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                        TrophySwitch {
+                            objectName: "discordGameNamesSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            checked: settingsManager ? settingsManager.discordShowGameNames : true
+                            onToggled: if (settingsManager) settingsManager.discordShowGameNames = checked
+                        }
+                    }
+                    SettingRow {
+                        objectName: "discordIdleRow"
+                        label: qsTr("Show When Idle")
+                        help: qsTr("Show Ready to record when neither recording nor instant replay is active, including while Trophy is in the tray.")
+                        rowEnabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                        TrophySwitch {
+                            objectName: "discordIdleSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            checked: settingsManager ? settingsManager.discordShowWhenIdle : false
+                            onToggled: if (settingsManager) settingsManager.discordShowWhenIdle = checked
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Discord's activity privacy settings apply. Sandboxed installations may require IPC socket access.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
                     }
                 }
 

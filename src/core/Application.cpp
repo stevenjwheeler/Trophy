@@ -15,6 +15,7 @@
 #include "AutostartManager.h"
 #include "BugReport.h"
 #include "ControlServer.h"
+#include "DiscordPresence.h"
 #include "GlobalShortcutManager.h"
 #include "NotificationService.h"
 #include "ReplayManager.h"
@@ -79,6 +80,7 @@ Application::Application(int &argc, char **argv)
     : QApplication(argc, argv) {}
 
 Application::~Application() {
+  m_discordPresence.reset();
   // Retiring pipelines retain raw mixer/settings/storage pointers. Settle
   // managers before those dependencies (member order would destroy them first).
   if (m_gameDetector) disconnect(m_gameDetector.get(), nullptr, this, nullptr);
@@ -386,6 +388,7 @@ void Application::initializeServices() {
   m_shortcutManager = std::make_unique<GlobalShortcutManager>(this);
   m_shortcutManager->setEnabled(m_settingsManager->globalShortcutsEnabled());
   m_controlServer = std::make_unique<ControlServer>(this);
+  m_discordPresence = std::make_unique<DiscordPresence>(this);
   connect(m_controlServer.get(), &ControlServer::toggleRecordingRequested,
           this, [this]() { requestToggleRecording(); });
   connect(m_controlServer.get(), &ControlServer::saveClipRequested, this,
@@ -484,7 +487,33 @@ void Application::preparePlayerCaches(const QString &filePath) {
     m_previewCache->preparePreview(filePath);
 }
 
+void Application::updateDiscordPresence() {
+  if (!m_discordPresence || !m_settingsManager || !m_recordingManager || !m_replayManager)
+    return;
+  // Privacy preferences gate lookups before adopting the current capture.
+  // IPC updates are queued, so both snapshots settle before publishing.
+  m_discordPresence->setPreferences(m_settingsManager->discordPresenceEnabled(),
+      m_settingsManager->discordShowGameNames(), m_settingsManager->discordShowWhenIdle());
+  m_discordPresence->setCaptureState(m_recordingManager->isRecording(),
+      m_recordingManager->currentGameName(), m_replayManager->isActive(),
+      m_replayManager->currentGame(), m_recordingManager->capturedSteamAppId(),
+      m_replayManager->capturedSteamAppId());
+}
+
 void Application::connectSignals() {
+  connect(m_recordingManager.get(), &RecordingManager::stateChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_recordingManager.get(), &RecordingManager::currentGameNameChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_replayManager.get(), &ReplayManager::replayStateChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordPresenceEnabledChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordShowGameNamesChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordShowWhenIdleChanged,
+          this, &Application::updateDiscordPresence);
+  updateDiscordPresence();
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {

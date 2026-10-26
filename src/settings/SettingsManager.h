@@ -126,6 +126,15 @@ class SettingsManager : public QObject {
   Q_PROPERTY(QVariantMap waylandRestoreTokens READ waylandRestoreTokens NOTIFY waylandRestoreTokensChanged)
 
 public:
+  Q_PROPERTY(bool discordPresenceEnabled READ discordPresenceEnabled WRITE setDiscordPresenceEnabled NOTIFY discordPresenceEnabledChanged)
+  Q_PROPERTY(bool discordShowGameNames READ discordShowGameNames WRITE setDiscordShowGameNames NOTIFY discordShowGameNamesChanged)
+  Q_PROPERTY(bool discordShowWhenIdle READ discordShowWhenIdle WRITE setDiscordShowWhenIdle NOTIFY discordShowWhenIdleChanged)
+  bool discordPresenceEnabled() const { return m_discordPresenceEnabled; }
+  bool discordShowGameNames() const { return m_discordShowGameNames; }
+  bool discordShowWhenIdle() const { return m_discordShowWhenIdle; }
+  void setDiscordPresenceEnabled(bool enabled);
+  void setDiscordShowGameNames(bool enabled);
+  void setDiscordShowWhenIdle(bool enabled);
   explicit SettingsManager(QObject *parent = nullptr);
   ~SettingsManager() override;
 
@@ -275,6 +284,9 @@ public:
   Q_INVOKABLE QStringList availableEncoders() const;
 
 signals:
+  void discordPresenceEnabledChanged();
+  void discordShowGameNamesChanged();
+  void discordShowWhenIdleChanged();
   // Video
   void videoBitrateChanged();
   void videoResolutionChanged();
@@ -328,6 +340,9 @@ signals:
   void settingsSaved();
 
 private:
+  bool m_discordPresenceEnabled = false;
+  bool m_discordShowGameNames = true;
+  bool m_discordShowWhenIdle = false;
   void loadDefaults();
   void migrateSettings(int fromVersion);
 

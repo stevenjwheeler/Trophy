@@ -362,6 +362,7 @@ ApplicationWindow {
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
+            { name: "Discord Rich Presence", section: "Discord Rich Presence", keywords: ["discord", "rich presence", "activity", "profile", "privacy", "game names", "idle"] },
             { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
             { name: "Detection Helpers", section: "Detection Helpers", keywords: ["helpers", "integration", "status", "enrolled", "game window helper", "window tracking", "vulkan", "opengl", "shim", "repair"] },
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },

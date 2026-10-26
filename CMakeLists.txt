@@ -253,6 +253,8 @@ set(CORE_SOURCES
     src/core/SystemTrayManager.cpp
     src/core/AutostartManager.cpp
     src/core/ControlServer.cpp
+    src/core/DiscordPresence.cpp
+    src/core/DiscordGameArtwork.cpp
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
     src/core/UpdateChecker.cpp
@@ -327,6 +329,8 @@ set(CORE_HEADERS
     src/core/SystemTrayManager.h
     src/core/AutostartManager.h
     src/core/ControlServer.h
+    src/core/DiscordPresence.h
+    src/core/DiscordGameArtwork.h
     src/core/GlobalShortcutManager.h
     src/core/ReplayManager.h
     src/core/UpdateChecker.h

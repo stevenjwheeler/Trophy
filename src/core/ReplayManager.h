@@ -69,6 +69,7 @@ public:
   bool isActive() const { return m_state == State::Running; }
   bool isStarting() const { return m_state == State::StartingCapture; }
   QString currentGame() const { return m_gameName; }
+  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   QVariantMap captureHealth() const;
 
   // Pure helpers (unit-tested): window/retention over segment lists.

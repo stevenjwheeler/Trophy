@@ -81,6 +81,7 @@ public:
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
   QString currentGameName() const { return m_currentGameName; }
+  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   qint64 recordingDuration() const; // milliseconds
   qint64 recordingSize() const;     // bytes
   QString currentFilePath() const { return m_currentFilePath; }

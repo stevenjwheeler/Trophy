@@ -74,6 +74,36 @@ protected:
 
 // --- Default Values ---
 
+TEST_F(SettingsManagerTest, DiscordDefaultsPersistenceNotificationsAndReset) {
+  EXPECT_FALSE(mgr->discordPresenceEnabled());
+  EXPECT_TRUE(mgr->discordShowGameNames());
+  EXPECT_FALSE(mgr->discordShowWhenIdle());
+  QSignalSpy enabled(mgr.get(), &SettingsManager::discordPresenceEnabledChanged);
+  QSignalSpy names(mgr.get(), &SettingsManager::discordShowGameNamesChanged);
+  QSignalSpy idle(mgr.get(), &SettingsManager::discordShowWhenIdleChanged);
+  mgr->setDiscordPresenceEnabled(true);
+  mgr->setDiscordShowGameNames(false);
+  mgr->setDiscordShowWhenIdle(true);
+  mgr->setDiscordShowWhenIdle(true);
+  EXPECT_EQ(enabled.count(), 1);
+  EXPECT_EQ(names.count(), 1);
+  EXPECT_EQ(idle.count(), 1);
+  {
+    SettingsManager loaded;
+    loaded.load();
+    EXPECT_TRUE(loaded.discordPresenceEnabled());
+    EXPECT_FALSE(loaded.discordShowGameNames());
+    EXPECT_TRUE(loaded.discordShowWhenIdle());
+  }
+  mgr->resetToDefaults();
+  EXPECT_FALSE(mgr->discordPresenceEnabled());
+  EXPECT_TRUE(mgr->discordShowGameNames());
+  EXPECT_FALSE(mgr->discordShowWhenIdle());
+  EXPECT_EQ(enabled.count(), 2);
+  EXPECT_EQ(names.count(), 2);
+  EXPECT_EQ(idle.count(), 2);
+}
+
 TEST_F(SettingsManagerTest, ShareWatermarkDefaultsOnPersistsOffAndResets) {
   EXPECT_TRUE(mgr->shareExportWatermark());
   QSignalSpy changed(mgr.get(), &SettingsManager::shareExportWatermarkChanged);
