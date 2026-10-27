@@ -7,6 +7,9 @@
 
 #include "UpdateChecker.h"
 
+#include "InstallInfo.h"
+
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
@@ -46,10 +49,6 @@ void UpdateChecker::setCurrentVersion(const QString &version) {
 
 bool UpdateChecker::parseVersion(const QString &tag, int *major,
                                   int *minor, int *patch) {
-  // Release tags are vX.Y.Z (the CI scheme stamps the tag on
-  // main). Branch stamps read "<base>-<branch>-<sha>" and must
-  // not compare against a release tag — a dev build is not
-  // "behind" its base tag, it's just not a release.
   static const QRegularExpression re(
       "^v?(\\d+)\\.(\\d+)\\.(\\d+)$");
   const auto m = re.match(tag.trimmed());
@@ -66,8 +65,8 @@ bool UpdateChecker::parseVersion(const QString &tag, int *major,
 }
 
 int UpdateChecker::compareVersions(int aMajor, int aMinor,
-                                    int aPatch, int bMajor,
-                                    int bMinor, int bPatch) {
+                                    int aPatch, int bMajor, int bMinor,
+                                    int bPatch) {
   const int a[3] = {aMajor, aMinor, aPatch};
   const int b[3] = {bMajor, bMinor, bPatch};
   for (int i = 0; i < 3; ++i) {
@@ -79,16 +78,89 @@ int UpdateChecker::compareVersions(int aMajor, int aMinor,
   return 0;
 }
 
+QString UpdateChecker::selectAssetUrl(const QJsonObject &root,
+                                       QString *outFileName,
+                                       QString *outDigest) const {
+  if (outFileName)
+    *outFileName = QString();
+  if (outDigest)
+    *outDigest = QString();
+
+  const QJsonArray assets = root.value("assets").toArray();
+  QString wantedSuffix;
+  switch (m_installKind) {
+  case InstallKind::AppImage:
+    wantedSuffix = QStringLiteral(".AppImage");
+    break;
+  case InstallKind::DebianPackage:
+    wantedSuffix = QStringLiteral(".deb");
+    break;
+  case InstallKind::RpmPackage:
+    wantedSuffix = QStringLiteral(".rpm");
+    break;
+  case InstallKind::PortablePrefix:
+    wantedSuffix = QStringLiteral(".tar.xz");
+    break;
+  default:
+    return QString();
+  }
+
+  for (const QJsonValue &v : assets) {
+    const QJsonObject a = v.toObject();
+    const QString name = a.value("name").toString();
+    if (!name.endsWith(wantedSuffix))
+      continue;
+    if (outFileName)
+      *outFileName = name;
+    if (outDigest)
+      *outDigest = a.value("digest").toString();
+    return a.value("browser_download_url").toString();
+  }
+  return QString();
+}
+
 void UpdateChecker::checkNow() {
-  if (m_currentVersion.isEmpty()) {
-    // Nothing to compare against: settle immediately so the Info
-    // page's spinner doesn't hang on a check that never runs.
+  if (m_currentVersion.isEmpty() && !m_forceFakeUpdate) {
     emit checkFinished(false, QString(), QString());
+    emit detailsReady(QString(), QString(), QString());
     return;
   }
   if (m_reply) {
-    // A check is already in flight; its finish covers this caller
-    // too, so concurrent callers coalesce onto the one reply.
+    return;
+  }
+  if (m_forceFakeUpdate) {
+    const QString ver = m_fakeUpdateVersion;
+    QString assetName;
+    switch (m_installKind) {
+    case InstallKind::DebianPackage:
+        assetName = QStringLiteral("Trophy-%1-amd64.deb").arg(ver);
+        break;
+    case InstallKind::RpmPackage:
+        assetName = QStringLiteral("Trophy-%1-x86_64.rpm").arg(ver);
+        break;
+    case InstallKind::PortablePrefix:
+        assetName = QStringLiteral("Trophy-%1-Linux.tar.xz").arg(ver);
+        break;
+    default:
+        assetName = QStringLiteral("Trophy-%1-x86_64.AppImage").arg(ver);
+        break;
+    }
+    m_latestAssetUrl =
+        QStringLiteral("https://github.com/stevenjwheeler/Trophy/releases/download/v%1/%2")
+            .arg(ver, assetName);
+    m_latestAssetFileName = assetName;
+    m_latestDigest.clear();
+    m_latestReleaseNotes =
+        QStringLiteral("## What's new in %1\n\n- Fake changelog entry one.\n"
+                       "- Fake changelog entry two.")
+            .arg(ver);
+    emit latestReleaseNotesChanged();
+    emit checkFinished(true, QStringLiteral("v%1").arg(ver),
+                      QStringLiteral(
+                          "https://github.com/stevenjwheeler/Trophy/releases/tag/v%1")
+                          .arg(ver));
+    emit detailsReady(m_latestAssetUrl, m_latestAssetFileName,
+                      m_latestDigest);
     return;
   }
   startRequest();
@@ -119,42 +191,49 @@ void UpdateChecker::onReplyFinished() {
   QString releaseUrl;
 
   if (reply->error() != QNetworkReply::NoError) {
-    // Offline / rate-limited / DNS hiccup: log only. A game
-    // recorder must never nag about connectivity.
-    qDebug("Update check failed: %s",
-           reply->errorString().toUtf8().constData());
-  } else {
-    const QJsonDocument doc =
-        QJsonDocument::fromJson(reply->readAll());
-    const QJsonObject root = doc.object();
-    const QString tagName = root["tag_name"].toString();
-    releaseUrl = root["html_url"].toString();
-    int rMajor = 0, rMinor = 0, rPatch = 0;
-    int cMajor = 0, cMinor = 0, cPatch = 0;
-    if (!parseVersion(tagName, &rMajor, &rMinor, &rPatch) ||
-        !parseVersion(m_currentVersion, &cMajor, &cMinor,
-                      &cPatch)) {
-      // Either side isn't a plain release tag (branch build or
-      // an unusual CI stamp) — nothing comparable, stay quiet.
-      qDebug("Update check: non-release tag shape (running '%s', "
+    qWarning("Update check failed: %s",
+             reply->errorString().toUtf8().constData());
+    emit checkFailed();
+    return;
+  }
+
+  const QJsonDocument doc =
+      QJsonDocument::fromJson(reply->readAll());
+  const QJsonObject root = doc.object();
+  const QString tagName = root["tag_name"].toString();
+  releaseUrl = root["html_url"].toString();
+  int rMajor = 0, rMinor = 0, rPatch = 0;
+  int cMajor = 0, cMinor = 0, cPatch = 0;
+  if (!parseVersion(tagName, &rMajor, &rMinor, &rPatch) ||
+      !parseVersion(m_currentVersion, &cMajor, &cMinor,
+                    &cPatch)) {
+    qWarning("Update check: non-release tag shape (running '%s', "
              "latest '%s')",
              m_currentVersion.toUtf8().constData(),
              tagName.toUtf8().constData());
-    } else {
-      latestVersion = tagName;
-      if (compareVersions(rMajor, rMinor, rPatch, cMajor, cMinor,
-                          cPatch) > 0) {
-        newer = true;
-        qDebug("Update available: %s (running %s)",
-               tagName.toUtf8().constData(),
-               m_currentVersion.toUtf8().constData());
-      }
-    }
+    emit checkFailed();
+    return;
   }
 
-  // One finish for a coalesced manual check; the daily
-  // schedule ignores the payload anyway.
+  latestVersion = tagName;
+  if (compareVersions(rMajor, rMinor, rPatch, cMajor, cMinor,
+                      cPatch) > 0) {
+    newer = true;
+    qDebug("Update available: %s (running %s)",
+           tagName.toUtf8().constData(),
+           m_currentVersion.toUtf8().constData());
+  }
+  QString fn, digest;
+  const QString url = selectAssetUrl(root, &fn, &digest);
+  m_latestAssetUrl = url;
+  m_latestAssetFileName = fn;
+  m_latestDigest = digest;
+  m_latestReleaseNotes = root.value("body").toString();
+  emit latestReleaseNotesChanged();
+
   emit checkFinished(newer, latestVersion, releaseUrl);
+  emit detailsReady(m_latestAssetUrl, m_latestAssetFileName,
+                    m_latestDigest);
 }
 
 } // namespace TrophyBackend

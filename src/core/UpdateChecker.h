@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "InstallInfo.h"
+
 #include <QDateTime>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -38,6 +40,8 @@ class UpdateChecker : public QObject {
   // AppVersion reaches QML). Empty disables checking entirely.
   Q_PROPERTY(QString currentVersion READ currentVersion WRITE
                  setCurrentVersion NOTIFY currentVersionChanged)
+  Q_PROPERTY(QString latestReleaseNotes READ latestReleaseNotes NOTIFY
+                 latestReleaseNotesChanged)
 
 public:
   explicit UpdateChecker(QObject *parent = nullptr);
@@ -45,6 +49,22 @@ public:
 
   QString currentVersion() const { return m_currentVersion; }
   void setCurrentVersion(const QString &version);
+
+  InstallKind installKind() const { return m_installKind; }
+  void setInstallKind(InstallKind kind) { m_installKind = kind; }
+
+  // Testing hook: when true, checkNow() skips the network and emits a
+  // synthetic "newer version available" result using fakeUpdateVersion().
+  bool forceFakeUpdate() const { return m_forceFakeUpdate; }
+  void setForceFakeUpdate(bool on) { m_forceFakeUpdate = on; }
+
+  QString fakeUpdateVersion() const { return m_fakeUpdateVersion; }
+  void setFakeUpdateVersion(const QString &v) { m_fakeUpdateVersion = v; }
+
+  QString latestAssetUrl() const { return m_latestAssetUrl; }
+  QString latestDigest() const { return m_latestDigest; }
+  QString latestAssetFileName() const { return m_latestAssetFileName; }
+  QString latestReleaseNotes() const { return m_latestReleaseNotes; }
 
   // Release tag -> comparable parts. Pure + static for unit
   // tests (no network involved). Returns false for non-release
@@ -66,16 +86,35 @@ signals:
   void currentVersionChanged();
   void checkFinished(bool newerAvailable, const QString &latestVersion,
                      const QString &releaseUrl);
+  // Emitted when a check cannot be completed (network/HTTP or
+  // unparseable release metadata). UI should report failure rather
+  // than "latest version".
+  void checkFailed();
+  // Emitted alongside checkFinished with the selected release asset (if any)
+  // for the running install kind. Empty when no asset matched.
+  void detailsReady(const QString &assetUrl, const QString &assetFileName,
+                    const QString &digest);
+  void latestReleaseNotesChanged();
 
 private slots:
   void onReplyFinished();
 
 private:
   void startRequest();
+  QString selectAssetUrl(const QJsonObject &root, QString *outFileName,
+                         QString *outDigest) const;
 
   QNetworkAccessManager m_network;
   QString m_currentVersion;
   QPointer<QNetworkReply> m_reply;
+
+  InstallKind m_installKind = InstallKind::Unknown;
+  bool m_forceFakeUpdate = false;
+  QString m_fakeUpdateVersion = QStringLiteral("99.0.0");
+  QString m_latestAssetUrl;
+  QString m_latestAssetFileName;
+  QString m_latestDigest;
+  QString m_latestReleaseNotes;
   // Bounds a hung GET: aborting settles via the normal error path so
   // one wedged request can't suppress checks for the whole session.
   QTimer m_requestTimeout;

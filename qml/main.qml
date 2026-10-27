@@ -694,6 +694,14 @@ ApplicationWindow {
                             id: infoPage
                             onReportBugRequested: window.app.reportBug()
                         }
+
+                        Connections {
+                            target: window.app
+                            function onUpdateDialogRequested() {
+                                window.currentPage = 3
+                                infoPage.showUpdateDialog = true
+                            }
+                        }
                     }
 
                     // In-app player: overlays the content area only,

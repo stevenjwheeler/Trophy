@@ -15,6 +15,8 @@ Page {
     id: root
     // Explicit dependencies; defaults preserve engine/creation-context hosts.
     property var updates: typeof updateChecker !== "undefined" ? updateChecker : null // qmllint disable unqualified
+    property var installer: typeof updateInstaller !== "undefined" ? updateInstaller : null // qmllint disable unqualified
+    property int installKindValue: typeof installKind !== "undefined" ? installKind : 4 // qmllint disable unqualified
     property string appVersion: typeof AppVersion !== "undefined" ? AppVersion : "" // qmllint disable unqualified
 
     signal reportBugRequested()
@@ -28,6 +30,11 @@ Page {
     // Release page behind the "Version X is available"
     // verdict, which opens it on click.
     property string updateReleaseUrl: ""
+    property string updateAssetUrl: ""
+    property string updateAssetFileName: ""
+    property string updateDigest: ""
+    property string updateLatestVersion: ""
+    property bool showUpdateDialog: false
     readonly property Flickable scrollContent: infoScroll.contentItem as Flickable
 
     Connections {
@@ -35,6 +42,7 @@ Page {
         function onCheckFinished(newerAvailable, latestVersion, releaseUrl) {
             root.updateChecking = false
             root.updateNewer = newerAvailable
+            root.updateLatestVersion = newerAvailable ? latestVersion : ""
             root.updateReleaseUrl = newerAvailable ? releaseUrl : ""
             if (newerAvailable) {
                 // Names both versions (they differ) and stays up:
@@ -47,6 +55,19 @@ Page {
                 root.updateStatus = qsTr("You're on the latest version.")
                 updateDismissTimer.restart()
             }
+        }
+        function onCheckFailed() {
+            root.updateChecking = false
+            root.updateNewer = false
+            root.updateLatestVersion = ""
+            root.updateReleaseUrl = ""
+            root.updateStatus = qsTr("Failed to check for updates.")
+            updateDismissTimer.restart()
+        }
+        function onDetailsReady(assetUrl, assetFileName, digest) {
+            root.updateAssetUrl = assetUrl
+            root.updateAssetFileName = assetFileName
+            root.updateDigest = digest
         }
     }
 
@@ -142,7 +163,7 @@ Page {
                 // A newer-version verdict opens its release page.
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    visible: root.updateChecking || root.updateStatus !== ""
+                    visible: root.updateChecking || (root.updateStatus !== "" && !root.updateNewer)
                     text: root.updateChecking ? qsTr("Checking…") : root.updateStatus
                     color: root.updateNewer ? Theme.primaryColor : Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
@@ -156,6 +177,127 @@ Page {
                     TapHandler {
                         enabled: root.updateNewer && root.updateReleaseUrl !== ""
                         onTapped: Qt.openUrlExternally(root.updateReleaseUrl)
+                    }
+                }
+
+                // Spacing between normal info and the update box.
+                Item {
+                    Layout.preferredHeight: Theme.spacingLarge
+                    visible: root.updateNewer
+                }
+
+                // Boxed update info.
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 420
+                    visible: root.updateNewer
+                    radius: Theme.radiusMedium
+                    color: Theme.withOpacity(Theme.textColor, 0.04)
+                    border.color: Theme.withOpacity(Theme.textColor, 0.12)
+                    border.width: 1
+                    implicitHeight: updateBoxCol.implicitHeight + Theme.spacingMedium * 2
+
+                    ColumnLayout {
+                        id: updateBoxCol
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingMedium
+                        spacing: Theme.spacingSmall
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: root.updateStatus
+                            color: Theme.primaryColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: qsTr("Install method: %1").arg(
+                                root.installKindValue === 0 ? qsTr("AppImage") :
+                                root.installKindValue === 1 ? qsTr("Debian package") :
+                                root.installKindValue === 2 ? qsTr("RPM package") :
+                                root.installKindValue === 3 ? qsTr("Portable install") :
+                                qsTr("Unknown"))
+                            color: Theme.textMutedColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        // Action button shown only when an update is available.
+                        TrophyButton {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: !(root.installer && root.installer.busy)
+                            text: root.installKindValue === 0
+                                ? qsTr("Update now")
+                                : qsTr("Download update")
+                            enabled: !(recordingManager && recordingManager.isRecording)
+                            opacity: enabled ? 1 : 0.5
+                            onClicked: {
+                                root.showUpdateDialog = true
+                            }
+                        }
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: recordingManager && recordingManager.isRecording
+                            text: qsTr("Recording in progress. Stop recording to update.")
+                            color: Theme.textMutedColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.installKindValue !== 0 && root.updateAssetFileName !== ""
+                            text: root.installKindValue === 1
+                                ? qsTr("Then run: sudo apt install ./%1").arg(root.updateAssetFileName)
+                                : root.installKindValue === 2
+                                ? qsTr("Then run: sudo dnf install ./%1").arg(root.updateAssetFileName)
+                                : qsTr("Extract with: tar -xf %1").arg(root.updateAssetFileName)
+                            color: Theme.textMutedColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        ProgressBar {
+                            id: updateProgressBar
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 8
+                            visible: root.installer !== null && root.installer.busy
+                            from: 0
+                            to: (root.installer && root.installer.totalBytes > 0)
+                                ? root.installer.totalBytes : 100
+                            value: root.installer ? root.installer.progressBytes : 0
+                            indeterminate: root.installer !== null &&
+                                           root.installer.totalBytes <= 0
+
+                            background: Rectangle {
+                                implicitWidth: 200
+                                implicitHeight: 8
+                                color: Theme.withOpacity(Theme.textColor, 0.12)
+                                radius: 4
+                            }
+                            contentItem: Rectangle {
+                                color: Theme.accentColor || "#3498db"
+                                radius: 4
+                                width: (root.installer && root.installer.totalBytes > 0)
+                                    ? (parent.width * (root.installer.progressBytes / root.installer.totalBytes))
+                                    : (root.installer && root.installer.totalBytes <= 0 ? parent.width : 0)
+                                height: parent.height
+                            }
+                        }
+
+                        Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.installer !== null && root.installer.busy
+                            text: root.installer ? root.installer.status : ""
+                            color: Theme.textMutedColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
                     }
                 }
 
@@ -658,6 +800,40 @@ Page {
 
         TapHandler {
             onTapped: footerLink.activated()
+        }
+    }
+
+    TrophyDialog {
+        id: updateDialog
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 40, 560)
+        visible: root.showUpdateDialog
+        onRejected: root.showUpdateDialog = false
+        title: root.updateLatestVersion !== ""
+            ? qsTr("Version %1").arg(root.updateLatestVersion)
+            : qsTr("Update available")
+        message: root.updates ? root.updates.latestReleaseNotes : ""
+        warningMessage: (recordingManager && recordingManager.isRecording)
+            ? qsTr("Recording in progress. Stop recording to update.")
+            : ""
+        confirmText: root.installKindValue === 0
+            ? qsTr("Auto-Update")
+            : qsTr("Download")
+        cancelText: qsTr("Cancel")
+        confirmEnabled: !(recordingManager && recordingManager.isRecording)
+        confirmColor: Theme.accentColor || "#3498db"
+        onAccepted: {
+            root.showUpdateDialog = false
+            if (root.installKindValue === 0) {
+                if (root.installer && !root.installer.busy)
+                    app.installUpdate()
+            } else {
+                if (root.updateAssetUrl !== "")
+                    Qt.openUrlExternally(root.updateAssetUrl)
+                else if (root.updateReleaseUrl !== "")
+                    Qt.openUrlExternally(root.updateReleaseUrl)
+            }
         }
     }
 

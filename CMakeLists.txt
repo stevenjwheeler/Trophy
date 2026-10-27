@@ -257,7 +257,9 @@ set(CORE_SOURCES
     src/core/DiscordGameArtwork.cpp
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
+    src/core/InstallInfo.cpp
     src/core/UpdateChecker.cpp
+    src/core/UpdateInstaller.cpp
     src/core/WindowService.cpp
     src/core/WindowChrome.cpp
     src/core/FrameDispatcher.cpp
@@ -333,7 +335,9 @@ set(CORE_HEADERS
     src/core/DiscordGameArtwork.h
     src/core/GlobalShortcutManager.h
     src/core/ReplayManager.h
+    src/core/InstallInfo.h
     src/core/UpdateChecker.h
+    src/core/UpdateInstaller.h
     src/core/WindowService.h
     src/core/WindowChrome.h
 )

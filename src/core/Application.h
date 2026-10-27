@@ -18,6 +18,7 @@
 namespace TrophyBackend {
 class ApplicationAudioProbeTest;
 class UpdateChecker;
+class UpdateInstaller;
 class RecordingManager;
 class SettingsManager;
 class StorageManager;
@@ -133,6 +134,8 @@ public:
   // Instant replay: routes tray/F10/hotkey requests with user feedback.
   Q_INVOKABLE void requestReplay();
   Q_INVOKABLE void requestBookmark();
+  Q_INVOKABLE void installUpdate();
+  Q_INVOKABLE void openUpdateDialog();
   Q_INVOKABLE QVariantMap captureHealth() const;
   // Track mute that follows the active pipeline (the dashboard meters).
   // The recording and the DVR own different mixers; muting only one
@@ -167,6 +170,7 @@ signals:
   void trayAvailabilityChanged();
   void detectionStatusChanged();
   void fatalError(const QString &message);
+  void updateDialogRequested();
 
 private:
   void queryCaptureAvailability();
@@ -209,6 +213,7 @@ private:
   std::unique_ptr<DiscordPresence> m_discordPresence;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
+  std::unique_ptr<UpdateInstaller> m_updateInstaller;
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
   std::unique_ptr<PreviewCache> m_previewCache;

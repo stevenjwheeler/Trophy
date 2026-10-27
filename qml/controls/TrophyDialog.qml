@@ -14,6 +14,7 @@ T.Dialog {
     property string confirmText: qsTr("Confirm")
     property string cancelText: qsTr("Cancel")
     property color confirmColor: Theme.accentColor || "#3498db"
+    property bool confirmEnabled: true
     readonly property color _text: Theme.textColor || "#ffffff"
     readonly property color _textMuted: Theme.textMutedColor || "#aaaaaa"
     readonly property color _accent: Theme.accentColor || "#3498db"
@@ -197,6 +198,8 @@ T.Dialog {
                 TrophyButton {
                     text: control.confirmText
                     baseColor: control.confirmColor
+                    enabled: control.confirmEnabled
+                    opacity: enabled ? 1 : 0.5
                     onClicked: control.accept()
                 }
 

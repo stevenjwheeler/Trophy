@@ -43,7 +43,9 @@
 #include "library/FilmstripCache.h"
 #include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
+#include "InstallInfo.h"
 #include "UpdateChecker.h"
+#include "UpdateInstaller.h"
 
 #include <QDateTime>
 #include <QDBusServiceWatcher>
@@ -404,8 +406,53 @@ void Application::initializeServices() {
   // release tag — parseVersion rejects them, so a dev build
   // stays silent instead of reading as "behind".
   m_updateChecker = std::make_unique<UpdateChecker>(this);
+  m_updateChecker->setInstallKind(InstallInfo::detect());
+  const QByteArray forceFake = qgetenv("TROPHY_FORCE_FAKE_UPDATE");
+  if (!forceFake.isEmpty() && forceFake != "0") {
+    m_updateChecker->setForceFakeUpdate(true);
+    const QByteArray v = qgetenv("TROPHY_FAKE_UPDATE_VERSION");
+    if (!v.isEmpty())
+      m_updateChecker->setFakeUpdateVersion(QString::fromUtf8(v));
+  }
   m_updateChecker->setCurrentVersion(
       QCoreApplication::applicationVersion());
+
+  m_updateInstaller = std::make_unique<UpdateInstaller>(this);
+  const QByteArray forceFail = qgetenv("TROPHY_FORCE_FAIL_UPDATE");
+  if (!forceFail.isEmpty() && forceFail != "0")
+    m_updateInstaller->setForceFail(true);
+  connect(m_updateInstaller.get(), &UpdateInstaller::finished, this,
+          [this](bool ok, const QString &message) {
+            if (ok)
+              return;
+            qWarning("UpdateInstaller finished with failure: %s",
+                     message.toUtf8().constData());
+            if (m_notificationService)
+              m_notificationService->showNotification(
+                  QStringLiteral("Trophy"),
+                  QStringLiteral("Auto-update failed, we have opened the "
+                                 "releases page for you to update manually."),
+                  QStringLiteral("trophy"), 8000, 1);
+            // Auto-fallback: open the release/asset page so the user
+            // can download and install manually.
+            const QString url = m_updateChecker && !m_updateChecker->latestAssetUrl().isEmpty()
+                                    ? m_updateChecker->latestAssetUrl()
+                                    : (m_latestReleaseUrl.isEmpty()
+                                           ? QString()
+                                           : m_latestReleaseUrl);
+            if (!url.isEmpty()) {
+              QDesktopServices::openUrl(QUrl(url));
+            }
+          });
+  if (m_recordingManager) {
+    m_updateInstaller->setRecording(m_recordingManager->isRecording());
+    connect(m_recordingManager.get(), &RecordingManager::stateChanged, this,
+            [this](RecordingManager::RecordingState) {
+              if (m_updateInstaller && m_recordingManager)
+                m_updateInstaller->setRecording(
+                    m_recordingManager->isRecording());
+            });
+  }
   connect(m_updateChecker.get(), &UpdateChecker::checkFinished, this,
           [this](bool newerAvailable, const QString &latestVersion,
                  const QString &releaseUrl) {
@@ -472,6 +519,9 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());
   context->setContextProperty("replayManager", m_replayManager.get());
   context->setContextProperty("updateChecker", m_updateChecker.get());
+  context->setContextProperty("updateInstaller", m_updateInstaller.get());
+  context->setContextProperty("installKind",
+                             static_cast<int>(InstallInfo::detect()));
 }
 
 void Application::preparePlayerCaches(const QString &filePath) {
@@ -873,8 +923,7 @@ void Application::connectSignals() {
             // dismissal below so it never clears pending
             // state (the two notices never coexist).
             if (action == QStringLiteral("open-update")) {
-              if (!m_latestReleaseUrl.isEmpty())
-                QDesktopServices::openUrl(QUrl(m_latestReleaseUrl));
+              openUpdateDialog();
               m_notificationService->closeLastNotification();
               return;
             }
@@ -1630,6 +1679,42 @@ void Application::requestBookmark() {
       saved ? "Find this moment on the recording's player timeline."
             : "Could not save the bookmark. Wait for video frames and check recording-folder permissions.",
       {}, 5000, 2);
+}
+
+void Application::installUpdate() {
+  if (!m_updateChecker || !m_updateInstaller)
+    return;
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    qWarning("installUpdate: blocked while recording");
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Stop recording before updating."), QStringLiteral("trophy"),
+          5000, 2);
+    return;
+  }
+  const int kind = static_cast<int>(InstallInfo::detect());
+  qWarning("installUpdate: kind=%d asset=%s", kind,
+           m_updateChecker->latestAssetUrl().toUtf8().constData());
+  if (kind != 0) {
+    const QString url = m_updateChecker->latestAssetUrl();
+    if (!url.isEmpty())
+      QDesktopServices::openUrl(QUrl(url));
+    return;
+  }
+  if (m_updateChecker->forceFakeUpdate()) {
+    m_updateInstaller->simulate();
+    return;
+  }
+  const QString target = QString::fromUtf8(qgetenv("APPIMAGE"));
+  m_updateInstaller->installAppImage(m_updateChecker->latestAssetUrl(),
+                                     m_updateChecker->latestDigest(),
+                                     target);
+}
+
+void Application::openUpdateDialog() {
+  showMainWindow();
+  emit updateDialogRequested();
 }
 
 QVariantMap Application::captureHealth() const {

@@ -4,6 +4,12 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_InstallInfo test_InstallInfo.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/InstallInfo.cpp)
+target_include_directories(test_InstallInfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_InstallInfo PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_InstallInfo)
+
 add_executable(test_DiscordPresence test_DiscordPresence.cpp
     test_DiscordGameArtwork.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DiscordPresence.cpp
