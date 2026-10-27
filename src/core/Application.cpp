@@ -576,6 +576,17 @@ void Application::connectSignals() {
         m_settingsManager->waylandRestoreTokens().keys());
   }
   connect(m_windowMonitor.get(), &WaylandWindowMonitor::windowsChanged, this, [this]() {
+            // If an authorize prompt was deferred because only a transient
+            // window (mod loader / splash) was visible, re-trigger it now
+            // that a real game window may have appeared.
+            const QString pendingAuth = !m_pendingAutoRecordGame.isEmpty()
+                                            ? m_pendingAutoRecordGame
+                                            : m_pendingDvrGame;
+            if (!pendingAuth.isEmpty() && m_gameDetector &&
+                m_gameDetector->hasVisibleWindow() &&
+                m_gameDetector->currentGameName() == pendingAuth) {
+              m_detectionDebounceTimer->start();
+            }
             if (!isCurrentCaptureGame(m_pendingWindowGame) ||
                 !m_gameDetector->hasVisibleWindow())
               return;
@@ -900,6 +911,16 @@ void Application::connectSignals() {
             }
             m_captureSelectionForRecording = isRecord;
             m_notificationService->showCaptureSelectionHint(game);
+            // Don't start capturing a transient window (mod loader / splash).
+            // Defer until a real game window appears.
+            if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+              qCInfo(appLog) << "Deferring capture for" << game
+                             << "(no visible game window yet)";
+              m_pendingWindowGame = game;
+              m_pendingWindowIsRecord = isRecord;
+              m_windowWaitTimer->start();
+              return;
+            }
             if (isRecord)
               m_recordingManager->startRecording(game);
             else
@@ -1268,6 +1289,14 @@ void Application::onAuthorizeDebounceFired() {
                               : m_pendingDvrGame;
   if (pending.isEmpty())
     return;
+  // Wait for a real game window (not a transient mod-loader or splash
+  // screen) before prompting.  Keep the pending state so the prompt
+  // re-fires when the actual game window appears.
+  if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+    qCDebug(appLog) << "Deferring authorize prompt for" << pending
+                    << "(no visible game window yet)";
+    return;
+  }
   if (!shouldShowAuthorizePrompt(pending)) {
     qCInfo(appLog) << "Skipping authorize prompt for" << pending
                    << "(blocked or already approved)";

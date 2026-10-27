@@ -893,6 +893,21 @@ bool GameDetectionService::hasVisibleWindow() const {
   for (const WindowInfo &w : m_monitor->windows()) {
     if (w.pid <= 0 || w.minimized)
       continue;
+    // Transient windows (mod loaders, splash screens, launcher dialogs) are
+    // usually either small or not fullscreen.  A real game window is
+    // fullscreen or borderless (covering >= 90% of the output).  Ignore
+    // non-fullscreen windows that don't cover the output so that
+    // auto-recording and restore-token capture wait for the actual game
+    // window instead of binding to a temporary surface that disappears.
+    if (!w.fullscreen && !coversOutput(w)) {
+      // Fall back to a size heuristic when output geometry is unknown.
+      if (w.outputWidth <= 0 || w.outputHeight <= 0) {
+        if (w.width < 640 || w.height < 480)
+          continue;
+      } else {
+        continue;
+      }
+    }
     const auto it = m_pidToGameName.find(w.pid);
     if (it != m_pidToGameName.end() && it.value() == m_currentGameName)
       return true;

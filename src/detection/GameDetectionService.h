@@ -79,7 +79,7 @@ public:
    * guarantees a picker even with a valid token. Application waits for
    * this before starting a token-armed capture.
    */
-  bool hasVisibleWindow() const;
+  Q_INVOKABLE bool hasVisibleWindow() const;
 
   // Whitelist/Blacklist Management (invokable for the Games page;
   // true when the list actually changed, for UI feedback)

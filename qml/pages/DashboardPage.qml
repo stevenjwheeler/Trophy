@@ -1082,7 +1082,7 @@ Page {
                             Rectangle {
                                 width: 10; height: 10; radius: 5
                                 Layout.alignment: Qt.AlignVCenter
-                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
+                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? Theme.successColor : Theme.warningColor) : Theme.textMutedColor)
                                 SequentialAnimation on opacity {
                                     running: (recordingManager && recordingManager.isRecording)
                                     loops: Animation.Infinite
@@ -1094,7 +1094,7 @@ Page {
                                 text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
                                       : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
                                       : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
-                                      : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
+                                      : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? qsTr("READY") : qsTr("WAITING FOR GAME")) : qsTr("IDLE"))
                                 font.pixelSize: 10; font.weight: Font.Black
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                             }
