@@ -89,6 +89,7 @@ public:
   Q_INVOKABLE Recording *get(int index) const;
   Q_INVOKABLE Recording *getRecording(const QString &filePath) const;
   Q_INVOKABLE QUrl localFileUrl(const QString &filePath) const;
+  Q_INVOKABLE QString localFilePath(const QUrl &url) const;
   Q_INVOKABLE void deleteRecording(const QString &filePath);
   Q_INVOKABLE void removeRecording(const QString &filePath);
   /**

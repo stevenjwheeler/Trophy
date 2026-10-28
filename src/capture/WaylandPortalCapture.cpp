@@ -6,6 +6,7 @@
  */
 
 #include "WaylandPortalCapture.h"
+#include <QDBusServiceWatcher>
 
 #include "capture/EglDmaBuf.h"
 #include "capture/PipeWireVideoFormat.h"
@@ -27,6 +28,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QUuid>
 #include <chrono>
+#include <cerrno>
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/type.h>
@@ -306,6 +308,11 @@ WaylandPortalCapture::WaylandPortalCapture(QObject *parent)
   connect(&m_startWatchdog, &QTimer::timeout, this,
           &WaylandPortalCapture::onStartWatchdogTimeout);
   ensureResponseSubscription();
+  auto *portalOwner = new QDBusServiceWatcher(
+      "org.freedesktop.portal.Desktop", QDBusConnection::sessionBus(),
+      QDBusServiceWatcher::WatchForOwnerChange, this);
+  connect(portalOwner, &QDBusServiceWatcher::serviceOwnerChanged,
+          this, &WaylandPortalCapture::onPortalOwnerChanged);
 }
 
 void WaylandPortalCapture::ensureResponseSubscription() {
@@ -331,7 +338,9 @@ void WaylandPortalCapture::ensureResponseSubscription() {
   bus.connect("org.freedesktop.portal.Desktop", QString(),
               "org.freedesktop.portal.Request", "Response", this,
               SLOT(onStartResponse(unsigned int, QVariantMap)));
-  m_responseSubscribed = true;
+  bus.connect("org.freedesktop.portal.Desktop", QString(),
+              "org.freedesktop.portal.Session", "Closed", this,
+              SLOT(onPortalSessionClosed(QVariantMap)));
   m_responseSubscribed = true;
 }
 
@@ -340,6 +349,7 @@ WaylandPortalCapture::~WaylandPortalCapture() {
 }
 
 bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
+  m_lastErrorKind = CaptureErrorKind::Other;
   if (m_retiring || m_capturing || m_starting)
     return false;
   m_config = config;
@@ -479,16 +489,54 @@ void WaylandPortalCapture::closePortalSession() {
   if (m_sessionHandle.isEmpty())
     return;
   const QString handle = m_sessionHandle;
+  const QString owner = m_sessionOwner;
   m_sessionHandle.clear();
+  m_sessionOwner.clear();
   if (!QDBusConnection::sessionBus().isConnected())
     return;
   // Fire-and-forget: a blocking Close on the GUI thread can hang teardown
   // if the portal side is ever slow to answer.
-  const auto close = QDBusMessage::createMethodCall(
-      "org.freedesktop.portal.Desktop", handle,
+  auto close = QDBusMessage::createMethodCall(
+      owner.isEmpty() ? QStringLiteral("org.freedesktop.portal.Desktop") : owner, handle,
       "org.freedesktop.portal.Session", "Close");
+  close.setAutoStartService(false);
   QDBusConnection::sessionBus().asyncCall(close);
   qDebug() << "Wayland Portal: session closed:" << handle;
+}
+
+void WaylandPortalCapture::onPortalSessionClosed(const QVariantMap &) {
+  if (!calledFromDBus() || m_sessionHandle.isEmpty() ||
+      message().path() != m_sessionHandle || message().service() != m_sessionOwner)
+    return;
+  portalSessionLost(QStringLiteral("Wayland Portal: screen sharing session was closed"),
+                    CaptureErrorKind::SourceUnavailable);
+}
+
+void WaylandPortalCapture::onPortalOwnerChanged(const QString &, const QString &oldOwner,
+                                             const QString &newOwner) {
+  if (m_sessionHandle.isEmpty() || oldOwner.isEmpty() || oldOwner != m_sessionOwner ||
+      oldOwner == newOwner)
+    return;
+  portalSessionLost(QStringLiteral("Wayland Portal: screen sharing service disappeared"));
+}
+
+void WaylandPortalCapture::portalSessionLost(const QString &reason, CaptureErrorKind kind) {
+  // The session no longer exists. Do not send Close to a replacement service.
+  // Retire logical delivery before notifying the manager; its normal error
+  // path owns asynchronous native drainage/finalization. Never tear down a
+  // PipeWire stream or wait for an entered callback in this D-Bus slot.
+  m_sessionHandle.clear();
+  m_sessionOwner.clear();
+  m_nativeEventsEnabled.store(false);
+  ++m_nativeGeneration;
+  const bool active = m_capturing.exchange(false) || m_starting;
+  clearStartGuard();
+  // A new start must wait until the owner's normal finishStopCapture drains
+  // the old native objects, even if an error receiver tries to restart inline.
+  if (active && !m_retiring.exchange(true)) {
+    m_lastErrorKind = kind;
+    emit captureError(reason);
+  }
 }
 
 bool WaylandPortalCapture::isCapturing() const { return m_capturing; }
@@ -608,6 +656,7 @@ void WaylandPortalCapture::onSessionCreated(unsigned int response,
     return;
   }
   qDebug() << "Wayland Portal: Session created:" << m_sessionHandle;
+  m_sessionOwner = message().service();
 
   requestSelectSources();
 }
@@ -943,6 +992,32 @@ bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
     return false;
   }
 
+  static const pw_core_events coreEvents = [] {
+    pw_core_events events{};
+    events.version = PW_VERSION_CORE_EVENTS;
+    events.error = WaylandPortalCapture::on_core_error;
+    return events;
+  }();
+  pw_core_add_listener(m_pw_core, &m_pw_core_listener, &coreEvents, this);
+
+  // A node can become inaccessible without disconnecting the core or putting
+  // the stream in ERROR (for example, a per-client read-permission removal).
+  // Observe only the granted capture node; this is not process discovery or
+  // pre-grant polling. Normal renegotiation keeps the same node identity.
+  m_pw_registry = pw_core_get_registry(m_pw_core, PW_VERSION_REGISTRY, 0);
+  if (!m_pw_registry) {
+    pw_thread_loop_unlock(m_pw_loop);
+    stopPipeWireStream();
+    return false;
+  }
+  static const pw_registry_events registryEvents = [] {
+    pw_registry_events events{};
+    events.version = PW_VERSION_REGISTRY_EVENTS;
+    events.global_remove = WaylandPortalCapture::on_registry_global_remove;
+    return events;
+  }();
+  pw_registry_add_listener(m_pw_registry, &m_pw_registry_listener, &registryEvents, this);
+
   static const pw_stream_events stream_events = [] {
     pw_stream_events e = {};
     e.version = PW_VERSION_STREAM_EVENTS;
@@ -1054,7 +1129,13 @@ void WaylandPortalCapture::stopPipeWireStream() {
     m_pw_stream = nullptr;
   }
 
+  if (m_pw_registry) {
+    spa_hook_remove(&m_pw_registry_listener);
+    pw_proxy_destroy(reinterpret_cast<pw_proxy *>(m_pw_registry));
+    m_pw_registry = nullptr;
+  }
   if (m_pw_core) {
+    spa_hook_remove(&m_pw_core_listener);
     pw_core_disconnect(m_pw_core);
     m_pw_core = nullptr;
   }
@@ -1078,12 +1159,37 @@ void WaylandPortalCapture::postNativeReady(quint64 generation) {
   }, Qt::QueuedConnection);
 }
 
-void WaylandPortalCapture::postNativeError(const QString &error, quint64 generation) {
-  QMetaObject::invokeMethod(this, [this, error, generation] {
+void WaylandPortalCapture::postNativeError(const QString &error, quint64 generation,
+                                          CaptureErrorKind kind) {
+  QMetaObject::invokeMethod(this, [this, error, generation, kind] {
     if (m_nativeEventsEnabled.load() && generation == m_nativeGeneration.load() &&
-        !m_retiring.load())
-      emit captureError(error);
+        !m_retiring.load()) {
+      // Keep the portal indicator honest even if only PipeWire disappeared.
+      // The shared retirement gate coalesces stream/core terminal events and
+      // rejects late ready/error callbacks before manager teardown runs.
+      closePortalSession();
+      portalSessionLost(error, kind);
+    }
   }, Qt::QueuedConnection);
+}
+
+void WaylandPortalCapture::on_core_error(void *data, uint32_t id, int, int result,
+                                       const char *message) {
+  auto *self = static_cast<WaylandPortalCapture *>(data);
+  if (!self->m_nativeEventsEnabled.load() ||
+      (id != PW_ID_CORE && result != -EPIPE && result != -ECONNRESET && result != -ENOTCONN))
+    return;
+  self->postNativeError(QStringLiteral("PipeWire connection failed: ") +
+      QString::fromUtf8(message ? message : "connection lost"), self->m_nativeGeneration.load());
+}
+
+void WaylandPortalCapture::on_registry_global_remove(void *data, uint32_t id) {
+  auto *self = static_cast<WaylandPortalCapture *>(data);
+  if (self->m_nativeEventsEnabled.load() && self->m_pipewireNodeId >= 0 &&
+      id == static_cast<uint32_t>(self->m_pipewireNodeId)) {
+    self->postNativeError(QStringLiteral("PipeWire capture source disappeared or access was revoked"),
+                          self->m_nativeGeneration.load(), CaptureErrorKind::SourceUnavailable);
+  }
 }
 
 void WaylandPortalCapture::on_stream_state_changed(void *data,
@@ -1101,6 +1207,8 @@ void WaylandPortalCapture::on_stream_state_changed(void *data,
     qCritical() << "PipeWire stream error:"
                 << (error ? error : "Unknown error");
     self->postNativeError(error ? error : "Unknown PipeWire error", generation);
+  } else if (state == PW_STREAM_STATE_UNCONNECTED && old != PW_STREAM_STATE_UNCONNECTED) {
+    self->postNativeError(QStringLiteral("PipeWire video stream disconnected"), generation);
   }
 }
 

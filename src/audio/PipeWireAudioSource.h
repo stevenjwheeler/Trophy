@@ -84,7 +84,8 @@ public:
    */
   static std::unique_ptr<PipeWireAudioSource>
   createApplicationSource(uint32_t nodeId, const QString &nodeName = {},
-                          const QString &serial = {});
+                           const QString &serial = {},
+                           const QString &expectedBinary = {});
   static std::unique_ptr<PipeWireAudioSource>
    createInputSource(const QString &deviceName, bool deferResolution = false);
 
@@ -97,7 +98,13 @@ public:
    */
   static uint32_t findNodeByProcessName(const QString &processName,
                                         QString *outNodeName = nullptr,
-                                        QString *outSerial = nullptr);
+                                         QString *outSerial = nullptr);
+
+  // Exact, case-insensitive binary identity for a saved Voice app. Never
+  // accepts node/app display names (e.g. unrelated Chromium streams).
+  static uint32_t findNodeByBinary(const QString &binary,
+                                   QString *outNodeName = nullptr,
+                                   QString *outSerial = nullptr);
 
   /**
    * @brief Enumerate PipeWire nodes to find one matching a process ID.
@@ -199,6 +206,7 @@ private:
   uint32_t m_targetNodeId;
   QString m_targetNodeName; // PW_KEY_NODE_NAME for target.object hint
   QString m_targetSerial;   // object.serial for WirePlumber 0.5 target.object
+  QString m_expectedBinary; // Strict Voice identity; empty for game hints.
   AudioConfig m_config;
   // Published on the GUI thread (setCallback), loaded-and-copied on the
   // PipeWire thread before invoking — mirrors

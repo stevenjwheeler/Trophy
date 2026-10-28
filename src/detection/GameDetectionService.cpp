@@ -1,4 +1,5 @@
 #include "GameDetectionService.h"
+#include "PrerequisiteInstallers.h"
 #include "DefaultAppCatalog.h"
 #include "GameWhitelist.h"
 #include "WaylandWindowMonitor.h"
@@ -157,6 +158,16 @@ uint GameDetectionService::steamAppIdForPid(qint64 pid) {
   return 0;
 }
 
+QVariantMap GameDetectionService::captureIdentityInfo(const QString &gameName) const {
+  if (!isGameRunning() || gameName != m_currentGameName || m_currentGameKey.isEmpty())
+    return {};
+  QVariantMap info{{"detectedGameKey", m_currentGameKey},
+                   {"detectedGamePid", m_currentGamePid}};
+  const auto steamId = steamAppIdFromAppId(m_currentGameKey);
+  if (steamId) info["detectedSteamAppId"] = QString::number(steamId);
+  return info;
+}
+
 uint GameDetectionService::steamAppIdFromAppId(const QString &appId) {
   static const QRegularExpression re("^steam_app_(\\d+)$",
                                      QRegularExpression::CaseInsensitiveOption);
@@ -270,7 +281,8 @@ GameDetectionService::resolveReporterIdentity(const QString &reporter,
   };
   const auto helper = [](const QString &name) {
     const QString key = GameWhitelist::normalizeKey(name);
-    return QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
+    return prerequisiteInstallerNames().contains(key) ||
+           QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
                        "steam-runtime-launcher-service", "pressure-vessel-wrap",
                        "d3ddriverquery", "d3ddriverquery64", "steam gpu query",
                        "wineopenxr test instance", "hellovr_vulkan", "xalia",
@@ -881,6 +893,21 @@ bool GameDetectionService::hasVisibleWindow() const {
   for (const WindowInfo &w : m_monitor->windows()) {
     if (w.pid <= 0 || w.minimized)
       continue;
+    // Transient windows (mod loaders, splash screens, launcher dialogs) are
+    // usually either small or not fullscreen.  A real game window is
+    // fullscreen or borderless (covering >= 90% of the output).  Ignore
+    // non-fullscreen windows that don't cover the output so that
+    // auto-recording and restore-token capture wait for the actual game
+    // window instead of binding to a temporary surface that disappears.
+    if (!w.fullscreen && !coversOutput(w)) {
+      // Fall back to a size heuristic when output geometry is unknown.
+      if (w.outputWidth <= 0 || w.outputHeight <= 0) {
+        if (w.width < 640 || w.height < 480)
+          continue;
+      } else {
+        continue;
+      }
+    }
     const auto it = m_pidToGameName.find(w.pid);
     if (it != m_pidToGameName.end() && it.value() == m_currentGameName)
       return true;

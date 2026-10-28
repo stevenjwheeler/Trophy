@@ -12,6 +12,7 @@
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <qlogging.h>
 
@@ -125,6 +126,36 @@ QString AudioMixer::semanticSourceName(int role) const {
     }
   }
   return source ? source->displayName() : QString();
+}
+
+QVariantMap AudioMixer::semanticAudioDiagnostics(int role) const {
+  if (role < 0 || role >= kTrackCount) return {};
+  SourceCallbackHandle callback;
+  {
+    std::lock_guard lock(m_mutex);
+    for (const auto &track : m_tracks) {
+      if (track.semanticRole == role && track.source) {
+        callback = track.sourceCallbackActive;
+        break;
+      }
+    }
+  }
+  const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  const auto summary = callback ? callback->signalStats.summary(now) : AudioSignalStats::Summary{};
+  const bool muted = isSemanticTrackMuted(role);
+  QVariantMap result{{"received", summary.received}, {"muted", muted}};
+  if (!summary.received) return result;
+  result["lastBufferAgeMs"] = QVariant::fromValue(summary.ageMs);
+  result["fullScaleSamplesTotal"] = QVariant::fromValue(summary.totalClippedSamples);
+  result["clippingRisk"] = summary.clipping;
+  if (summary.recent) {
+    result["peak"] = muted ? 0.0 : summary.peak;
+    result["rms"] = muted ? 0.0 : summary.rms;
+    result["fullScaleSamplesRecent"] = QVariant::fromValue(summary.clippedSamples);
+  }
+  if (summary.held) result["peakHold"] = summary.heldPeak;
+  return result;
 }
 
 void AudioMixer::applySourceRole(Track &track) {
@@ -719,12 +750,23 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
 
   // Calculate peak level for metering
   float peak = 0.0f;
-  int totalSamples = frameCount * m_channels;
+  if (!samples || frameCount <= 0 || m_channels <= 0 || frameCount > INT_MAX / m_channels)
+    return;
+  const int totalSamples = frameCount * m_channels;
+  double signalPeak = 0.0, squares = 0.0;
+  uint64_t fullScaleSamples = 0;
 
   for (int i = 0; i < totalSamples; i++) {
     float absVal = std::abs(samples[i]);
     if (absVal > peak) {
       peak = absVal;
+    }
+    // The audio encoder treats non-finite PCM as zero. Diagnostics must
+    // remain finite too, without changing the borrowed source buffer.
+    if (std::isfinite(samples[i])) {
+      signalPeak = std::max(signalPeak, double(absVal));
+      squares += double(samples[i]) * samples[i];
+      if (absVal >= 1.0f) ++fullScaleSamples;
     }
   }
 
@@ -762,7 +804,9 @@ void AudioMixer::onAudioReceived(int trackIndex, const float *samples,
   const int64_t nowUs =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
-          .count();
+           .count();
+  sourceCallback->signalStats.record(nowUs, muted ? 0.0 : signalPeak,
+      muted ? 0.0 : squares, uint64_t(totalSamples), muted ? 0 : fullScaleSamples);
   const int64_t lastEmitUs =
       track.lastLevelEmitUs.load(std::memory_order_relaxed);
   if (nowUs - lastEmitUs >= 100000) {

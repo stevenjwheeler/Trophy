@@ -76,6 +76,22 @@ class ReporterAbiTest(unittest.TestCase):
     def test_complete_fixture_passes(self):
         self.assertEqual(self.check_fixture()["status"], "static-check-pass")
 
+    def test_i386_versioned_symbol_closure(self):
+        def x86(text):
+            return text.replace("ELF64", "ELF32").replace("Advanced Micro Devices X86-64", "Intel 80386")
+        objects = {Path("/fixture/reporter.so"): abi.parse_elf(x86(CONSUMER)),
+                   Path("/fixture/libfixture.so.1"): abi.parse_elf(x86(PROVIDER))}
+        with patch.object(abi, "inspect", side_effect=lambda path: objects[Path(path)]):
+            result = abi.check(Path("/fixture/reporter.so"),
+                               {"libfixture.so.1": [Path("/fixture/libfixture.so.1")]})
+        self.assertEqual(result["status"], "static-check-pass")
+        self.assertEqual(result["class"], "ELF32")
+
+    def test_matching_version_name_without_required_export_fails(self):
+        result = self.check_fixture(PROVIDER.replace("fixture@@FIXTURE_1.0", "different@@FIXTURE_1.0"))
+        self.assertTrue(any("missing symbol fixture@FIXTURE_1.0" in error for error in result["errors"]))
+        self.assertFalse(any("missing versions" in error for error in result["errors"]))
+
     def test_missing_version_and_symbol_fail(self):
         report = self.check_fixture(PROVIDER.replace("FIXTURE_1.0", "FIXTURE_0.9"))
         self.assertTrue(any("missing versions" in error for error in report["errors"]))

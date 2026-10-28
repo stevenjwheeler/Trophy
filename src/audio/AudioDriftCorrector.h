@@ -38,6 +38,9 @@ public:
   explicit AudioDriftCorrector(int sampleRate, int channels,
                                Clock clock = {});
   ~AudioDriftCorrector();
+  // Start a fresh servo origin after a source discontinuity; do not stretch
+  // replacement PCM to compensate for time with no captured input.
+  void reset();
 
   AudioDriftCorrector(const AudioDriftCorrector &) = delete;
   AudioDriftCorrector &operator=(const AudioDriftCorrector &) = delete;

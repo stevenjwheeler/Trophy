@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
+#include "PrerequisiteInstallers.h"
+
 #include <QString>
 #include <QStringList>
 #include <QList>
@@ -18,6 +20,8 @@ struct DefaultAppInfo {
 
 inline const QList<DefaultAppInfo> &defaultAppCatalog() {
   static const QList<DefaultAppInfo> apps{
+      {"vc_redist", "generic-game", visualCppInstallerNames(), {}},
+      {"dxsetup", "generic-game", {}, {}},
       {"xalia", "generic-game", {}, {}},
       {"steam", "steam", {"com.valvesoftware.steam"}, {}},
       {"discord", "discord", {"com.discordapp.discord"}, {}},

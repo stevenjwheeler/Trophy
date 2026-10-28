@@ -69,6 +69,7 @@ public:
   bool isActive() const { return m_state == State::Running; }
   bool isStarting() const { return m_state == State::StartingCapture; }
   QString currentGame() const { return m_gameName; }
+  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   QVariantMap captureHealth() const;
 
   // Pure helpers (unit-tested): window/retention over segment lists.
@@ -112,6 +113,7 @@ private slots:
 private:
   GameDetectionService *m_gameDetector = nullptr; // owner outlives this manager
   QString m_captureIdentity;
+  QVariantMap m_detectedGameInfo;
   enum class State { Idle, StartingCapture, Running, Stopping };
 
   void setState(State s);

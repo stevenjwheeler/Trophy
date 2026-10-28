@@ -2,385 +2,421 @@ name: Trophy CI
 
 on:
   push:
-    branches: [ '**' ]
-    tags: [ 'v*' ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:
 
-# One run per ref: new pushes cancel stale ones (tags unaffected —
-# each tag is its own ref group, so releases never cancel).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege by default; jobs that publish escalate themselves.
 permissions:
   contents: read
 
 jobs:
-  # A push carrying both a branch ref and a v* tag on the same commit
-  # would build twice (once per ref). The tag run covers a tagged main
-  # commit (branch build skipped); any other branch keeps the branch run
-  # and the tag run is dropped, so tags only ever build once.
-  gate:
+  build:
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.check.outputs.skip }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: check
-        run: |
-          REF_TYPE="${{ github.ref_type }}"
-          REF_NAME="${{ github.ref_name }}"
-          SKIP=false
-          if [[ "$REF_TYPE" == "branch" && "$REF_NAME" == "main" ]] && git describe --exact-match --match 'v*' HEAD 2>/dev/null; then
-            echo "Release commit already covered by the tag run — skipping branch build."
-            SKIP=true
-          elif [[ "$REF_TYPE" == "tag" && "$REF_NAME" == v* ]]; then
-            if git show-ref --verify --quiet refs/remotes/origin/main; then
-              MAIN_REF="origin/main"
-            elif git show-ref --verify --quiet refs/heads/main; then
-              MAIN_REF="main"
-            else
-              MAIN_REF=""
-            fi
-            if [[ -n "$MAIN_REF" ]] && ! git merge-base --is-ancestor HEAD "$MAIN_REF"; then
-              echo "Tag on a non-main commit — covered by the branch build, skipping tag run."
-              SKIP=true
-            fi
-          fi
-          echo "skip=$SKIP" >> $GITHUB_OUTPUT
-
-  build-and-test:
-    needs: gate
-    if: needs.gate.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    env:
-      APPIMAGE_EXTRACT_AND_RUN: 1
-    
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          # Full history + tags: version resolution needs
-          # `git describe` to see tags on every event type.
           fetch-depth: 0
-
       - name: Resolve version
+        id: version
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          SHA=$(git rev-parse --short HEAD)
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "main" ]]; then
-            # Main is the release line: stamp the tag itself, leading v
-            # included (e.g. v0.9.4), never a commit id. Falls back to
-            # v0.0.0 when no tag is reachable.
-            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          elif [[ ${GITHUB_HEAD_REF:-$GITHUB_REF_NAME} == "dev" ]]; then
-            # Dev line: base tag plus -dev- and the commit
-            # (e.g. v0.9.4-dev-f1f465b). Releases are cut manually;
-            # CI only names the artifacts.
-            BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            VERSION="${BASE}-dev-${SHA}"
-          else
-            BRANCH=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}
-            SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^A-Za-z0-9.-]/-/g')
-            BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
-            VERSION="${BASE}-${SAFE_BRANCH}-${SHA}"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Building Trophy version: $VERSION"
-
-      - name: Install System Dependencies
-        # Plain apt-get, deliberately NOT cached: the previous
-        # cache-apt-pkgs-action setup kept failing in two ways.
-        # First it swallowed apt errors (a mirror 404 on transitive
-        # libsoup3 debs left libvulkan-dev uninstalled while the step
-        # still reported success, so the build died later with
-        # "Could NOT find Vulkan"). Then it saved that partial
-        # state, so every later run restored the poisoned cache
-        # (see the 1.6 version-bump commit). Direct apt fails fast
-        # on error and retries the update/install cycle, so a
-        # flaked mirror recovers instead of poisoning later runs.
-        # Headless audio daemon for device-enumerating tests: without
-        # it, QAudioOutput construction segfaults inside QtMultimedia
-        # (a bare daemon is enough; nothing plays audio).
-        run: |
-          set -e
-          PACKAGES="build-essential cmake ninja-build ccache libfuse2t64 wget \
-            libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev \
-            libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 \
-            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
-            libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
-            libavutil-dev libswscale-dev libswresample-dev libva-dev \
-            libva-drm2 libgtest-dev desktop-file-utils appstream \
-            dpkg-dev rpm"
-          for attempt in 1 2 3; do
-            echo "apt attempt $attempt/3..."
-            if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
-              break
-            fi
-            echo "apt attempt $attempt failed, retrying..."
-            sleep 10
-            if [[ $attempt == "3" ]]; then
-              echo "Final retry with --fix-missing..."
-              sudo apt-get update
-              sudo apt-get install -y --fix-missing $PACKAGES
-            fi
-          done
-          # Fail fast with a clear message instead of a cryptic
-          # "Could NOT find Vulkan" at configure time.
-          test -f /usr/include/vulkan/vulkan.h || { echo "ERROR: libvulkan-dev missing after apt install"; exit 1; }
-          pkg-config --exists libpipewire-0.3 || { echo "ERROR: libpipewire-0.3-dev missing after apt install"; exit 1; }
-          
+          VERSION=$(python3 packaging/ci_version.py --event "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" --pr "$PR_NUMBER" --sha "$GITHUB_SHA")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-sdk
       - name: Restore ccache
-        # Purpose-built action instead of raw actions/cache: stable key
-        # (SHA-pinned keys never restore) and save-always so even failed
-        # builds bank their compiled objects for the next run.
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: ${{ runner.os }}-ccache
           restore-keys: ${{ runner.os }}-ccache
           max-size: 2G
           save-always: true
-
-      - name: Restore GTest from cache if exists
+      - name: Restore GTest
         id: cache-gtest
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/gtest_install
-          key: ${{ runner.os }}-gtest-6.12.0-${{ hashFiles('**/CMakeLists.txt') }} 
-          restore-keys: |
-            ${{ runner.os }}-gtest-
-
+          key: ${{ runner.os }}-gtest-6.12.0-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-gtest-
       - name: Prepare GTest if not cached
         if: steps.cache-gtest.outputs.cache-hit != 'true'
         run: |
-          # Runners don't reliably ship gtest sources (/usr/src/googletest
-          # is absent), so fetch a pinned copy instead of depending on it.
           git clone --depth 1 --branch v1.14.0 https://github.com/google/googletest.git gtest_src
-          cmake -GNinja -S gtest_src -B gtest_build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/gtest_install
+          cmake -GNinja -S gtest_src -B gtest_build -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/gtest_install"
           cmake --build gtest_build --target install
-
-      - name: Prepare Qt or use from cache
-        uses: jurplel/install-qt-action@v3
-        with:
-          # Pinned to the version local dev runs (nothing in-tree needs
-          # newer; CMakeLists floor is Qt 6.5). Bump deliberately, not
-          # float: a silent major here once broke linuxdeploy bundling.
-          version: '6.12.0'
-          modules: 'qtmultimedia qtwaylandcompositor'
-          cache: 'true'
-
-      - name: Configure & Build
+      - name: Configure and build
         run: |
           cmake -B build -GNinja \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=ON \
-            -DAPP_VERSION=$VERSION \
-            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/gtest_install \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DAPP_VERSION="$VERSION" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/gtest_install" \
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
-
-      - name: Validate package metadata
-        run: |
           desktop-file-validate packaging/trophy.desktop
           appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
-
-      - name: Start headless PipeWire for audio-device tests
-        # Player probe tests instantiate real QML AudioOutput items, whose
-        # constructor enumerates audio devices inside QtMultimedia. On a
-        # runner with PipeWire libraries but no daemon that enumeration
-        # segfaults (QPlatformAudioDevices::create), so provide a bare
-        # headless daemon in the same runtime dir the tests use. An empty
-        # registry enumerates fine; nothing here plays or captures audio.
+      - name: Preserve build for tests and AppImage (no rebuild)
         run: |
-          mkdir -p "${{ runner.temp }}/trophy-test-runtime"
-          chmod 700 "${{ runner.temp }}/trophy-test-runtime"
-          export XDG_RUNTIME_DIR="${{ runner.temp }}/trophy-test-runtime"
-          if command -v pipewire >/dev/null; then
-            nohup pipewire >"$RUNNER_TEMP/pipewire.log" 2>&1 &
-            for i in $(seq 1 50); do
-              [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break
-              sleep 0.2
-            done
-            ls -l "$XDG_RUNTIME_DIR" || true
-          else
-            echo "pipewire daemon not installed; audio-device tests may fail"
-          fi
+          # Tar preserves modes, symlinks and generated paths. All consumers
+          # use the same runner OS, SDK and checkout path as this job.
+          tar -I 'zstd -T2 -3' -cf "$RUNNER_TEMP/trophy-sdk-build.tar.zst" build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-sdk-build-${{ github.sha }}
+          path: ${{ runner.temp }}/trophy-sdk-build.tar.zst
+          compression-level: 0
+          retention-days: 1
 
-      - name: Run Unit Tests
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-sdk
+      - uses: actions/download-artifact@v4
+        with:
+          name: Trophy-sdk-build-${{ github.sha }}
+          path: ${{ runner.temp }}/sdk-build
+      - name: Restore built binaries
+        run: tar -I zstd -xf "$RUNNER_TEMP/sdk-build/trophy-sdk-build.tar.zst"
+      - name: Start headless PipeWire
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/trophy-test-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          nohup pipewire > "$RUNNER_TEMP/pipewire.log" 2>&1 &
+          for i in $(seq 1 50); do
+            [[ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]] || break
+            sleep 0.2
+          done
+          test -S "$XDG_RUNTIME_DIR/pipewire-0"
+      - name: Run unit and integration tests
         env:
           XDG_CONFIG_HOME: ${{ runner.temp }}/trophy-test-config
           XDG_RUNTIME_DIR: ${{ runner.temp }}/trophy-test-runtime
           TMPDIR: ${{ runner.temp }}/trophy-test-tmp
           QT_QPA_PLATFORM: offscreen
-          # Force ALSA for audio-device enumeration: with PipeWire
-          # libraries but no daemon, QtMultimedia's PipeWire backend
-          # segfaults inside QPlatformAudioDevices::create. No test
-          # plays audio, so the backend only needs to enumerate
-          # cleanly (empty is fine).
           QT_AUDIO_BACKEND: alsa
         run: |
-          mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
-          chmod 700 "$XDG_RUNTIME_DIR"
-          cd build && ctest --output-on-failure --timeout 300
+          mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
+          ctest --test-dir build --output-on-failure --timeout 300 \
+            --output-junit "$RUNNER_TEMP/trophy-tests.xml"
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-test-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/trophy-tests.xml
+            ${{ runner.temp }}/pipewire.log
+          retention-days: 7
 
-      - name: Generate packages (tar.xz, deb, rpm)
+  package-appimage:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-sdk
+      - uses: actions/download-artifact@v4
+        with:
+          name: Trophy-sdk-build-${{ github.sha }}
+          path: ${{ runner.temp }}/sdk-build
+      - name: Restore build
+        run: tar -I zstd -xf "$RUNNER_TEMP/sdk-build/trophy-sdk-build.tar.zst"
+      - name: Generate and smoke-test AppImage
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          cd build
-          cpack -G "TXZ;DEB;RPM" -B "$GITHUB_WORKSPACE/dist"
-          # Remove CPack's working directory so it isn't shipped as an artifact.
-          rm -rf "$GITHUB_WORKSPACE/dist/_CPack_Packages"
-          # Normalize artifact names to the project's release naming scheme.
-          cd "$GITHUB_WORKSPACE/dist"
-          for f in *.deb; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-amd64.deb"; done
-          for f in *.rpm; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}-x86_64.rpm"; done
-          for f in *.tar.xz; do [ -e "$f" ] && mv "$f" "Trophy-${VERSION}.tar.xz"; done
-          cd "$GITHUB_WORKSPACE"
-          echo "Generated packages:"
-          ls -lh "$GITHUB_WORKSPACE/dist"
-
-      - name: Generate AppImage
-        shell: bash
-        run: |
-          export VERSION=$VERSION
-          export LINUXDEPLOY_OUTPUT_VERSION=$VERSION
-          echo "Building Trophy version: $VERSION"
-
-          # 2. Download tools (retried: a transient drop here used to
-          # kill a 7-minute run after the build had already passed)
+          set -euo pipefail
+          export LINUXDEPLOY_OUTPUT_VERSION="$VERSION"
           wget --tries=3 --waitretry=5 -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget --tries=3 --waitretry=5 -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
-
-          # 3. Install to AppDir (GNUInstallDirs: the lib lands in
-          # usr/lib on Arch but usr/lib/x86_64-linux-gnu on Ubuntu,
-          # so locate it instead of hardcoding the path)
           DESTDIR=AppDir cmake --install build
-          TROPHY_LIB=$(find AppDir/usr -name 'libTrophy.so' | head -n 1)
-          if [[ -z "$TROPHY_LIB" ]]; then
-            echo "ERROR: libTrophy.so missing from AppDir install:"
-            find AppDir/usr -maxdepth 3 | sort
-            exit 1
-          fi
-          echo "Bundling $TROPHY_LIB"
-          TROPHY_BIN=$(find AppDir/usr -name 'trophy' -type f | head -n 1)
-          if [[ -z "$TROPHY_BIN" ]]; then
-            echo "ERROR: trophy binary missing from AppDir install:"
-            find AppDir/usr -maxdepth 3 | sort
-            exit 1
-          fi
-          echo "Bundling $TROPHY_BIN"
-
-          # 4. Environment setup (QML_SOURCES_PATHS must point at the
-          # GENERATED module in build/qml — it holds the qmldir +
-          # plugin lib. The raw source tree has neither.)
-          export QMAKE=$(which qmake6 || which qmake)
-          export LD_LIBRARY_PATH=$PWD/AppDir/usr/lib:$LD_LIBRARY_PATH
-          export QML_SOURCES_PATHS=$PWD/build/qml
-          export EXTRA_QT_MODULES="quickcontrols2;multimedia;waylandcompositor"
-          # Qt 6 releases ship either libqwayland.so or the older split
-          # plugins. Never rely on host plugins for a Wayland-only package.
+          TROPHY_LIB=$(find AppDir/usr -name libTrophy.so -print -quit)
+          TROPHY_BIN=$(find AppDir/usr -name trophy -type f -print -quit)
+          test -n "$TROPHY_LIB" && test -n "$TROPHY_BIN"
+          export QMAKE=$(command -v qmake6 || command -v qmake)
+          export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib:${LD_LIBRARY_PATH:-}"
+          export QML_SOURCES_PATHS="$PWD/build/qml"
+          export EXTRA_QT_MODULES='quickcontrols2;multimedia;waylandcompositor'
           QT_PLUGINS=$("$QMAKE" -query QT_INSTALL_PLUGINS)
           WAYLAND_PLUGINS=("$QT_PLUGINS"/platforms/libqwayland*.so)
-          if [[ ! -f "${WAYLAND_PLUGINS[0]}" ]]; then
-            echo "ERROR: Qt Wayland platform plugins are missing"
-            exit 1
-          fi
-          EXTRA_PLATFORM_PLUGINS="libqoffscreen.so"
+          test -f "${WAYLAND_PLUGINS[0]}"
+          EXTRA_PLATFORM_PLUGINS=libqoffscreen.so
           for plugin in "${WAYLAND_PLUGINS[@]}"; do
             EXTRA_PLATFORM_PLUGINS+=";$(basename "$plugin")"
           done
           export EXTRA_PLATFORM_PLUGINS
-          
-          # 5. Run linuxdeploy
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --executable "$TROPHY_BIN" \
-            --library "$TROPHY_LIB" \
-            --desktop-file packaging/trophy.desktop \
-             --icon-file resources/icons/trophy.svg \
-             --plugin qt
-
-          # A root-level executable symlink can resolve Qt/loader paths from
-          # the wrong directory. Keep a real launcher and smoke-test it.
+            --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
+            --desktop-file packaging/trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
           ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
-
-          # 6. SMOKE TEST
-          echo "Running smoke test..."
-          GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
-          chmod +x "$GENERATED_FILE"
-          
-          # Private HOME/XDG/bus, readiness marker and QML-error checks;
-          # surviving for five seconds alone did not prove a working GUI.
-          python3 packaging/smoke_appimage.py "$GENERATED_FILE" \
-            --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
-
-          # 7. Consistent artifact name (linuxdeploy usually honors
-          # LINUXDEPLOY_OUTPUT_VERSION already — only rename when the
-          # names differ, since mv onto itself errors out)
-          GENERATED_FILE=$(ls Trophy*.AppImage | head -n 1)
+          images=(Trophy*.AppImage)
+          test "${#images[@]}" -eq 1
+          chmod +x "${images[0]}"
+          python3 packaging/smoke_appimage.py "${images[0]}" --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
           TARGET="Trophy-${VERSION}-x86_64.AppImage"
-          if [[ "$GENERATED_FILE" != "$TARGET" ]]; then
-            mv "$GENERATED_FILE" "$TARGET"
-          fi
-
-      - name: Upload diagnostic logs
+          if [[ "${images[0]}" != "$TARGET" ]]; then mv "${images[0]}" "$TARGET"; fi
+          sha256sum "$TARGET" > SHA256SUMS.appimage
+      - name: Upload AppImage immediately
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-${{ env.VERSION }}-package-appimage
+          path: |
+            Trophy-*-x86_64.AppImage
+            SHA256SUMS.appimage
+          compression-level: 0
+          retention-days: 14
+      - name: Upload AppImage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Trophy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            build/Testing/Temporary/LastTest.log
-            ${{ runner.temp }}/trophy-appimage-smoke.log
+          name: Trophy-appimage-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trophy-appimage-smoke.log
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Generate Checksum
+  package-native:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: ubuntu
+            kind: deb
+          - profile: fedora
+            kind: rpm
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      PROFILE: ${{ matrix.profile }}
+      KIND: ${{ matrix.kind }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      - name: Refresh dependency layers weekly
+        id: dependency-cache
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Reuse distro-native dependency image layers
+        uses: docker/build-push-action@v6
+        with:
+          context: packaging/containers
+          file: packaging/containers/${{ matrix.profile }}.Dockerfile
+          load: true
+          tags: trophy-native-${{ matrix.profile }}:ci
+          build-args: DEPENDENCY_REFRESH=${{ steps.dependency-cache.outputs.week }}
+          cache-from: type=gha,scope=trophy-native-${{ matrix.profile }}
+          cache-to: type=gha,mode=max,scope=trophy-native-${{ matrix.profile }}
+      - name: Reuse clean runtime image layers
+        uses: docker/build-push-action@v6
+        with:
+          context: packaging/containers
+          file: packaging/containers/${{ matrix.profile }}-runtime.Dockerfile
+          load: true
+          tags: trophy-runtime-${{ matrix.profile }}:ci
+          build-args: DEPENDENCY_REFRESH=${{ steps.dependency-cache.outputs.week }}
+          cache-from: type=gha,scope=trophy-runtime-${{ matrix.profile }}
+          cache-to: type=gha,mode=max,scope=trophy-runtime-${{ matrix.profile }}
+      - name: Restore native compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/trophy-native-${{ matrix.profile }}/ccache
+          key: native-ccache-${{ matrix.profile }}-${{ hashFiles('packaging/containers/*.Dockerfile') }}-${{ github.sha }}
+          restore-keys: native-ccache-${{ matrix.profile }}-${{ hashFiles('packaging/containers/*.Dockerfile') }}-
+      - name: Build, smoke-test and check package-manager lifecycle
         run: |
-          # Single checksum file covering the AppImage and all generated packages.
-          sha256sum Trophy-*-x86_64.AppImage dist/* > SHA256SUMS
-        
-      - name: Upload Artifact
+          set -euo pipefail
+          work="$RUNNER_TEMP/trophy-native-$PROFILE"
+          mkdir -p "$work/runtime" "$GITHUB_WORKSPACE/dist"
+          # No SDK: each package links against its target distro's Qt/FFmpeg.
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --env "VERSION=$VERSION" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$work,dst=/work" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/dist,dst=/dist" \
+            "trophy-native-$PROFILE:ci" bash /source/packaging/containers/build.sh "$KIND" \
+            > "$work/build.log" 2>&1
+          packages=("$work/ci-packages"/*."$KIND")
+          upgrades=("$work/ci-upgrade"/*."$KIND")
+          test "${#packages[@]}" -eq 1 && test "${#upgrades[@]}" -eq 1
+          docker run --rm --env TROPHY_PACKAGE_TEST_CONTAINER=1 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$work,dst=/artifacts,readonly" \
+            --mount "type=bind,src=$work/runtime,dst=/evidence" \
+            "trophy-runtime-$PROFILE:ci" python3 /source/packaging/test_native_install.py \
+            "/artifacts/ci-packages/$(basename "${packages[0]}")" \
+            --upgrade "/artifacts/ci-upgrade/$(basename "${upgrades[0]}")" --logs /evidence
+          sha256sum dist/* > "SHA256SUMS.$PROFILE"
+      - name: Upload native packages immediately
         uses: actions/upload-artifact@v4
         with:
-          name: Trophy-${{ env.VERSION }}-x86_64
+          name: Trophy-${{ env.VERSION }}-package-${{ matrix.profile }}
           path: |
-            Trophy-*-x86_64.AppImage
             dist/*
-            SHA256SUMS
-          # Artifacts are short-lived (14 days); release attachments
-          # are uploaded manually.
+            SHA256SUMS.${{ matrix.profile }}
+          compression-level: 0
+          retention-days: 14
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-${{ matrix.profile }}-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/trophy-native-${{ matrix.profile }}/build.log
+            ${{ runner.temp }}/trophy-native-${{ matrix.profile }}/*startup.log
+            ${{ runner.temp }}/trophy-native-${{ matrix.profile }}/runtime/*.log
+            ${{ runner.temp }}/trophy-native-${{ matrix.profile }}/runtime/*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  verify-packages:
+    needs: [build, test, package-appimage, package-native, reporters-multilib]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Trophy-${{ env.VERSION }}-package-*
+          merge-multiple: true
+      - name: Check complete set and generate combined checksums
+        run: |
+          set -euo pipefail
+          test -f "Trophy-${VERSION}-x86_64.AppImage"
+          test -f "dist/Trophy-${VERSION}.tar.xz"
+          test -f "dist/Trophy-${VERSION}-amd64.deb"
+          test -f "dist/Trophy-${VERSION}-x86_64.rpm"
+          sha256sum --check SHA256SUMS.appimage
+          sha256sum --check SHA256SUMS.ubuntu
+          sha256sum --check SHA256SUMS.fedora
+          sha256sum Trophy-*-x86_64.AppImage dist/* > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-${{ env.VERSION }}-checksums
+          path: SHA256SUMS
           retention-days: 14
 
+  reporters-multilib:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bits: [32, 64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install reporter build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++-multilib libvulkan-dev libgtest-dev
+      - name: Build architecture-matched reporter fixtures
+        env:
+          BITS: ${{ matrix.bits }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [[ "$BITS" == 32 ]]; then
+            cmake -S /usr/src/googletest -B "$RUNNER_TEMP/gtest32-build" -GNinja \
+              -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DBUILD_GMOCK=OFF \
+              -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gtest32"
+            cmake --build "$RUNNER_TEMP/gtest32-build" --parallel 2
+            cmake --install "$RUNNER_TEMP/gtest32-build"
+            options+=("-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/reporters/i686-linux.cmake"
+                      "-DCMAKE_PREFIX_PATH=$RUNNER_TEMP/gtest32")
+          fi
+          cmake -S reporters -B "$RUNNER_TEMP/reporters$BITS" -GNinja \
+            -DCMAKE_BUILD_TYPE=Release "${options[@]}"
+          cmake --build "$RUNNER_TEMP/reporters$BITS" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/reporters$BITS" --output-on-failure \
+            --timeout 60 --output-junit "$RUNNER_TEMP/reporters$BITS.xml"
+      - name: Check reporter ABI and disabled host runtime loading
+        env:
+          BITS: ${{ matrix.bits }}
+        run: |
+          python3 packaging/check_reporter_runtimes.py \
+            "$RUNNER_TEMP/reporters$BITS/libtrophy_layer.so" \
+            "$RUNNER_TEMP/reporters$BITS/libtrophy_gl_shim.so" \
+            --execute-trusted-fixtures --require-host-pass \
+            --output "$RUNNER_TEMP/reporters$BITS-runtime.json"
+      - name: Upload reporter test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trophy-reporters-${{ matrix.bits }}-diagnostics
+          path: |
+            ${{ runner.temp }}/reporters${{ matrix.bits }}.xml
+            ${{ runner.temp }}/reporters${{ matrix.bits }}-runtime.json
+            ${{ runner.temp }}/reporters${{ matrix.bits }}/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  draft-release:
+    needs: [build, verify-packages]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Serialize automatic tag creation and draft updates.
+    concurrency:
+      group: trophy-release-draft
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main for release ancestry check
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Trophy-${{ env.VERSION }}-package-*
+          path: release-input
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: Trophy-${{ env.VERSION }}-checksums
+          path: release-input
+      - name: Draft a newer main release (never publish)
+        run: |
+          python3 packaging/draft_release.py --repo "$GITHUB_REPOSITORY" \
+            --version-file VERSION --sha "$GITHUB_SHA" --assets release-input
+
   comment-pr:
-    needs: build-and-test
-    # Only celebrate green builds: without the result check a failed run
-    # still posted "Build Ready!".
-    if: github.event_name == 'pull_request' && needs.build-and-test.result == 'success'
+    needs: verify-packages
+    if: github.event_name == 'pull_request' && needs.verify-packages.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
     steps:
-      - name: Post AppImage Link
+      - name: Post build link
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
-            const run_id = context.runId;
-            const artifactsUrl = `https://github.com/${owner}/${repo}/actions/runs/${run_id}`;
-            
+            const url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
             github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: owner,
-              repo: repo,
-              body: `### 🚀 Build Ready!\n\nA new **AppImage** has been generated for this PR. You can download it from the artifacts section here:\n\n[📦 Download Trophy AppImage](${artifactsUrl})`
-            })
+              owner, repo, issue_number: context.issue.number,
+              body: `### Build ready\n\n[Download verified packages](${url})`
+            });

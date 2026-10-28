@@ -102,6 +102,41 @@ TEST_F(GameWhitelistTest, DefaultListCollapsedToCanonical) {
   EXPECT_TRUE(wl->isBlacklisted("Xalia.EXE"));
 }
 
+TEST_F(GameWhitelistTest, PrerequisiteInstallersAreDefaultExclusions) {
+  const QStringList installers{
+      "VC_REDIST.X86.EXE", "vc_redist.x64.exe", "vc_redist.arm64.exe",
+      "vcredist_x86.exe", "vcredist_x64.exe", "vcredist_arm64.exe",
+      "vcredist_ia64.exe", "DXSETUP.EXE"};
+  wl->save();
+  wl->load();
+  for (const QString &installer : installers) {
+    SCOPED_TRACE(installer.toStdString());
+    EXPECT_TRUE(wl->isBlacklisted(installer));
+    EXPECT_TRUE(GameWhitelist::defaultBlacklistEntries().contains(
+        defaultExclusionKey(GameWhitelist::normalizeKey(installer))));
+  }
+  EXPECT_FALSE(wl->isBlacklisted("steam_proton"));
+  EXPECT_FALSE(wl->isBlacklisted("setup.exe"));
+  EXPECT_FALSE(wl->isBlacklisted("vc_redist.x64-adventure.exe"));
+}
+
+TEST_F(GameWhitelistTest, LegacyRedistributableRowsConsolidateOnLoad) {
+  const QString path = configHome.path() + "/trophy/game-whitelist.json";
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write(R"({"blacklist":["vc_redist.x86","vc_redist.x64","vcredist_x86","dxsetup"]})");
+  file.close();
+  wl->load();
+  EXPECT_EQ(wl->blacklistEntries().count("vc_redist"), 1);
+  EXPECT_TRUE(wl->blacklistEntries().contains("dxsetup"));
+  for (const QString &alias : visualCppInstallerNames()) {
+    EXPECT_FALSE(wl->blacklistEntries().contains(alias));
+    EXPECT_TRUE(wl->isBlacklisted(alias));
+  }
+  EXPECT_EQ(GameWhitelist::prettySystemName("vc_redist"), "vc_redist");
+}
+
 TEST_F(GameWhitelistTest, DefaultAliasesMatchExactlyAndStayOnOneVetoRow) {
   const auto defaults = GameWhitelist::defaultBlacklistEntries();
   for (const auto &app : defaultAppCatalog()) {

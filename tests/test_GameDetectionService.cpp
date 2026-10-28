@@ -547,6 +547,33 @@ TEST_F(GameDetectionServiceTest, HelperSteamEnvironmentDoesNotMakeGame) {
                 "", "", true);
 }
 
+TEST_F(GameDetectionServiceTest, PrerequisiteInstallersIgnoredBeforeSteamIdentity) {
+  const QStringList installers{
+      "VC_REDIST.X86.EXE", "vc_redist.x64.exe", "vc_redist.arm64.exe",
+      "vcredist_x86.exe", "vcredist_x64.exe", "vcredist_arm64.exe",
+      "vcredist_ia64.exe", "DXSETUP.EXE"};
+  for (const QString &installer : installers) {
+    SCOPED_TRACE(installer.toStdString());
+    for (uint steamId : {0u, 493520u}) {
+      checkIdentity("steam_proton", "/usr/bin/wine64",
+                    {"wine64", "Z:\\Steamworks Shared\\_CommonRedist\\" + installer},
+                    steamId, "", "", true, "/compatdata/493520/pfx");
+      checkIdentity("steam_proton", "/games/" + installer, {}, steamId,
+                    "", "", true);
+      checkIdentity(installer, "/games/game.exe", {}, steamId, "", "", true);
+    }
+  }
+}
+
+TEST_F(GameDetectionServiceTest, PrerequisiteFilterDoesNotExcludeGamesOrGenericSetup) {
+  for (const QString &executable : {QString("Game.exe"), QString("setup.exe"),
+                                    QString("vc_redist.x64-adventure.exe")}) {
+    checkIdentity("steam_proton", "/usr/bin/wine64",
+                  {"wine64", "C:\\Games\\" + executable}, 493520,
+                  "steam_app_493520", "steam_proton");
+  }
+}
+
 TEST_F(GameDetectionServiceTest, BackgroundReporterCannotStealVisibleGame) {
   auto currentWindow = snapshotFor(6301, true, true);
   monitor.ingestSnapshot(currentWindow);
@@ -1315,7 +1342,8 @@ TEST_F(GameDetectionServiceTest, DefaultRowsConsolidateAndSearchTheirIdentifiers
   auto *model = service->gamesModel();
   const QList<QPair<QString, QString>> groups{
       {"obs", "obs64"}, {"signal", "signal-desktop"},
-      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"}};
+      {"telegram", "telegram-desktop"}, {"vkcube", "vkcube-wayland"},
+      {"vc_redist", "vc_redist.x86"}};
   for (const auto &[canonical, legacy] : groups) {
     SCOPED_TRACE(legacy.toStdString());
     int count = 0;
@@ -1409,6 +1437,28 @@ TEST_F(GameDetectionServiceTest, CustomEntriesStickWithoutRules) {
   }
   EXPECT_FALSE(goneRow);
   EXPECT_FALSE(service->addCustomGame("  ", "blank", false));
+}
+
+TEST_F(GameDetectionServiceTest, PromptBlockActionsKeepExistingGameModelRows) {
+  ASSERT_TRUE(service->addCustomGame("scroll-fixture", "Scroll Fixture", false));
+  auto *model = service->gamesModel();
+  QPersistentModelIndex retained;
+  for (int row = 0; row < model->rowCount(); ++row) {
+    const auto index = model->index(row, 0);
+    if (index.data(GameListModel::KeyRole).toString() == "scroll-fixture")
+      retained = index;
+  }
+  ASSERT_TRUE(retained.isValid());
+  QSignalSpy resets(model, &QAbstractItemModel::modelReset);
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    ASSERT_TRUE(service->moveToBlacklist("scroll-fixture"));
+    ASSERT_TRUE(retained.isValid());
+    EXPECT_EQ(retained.data(GameListModel::ListedRole).toInt(), 2);
+    ASSERT_TRUE(service->unblockGame("scroll-fixture"));
+    ASSERT_TRUE(retained.isValid());
+    EXPECT_NE(retained.data(GameListModel::ListedRole).toInt(), 2);
+  }
+  EXPECT_EQ(resets.size(), 0);
 }
 
 TEST_F(GameDetectionServiceTest, SteamGameKeyForm) {

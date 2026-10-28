@@ -23,17 +23,17 @@ TextField {
 
     background: Rectangle {
         radius: Theme.radiusNormal
-        color: _card
+        color: control._card
         // Permanent border that glows on focus
         border.width: control.activeFocus ? 2 : 1
         border.color: {
             if (control.activeFocus)
-                return _accent;
+                return control._accent;
 
             if (control.hovered)
-                return Qt.rgba(_accent.r, _accent.g, _accent.b, 0.5);
+                return Qt.rgba(control._accent.r, control._accent.g, control._accent.b, 0.5);
 
-            return Qt.rgba(_text.r, _text.g, _text.b, 0.15);
+            return Qt.rgba(control._text.r, control._text.g, control._text.b, 0.15);
         }
 
         Behavior on border.color {

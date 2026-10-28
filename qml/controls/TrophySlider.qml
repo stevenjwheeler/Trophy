@@ -1,7 +1,6 @@
 import "../styles"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 Slider {
     id: control
@@ -19,8 +18,8 @@ Slider {
         implicitWidth: 16
         implicitHeight: 16
         radius: 8
-        color: control.pressed ? _accent : _text
-        border.color: _accent
+        color: control.pressed ? control._accent : control._text
+        border.color: control._accent
         border.width: control.hovered ? 2 : 0
 
         Behavior on color {
@@ -48,13 +47,13 @@ Slider {
         width: control.availableWidth
         height: implicitHeight
         radius: 3
-        color: Qt.rgba(_text.r, _text.g, _text.b, 0.1) // Muted background track
+        color: Qt.rgba(control._text.r, control._text.g, control._text.b, 0.1) // Muted background track
 
         // The "Progress" part of the track
         Rectangle {
             width: control.visualPosition * parent.width
             height: parent.height
-            color: _accent
+            color: control._accent
             radius: 3
         }
 

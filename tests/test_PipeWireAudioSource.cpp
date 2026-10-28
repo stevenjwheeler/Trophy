@@ -5,6 +5,7 @@
  */
 
 #include "audio/PipeWireAudioSource.h"
+#include "audio/AppAudioGroup.h"
 #include <gtest/gtest.h>
 #include <spa/buffer/buffer.h>
 #include <pipewire/pipewire.h>
@@ -15,6 +16,90 @@
 #include <thread>
 
 using namespace TrophyBackend;
+
+namespace TrophyBackend {
+class AppAudioGroupTestPeer {
+public:
+  static std::unique_ptr<AppAudioGroup> group() {
+    auto group = std::unique_ptr<AppAudioGroup>(new AppAudioGroup);
+    group->m_target = 10;
+    group->m_serial = "100";
+    group->m_expectedBinary = "Discord";
+    group->m_nodes[10] = {"5", "Chromium", "100", "Discord", "42", true, true};
+    group->m_ready = true;
+    return group;
+  }
+  static void node(AppAudioGroup &g, uint32_t id,
+                   const detail::ApplicationAudioIdentity &identity) {
+    g.m_nodes[id] = identity;
+  }
+  static void link(AppAudioGroup &g, uint32_t id, uint32_t source) {
+    g.m_incoming[id] = {source, 20};
+  }
+  static void remove(AppAudioGroup &g, uint32_t id) {
+    g.m_nodes.erase(id);
+    g.m_incoming.erase(id);
+  }
+  static void refresh(AppAudioGroup &g) { g.refreshForCapture(20); }
+};
+}
+
+TEST(ApplicationAudioRouteTest, StrictBinaryDoesNotMatchDisplayNamesOrSubstrings) {
+  EXPECT_TRUE(detail::matchesAudioBinary("dIsCoRd", "Discord"));
+  EXPECT_FALSE(detail::matchesAudioBinary("DiscordHelper", "Discord"));
+  EXPECT_FALSE(detail::matchesAudioBinary("Chromium", "Discord"));
+  EXPECT_FALSE(detail::matchesAudioBinary("", "Discord"));
+  EXPECT_FALSE(detail::matchesAudioBinary("", ""));
+}
+
+TEST(ApplicationAudioRouteTest, ChecksActualLinksAndRejectsUnrelatedChromium) {
+  auto group = AppAudioGroupTestPeer::group();
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio()); // Requested target alone is not proof.
+  AppAudioGroupTestPeer::link(*group, 50, 10);
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_TRUE(group->acceptsAudio());
+  // Even an identically named stream in the same PipeWire client must not
+  // enter Voice when it belongs to a different process binary.
+  AppAudioGroupTestPeer::node(*group, 11,
+      {"5", "Chromium", "101", "VRChat.exe", "43", true, true});
+  AppAudioGroupTestPeer::link(*group, 51, 11);
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio());
+  EXPECT_TRUE(group->rejectedRoute());
+}
+
+TEST(ApplicationAudioRouteTest, TargetRemovalAndReusedNodeIdCannotAdoptAnotherApp) {
+  auto group = AppAudioGroupTestPeer::group();
+  AppAudioGroupTestPeer::link(*group, 50, 10);
+  AppAudioGroupTestPeer::remove(*group, 10);
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio());
+  EXPECT_TRUE(group->rejectedRoute());
+  AppAudioGroupTestPeer::node(*group, 10,
+      {"5", "Chromium", "200", "Discord", "42", true, true});
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio());
+  EXPECT_TRUE(group->rejectedRoute()); // Same binary, different generation.
+}
+
+TEST(ApplicationAudioRouteTest, VerifiedSiblingsAllowedButUnknownIdentityIsSilent) {
+  auto group = AppAudioGroupTestPeer::group();
+  AppAudioGroupTestPeer::node(*group, 11,
+      {"5", "Chromium", "101", "Discord", "42", true, false});
+  AppAudioGroupTestPeer::link(*group, 51, 11);
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio());
+  EXPECT_FALSE(group->rejectedRoute()); // Await current node info, not an error.
+  AppAudioGroupTestPeer::node(*group, 11,
+      {"5", "Chromium", "101", "Discord", "42", true, true});
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_TRUE(group->acceptsAudio());
+  AppAudioGroupTestPeer::node(*group, 11,
+      {"6", "Chromium", "101", "Discord", "42", true, true});
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio()); // Different client, same title/binary.
+}
 
 class PipeWireAudioSourceTest : public ::testing::Test {
 protected:
@@ -374,7 +459,9 @@ TEST_F(PipeWireAudioSourceTest, ReinitializeAllocationFailureDoesNotKeepOldOwner
 TEST_F(PipeWireAudioSourceTest, TargetPropertyFailuresNeverCreateUnpinnedStream) {
   // Factory is lookup-free for application sources with a supplied identity.
   for (const QString &failure : {QStringLiteral("properties.set:target.object"),
-                                 QStringLiteral("properties.set:node.target")}) {
+                                 QStringLiteral("properties.set:node.target"),
+                                 QStringLiteral("properties.set:node.dont-fallback"),
+                                 QStringLiteral("properties.set:node.dont-move")}) {
     SCOPED_TRACE(failure.toStdString());
     auto app = PipeWireAudioSource::createApplicationSource(42, "game", "99");
     installOperations(*app);
@@ -391,6 +478,8 @@ TEST_F(PipeWireAudioSourceTest, TargetPropertyFailuresNeverCreateUnpinnedStream)
     lifecycle.failure.clear();
     ASSERT_TRUE(app->initialize(AudioConfig{}));
     ASSERT_TRUE(app->start());
+    EXPECT_TRUE(lifecycle.calls.contains("properties.set:node.dont-fallback"));
+    EXPECT_TRUE(lifecycle.calls.contains("properties.set:node.dont-move"));
     app.reset(); // The real destructor must run the same cleanup.
     EXPECT_TRUE(lifecycle.empty());
   }
@@ -604,6 +693,37 @@ TEST_F(PipeWireAudioSourceTest, NativeProcessNullDequeueNeverQueues) {
   lifecycle.events->process(lifecycle.userdata);
   EXPECT_EQ(lifecycle.dequeues, 1);
   EXPECT_EQ(lifecycle.queues, 0);
+}
+
+TEST_F(PipeWireAudioSourceTest, NativeMalformedBuffersAreReturnedAndNextBufferRecovers) {
+  ASSERT_TRUE(source.initialize(AudioConfig{}));
+  ASSERT_TRUE(source.start());
+  Buffer b;
+  pw_buffer native{};
+  lifecycle.buffer = &native;
+  int deliveries = 0;
+  source.setCallback([&](const AudioFrame &) { ++deliveries; });
+  // Enter through the registered native listener, not just processBuffer:
+  // rejected input must not leak a dequeued producer buffer or kill capture.
+  for (int malformed = 0; malformed < 4; ++malformed) {
+    SCOPED_TRACE(malformed);
+    native.buffer = malformed == 0 ? nullptr : &b.buffer;
+    b.buffer.datas = malformed == 1 ? nullptr : &b.data;
+    b.data.chunk = malformed == 2 ? nullptr : &b.chunk;
+    b.chunk.size = malformed == 3 ? sizeof(b.samples) + 1 : sizeof(b.samples);
+    lifecycle.events->process(lifecycle.userdata);
+    EXPECT_EQ(deliveries, 0);
+    EXPECT_EQ(lifecycle.dequeues, malformed + 1);
+    EXPECT_EQ(lifecycle.queues, malformed + 1);
+    EXPECT_TRUE(source.isCapturing());
+    EXPECT_TRUE(lifecycle.errors.isEmpty());
+  }
+  b.chunk.size = sizeof(b.samples);
+  lifecycle.events->process(lifecycle.userdata);
+  EXPECT_EQ(deliveries, 1);
+  EXPECT_EQ(lifecycle.dequeues, 5);
+  EXPECT_EQ(lifecycle.queues, 5);
+  EXPECT_FLOAT_EQ(source.peakLevel(), 1.0f);
 }
 
 TEST_F(PipeWireAudioSourceTest, StopWaitsForEnteredNativeProcessAndBufferReturn) {

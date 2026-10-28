@@ -25,6 +25,7 @@
 
 #include "core/WindowService.h"
 #include "detection/GnomeBackend.h"
+#include "detection/DetectorVersion.h"
 #include "detection/HyprlandBackend.h"
 #include "detection/KWinBackend.h"
 #include "detection/SwayBackend.h"
@@ -34,6 +35,44 @@
 #include "detection/WindowInfo.h"
 
 using namespace TrophyBackend;
+
+TEST(DetectorVersionTest, IntegerMetadataAndLegacyUnknown) {
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const QString path = directory.path() + "/metadata.json";
+  auto write = [&](const QByteArray &bytes) {
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(bytes) == bytes.size();
+  };
+  ASSERT_TRUE(write(R"({"KPlugin":{"Id":"trophy-monitor","Version":"12"}})"));
+  EXPECT_EQ(DetectorVersion::metadata(path, true), 12);
+  ASSERT_TRUE(write(R"({"uuid":"trophy-monitor@trophy","version":3})"));
+  EXPECT_EQ(DetectorVersion::metadata(path, false), 3);
+  for (const QByteArray &bad : {QByteArray(R"({"KPlugin":{"Id":"foreign","Version":"12"}})"),
+                               QByteArray(R"({"KPlugin":{"Id":"trophy-monitor","Version":"1.2.3"}})"),
+                               QByteArray("broken"), QByteArray(17000, 'x')}) {
+    ASSERT_TRUE(write(bad));
+    EXPECT_EQ(DetectorVersion::metadata(path, true), 0);
+  }
+  ASSERT_TRUE(write(R"({"uuid":"trophy-monitor@trophy","version":1.5})"));
+  EXPECT_EQ(DetectorVersion::metadata(path, false), 0);
+  EXPECT_EQ(DetectorVersion::metadata(directory.path(), true), 0);
+  EXPECT_EQ(DetectorVersion::metadata(directory.path() + "/absent", true), 0);
+}
+
+TEST(DetectorVersionTest, ReporterMarkersAreDataOnlyAndBoundedIntegers) {
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const QString path = directory.path() + "/fixture.so";
+  for (const auto &version : {QByteArray("4"), QByteArray("1.2.3"), QByteArray("-1"), QByteArray("9999999999")}) {
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    file.write(QByteArray("\x7f" "ELF", 4) + "TROPHY_HELPER_VERSION:gl:" + version + '\0');
+    file.close();
+    EXPECT_EQ(DetectorVersion::reporter(path, "gl"), version == "4" ? 4 : 0);
+    EXPECT_EQ(DetectorVersion::reporter(path, "vulkan"), 0);
+  }
+}
 
 class WindowMonitorTestEnvironment : public ::testing::Environment {
 public:
@@ -53,6 +92,9 @@ static auto *env =
 namespace TrophyBackend {
 class WindowMonitorWorkerTest : public ::testing::Test {
 protected:
+  static void compositor(WaylandWindowMonitor &monitor, const QString &name) {
+    monitor.m_compositor = name;
+  }
   static void arm(WaylandWindowMonitor &monitor, std::function<void()> worker) {
     monitor.m_monitoring = true;
     ++monitor.m_generation;
@@ -80,6 +122,45 @@ protected:
     return monitor.m_hyprland;
   }
 };
+
+TEST_F(WindowMonitorWorkerTest, ScriptVersionReadsInstalledCompositorPackageOnly) {
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const auto oldData = qgetenv("XDG_DATA_HOME");
+  const auto oldScript = qgetenv("TROPHY_KWIN_SCRIPT_DIR");
+  const auto restore = qScopeGuard([&] {
+    if (oldData.isNull()) qunsetenv("XDG_DATA_HOME");
+    else qputenv("XDG_DATA_HOME", oldData);
+    if (oldScript.isNull()) qunsetenv("TROPHY_KWIN_SCRIPT_DIR");
+    else qputenv("TROPHY_KWIN_SCRIPT_DIR", oldScript);
+  });
+  qputenv("XDG_DATA_HOME", directory.path().toUtf8());
+  auto write = [&](const QString &parent, const QByteArray &bytes) {
+    if (!QDir().mkpath(parent)) return false;
+    QFile file(parent + "/metadata.json");
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+  };
+  ASSERT_TRUE(write(KWinBackend::installedScriptDir(), R"({"KPlugin":{"Id":"trophy-monitor","Version":"9"}})"));
+  ASSERT_TRUE(write(GnomeBackend::extensionDirectory(), R"({"uuid":"trophy-monitor@trophy","version":4})"));
+  const auto bundled = directory.path() + "/bundled-kwin";
+  ASSERT_TRUE(write(bundled, R"({"KPlugin":{"Id":"trophy-monitor","Version":"1"}})"));
+  qputenv("TROPHY_KWIN_SCRIPT_DIR", bundled.toUtf8());
+  WaylandWindowMonitor monitor;
+  compositor(monitor, "kwin");
+  EXPECT_EQ(monitor.helperVersion(), 9);
+  EXPECT_EQ(monitor.bundledHelperVersion(), 1);
+  compositor(monitor, "gnome");
+  EXPECT_EQ(monitor.helperVersion(), 4);
+  EXPECT_EQ(monitor.bundledHelperVersion(), 1);
+  for (const QString &name : {QString("hyprland"), QString("sway"), QString("unknown")}) {
+    compositor(monitor, name);
+    EXPECT_EQ(monitor.helperVersion(), 0);
+    EXPECT_EQ(monitor.bundledHelperVersion(), 0);
+  }
+  compositor(monitor, "kwin");
+  ASSERT_TRUE(QFile::remove(KWinBackend::installedScriptDir() + "/metadata.json"));
+  EXPECT_EQ(monitor.helperVersion(), 0);
+}
 
 TEST_F(WindowMonitorWorkerTest, HealthCheckSettlesWithoutCallingTrackingWorking) {
   WaylandWindowMonitor monitor;

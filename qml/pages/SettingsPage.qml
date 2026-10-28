@@ -14,6 +14,9 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
+    property var audioDevices: typeof audioDeviceEnumerator !== "undefined" ? audioDeviceEnumerator : null // qmllint disable unqualified
 
     // Refresh live choices on open; the voice picker retains the saved app
     // independently because apps publish audio streams on demand.
@@ -54,6 +57,8 @@ Page {
             card = storageCard;
         else if (sectionTitle === "Notifications")
             card = notificationsCard;
+        else if (sectionTitle === "Discord Rich Presence")
+            card = discordCard;
         else if (sectionTitle === "Game Detection")
             card = detectionCard;
         else if (sectionTitle === "Detection Helpers")
@@ -123,7 +128,8 @@ Page {
             return;
         }
 
-        var bytes = Math.round(valueGB * 1024 * 1024 * 1024);
+        valueGB = Math.round(valueGB);
+        var bytes = valueGB * 1024 * 1024 * 1024;
         if (isCurrentUsageAbove(bytes)) {
             pendingStorageLimitGB = valueGB;
             var autoCleanupActive = storageManager.autoDeleteOldest;
@@ -251,15 +257,15 @@ Page {
 
                     SettingRow {
                         label: qsTr("Theme")
-                        help: qsTr("Default keeps the classic navy palette. Charcoal is neutral gray. AMOLED uses a pure-black background.")
+                        help: qsTr("Original keeps the classic navy palette. Charcoal is neutral gray. AMOLED is the default and uses a pure-black background.")
 
                         TrophyComboBox {
                             id: themeModeBox
                             objectName: "themeModeBox"
                             Layout.preferredWidth: 200
                             property var values: ["dark", "charcoal", "amoled"]
-                            model: [qsTr("Default"), qsTr("Charcoal"), qsTr("AMOLED")]
-                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 0
+                            model: [qsTr("Original"), qsTr("Charcoal"), qsTr("AMOLED")]
+                            currentIndex: settingsManager ? Math.max(0, values.indexOf(settingsManager.themeMode)) : 2
                             onActivated: settingsManager.themeMode = values[currentIndex]
                         }
                     }
@@ -411,13 +417,44 @@ Page {
                         }
                     }
 
+                    SettingStack {
+                        id: sizeEstimate
+                        objectName: "recordingSizeEstimate"
+                        // Separate game capture reserves all three encoded streams,
+                        // even without a running voice app. Desktop always mixes.
+                        readonly property int audioTracks: settingsManager && settingsManager.audioMode !== "desktop" && settingsManager.separateAudioTracks ? 3 : 1
+                        readonly property real totalKbps: bitrateSlider.value + audioTracks * 192
+                        readonly property real bytesPerMinute: totalKbps * 1000 / 8 * 60
+
+                        function formatEstimate(bytes) {
+                            return bytes >= 1000000000 ? (bytes / 1000000000).toFixed(1) + " GB"
+                                                       : (bytes / 1000000).toFixed(0) + " MB";
+                        }
+
+                        label: qsTr("Estimated File Size")
+                        help: qsTr("Actual file size may vary.")
+
+                        Label {
+                            objectName: "recordingSizeEstimateText"
+                            Layout.fillWidth: true
+                            text: qsTr("1 minute: ~%1  •  10 minutes: ~%2  •  1 hour: ~%3")
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute))
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute * 10))
+                                .arg(sizeEstimate.formatEstimate(sizeEstimate.bytesPerMinute * 60))
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
                     SettingRow {
                         label: qsTr("Frame Rate")
-                        help: qsTr("60 FPS is the standard for gameplay. Higher rates look smoother but increase file size.")
+                        help: qsTr("Caps recording FPS, choose ∞ for uncapped capture. Higher FPS limits will use more processing power.")
 
                         Rectangle {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             Layout.preferredWidth: fpsSegments.implicitWidth + 8
+                            objectName: "recordingFrameRate"
                             Layout.preferredHeight: 36
                             radius: 18
                             color: Theme.withOpacity(Theme.textColor, 0.06)
@@ -432,19 +469,20 @@ Page {
                                 spacing: 2
 
                                 Repeater {
-                                    model: [30, 60, 120, 144]
+                                    model: [30, 60, 120, 144, 0]
 
                                     Rectangle {
+                                        objectName: "recordingFps" + modelData
                                         property bool isChecked: settingsManager ? settingsManager.fps === modelData : false
 
-                                        Layout.preferredWidth: 72
+                                        Layout.preferredWidth: 56
                                         Layout.preferredHeight: 28
                                         radius: 14
                                         color: isChecked ? Theme.primaryColor : "transparent"
 
                                         Label {
                                             anchors.centerIn: parent
-                                            text: modelData
+                                            text: modelData === 0 ? "∞" : modelData
                                             font.pixelSize: Theme.fontSizeSmall
                                             font.weight: isChecked ? Font.Medium : Font.Normal
                                             color: isChecked ? "white" : Theme.textSecondaryColor
@@ -531,13 +569,21 @@ Page {
                     }
 
                     SettingRow {
+                        id: dmaBufRow
+                        objectName: "settingsDmaBufOption"
+                        readonly property bool softwareEncoder: settingsManager &&
+                            (settingsManager.encoder === "x264" ||
+                             (settingsManager.encoder === "auto" && hardwareInfo &&
+                              hardwareInfo.recommendedEncoderName === "x264"))
                         label: qsTr("Zero-Copy Capture (DMA-BUF)")
-                        help: qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
+                        help: softwareEncoder ? qsTr("Not available with software encoding. Shared memory capture is used instead.")
+                                              : qsTr("Hardware-accelerated capture with much lower CPU usage. Turn off if you see green screens or crashes.")
+                        rowEnabled: !softwareEncoder && !(recordingManager && recordingManager.isRecording)
 
                         TrophySwitch {
+                            objectName: "settingsDmaBufSwitch"
                             Layout.alignment: Qt.AlignVCenter
                             checked: settingsManager ? settingsManager.useDmaBuf : true
-                            enabled: !(recordingManager && recordingManager.isRecording)
                             onToggled: {
                                 if (settingsManager)
                                     settingsManager.useDmaBuf = checked;
@@ -749,8 +795,8 @@ Page {
                             }
 
                             onActivated: {
-                                if (settingsManager && audioDeviceEnumerator && currentIndex < devices.length) {
-                                    settingsManager.microphoneDevice = devices[currentIndex].id;
+                                if (root.preferences && root.audioDevices && currentIndex < devices.length) {
+                                    root.preferences.microphoneDevice = devices[currentIndex].id;
                                 }
                             }
                         }
@@ -928,7 +974,8 @@ Page {
                                 // Upper bound is the drive holding the
                                 // recordings (0 = unknown → legacy 500 GB cap).
                                 to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500
-                                stepSize: 0.1
+                                stepSize: 1
+                                snapMode: Slider.SnapAlways
                                 value: settingsManager ? settingsManager.maxStorageSize / (1024 * 1024 * 1024) : 50
                                 onPressedChanged: {
                                     if (!pressed && settingsManager)
@@ -937,7 +984,7 @@ Page {
                             }
 
                             ValuePill {
-                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : storageSlider.value >= 1024 ? (storageSlider.value / 1024).toFixed(1) + " TB" : storageSlider.value < 1 ? storageSlider.value.toFixed(1) + " GB" : Math.round(storageSlider.value) + " GB"
+                                pillText: storageSlider.value === 0 ? qsTr("No Limit") : Math.round(storageSlider.value) + " GB"
                             }
                         }
                     }
@@ -1058,6 +1105,59 @@ Page {
                     }
                 }
 
+                // ================= DISCORD =================
+                SectionCard {
+                    id: discordCard
+                    sectionTitle: qsTr("Discord Rich Presence")
+                    iconSource: "qrc:/icons/social.svg"
+                    description: qsTr("Share your recording status on Discord.")
+
+                    SettingRow {
+                        label: qsTr("Enable Rich Presence")
+                        help: qsTr("Show Recording or Instant replay ready on your Discord profile. No login or account token required.")
+                        TrophySwitch {
+                            objectName: "discordPresenceSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            checked: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            onToggled: if (settingsManager) settingsManager.discordPresenceEnabled = checked
+                        }
+                    }
+                    SettingRow {
+                        objectName: "discordGameNamesRow"
+                        label: qsTr("Show Game Names")
+                        help: qsTr("Include the game name and public game artwork when available.")
+                        rowEnabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                        TrophySwitch {
+                            objectName: "discordGameNamesSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            checked: settingsManager ? settingsManager.discordShowGameNames : true
+                            onToggled: if (settingsManager) settingsManager.discordShowGameNames = checked
+                        }
+                    }
+                    SettingRow {
+                        objectName: "discordIdleRow"
+                        label: qsTr("Show When Idle")
+                        help: qsTr("Show Ready to record when neither recording nor instant replay is active, including while Trophy is in the tray.")
+                        rowEnabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                        TrophySwitch {
+                            objectName: "discordIdleSwitch"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: settingsManager ? settingsManager.discordPresenceEnabled : false
+                            checked: settingsManager ? settingsManager.discordShowWhenIdle : false
+                            onToggled: if (settingsManager) settingsManager.discordShowWhenIdle = checked
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Discord's activity privacy settings apply. Sandboxed installations may require IPC socket access.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
                 // ================= DETECTION =================
                 SectionCard {
                     id: detectionCard
@@ -1111,6 +1211,12 @@ Page {
                                    : (windowMonitor && windowMonitor.compositorName === "gnome"
                                       ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation. %1").arg(windowMonitor.gnomeHelperStatus) : ""))
 
+                        showVersions: windowMonitor && (windowMonitor.compositorName === "kwin" || windowMonitor.compositorName === "gnome")
+                        bundledVersion: windowMonitor ? windowMonitor.bundledHelperVersion : 0
+                        installedVersion: windowMonitor ? windowMonitor.helperVersion : 0
+                        helperInstalled: windowMonitor && ((windowMonitor.compositorName === "kwin" && windowMonitor.kwinScriptInstalled)
+                                         || (windowMonitor.compositorName === "gnome" && windowMonitor.gnomeHelperInstalled))
+
                         HelperControls {
                             id: windowHelperControls
                             objectName: "gameWindowHelperStatus"
@@ -1143,9 +1249,14 @@ Page {
                     SettingRow {
                         label: qsTr("Vulkan Detection")
                         help: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles.")
+                        showVersions: app !== null
+                        bundledVersion: app ? app.vulkanBundledHelperVersion : 0
+                        installedVersion: app ? app.vulkanHelperVersion : 0
+                        helperInstalled: app && app.vulkanLayerRegistered
 
                         HelperControls {
                             id: vulkanControls
+                            objectName: "vulkanHelperStatus"
                             statusWidth: detectionHelpersCard.statusWidth
                             actionWidth: detectionHelpersCard.actionWidth
                             healthy: app && app.vulkanLayerRegistered
@@ -1175,9 +1286,14 @@ Page {
                                      : qsTr("may cause issues with anti-cheat games"))
                               : qsTr("OpenGL detection helper not found in this install.")
                         rowEnabled: app ? app.glShimAvailable : false
+                        showVersions: app && app.glShimAvailable
+                        bundledVersion: app ? app.glBundledHelperVersion : 0
+                        installedVersion: app ? app.glHelperVersion : 0
+                        helperInstalled: app && app.glShimEnrolled
 
                         HelperControls {
                             id: glControls
+                            objectName: "glHelperStatus"
                             statusWidth: detectionHelpersCard.statusWidth
                             actionWidth: detectionHelpersCard.actionWidth
                             attention: !app || !app.glShimAvailable
@@ -1196,6 +1312,13 @@ Page {
                         }
                     }
 
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Installed versions may not be active until the game, compositor or login session restarts.")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                    }
                 }
 
                 // ================= TRAY =================
@@ -1420,7 +1543,7 @@ Page {
         property real statusWidth: 0
         property real actionWidth: 0
         property bool showAction: true
-        property alias text: helperBadge.text
+        property string text: ""
         property alias healthy: helperBadge.healthy
         property alias attention: helperBadge.attention
         property alias enrolled: helperBadge.enrolled
@@ -1433,6 +1556,7 @@ Page {
 
         HelperStatusBadge {
             id: helperBadge
+            text: helperControls.text
             anchors.right: actionSlot.left
             anchors.rightMargin: helperControls.showAction ? Theme.spacingMedium : 0
             anchors.verticalCenter: parent.verticalCenter
@@ -1519,10 +1643,17 @@ Page {
 
     // Label + help on the left, control right-aligned on the right.
     component SettingRow: ColumnLayout {
+        id: settingRow
         property string label: ""
         property string help: ""
         property int helpTextFormat: Text.AutoText
         property bool rowEnabled: true
+        property bool showVersions: false
+        property bool helperInstalled: false
+        property int bundledVersion: 0
+        property int installedVersion: 0
+        readonly property string versionText: qsTr("Bundled: %1").arg(bundledVersion > 0 ? qsTr("Version %1").arg(bundledVersion) : qsTr("Version unknown"))
+            + (helperInstalled ? " · " + qsTr("Installed: %1").arg(installedVersion > 0 ? qsTr("Version %1").arg(installedVersion) : qsTr("Version unknown")) : "")
         default property alias control: controlHolder.data
 
         Layout.fillWidth: true
@@ -1555,6 +1686,18 @@ Page {
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap
                     visible: help.length > 0
+                }
+
+                Label {
+                    objectName: "helperVersions"
+                    Layout.fillWidth: true
+                    visible: settingRow.showVersions
+                    text: settingRow.versionText
+                    textFormat: Text.PlainText
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                    wrapMode: Text.WordWrap
                 }
             }
 

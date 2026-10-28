@@ -1,6 +1,7 @@
 /* Real PlayerPage engine load with controlled probe delivery, no media I/O. */
 #include <QGuiApplication>
 #include <QColor>
+#include <QImage>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -12,6 +13,10 @@
 #include <QQuickWindow>
 #include <QUrl>
 #include <QSignalSpy>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QElapsedTimer>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
@@ -35,6 +40,7 @@ class PlayerLibraryFake : public QObject {
 public:
   QQmlPropertyMap entry;
   bool hasEntry = false;
+  bool realMedia = false;
   QString bookmarkedPath;
   qint64 bookmarkedPosition = -1;
   int removedIndex = -1;
@@ -62,7 +68,12 @@ public:
   bool clipSaving() const { return false; }
   // Keep pipelines idle: this suite tests the page's probe lifecycle, not
   // decoding, and never passes the fake file paths to FFmpeg.
-  Q_INVOKABLE QUrl localFileUrl(const QString &) const { return {}; }
+  Q_INVOKABLE QUrl localFileUrl(const QString &path) const {
+    return realMedia || path.endsWith(".png") ? QUrl::fromLocalFile(path) : QUrl{};
+  }
+  Q_INVOKABLE QString localFilePath(const QUrl &url) const {
+    return url.isLocalFile() ? url.toLocalFile() : QString{};
+  }
   // The file-info dialog looks the open path up in the library; unknown
   // here, so its rows fall back to path-derived text.
   Q_INVOKABLE QObject *getRecording(const QString &) { return hasEntry ? &entry : nullptr; }
@@ -79,11 +90,23 @@ signals:
   void filmstripReady(const QString &path, const QStringList &thumbs);
 };
 
+class PlayerGameDetectorFake : public QObject {
+  Q_OBJECT
+  Q_PROPERTY(QObject *gamesModel READ gamesModel CONSTANT)
+public:
+  QString iconUrl;
+  QObject *gamesModel() const { return nullptr; }
+  Q_INVOKABLE QString iconSourceForGame(const QString &name) const {
+    return name == "Game" ? iconUrl : QString{};
+  }
+};
+
 class PlayerProbeTest : public ::testing::Test {
 protected:
   PlayerWaveformFake waveform;
   PlayerLibraryFake library;
   PlayerFilmstripFake filmstrip;
+  PlayerGameDetectorFake detector;
   QQmlEngine engine;
   QQuickWindow window;
   std::unique_ptr<QQuickItem> page;
@@ -101,6 +124,7 @@ protected:
     engine.rootContext()->setContextProperty("waveformCache", &waveform);
     engine.rootContext()->setContextProperty("recordingLibrary", &library);
     engine.rootContext()->setContextProperty("filmstripCache", &filmstrip);
+    engine.rootContext()->setContextProperty("gameDetector", &detector);
     QQmlComponent component(&engine, QUrl::fromLocalFile(PLAYER_QML_FILE));
     ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
     QObject *created = component.create();
@@ -135,6 +159,161 @@ protected:
   }
 };
 
+TEST_F(PlayerProbeTest, SpeedPopupAlignsTrackNotchesAndLabels) {
+  open("/fake/game.mkv");
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  for (const auto *name : {"playerSpeedButton", "playerSeekBackButton", "playerSeekForwardButton"}) {
+    auto *button = findVisual(page.get(), name);
+    ASSERT_NE(button, nullptr);
+    EXPECT_EQ(button->implicitWidth(), 36);
+    EXPECT_EQ(button->implicitHeight(), 36);
+  }
+  auto *popup = page->findChild<QObject *>("playerSpeedPopup");
+  ASSERT_NE(popup, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return popup->property("opened").toBool(); }));
+  auto *slider = page->findChild<QQuickItem *>("playerSpeedSlider");
+  auto *content = qvariant_cast<QQuickItem *>(popup->property("contentItem"));
+  ASSERT_NE(content, nullptr);
+  ASSERT_NE(slider, nullptr);
+  EXPECT_EQ(page->property("playbackRate").toDouble(), 1.0);
+  for (int i = 0; i < 6; ++i) {
+    auto *dot = findVisual(slider, "playerSpeedNotch" + QString::number(i));
+    auto *label = findVisual(content, "playerSpeedLabel" + QString::number(i));
+    ASSERT_NE(dot, nullptr);
+    ASSERT_NE(label, nullptr);
+    EXPECT_NEAR(dot->y() + dot->height() / 2, slider->height() / 2, 0.5);
+    EXPECT_NEAR(dot->mapToScene(QPointF(dot->width() / 2, 0)).x(),
+                label->mapToScene(QPointF(label->width() / 2, 0)).x(), 0.5);
+  }
+  ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+}
+
+TEST_F(PlayerProbeTest, SnapshotChoosesDestinationAndCancelWritesNothing) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString source = dir.filePath("Game # 100%.mkv");
+  open(source);
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *dialog = page->findChild<QObject *>("playerSnapshotDialog");
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(dialog, nullptr);
+  ASSERT_NE(video, nullptr);
+  QSignalSpy saved(video, SIGNAL(snapshotSaved(QString,bool)));
+
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const auto suggested = dialog->property("selectedFile").toUrl();
+  EXPECT_TRUE(suggested.toLocalFile().startsWith(dir.filePath("Game # 100%_snapshot_")));
+  EXPECT_TRUE(suggested.toLocalFile().endsWith(".png"));
+  EXPECT_FALSE(QFileInfo::exists(suggested.toLocalFile()));
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "reject"));
+  EXPECT_EQ(saved.count(), 0);
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_TRUE(QDir(dir.path()).entryList(QDir::Files).isEmpty());
+
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const QString destination = dir.filePath("Chosen # 50% café.png");
+  ASSERT_TRUE(dialog->setProperty("selectedFile", QUrl::fromLocalFile(destination)));
+  // Drive the acceptance handler with a chosen URL; the offscreen dialog's
+  // filename editor otherwise overwrites programmatic selections on accept.
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "accepted"));
+  ASSERT_EQ(saved.count(), 1);
+  EXPECT_EQ(saved.at(0).at(0).toString(), destination);
+  EXPECT_TRUE(saved.at(0).at(1).toBool());
+  EXPECT_FALSE(QImage(destination).isNull());
+  EXPECT_FALSE(QFileInfo::exists(suggested.toLocalFile()));
+}
+
+TEST_F(PlayerProbeTest, SnapshotCloseDiscardsFrameAndSaveFailureIsReported) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  open(dir.filePath("game.mkv"));
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *dialog = page->findChild<QObject *>("playerSnapshotDialog");
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(dialog, nullptr);
+  ASSERT_NE(video, nullptr);
+  QSignalSpy saved(video, SIGNAL(snapshotSaved(QString,bool)));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  close();
+  EXPECT_FALSE(dialog->property("visible").toBool());
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_EQ(saved.count(), 0);
+
+  open(dir.filePath("other.mkv"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const QString destination = dir.filePath("missing/image.png");
+  ASSERT_TRUE(dialog->setProperty("selectedFile", QUrl::fromLocalFile(destination)));
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "accepted"));
+  ASSERT_EQ(saved.count(), 1);
+  EXPECT_EQ(saved.at(0).at(0).toString(), destination);
+  EXPECT_FALSE(saved.at(0).at(1).toBool());
+  EXPECT_FALSE(QFileInfo::exists(destination));
+
+  // An already queued grab must not reopen the dialog after navigation.
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  close();
+  QTest::qWait(50);
+  EXPECT_FALSE(dialog->property("visible").toBool());
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_EQ(saved.count(), 1);
+}
+
+TEST_F(PlayerProbeTest, HeaderIconSitsLeftOfTitleAndCollapsesWhenUnavailable) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  QImage image(40, 40, QImage::Format_RGB32);
+  image.fill(Qt::green);
+  const QString iconPath = dir.filePath("game.png");
+  ASSERT_TRUE(image.save(iconPath));
+  detector.iconUrl = QUrl::fromLocalFile(iconPath).toString();
+  library.hasEntry = true;
+  library.entry.insert("gameName", "Game");
+  open("/fake/game.mkv");
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *icon = findVisual(page.get(), "playerGameIcon");
+  auto *title = findVisual(page.get(), "playerTitleBlock");
+  ASSERT_NE(icon, nullptr);
+  ASSERT_NE(title, nullptr);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return icon->isVisible() && icon->width() == 40; }));
+  // Image readiness can precede the RowLayout's next polish. In particular,
+  // the title can still occupy its no-icon position when visibility flips.
+  // Settle that layout before capturing the baseline for the collapse check.
+  icon->parentItem()->ensurePolished();
+  ASSERT_TRUE(QTest::qWaitFor([&] {
+    return icon->x() > 0 && icon->x() + icon->width() <= title->x();
+  })) << "Visible game icon was not laid out before the title";
+  EXPECT_EQ(icon->height(), 40);
+  EXPECT_LE(icon->x() + icon->width(), title->x());
+  EXPECT_NEAR(icon->y() + icon->height() / 2, title->y() + title->height() / 2, 1);
+  const qreal withIcon = title->x();
+
+  library.entry.insert("gameName", "Missing icon");
+  ASSERT_TRUE(QTest::qWaitFor([&] { return !icon->isVisible(); }))
+      << "Game icon stayed visible after its source was removed";
+  EXPECT_TRUE(icon->property("source").toUrl().isEmpty());
+  ASSERT_TRUE(QTest::qWaitFor([&] { return title->x() < withIcon; }))
+      << "Title did not reclaim the hidden icon's space: before=" << withIcon
+      << ", after=" << title->x();
+  close();
+  library.hasEntry = false;
+  open("/fake/unknown.mkv");
+  EXPECT_FALSE(icon->isVisible());
+}
+
 TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   open("/fake/same.mkv");
   const int oldId = requestId();
@@ -149,6 +328,81 @@ TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   EXPECT_FALSE(pending());
   EXPECT_EQ(count(), 0);
   EXPECT_EQ(waveform.requests, 2);
+}
+
+TEST_F(PlayerProbeTest, BoundFilmstripDelegatesKeepIndicesAcrossRefreshZoomAndReopen) {
+  window.show();
+  const QString path = "/fake/filmstrip.mkv";
+  for (int reopen = 0; reopen < 2; ++reopen) {
+    open(path);
+    page->setVisible(true); // main.qml reveals the page after open(), including reopen.
+    auto *lane = findVisual(page.get(), "playerVideoLane");
+    ASSERT_NE(lane, nullptr);
+    lane->setProperty("playDuration", 60000);
+    lane->setProperty("viewStartMs", 0);
+    lane->setProperty("viewSpanMs", 60000);
+    emit filmstrip.filmstripReady(path, {"/fake/one.jpg", "/fake/two.jpg", "/fake/three.jpg"});
+    ASSERT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb2") != nullptr; }));
+    for (int index = 0; index < 3; ++index) {
+      auto *thumb = findVisual(lane, QString("filmstripThumb%1").arg(index));
+      ASSERT_NE(thumb, nullptr);
+      EXPECT_EQ(thumb->property("index").toInt(), index);
+      EXPECT_EQ(thumb->property("thumbStart").toDouble(), index * 20000);
+      EXPECT_EQ(thumb->property("thumbSpan").toDouble(), 20000);
+    }
+    lane->setProperty("viewStartMs", 30000);
+    lane->setProperty("viewSpanMs", 30000);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(findVisual(lane, "filmstripThumb0")->isVisible());
+    EXPECT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb2")->isVisible(); }));
+    emit filmstrip.filmstripReady(path, {"/fake/replacement.jpg"});
+    ASSERT_TRUE(QTest::qWaitFor([&] { return findVisual(lane, "filmstripThumb1") == nullptr; }));
+    auto *replacement = findVisual(lane, "filmstripThumb0");
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_EQ(replacement->property("modelData").toString(), "/fake/replacement.jpg");
+    EXPECT_EQ(replacement->property("thumbSpan").toDouble(), 60000);
+    close();
+  }
+}
+
+TEST_F(PlayerProbeTest, SeekAfterEndResumesButPausedSeekStaysPaused) {
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP() << "ffmpeg fixture tool unavailable";
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("end.mkv");
+  QProcess generate;
+  generate.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=15", "-t", "1", "-c:v", "mpeg4", path});
+  ASSERT_TRUE(generate.waitForFinished(15000));
+  ASSERT_EQ(generate.exitCode(), 0) << generate.readAllStandardError().toStdString();
+  library.realMedia = true;
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  open(path);
+  emit waveform.audioTrackCountReady(path, requestId(), 0);
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(video, nullptr);
+  auto waitFor = [](auto predicate) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!predicate() && timer.elapsed() < 10000) QTest::qWait(20);
+    return predicate();
+  };
+  ASSERT_TRUE(waitFor([&] { return video->property("atEnd").toBool(); }));
+  auto *output = video->findChild<QObject *>("playerVideoOutput");
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(output->property("endOfStreamPolicy").toInt(), 1);
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(200))));
+  ASSERT_TRUE(waitFor([&] { return video->property("playing").toBool(); }));
+  EXPECT_FALSE(video->property("atEnd").toBool());
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "pauseAll"));
+  ASSERT_TRUE(waitFor([&] { return !video->property("playing").toBool(); }));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(100))));
+  QTest::qWait(150);
+  EXPECT_FALSE(video->property("playing").toBool());
+  close();
 }
 
 TEST_F(PlayerProbeTest, BookmarkListReactsAndRangeClampsAtFileEdges) {

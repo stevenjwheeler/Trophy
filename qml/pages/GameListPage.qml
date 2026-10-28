@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../controls"
 import "../styles"
 import QtQuick
@@ -14,13 +15,8 @@ import QtQuick.Layouts
 
 Page {
     id: root
-
-    property string statusMessage: ""
-
-    function flash(message) {
-        root.statusMessage = message
-        statusTimer.restart()
-    }
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var detector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
 
     ColumnLayout {
         anchors.fill: parent
@@ -48,10 +44,10 @@ Page {
 
                 Layout.preferredWidth: 220
                 placeholderText: qsTr("Search games…")
-                text: gameDetector ? gameDetector.gameFilterText : ""
+                text: root.detector ? root.detector.gameFilterText : ""
                 onSearchTextChanged: function(query) {
-                    if (gameDetector)
-                        gameDetector.gameFilterText = query
+                    if (root.detector)
+                        root.detector.gameFilterText = query
                 }
             }
 
@@ -61,23 +57,6 @@ Page {
                 onClicked: addGameDialog.open()
             }
 
-        }
-
-        // Transient action feedback
-        Label {
-            Layout.fillWidth: true
-            text: root.statusMessage
-            color: Theme.textMutedColor
-            font.pixelSize: Theme.fontSizeSmall
-            visible: text !== ""
-        }
-
-        Timer {
-            id: statusTimer
-
-            interval: 4000
-            repeat: false
-            onTriggered: root.statusMessage = ""
         }
 
         // List options: count + default-exclusions toggle
@@ -102,10 +81,10 @@ Page {
             }
 
             TrophySwitch {
-                checked: gameDetector ? gameDetector.showDefaultExclusions : false
+                checked: root.detector ? root.detector.showDefaultExclusions : false
                 onToggled: {
-                    if (gameDetector)
-                        gameDetector.showDefaultExclusions = checked
+                    if (root.detector)
+                        root.detector.showDefaultExclusions = checked
                 }
             }
 
@@ -134,17 +113,19 @@ Page {
 
                 ListView {
                     id: gamesList
+                    objectName: "gamesList"
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
                     spacing: Theme.spacingSmall
                     visible: count > 0
-                    model: gameDetector ? gameDetector.gamesModel : null
+                    model: root.detector ? root.detector.gamesModel : null
                     ScrollBar.vertical: TrophyScrollBar { id: gamesScrollBar }
 
                     section.property: "section"
                     section.delegate: Label {
+                        required property string section
                         width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         text: section
                         color: Theme.textMutedColor
@@ -158,6 +139,7 @@ Page {
                     }
 
                     delegate: GameListItem {
+                        required property var model
                         width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
                         entryKey: model.key || ""
                         entryDisplay: model.display || ""
@@ -169,10 +151,6 @@ Page {
                         entryTokenKey: model.tokenKey || ""
                         entryIconSource: model.iconSource || ""
                         entryIdentifiers: model.identifiers || []
-                        onNotice: function(text) {
-                            root.statusMessage = text
-                            statusTimer.restart()
-                        }
                     }
 
                 }
@@ -204,6 +182,7 @@ Page {
         property var allWindows: []
         property string searchQuery: ""
         property var pickedWindow: null
+        property string errorMessage: ""
         readonly property var shownWindows: allWindows.filter(function(w) {
             if (searchQuery === "")
                 return true
@@ -223,7 +202,7 @@ Page {
                 return
             const key = ((pickedWindow.class || pickedWindow.title) || "").trim()
             if (key === "") {
-                root.flash(qsTr("That window has no usable key."))
+                errorMessage = qsTr("That window has no usable key.")
                 return
             }
             const display = displayField.text.trim() || pickedWindow.title || key
@@ -231,7 +210,7 @@ Page {
             if (ok) {
                 addGameDialog.close()
             } else {
-                root.flash(qsTr("That game is already listed."))
+                errorMessage = qsTr("That game is already listed.")
             }
         }
 
@@ -240,6 +219,7 @@ Page {
         height: 600
         anchors.centerIn: Overlay.overlay
         onOpened: {
+            errorMessage = ""
             pickedWindow = null
             searchQuery = ""
             processSearch.text = ""
@@ -261,6 +241,15 @@ Page {
 
         contentItem: ColumnLayout {
             spacing: 0
+
+            Label {
+                Layout.fillWidth: true
+                Layout.margins: Theme.spacingLarge
+                text: addGameDialog.errorMessage
+                visible: text !== ""
+                color: Theme.errorColor
+                wrapMode: Text.WordWrap
+            }
 
             // Title + search
             RowLayout {
@@ -291,8 +280,9 @@ Page {
 
             // Divider
             Rectangle {
+                objectName: "gamePickerTopDivider"
                 Layout.fillWidth: true
-                height: 1
+                implicitHeight: 1
                 color: Theme.dividerColor
             }
 
@@ -308,6 +298,8 @@ Page {
                 spacing: 2
 
                 delegate: ItemDelegate {
+                    id: processDelegate
+                    required property var modelData
                     width: processList.width
                     height: 50
                     padding: 0
@@ -324,8 +316,9 @@ Page {
                         spacing: Theme.spacingSmall
 
                         Rectangle {
-                            width: 36
-                            height: 36
+                            objectName: "pickerIconTile"
+                            Layout.preferredWidth: 36
+                            Layout.preferredHeight: 36
                             radius: Theme.radiusSmall
                             color: Theme.surfaceColor
                             Layout.alignment: Qt.AlignVCenter
@@ -402,8 +395,9 @@ Page {
 
             // Divider
             Rectangle {
+                objectName: "gamePickerBottomDivider"
                 Layout.fillWidth: true
-                height: 1
+                implicitHeight: 1
                 color: Theme.dividerColor
             }
 
@@ -505,26 +499,29 @@ Page {
                 ]
 
                 Rectangle {
+                    id: pole
+                    required property var modelData
+                    objectName: modelData.blocked ? "blockPole" : "promptPole"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     radius: 4
                     color: {
-                        const active = (duoSwitch.blocked === modelData.blocked)
+                        const active = (duoSwitch.blocked === pole.modelData.blocked)
                         if (!active)
                             return "transparent"
-                        return modelData.blocked ? Qt.alpha(Theme.errorColor, 0.25)
+                        return pole.modelData.blocked ? Qt.alpha(Theme.errorColor, 0.25)
                                                  : Qt.alpha(Theme.successColor, 0.15)
                     }
 
                     Label {
                         anchors.centerIn: parent
-                        text: modelData.label
+                        text: pole.modelData.label
                         font.pixelSize: Theme.fontSizeSmall
-                        font.weight: duoSwitch.blocked === modelData.blocked ? Font.Bold : Font.Normal
+                        font.weight: duoSwitch.blocked === pole.modelData.blocked ? Font.Bold : Font.Normal
                         color: {
-                            if (duoSwitch.blocked !== modelData.blocked)
+                            if (duoSwitch.blocked !== pole.modelData.blocked)
                                 return Theme.textMutedColor
-                            return modelData.blocked ? Theme.errorColor : Theme.successColor
+                            return pole.modelData.blocked ? Theme.errorColor : Theme.successColor
                         }
                     }
 
@@ -533,7 +530,7 @@ Page {
                     }
                     TapHandler {
                         onTapped: {
-                            if (modelData.blocked)
+                            if (pole.modelData.blocked)
                                 duoSwitch.blockSelected()
                             else
                                 duoSwitch.promptSelected()
@@ -562,7 +559,6 @@ Page {
         property url entryIconSource: ""
         property var entryIdentifiers: []
 
-        signal notice(string text)
 
         height: 60
 
@@ -596,8 +592,9 @@ Page {
             spacing: Theme.spacingMedium
 
             Rectangle {
-                width: 40
-                height: 40
+                objectName: "gameIconTile"
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
                 radius: Theme.radiusSmall
                 color: Theme.surfaceColor
                 Layout.alignment: Qt.AlignVCenter
@@ -724,12 +721,8 @@ Page {
                     visible: gameItem.entryHasToken
                     text: qsTr("Withdraw")
                     onClicked: {
-                        const tokenKey = entryTokenKey, name = entryDisplay, running = entryRunning
+                        const tokenKey = entryTokenKey
                         settingsManager.removeRestoreToken(tokenKey)
-                        if (running)
-                            gameItem.notice(qsTr("Silent capture withdrawn for %1 — takes effect the next time it launches.").arg(name))
-                        else
-                            gameItem.notice(qsTr("Silent capture withdrawn for %1 — back to prompt.").arg(name))
                     }
                 }
 
@@ -737,18 +730,10 @@ Page {
                     visible: !gameItem.entryHasToken
                     blocked: gameItem.entryListed === 2
                     onPromptSelected: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.unblockGame(key))
-                            gameItem.notice(qsTr("%1 will prompt on detection.").arg(name))
-                        else
-                            gameItem.notice(qsTr("%1 already prompts.").arg(name))
+                        gameDetector.unblockGame(gameItem.entryKey)
                     }
                     onBlockSelected: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.moveToBlacklist(key))
-                            gameItem.notice(qsTr("Blocked %1.").arg(name))
-                        else
-                            gameItem.notice(qsTr("%1 is already blocked.").arg(name))
+                        gameDetector.moveToBlacklist(gameItem.entryKey)
                     }
                 }
 
@@ -757,11 +742,7 @@ Page {
                     text: qsTr("×")
                     implicitWidth: 30
                     onClicked: {
-                        const key = entryKey, name = entryDisplay
-                        if (gameDetector.forgetGame(key))
-                            gameItem.notice(qsTr("Removed %1.").arg(name))
-                        else
-                            gameItem.notice(qsTr("Nothing to remove."))
+                        gameDetector.forgetGame(gameItem.entryKey)
                     }
                 }
 

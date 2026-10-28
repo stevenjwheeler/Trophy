@@ -18,6 +18,7 @@
 namespace TrophyBackend {
 class ApplicationAudioProbeTest;
 class UpdateChecker;
+class UpdateInstaller;
 class RecordingManager;
 class SettingsManager;
 class StorageManager;
@@ -40,6 +41,7 @@ class AutostartManager;
 class ReplayManager;
 class GlobalShortcutManager;
 class ControlServer;
+class DiscordPresence;
 } // namespace TrophyBackend
 
 namespace TrophyBackend {
@@ -64,6 +66,10 @@ class Application : public QApplication {
   Q_PROPERTY(bool glShimAvailable READ glShimAvailable NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimEnrolled READ glShimEnrolled NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimActive READ glShimActive NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int glHelperVersion READ glHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int glBundledHelperVersion READ glBundledHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int vulkanBundledHelperVersion READ vulkanBundledHelperVersion NOTIFY detectionStatusChanged)
+  Q_PROPERTY(int vulkanHelperVersion READ vulkanHelperVersion NOTIFY detectionStatusChanged)
 
 public:
   explicit Application(int &argc, char **argv);
@@ -108,6 +114,10 @@ public:
   bool glShimAvailable() const;
   bool glShimEnrolled() const;
   bool glShimActive() const;
+  int glHelperVersion() const;
+  int glBundledHelperVersion() const;
+  int vulkanBundledHelperVersion() const;
+  int vulkanHelperVersion() const;
   Q_INVOKABLE bool setGlShimEnrolled(bool enrolled);
 
   bool suppressNextStorageNotification() const;
@@ -124,6 +134,8 @@ public:
   // Instant replay: routes tray/F10/hotkey requests with user feedback.
   Q_INVOKABLE void requestReplay();
   Q_INVOKABLE void requestBookmark();
+  Q_INVOKABLE void installUpdate();
+  Q_INVOKABLE void openUpdateDialog();
   Q_INVOKABLE QVariantMap captureHealth() const;
   // Track mute that follows the active pipeline (the dashboard meters).
   // The recording and the DVR own different mixers; muting only one
@@ -158,6 +170,7 @@ signals:
   void trayAvailabilityChanged();
   void detectionStatusChanged();
   void fatalError(const QString &message);
+  void updateDialogRequested();
 
 private:
   void queryCaptureAvailability();
@@ -169,13 +182,14 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  void updateDiscordPresence();
   // Only successful, finalized outputs are warmed (never active recordings or
   // DVR segments). Reuses the player's cache instances and in-flight jobs.
   void preparePlayerCaches(const QString &filePath);
   friend class ApplicationMediaCacheTest;
   // Registers the Vulkan implicit layer; true when the layer JSON is in
   // place (result cached in m_vulkanLayerRegistered at startup).
-  bool ensureVulkanLayerRegistered();
+  bool ensureVulkanLayerRegistered(bool allow32BitMigration = false);
   // Deletes our layer JSON; true when nothing remains registered.
   bool removeVulkanLayerRegistration();
 
@@ -196,8 +210,10 @@ private:
   std::unique_ptr<ReplayManager> m_replayManager;
   std::unique_ptr<GlobalShortcutManager> m_shortcutManager;
   std::unique_ptr<ControlServer> m_controlServer;
+  std::unique_ptr<DiscordPresence> m_discordPresence;
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
+  std::unique_ptr<UpdateInstaller> m_updateInstaller;
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
   std::unique_ptr<PreviewCache> m_previewCache;

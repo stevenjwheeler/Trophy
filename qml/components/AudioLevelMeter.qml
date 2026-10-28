@@ -97,6 +97,7 @@ Item {
                 model: 10
 
                 Rectangle {
+                    required property int index
                     y: parent.height - (parent.height * (index + 1) / 10) - 1
                     width: parent.width
                     height: 1
@@ -109,6 +110,7 @@ Item {
 
         // Icon label at bottom - clickable to mute
         AbstractButton {
+            id: verticalMuteButton
             Layout.alignment: Qt.AlignHCenter
             implicitWidth: 24
             implicitHeight: 24
@@ -138,7 +140,7 @@ Item {
 
             background: Rectangle {
                 radius: Theme.radiusSmall
-                color: parent.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
+                color: verticalMuteButton.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
             }
 
         }
@@ -153,6 +155,7 @@ Item {
         spacing: Theme.spacingSmall
 
         AbstractButton {
+            id: horizontalMuteButton
             Layout.alignment: Qt.AlignVCenter
             implicitWidth: 24
             implicitHeight: 24
@@ -182,7 +185,7 @@ Item {
 
             background: Rectangle {
                 radius: Theme.radiusSmall
-                color: parent.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
+                color: horizontalMuteButton.hovered ? Theme.withOpacity(Theme.textColor, 0.1) : "transparent"
             }
 
         }

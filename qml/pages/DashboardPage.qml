@@ -16,14 +16,103 @@ import QtQuick.Layouts
 
 Page {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
+    property var feed: typeof activityFeed !== "undefined" ? activityFeed : null // qmllint disable unqualified
+    property var replay: typeof replayManager !== "undefined" ? replayManager : null // qmllint disable unqualified
+    property var storage: typeof storageManager !== "undefined" ? storageManager : null // qmllint disable unqualified
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
 
     property bool libraryListView: false
     property var captureStatus: ({})
     // Retain the last live snapshot until the closing animation finishes.
     property var healthStatus: ({})
+    property var audioSignalSnapshot: ({})
     onCaptureStatusChanged: {
-        if (captureStatus.mode)
+        if (captureStatus.mode) {
             healthStatus = captureStatus;
+            audioSignalSnapshot = captureStatus;
+        } else {
+            audioSignalSnapshot = ({});
+            captureInfoDialog.close();
+        }
+    }
+    onVisibleChanged: { if (!visible) captureInfoDialog.close() }
+    function captureInfoValue(key, suffix) {
+        const value = root.captureStatus[key];
+        return value === undefined ? "–" : String(value) + (suffix || "");
+    }
+    function captureInfoSize(widthKey, heightKey) {
+        return root.captureStatus[widthKey] > 0 && root.captureStatus[heightKey] > 0
+            ? root.captureStatus[widthKey] + " × " + root.captureStatus[heightKey] : "–";
+    }
+    function captureInfoNumber(key, decimals, suffix) {
+        const value = root.captureStatus[key];
+        return value === undefined || !isFinite(Number(value)) ? "–"
+            : Number(value).toFixed(decimals) + (suffix || "");
+    }
+    function captureInfoBitrate(key) {
+        const value = root.captureInfoNumber(key, 0, " kbps");
+        return value === "–" ? value : value
+            + (root.captureStatus.rateControlMode ? " · " + root.captureStatus.rateControlMode : "");
+    }
+    function audioSignalForRole(role) {
+        const snapshot = root.audioSignalSnapshot.session === root.captureStatus.session
+            ? root.audioSignalSnapshot : root.captureStatus;
+        return snapshot["audio" + role + "Signal"] || ({});
+    }
+    function audioDb(data, key) {
+        const value = data[key];
+        if (value === undefined || value === null || !isFinite(Number(value)) || value < 0)
+            return "–";
+        return value === 0 ? qsTr("−∞ dBFS")
+            : (20 * Math.log(value) / Math.LN10).toFixed(1) + " dBFS";
+    }
+    function audioMeterFraction(value) {
+        return value > 0 ? Math.max(0, Math.min(1, (20 * Math.log(value) / Math.LN10 + 60) / 60)) : 0;
+    }
+    function audioReceiptText(role, data) {
+        if (role === 1 && (root.healthStatus.desktopAudio || root.healthStatus.desktopFallback
+                           || root.healthStatus.audio1 === "not-configured"))
+            return qsTr("No separate source");
+        if (!data.received) return qsTr("No buffers received");
+        const age = Number(data.lastBufferAgeMs);
+        if (!isFinite(age)) return "–";
+        return age < 1000 ? qsTr("%1 ms ago").arg(Math.round(age))
+            : qsTr("%1 s ago · no recent buffers").arg((age / 1000).toFixed(1));
+    }
+
+    component CaptureInfoRow: Item {
+        id: infoRow
+        property string rowName: ""
+        property string rowValue: ""
+        Layout.fillWidth: true
+        // The outer layout owns width. Do not propagate the inner layout's
+        // width-dependent text hints back into that same layout negotiation.
+        implicitHeight: infoContent.implicitHeight + Theme.spacingSmall + 1
+        RowLayout {
+            id: infoContent
+            width: infoRow.width
+            Label {
+                text: infoRow.rowName
+                color: Theme.textSecondaryColor
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+            }
+            Label {
+                text: infoRow.rowValue
+                color: Theme.textColor
+                Layout.maximumWidth: infoRow.width * 0.48
+                wrapMode: Text.WrapAnywhere
+                horizontalAlignment: Text.AlignRight
+            }
+        }
+        Rectangle {
+            y: infoContent.height + Theme.spacingSmall
+            width: infoRow.width
+            height: 1
+            color: Theme.borderColor
+        }
     }
     property int dropWarningTicks: 0
     function updateCaptureStatus() {
@@ -86,11 +175,314 @@ Page {
     }
 
     Timer {
+        objectName: "captureStatusTimer"
         interval: 1000
         repeat: true
         running: root.visible
         triggeredOnStart: true
         onTriggered: root.updateCaptureStatus()
+    }
+    Timer {
+        interval: 100
+        repeat: true
+        running: root.visible && captureInfoDialog.visible && captureInfoDialog.section === 1
+        triggeredOnStart: true
+        onTriggered: {
+            if (typeof app === "undefined" || !app || typeof app.captureHealth !== "function") return;
+            const next = app.captureHealth();
+            // Do not change the Dashboard's one-second drop-warning cadence,
+            // or adopt a retired DVR segment's audio into its successor.
+            if (next.session && next.session === root.captureStatus.session && next.mode === root.captureStatus.mode)
+                root.audioSignalSnapshot = next;
+        }
+    }
+
+    Dialog {
+        id: captureInfoDialog
+        objectName: "captureInfoDialog"
+        property int section: 0
+        onOpened: section = 0
+        onSectionChanged: {
+            if (captureInfoScroll) {
+                const flickable = captureInfoScroll.contentItem as Flickable;
+                if (flickable) flickable.contentY = 0;
+            }
+        }
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(640, root.width - 32)
+        height: Math.min(660, root.height - 32)
+        padding: Theme.spacingLarge
+        Overlay.modal: Rectangle { color: Theme.withOpacity("#000000", 0.5) }
+        background: Rectangle {
+            color: Theme.cardColor
+            radius: Theme.radiusLarge
+            border.color: Theme.borderColor
+        }
+        header: ColumnLayout {
+            spacing: Theme.spacingSmall
+            Label {
+                text: qsTr("Capture Info")
+                padding: Theme.spacingLarge
+                color: Theme.textColor
+                font.pixelSize: Theme.fontSizeLarge
+                font.bold: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingSmall
+                Repeater {
+                    model: [qsTr("Video"), qsTr("Audio"), qsTr("Session")]
+                    delegate: TrophyButton {
+                        required property int index
+                        required property string modelData
+                        objectName: "captureInfoTab" + index
+                        Layout.fillWidth: true
+                        text: modelData
+                        checkable: true
+                        autoExclusive: true
+                        outlined: true
+                        checked: captureInfoDialog.section === index
+                        onClicked: captureInfoDialog.section = index
+                    }
+                }
+            }
+        }
+        contentItem: ScrollView {
+            id: captureInfoScroll
+            clip: true
+            contentWidth: availableWidth
+            ColumnLayout {
+                width: parent.width
+                spacing: Theme.spacingMedium
+                Label {
+                    Layout.fillWidth: true
+                    text: root.captureStatus.mode === "replay"
+                        ? qsTr("DVR · current segment (counters reset at rotation)")
+                        : qsTr("Full recording · current session")
+                    color: Theme.accentColor
+                    wrapMode: Text.WordWrap
+                }
+                Repeater {
+                    model: captureInfoDialog.section === 0 ? [
+                        [qsTr("Input resolution"), root.captureInfoSize("inputWidth", "inputHeight")],
+                        [qsTr("Output resolution"), root.captureInfoSize("outputWidth", "outputHeight")],
+                        [qsTr("Delivered transport"), root.captureStatus.transport === "dma-buf" ? qsTr("DMA-BUF") : root.captureStatus.transport === "shm" ? qsTr("Shared memory (SHM)") : "–"],
+                        [qsTr("Transport changes"), root.captureInfoValue("transportChanges")],
+                        [qsTr("DMA-BUF → SHM changes"), root.captureInfoValue("shmTransitions")],
+                        [qsTr("Encoder / codec"), root.captureInfoValue("encoder")],
+                        [qsTr("Target frame rate"), root.captureStatus.targetFps === 0 ? qsTr("Uncapped") : root.captureInfoValue("targetFps", " fps")],
+                        [qsTr("Actual capture frame rate"), root.captureInfoNumber("actualCaptureFps", 1, " fps")],
+                        [qsTr("Actual encode frame rate"), root.captureInfoNumber("actualEncodeFps", 1, " fps")],
+                        [qsTr("Target video bitrate"), root.captureInfoBitrate("bitrateKbps")],
+                        [qsTr("Actual output bitrate (A/V payload)"), root.captureInfoBitrate("actualOutputKbps")],
+                        [qsTr("Rate measurement interval"), root.captureInfoNumber("rateWindowSeconds", 2, " s")],
+                        [qsTr("Requested preset"), root.captureInfoValue("preset")],
+                        [qsTr("Target keyframe interval"), root.captureInfoValue("keyframeSeconds", " s")],
+                        [qsTr("Session average encoder call"), root.captureInfoNumber("averageEncodeMs", 2, " ms")],
+                        [qsTr("Recent average encoder call"), root.captureInfoNumber("recentEncodeAverageMs", 2, " ms")],
+                        [qsTr("Recent maximum encoder call"), root.captureInfoNumber("recentEncodeMaximumMs", 2, " ms")],
+                        [qsTr("Recent 95th percentile"), root.captureInfoNumber("recentEncodeP95Ms", 2, " ms")],
+                        [qsTr("Recent timing samples"), root.captureInfoValue("recentEncodeSamples")],
+                        [qsTr("Frames delivered to session"), root.captureInfoValue("deliveredFrames")],
+                        [qsTr("DMA-BUF frames delivered"), root.captureInfoValue("dmaBufFrames")],
+                        [qsTr("Frames accepted by encoder"), root.captureInfoValue("acceptedFrames")],
+                        [qsTr("Video packets produced"), root.captureInfoValue("videoPackets")],
+                        [qsTr("Queue depth / capacity"), root.captureInfoValue("queueDepth") + " / " + root.captureInfoValue("queueCapacity")],
+                        [qsTr("Peak queue depth"), root.captureInfoValue("peakQueueDepth")],
+                        [qsTr("Session queue drops"), root.captureInfoValue("queueDrops")],
+                        [qsTr("Encoder input drops"), root.captureInfoValue("encoderDrops")],
+                        [qsTr("EGL / CUDA imports"), root.captureInfoValue("eglImportFrames")],
+                        [qsTr("VA-API VPP frames"), root.captureInfoValue("vaapiVppFrames")],
+                        [qsTr("Hardware-mapped frames"), root.captureInfoValue("hwMappedFrames")],
+                        [qsTr("GPU-scaled frames"), root.captureInfoValue("gpuScaledFrames")],
+                        [qsTr("CPU-input frames"), root.captureInfoValue("cpuInputFrames")],
+                        [qsTr("Written size"), root.captureStatus.bytesWritten === undefined ? "–" : root.formatSize(root.captureStatus.bytesWritten)],
+                        [qsTr("Captured video"), root.captureStatus.videoSeconds === undefined ? "–" : Number(root.captureStatus.videoSeconds).toFixed(1) + " s"]
+                    ] : []
+                    delegate: CaptureInfoRow {
+                        required property var modelData
+                        rowName: modelData[0]
+                        rowValue: modelData[1]
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 0
+                    text: qsTr("Rates use the interval shown above. Capture FPS counts session deliveries; encode FPS counts accepted inputs, including delayed output. Output bitrate includes successfully muxed audio/video payload, not container overhead. Recent timing covers the last 5 seconds, up to 1024 completed calls. Encoder-call time includes conversion, GPU import and driver waits; it is not end-to-end latency. Transport changes are observed deliveries, not inferred failure reasons. Drop counters do not include every compositor or PipeWire loss.")
+                    color: Theme.textMutedColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
+                }
+                Label {
+                    visible: captureInfoDialog.section === 1
+                    text: qsTr("Audio")
+                    color: Theme.textColor
+                    font.bold: true
+                    font.pixelSize: Theme.fontSizeMedium
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 1
+                    text: (root.captureStatus.separateAudio ? qsTr("Separate tracks") : qsTr("Mixed track"))
+                        + " · " + root.captureInfoValue("audioBitrateKbps", qsTr(" kbps target per encoded stream"))
+                    color: Theme.textSecondaryColor
+                    wrapMode: Text.WordWrap
+                }
+                Repeater {
+                    model: captureInfoDialog.section === 1 ? (root.captureStatus.audioStreams || []) : []
+                    delegate: CaptureInfoRow {
+                        required property var modelData
+                        rowName: qsTr("Audio stream %1").arg(modelData.stream)
+                        rowValue: modelData.codec + " · " + modelData.sampleRate + " Hz · "
+                            + qsTr("%1 channels").arg(modelData.channels)
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 1 && !(root.captureStatus.audioStreams || []).length
+                    text: qsTr("No encoded audio streams")
+                    color: Theme.textMutedColor
+                }
+                Repeater {
+                    model: captureInfoDialog.section === 1 ? 3 : 0
+                    delegate: ColumnLayout {
+                        id: audioPanel
+                        required property int index
+                        readonly property var signalData: root.audioSignalForRole(index)
+                        objectName: "captureAudioSignal" + index
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                        spacing: Theme.spacingSmall
+                        Label {
+                            Layout.fillWidth: true
+                            text: root.audioHealthName(audioPanel.index) + ": " + root.audioHealthText(audioPanel.index)
+                            color: root.audioHealthColor(audioPanel.index)
+                            font.bold: true
+                            wrapMode: Text.WordWrap
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: root.audioHealthTarget(audioPanel.index) || qsTr("No bound source")
+                            color: Theme.textSecondaryColor
+                            wrapMode: Text.WrapAnywhere
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 6
+                            radius: 3
+                            color: Theme.borderColor
+                            Rectangle {
+                                height: parent.height
+                                width: parent.width * root.audioMeterFraction(audioPanel.signalData.peak)
+                                radius: parent.radius
+                                color: audioPanel.signalData.peak >= 1 ? Theme.errorColor : Theme.accentColor
+                            }
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("Peak (≈1 s)")
+                            rowValue: root.audioDb(audioPanel.signalData, "peak")
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("Peak hold (≈5 s)")
+                            rowValue: root.audioDb(audioPanel.signalData, "peakHold")
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("RMS (≈1 s)")
+                            rowValue: root.audioDb(audioPanel.signalData, "rms")
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: audioPanel.signalData.clippingRisk ? qsTr("Full scale / clipping risk · last 5 s")
+                                : audioPanel.signalData.received ? qsTr("No full-scale samples in the last 5 s") : qsTr("Clipping: no measurements")
+                            color: audioPanel.signalData.clippingRisk ? Theme.errorColor : Theme.textMutedColor
+                            wrapMode: Text.WordWrap
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("Full-scale samples (since source bind)")
+                            rowValue: audioPanel.signalData.fullScaleSamplesTotal === undefined ? "–"
+                                : String(audioPanel.signalData.fullScaleSamplesTotal)
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("Mute control")
+                            rowValue: audioPanel.signalData.muted === undefined ? "–"
+                                : audioPanel.signalData.muted ? qsTr("Muted") : qsTr("Unmuted")
+                        }
+                        CaptureInfoRow {
+                            rowName: qsTr("Last audio buffer")
+                            rowValue: root.audioReceiptText(audioPanel.index, audioPanel.signalData)
+                        }
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 1
+                    text: qsTr("Post-mute source PCM, before session startup gating, track mixing and encoding. Peak/RMS use about 1 second; peak hold and clipping risk use about 5 seconds, in 100 ms buckets. 0 dBFS is full scale; digital silence is −∞. RMS averages sample power across channels, not LUFS. These are sample peaks, not true-peak or physical microphone loudness; final mixed-track clipping can differ. History follows each source binding and resets when that source is replaced or restarted.")
+                    color: Theme.textMutedColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
+                }
+                Label {
+                    visible: captureInfoDialog.section === 2
+                    text: qsTr("Session and source")
+                    color: Theme.textColor
+                    font.bold: true
+                    font.pixelSize: Theme.fontSizeMedium
+                }
+                Repeater {
+                    model: captureInfoDialog.section === 2 ? [
+                        [qsTr("Game"), root.captureStatus.gameName || "–"],
+                        [qsTr("Detected game identity"), root.captureInfoValue("detectedGameKey")],
+                        [qsTr("Steam App ID"), root.captureInfoValue("detectedSteamAppId")],
+                        [qsTr("Detected game PID (at capture start)"), root.captureInfoValue("detectedGamePid")],
+                        [qsTr("Capture backend"), root.captureInfoValue("captureBackend")],
+                        [qsTr("Portal stream label"), root.captureStatus.sourceLabel || qsTr("Not reported")],
+                        [qsTr("Portal application / ID"), root.captureStatus.sourceAppId || qsTr("Not reported")],
+                        [qsTr("Portal source PID"), root.captureInfoValue("sourcePid")],
+                        [root.captureStatus.mode === "replay" ? qsTr("Current segment duration") : qsTr("Session duration"), root.captureInfoNumber("sessionSeconds", 1, " s")]
+                    ].concat(root.captureStatus.mode === "replay" ? [
+                        [qsTr("DVR session duration"), root.captureInfoNumber("dvrSessionSeconds", 1, " s")],
+                        [qsTr("Segments retained (including current)"), root.captureInfoValue("retainedSegments")],
+                        [qsTr("Segments finalizing"), root.captureInfoValue("retiringSegments")],
+                        [qsTr("Retained video (including safety margin)"), root.captureInfoNumber("retainedVideoSeconds", 1, " s")]
+                    ] : []) : []
+                    delegate: CaptureInfoRow {
+                        required property var modelData
+                        rowName: modelData[0]
+                        rowValue: modelData[1]
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 2 && root.captureStatus.mode === "replay"
+                    text: qsTr("DVR buffer: %1 / %2 s (approximate)")
+                        .arg(Number(root.captureStatus.bufferSeconds || 0).toFixed(1))
+                        .arg(root.captureStatus.bufferTargetSeconds || 0)
+                    color: Theme.textSecondaryColor
+                    wrapMode: Text.WordWrap
+                }
+                Label {
+                    Layout.fillWidth: true
+                    visible: captureInfoDialog.section === 2
+                    text: qsTr("Detected identity, Steam ID and game PID are pinned when capture starts; they do not prove which window a manual picker selected. Portal metadata is separate and may name the compositor (such as kwin_wayland) rather than the game. DVR session duration starts when DVR is armed; buffered video is measured separately.")
+                    color: Theme.textMutedColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+        footer: DialogButtonBox {
+            padding: Theme.spacingLarge
+            background: Item {}
+            TrophyButton {
+                objectName: "captureInfoCloseButton"
+                text: qsTr("Close")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                onClicked: captureInfoDialog.close()
+            }
+        }
     }
 
     HoverPreview {
@@ -151,8 +543,11 @@ Page {
         if (!seconds || seconds <= 0)
             return "00:00";
 
-        var m = Math.floor(seconds / 60);
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
         var s = seconds % 60;
+        if (h > 0)
+            return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
         return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
     }
 
@@ -687,7 +1082,7 @@ Page {
                             Rectangle {
                                 width: 10; height: 10; radius: 5
                                 Layout.alignment: Qt.AlignVCenter
-                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? Theme.successColor : Theme.textMutedColor)
+                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? Theme.successColor : Theme.warningColor) : Theme.textMutedColor)
                                 SequentialAnimation on opacity {
                                     running: (recordingManager && recordingManager.isRecording)
                                     loops: Animation.Infinite
@@ -699,7 +1094,7 @@ Page {
                                 text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
                                       : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
                                       : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
-                                      : ((gameDetector && gameDetector.currentGameName) ? qsTr("READY") : qsTr("IDLE"))
+                                      : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? qsTr("READY") : qsTr("WAITING FOR GAME")) : qsTr("IDLE"))
                                 font.pixelSize: 10; font.weight: Font.Black
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                             }
@@ -712,6 +1107,23 @@ Page {
                             color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textColor
                             elide: Text.ElideRight
                         }
+                    }
+
+                    TrophyButton {
+                        objectName: "captureInfoButton"
+                        text: "ⓘ"
+                        flat: true
+                        padding: 0
+                        horizontalPadding: 0
+                        Layout.preferredWidth: 32
+                        Layout.preferredHeight: 32
+                        visible: !!root.captureStatus.mode
+                        enabled: !!root.captureStatus.mode
+                        Accessible.name: qsTr("Capture info")
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Live capture info")
+                        ToolTip.delay: 600
+                        onClicked: captureInfoDialog.open()
                     }
 
                     Button {
@@ -962,7 +1374,7 @@ Page {
                         Label { text: qsTr("Quality"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 0; Layout.minimumHeight: 18; verticalAlignment: Text.AlignVCenter }
                         Label { text: qsTr("FPS"); font.pixelSize: Theme.fontSizeTiny; color: Theme.textSecondaryColor; Layout.row: 2; Layout.column: 1 }
                         Label { text: (settingsManager ? settingsManager.videoBitrate : 0) + " kbps"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 0; Layout.alignment: Qt.AlignVCenter }
-                        Label { text: settingsManager ? settingsManager.fps.toString() : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
+                        Label { text: settingsManager ? (settingsManager.fps === 0 ? "∞" : settingsManager.fps.toString()) : "0"; font.pixelSize: Theme.fontSizeSmall; color: Theme.textColor; Layout.row: 3; Layout.column: 1; Layout.alignment: Qt.AlignVCenter }
 
                         Item {
                             Layout.row: 1; Layout.column: 2; Layout.rowSpan: 3
@@ -1212,24 +1624,24 @@ Page {
             }
         }
     }
-    Connections { target: recordingManager; function onStateChanged() { activityModel.updateActivity() } }
+    Connections { target: root.recorder; function onStateChanged() { activityModel.updateActivity() } }
     Connections {
-        target: activityFeed
+        target: root.feed
         function onEventsChanged() { activityModel.updateActivity() }
     }
     Connections {
-        target: replayManager
+        target: root.replay
         function onReplaySaved(filePath, seconds) {
             var secs = Math.max(1, Math.round(seconds))
             var span = secs === 1 ? qsTr("Last 1 second") : qsTr("Last %1 seconds").arg(secs)
-            var game = (replayManager && replayManager.currentGame) || qsTr("Unknown Game")
+            var game = (root.replay && root.replay.currentGame) || qsTr("Unknown Game")
             root.pushActivityEvent("clip", "blue", qsTr("Clip saved: %1").arg(game), span, filePath)
         }
     }
     Connections {
-        target: storageManager
+        target: root.storage
         function onStorageLimitReached() {
-            var auto = settingsManager ? settingsManager.autoDeleteOldest : false
+            var auto = root.preferences ? root.preferences.autoDeleteOldest : false
             root.pushActivityEvent("storage", "red", qsTr("Storage Full"), auto ? qsTr("Over limit — oldest files will be auto-deleted") : qsTr("Over limit — enable auto-cleanup or free space manually"))
         }
         function onStorageLimitCannotCleanup() {

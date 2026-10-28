@@ -5,14 +5,18 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../styles"
 import "../controls"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 GridView {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var hostWindow: typeof window !== "undefined" ? window : null // qmllint disable unqualified
+    property var library: typeof recordingLibrary !== "undefined" ? recordingLibrary : null // qmllint disable unqualified
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
 
     property int skip: 0
     property HoverPreview previewController: null
@@ -29,13 +33,13 @@ GridView {
     boundsBehavior: Flickable.DragAndOvershootBounds
     boundsMovement: Flickable.FollowBoundsBehavior
     model: {
-        var full = (typeof recordingLibrary !== "undefined" && recordingLibrary) ? recordingLibrary.recordings : [];
+        var full = root.library ? root.library.recordings : [];
         if (skip > 0 && full.length > skip) {
             full = full.slice(skip);
         }
         // Prepend a sentinel for the in-progress recording so the live
         // card renders as the first grid cell while recording.
-        if (typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) {
+        if (root.recorder && root.recorder.isRecording) {
             return [{ __live: true }].concat(full);
         }
         return full;
@@ -45,7 +49,7 @@ GridView {
     Label {
         anchors.centerIn: parent
         visible: root.count === 0
-        text: recordingLibrary && (recordingLibrary.kindFilter !== 0 || recordingLibrary.searchQuery.length > 0)
+        text: root.library && (root.library.kindFilter !== 0 || root.library.searchQuery.length > 0)
             ? qsTr("No matching captures\nTry another filter or search.")
             : qsTr("No captures yet\nRecord some gameplay to see it here!")
         color: Theme.textMutedColor
@@ -53,8 +57,12 @@ GridView {
         font.pixelSize: Theme.fontSizeMedium
     }
 
-    delegate: Loader {
+    delegate: CellLoader {}
+
+    component CellLoader: Loader {
         id: cellLoader
+        required property var modelData
+        required property int index
         width: root.cellWidth - Theme.spacingMedium
         height: Theme.recordingCardHeight
         // NOTE: modelData/index live on the delegate's context and do NOT
@@ -68,6 +76,7 @@ GridView {
     Component {
         id: liveCardComponent
         ActiveRecordingCard {
+            recorder: root.recorder
             anchors.fill: parent
         }
     }
@@ -75,32 +84,35 @@ GridView {
     Component {
         id: recordingCardComponent
         RecordingCard {
+            readonly property CellLoader cell: parent as CellLoader
+            hostWindow: root.hostWindow
+            library: root.library
             anchors.fill: parent
             previewController: root.previewController
             previewAllowed: !root.moving && root.visible
-                && (typeof window.hoverPreviewsAllowed === "undefined" || window.hoverPreviewsAllowed)
-            recording: parent.recData
+                && (!root.hostWindow || typeof root.hostWindow.hoverPreviewsAllowed === "undefined" || root.hostWindow.hoverPreviewsAllowed)
+            recording: cell ? cell.recData : null
             // Delegate index includes the live sentinel while recording
             // (scrollToRecording adds the same offset in reverse): subtract
             // it so shift-select ranges index into recordingLibrary.
-            cardIndex: parent.isLive ? -1 : parent.recIdx - ((typeof recordingManager !== "undefined" && recordingManager && recordingManager.isRecording) ? 1 : 0)
+            cardIndex: !cell || cell.isLive ? -1 : cell.recIdx - ((root.recorder && root.recorder.isRecording) ? 1 : 0)
             onPlay: {
                 if (recording) {
-                    window.openPlayer(recording.filePath);
+                    root.hostWindow.openPlayer(recording.filePath);
                 }
             }
             onDeleteRequested: {
                 if (recording) {
-                    window.confirmDelete(recording.filePath, recording.fileName);
+                    root.hostWindow.confirmDelete(recording.filePath, recording.fileName);
                 }
             }
             onShareRequested: {
                 if (recording)
-                    window.openShareExport(recording.filePath);
+                    root.hostWindow.openShareExport(recording.filePath);
             }
             onRenameRequested: {
                 if (recording) {
-                    window.requestRename(recording.filePath, recording.gameName);
+                    root.hostWindow.requestRename(recording.filePath, recording.gameName);
                 }
             }
         }

@@ -81,6 +81,7 @@ public:
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
   QString currentGameName() const { return m_currentGameName; }
+  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   qint64 recordingDuration() const; // milliseconds
   qint64 recordingSize() const;     // bytes
   QString currentFilePath() const { return m_currentFilePath; }
@@ -165,6 +166,13 @@ private:
   void beginAudioPreparation();
   void completePipelineAndStart();
   void finishStoppedRecording();
+  void onCaptureError(const QString &error);
+  bool capturedGameHasEnded() const;
+  QString m_captureGameName;
+  QString m_pendingCaptureError;
+  QElapsedTimer m_captureEndGrace;
+  int m_captureEndGraceMs = 5000;
+  bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;
   qint64 m_stopSizeBytes = 0;
@@ -186,6 +194,7 @@ private:
 
   RecordingState m_state = RecordingState::Idle;
   QString m_currentGameName;
+  QVariantMap m_detectedGameInfo;
   QString m_currentFilePath;
   unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;

@@ -13,6 +13,7 @@
 #include "detection/GlShimEnrollment.h"
 #include "detection/ShippedLibDirs.h"
 #include "detection/PersistentReporterLib.h"
+#include "detection/MultilibGlPreload.h"
 
 using namespace TrophyBackend;
 
@@ -40,6 +41,7 @@ protected:
   QByteArray oldAppDir;
   QByteArray oldXdgConfigHome;
   QByteArray oldOverride;
+  QByteArray oldOverride32;
   QString fakeLib;
 
   void SetUp() override {
@@ -55,15 +57,19 @@ protected:
 
     oldXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
     oldOverride = qgetenv("TROPHY_GL_SHIM_LIB");
+    oldOverride32 = qgetenv("TROPHY_GL_SHIM_LIB32");
     oldDataHome = qgetenv("XDG_DATA_HOME");
     oldAppDir = qgetenv("APPDIR");
     qputenv("XDG_DATA_HOME", dataHome.path().toUtf8());
     qunsetenv("APPDIR");
     qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
     qputenv("TROPHY_GL_SHIM_LIB", fakeLib.toUtf8());
+    qunsetenv("TROPHY_GL_SHIM_LIB32");
   }
 
   void TearDown() override {
+    if (oldOverride32.isNull()) qunsetenv("TROPHY_GL_SHIM_LIB32");
+    else qputenv("TROPHY_GL_SHIM_LIB32", oldOverride32);
     if (oldDataHome.isNull())
       qunsetenv("XDG_DATA_HOME");
     else
@@ -81,7 +87,177 @@ protected:
     else
       qputenv("TROPHY_GL_SHIM_LIB", oldOverride);
   }
+
+  bool elf(const QString &path, int bits, const QByteArray &version = {}) {
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) return false;
+    QByteArray bytes(20, '\0');
+    bytes.replace(0, 4, QByteArray("\x7f" "ELF", 4));
+    bytes[4] = bits == 32 ? 1 : 2; bytes[5] = 1; bytes[6] = 1;
+    bytes[16] = 3; bytes[18] = bits == 32 ? 3 : 62;
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           file.write(bytes + version) == bytes.size() + version.size();
+  }
+  QString companion() const { return libDir.path() + "/reporters32/libtrophy_gl_shim.so"; }
+  QString content() const {
+    QFile file(GlShimEnrollment::confFilePath());
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+  }
+  QString token() const {
+    for (const auto &line : content().split('\n'))
+      if (line.startsWith("LD_PRELOAD=")) return line.mid(11).section(':', 0, 0);
+    return {};
+  }
 };
+
+TEST_F(GlShimEnrollmentTest, MultilibLookupAndStatusNeverEnroll) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  EXPECT_EQ(GlShimEnrollment::libraryPath32(), companion());
+  EXPECT_FALSE(GlShimEnrollment::isEnrolled());
+  EXPECT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_FALSE(QFile::exists(GlShimEnrollment::confFilePath()));
+  EXPECT_FALSE(QDir(PersistentReporterLib::directory()).exists());
+}
+
+TEST_F(GlShimEnrollmentTest, VersionReadsEnrolledFileRatherThanNewBundledRevision) {
+  ASSERT_TRUE(elf(fakeLib, 64, QByteArray("TROPHY_HELPER_VERSION:gl:1") + '\0'));
+  EXPECT_EQ(GlShimEnrollment::helperVersion(), 1);
+  qputenv("APPDIR", libDir.path().toUtf8());
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  ASSERT_TRUE(elf(fakeLib, 64, QByteArray("TROPHY_HELPER_VERSION:gl:2") + '\0'));
+  EXPECT_EQ(GlShimEnrollment::helperVersion(), 1);
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(false));
+  EXPECT_EQ(GlShimEnrollment::bundledHelperVersion(), 2);
+  EXPECT_EQ(GlShimEnrollment::helperVersion(), 2);
+  ASSERT_TRUE(elf(fakeLib, 64));
+  EXPECT_EQ(GlShimEnrollment::helperVersion(), 0); // Old unversioned helper.
+  EXPECT_EQ(GlShimEnrollment::bundledHelperVersion(), 0);
+}
+
+TEST_F(GlShimEnrollmentTest, LastPreloadAssignmentDeterminesStatusWithoutRewriting) {
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(GlShimEnrollment::confFilePath()).absolutePath()));
+  for (bool enabled : {false, true}) {
+    const QString ours = "LD_PRELOAD=" + fakeLib + '\n';
+    const QString foreign = "LD_PRELOAD=/foreign.so\n";
+    const QString original = enabled ? foreign + ours : ours + foreign;
+    QFile file(GlShimEnrollment::confFilePath());
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(file.write(original.toUtf8()), original.toUtf8().size());
+    file.close();
+    EXPECT_EQ(GlShimEnrollment::isEnrolled(), enabled);
+    EXPECT_FALSE(GlShimEnrollment::refreshEnrolledBundle());
+    EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+    EXPECT_EQ(content(), original);
+  }
+}
+
+TEST_F(GlShimEnrollmentTest, ExistingGlobalTogglePublishesDurableArchitecturePair) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_TRUE(token().contains("/$$PLATFORM/"));
+  EXPECT_TRUE(MultilibGlPreload::isOwned(token()));
+  const QString saved = content();
+  ASSERT_TRUE(QFile::remove(fakeLib)); ASSERT_TRUE(QFile::remove(companion()));
+  EXPECT_TRUE(GlShimEnrollment::isEnrolled());
+  EXPECT_EQ(content(), saved); // Status cannot refresh/migrate/write.
+  EXPECT_TRUE(GlShimEnrollment::setEnrolled(false));
+  EXPECT_FALSE(QFile::exists(GlShimEnrollment::confFilePath()));
+  EXPECT_TRUE(MultilibGlPreload::isOwned(saved.split("LD_PRELOAD=").last().trimmed()));
+}
+
+TEST_F(GlShimEnrollmentTest, LegacyConsentIsNotSilentlyMigratedToMultilib) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  qputenv("APPDIR", libDir.path().toUtf8());
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(GlShimEnrollment::confFilePath()).absolutePath()));
+  QFile file(GlShimEnrollment::confFilePath());
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write("LD_PRELOAD=" + fakeLib.toUtf8() + '\n'); file.close();
+  ASSERT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_FALSE(content().contains("$$PLATFORM"));
+  EXPECT_TRUE(GlShimEnrollment::isEnrolled());
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true)); // Explicit re-enrollment.
+  EXPECT_TRUE(content().contains("$$PLATFORM"));
+}
+
+TEST_F(GlShimEnrollmentTest, MultilibRefreshKeepsOldVersionsAndPreservesUnchangedMtime) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  const QString old = token();
+  QFile config(GlShimEnrollment::confFilePath());
+  ASSERT_TRUE(config.open(QIODevice::ReadWrite));
+  const auto sentinel = QDateTime::fromSecsSinceEpoch(1000000000);
+  ASSERT_TRUE(config.setFileTime(sentinel, QFileDevice::FileModificationTime)); config.close();
+  ASSERT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_EQ(QFileInfo(config).lastModified(), sentinel);
+  ASSERT_TRUE(elf(fakeLib, 64, "updated"));
+  ASSERT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_NE(old, token());
+  EXPECT_TRUE(MultilibGlPreload::isOwned(old));
+  EXPECT_TRUE(MultilibGlPreload::isOwned(token()));
+}
+
+TEST_F(GlShimEnrollmentTest, BadMultilibCompanionNeverReplacesEnrollment) {
+  ASSERT_TRUE(elf(fakeLib, 64));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  const QString previous = content();
+  ASSERT_TRUE(elf(companion(), 64)); // Present but wrong architecture.
+  EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_EQ(content(), previous);
+  ASSERT_TRUE(QFile::remove(companion()));
+  ASSERT_TRUE(QFile::link(fakeLib, companion()));
+  EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_EQ(content(), previous);
+}
+
+TEST_F(GlShimEnrollmentTest, MissingCompanionDoesNotSilentlyDowngradeExistingPair) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  const QString previous = content();
+  ASSERT_TRUE(QFile::remove(companion()));
+  EXPECT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_TRUE(GlShimEnrollment::isEnrolled());
+  EXPECT_EQ(content(), previous);
+  ASSERT_TRUE(elf(fakeLib, 64, "native-update-without-companion"));
+  EXPECT_TRUE(GlShimEnrollment::refreshEnrolledBundle());
+  EXPECT_NE(content(), previous);
+  EXPECT_TRUE(GlShimEnrollment::isEnrolled());
+}
+
+TEST_F(GlShimEnrollmentTest, UnsafeMultilibStorePathIsNotEnrolled) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  qputenv("XDG_DATA_HOME", (dataHome.path() + "/with space").toUtf8());
+  EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_FALSE(QFile::exists(GlShimEnrollment::confFilePath()));
+}
+
+TEST_F(GlShimEnrollmentTest, CorruptMultilibObjectIsNotOverwrittenAndCanBeDisabled) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  const QString previous = content();
+  const QString library = MultilibGlPreload::tokenDirectory(token()) + "/i686/libtrophy_gl_shim.so";
+  ASSERT_TRUE(QFile::setPermissions(library, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
+  QFile file(library); ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+  file.write("damaged"); file.close();
+  EXPECT_FALSE(GlShimEnrollment::isEnrolled());
+  EXPECT_FALSE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_EQ(content(), previous);
+  EXPECT_TRUE(GlShimEnrollment::setEnrolled(false));
+  EXPECT_FALSE(QFile::exists(GlShimEnrollment::confFilePath()));
+}
+
+TEST_F(GlShimEnrollmentTest, MultilibPreservesForeignEntriesAndAssignmentOrdering) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(GlShimEnrollment::confFilePath()).absolutePath()));
+  QFile file(GlShimEnrollment::confFilePath()); ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.write("FOREIGN=/foreign\nLD_PRELOAD=${FOREIGN}/trophy_gl_shim_extra.so /another.so\nOTHER=value\n");
+  file.close();
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(true));
+  EXPECT_LT(content().indexOf("FOREIGN="), content().indexOf("LD_PRELOAD="));
+  EXPECT_LT(content().indexOf("LD_PRELOAD="), content().indexOf("OTHER="));
+  EXPECT_TRUE(content().contains(":${FOREIGN}/trophy_gl_shim_extra.so:/another.so"));
+  ASSERT_TRUE(GlShimEnrollment::setEnrolled(false));
+  EXPECT_EQ(content(), "FOREIGN=/foreign\nLD_PRELOAD=${FOREIGN}/trophy_gl_shim_extra.so:/another.so\nOTHER=value\n");
+}
 
 TEST_F(GlShimEnrollmentTest, LibraryOverrideResolves) {
   EXPECT_EQ(GlShimEnrollment::libraryPath(), fakeLib);

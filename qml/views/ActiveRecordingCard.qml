@@ -12,6 +12,8 @@ import QtQuick.Layouts
 
 Rectangle {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
 
     radius: Theme.radiusMedium
     color: Theme.cardColor
@@ -142,7 +144,7 @@ Rectangle {
                     id: durationLabel
 
                     anchors.centerIn: parent
-                    text: recordingManager ? formatDuration(recordingManager.recordingDuration) : "0:00"
+                    text: root.recorder ? root.formatDuration(root.recorder.recordingDuration) : "0:00"
                     color: "white"
                     font.pixelSize: Theme.fontSizeTiny
                 }
@@ -150,33 +152,47 @@ Rectangle {
         }
 
         // --- INFO SECTION (same structure as RecordingCard) ---
-        ColumnLayout {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: Theme.spacingSmall
-            spacing: 2
 
-            Label {
+            ColumnLayout {
                 Layout.fillWidth: true
-                text: recordingManager ? (recordingManager.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
-                color: Theme.textColor
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Bold
-                elide: Text.ElideRight
+                Layout.fillHeight: true
+                spacing: 2
+
+                Label {
+                    Layout.fillWidth: true
+                    text: root.recorder ? (root.recorder.currentGameName || qsTr("Recording...")) : qsTr("Recording...")
+                    color: Theme.textColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Bold
+                    elide: Text.ElideRight
+                }
+
+                Label {
+                    text: root.recorder ? (root.formatDuration(root.recorder.recordingDuration) + " • " + root.formatSize(root.recorder.recordingSize)) : ""
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeTiny
+                }
+
+                Label {
+                    objectName: "liveRecordingStatus"
+                    text: qsTr("In Progress")
+                    color: Theme.primaryColor
+                    font.pixelSize: Theme.fontSizeTiny
+                    Layout.alignment: Qt.AlignBottom
+                }
             }
 
-            Label {
-                text: recordingManager ? (formatDuration(recordingManager.recordingDuration) + " • " + formatSize(recordingManager.recordingSize)) : ""
-                color: Theme.textSecondaryColor
-                font.pixelSize: Theme.fontSizeTiny
-            }
-
-            Label {
-                objectName: "liveRecordingStatus"
-                text: qsTr("In Progress")
-                color: Theme.primaryColor
-                font.pixelSize: Theme.fontSizeTiny
-                Layout.alignment: Qt.AlignBottom
+            RecordingGameIcon {
+                objectName: "liveGridGameIcon"
+                gameName: root.recorder ? root.recorder.currentGameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.leftMargin: Theme.spacingSmall
+                Layout.alignment: Qt.AlignVCenter
             }
         }
     }

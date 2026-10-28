@@ -1,6 +1,5 @@
 import "../styles"
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Effects
 import QtQuick.Templates as T
 

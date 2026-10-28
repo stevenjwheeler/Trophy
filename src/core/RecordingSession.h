@@ -10,6 +10,7 @@
 #include "audio/AudioMixer.h"
 #include "capture/IVideoCaptureSource.h"
 #include "encoding/AudioEncoder.h"
+#include "EncodeTimingWindow.h"
 #include "audio/AudioDriftCorrector.h"
 #include <QElapsedTimer>
 #include <QMap>
@@ -128,9 +129,11 @@ public:
   bool pushQueuedFrame(QueuedFrame &&frame);
 
   // Mark a track as already having a source so the node-check timer won't re-add it
-  void markSourceConnected(int trackIndex) {
-    if (trackIndex >= 0 && trackIndex < kAudioTrackCount)
+  void markSourceConnected(int trackIndex, const QString &serial = {}) {
+    if (trackIndex >= 0 && trackIndex < kAudioTrackCount) {
       m_sourceConnected[trackIndex] = true;
+      if (!serial.isEmpty()) m_boundSerial[trackIndex] = serial;
+    }
   }
   // Forget a track's bind (used when the user retargets mid-session: the
   // old source is removed and the retry hunts the new identity).
@@ -160,6 +163,9 @@ private:
   // Caller holds m_mergeMutex; silence fills missing slots after bounded grace.
   void drainMergedAudio(int channels, bool flushTail = false);
   void noteCapturedVideo(const VideoFrame &frame);
+  bool admitVideoFrame(int64_t timestampUs); // Capture callback only.
+  void noteQueueDepth(); // caller holds m_queueMutex
+  void sampleCaptureRates(QVariantMap &result, int64_t now) const;
   bool advanceMergedClock(bool finalDrain = false);
   bool drainClockedMergedAudio(int channels, bool finalDrain);
   void appendClockedMergedAudio(int track, const float *samples, int frames,
@@ -172,8 +178,9 @@ private:
   void checkForNewAudioNodes();
   void deliverAudioLookups();
   using AudioNodeResult = AudioMixer::NodeLookupResult;
-  using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &)>;
-  static AudioNodeResult lookupAudioNode(uint32_t pid, const QStringList &hints);
+  using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &, bool)>;
+  static AudioNodeResult lookupAudioNode(uint32_t pid, const QStringList &hints,
+                                        bool exactBinary);
   AudioNodeLookup m_audioNodeLookup = lookupAudioNode;
   struct AudioLookupOperation {
     std::future<AudioNodeResult> worker;
@@ -244,12 +251,33 @@ private:
   std::atomic<int64_t> m_firstCapturedVideoTimestampUs{-1};
   std::atomic<int64_t> m_capturedVideoTimelineUs{-1};
   int64_t m_videoFrameDurationUs = 0; // Immutable after start, before worker creation.
+  int m_videoTargetFps = 1;
+  int64_t m_videoRateOriginUs = -1;
+  int64_t m_videoRateSlot = -1;
 
   std::atomic<bool> m_running{false};
   std::atomic<bool> m_outputFailed{false};
   std::atomic<bool> m_outputFinalized{false};
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};
+  // Live diagnostics: published without taking the encoding/queue locks.
+  std::atomic<qint64> m_deliveredFrames{0};
+  std::atomic<qint64> m_dmaBufDelivered{0};
+  std::atomic<int> m_inputWidth{0}, m_inputHeight{0};
+  std::atomic<qint64> m_encodeCalls{0}, m_encodeTimeUs{0};
+  EncodeTimingWindow m_recentEncodeTimes;
+  std::atomic<int> m_queueDepth{0}, m_peakQueueDepth{0};
+  // 0: no delivered video, 1: SHM, 2: DMA-BUF. Observed transitions,
+  // not a claim about the reason the producer changed transport.
+  std::atomic<int> m_transport{0};
+  std::atomic<qint64> m_transportChanges{0}, m_shmTransitions{0};
+  std::atomic<qint64> m_outputPayloadBytes{0};
+  QVariantList m_audioStreamInfo; // owner-thread setup, immutable during capture
+  // Rate sampling is owner-thread only and cached for >=1 s so repeated
+  // health reads cannot shrink the interval or manufacture rate spikes.
+  mutable int64_t m_rateSampleUs = -1;
+  mutable qint64 m_rateDelivered = 0, m_rateAccepted = 0, m_ratePayload = 0;
+  mutable QVariantMap m_recentRates;
   // A/V origin alignment: audio and video pipelines start at different
   // wall times yet both count timestamps from zero, baking in a constant
   // offset. Audio before the first video frame is dropped (unpairable

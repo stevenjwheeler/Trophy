@@ -15,6 +15,8 @@ import QtQuick.Dialogs
 
 Rectangle {
     id: root
+    // Explicit dependency; this default preserves engine/creation-context hosts.
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
 
     anchors.fill: parent
     color: Theme.withOpacity(Theme.backgroundColor, 0.95)
@@ -234,18 +236,19 @@ Rectangle {
                                         TrophySlider {
                                             id: mainStorageSlider
                                             Layout.fillWidth: true
-                                            from: 0; to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500; stepSize: 0.1
+                                            from: 0; to: storageManager && storageManager.driveCapacityBytes > 0 ? storageManager.driveCapacityBytes / (1024 * 1024 * 1024) : 500; stepSize: 1
+                                            snapMode: Slider.SnapAlways
                                             value: settingsManager ? (settingsManager.maxStorageSize / (1024 * 1024 * 1024)) : 50
                                             onMoved: {
                                                 if (!pressed && settingsManager)
-                                                    settingsManager.maxStorageSize = Math.round(value * 1024 * 1024 * 1024);
+                                                    settingsManager.maxStorageSize = Math.round(value) * 1024 * 1024 * 1024;
                                             }
                                             onPressedChanged: {
                                                 if (!pressed && settingsManager)
-                                                    settingsManager.maxStorageSize = Math.round(value * 1024 * 1024 * 1024);
+                                                    settingsManager.maxStorageSize = Math.round(value) * 1024 * 1024 * 1024;
                                             }
                                         }
-                                        Label { text: mainStorageSlider.value === 0 ? qsTr("No Limit") : mainStorageSlider.value < 1 ? mainStorageSlider.value.toFixed(1) + " GB" : Math.round(mainStorageSlider.value) + " GB"; color: Theme.textColor; font.weight: Font.Medium; Layout.preferredWidth: 70 }
+                                        Label { text: mainStorageSlider.value === 0 ? qsTr("No Limit") : Math.round(mainStorageSlider.value) + " GB"; color: Theme.textColor; font.weight: Font.Medium; Layout.preferredWidth: 70 }
                                     }
                                     RowLayout {
                                         spacing: Theme.spacingMedium
@@ -308,7 +311,7 @@ Rectangle {
                                                 return 0;
                                             })()
                                         }
-                                        onActivated: if (settingsManager && currentIndex < devices.length) settingsManager.microphoneDevice = devices[currentIndex].id
+                                        onActivated: if (root.preferences && currentIndex < devices.length) root.preferences.microphoneDevice = devices[currentIndex].id
                                     }
                                     Label { text: qsTr("Audio Capture Mode"); font.weight: Font.Bold; color: Theme.textColor }
                                     RowLayout {
@@ -676,19 +679,26 @@ Rectangle {
                                         TrophyRadioButton { text: qsTr("AV1 — best quality"); checked: stepHwScroll.currentCodec() === "av1"; enabled: stepHwScroll.codecAvailable("av1") && !(recordingManager && recordingManager.isRecording); opacity: enabled ? 1.0 : 0.5; onClicked: stepHwScroll.setCodec("av1") }
                                     }
                                     RowLayout {
+                                        id: dmaBufRow
+                                        objectName: "wizardDmaBufOption"
+                                        readonly property bool softwareEncoder: settingsManager &&
+                                            (settingsManager.encoder === "x264" ||
+                                             (settingsManager.encoder === "auto" && hardwareInfo &&
+                                              hardwareInfo.recommendedEncoderName === "x264"))
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
+                                        enabled: !softwareEncoder && (hardwareInfo ? hardwareInfo.dmaBufAvailable : false) && !(recordingManager && recordingManager.isRecording)
+                                        opacity: enabled ? 1.0 : 0.5
                                         TrophySwitch {
+                                            objectName: "wizardDmaBufSwitch"
                                             checked: settingsManager ? settingsManager.useDmaBuf : true
-                                            enabled: (hardwareInfo ? hardwareInfo.dmaBufAvailable : false) && !(recordingManager && recordingManager.isRecording)
-                                            opacity: enabled ? 1.0 : 0.5
                                             onToggled: if (settingsManager) settingsManager.useDmaBuf = checked
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 0
                                             Label { text: qsTr("Zero-copy capture"); font.weight: Font.Bold; color: Theme.textColor }
-                                            Label { text: (hardwareInfo && hardwareInfo.dmaBufAvailable) ? qsTr("Frames go straight to the encoder.") : qsTr("Not available on this system."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                            Label { text: dmaBufRow.softwareEncoder ? qsTr("Software encoding uses shared memory capture.") : (hardwareInfo && hardwareInfo.dmaBufAvailable) ? qsTr("Frames go straight to the encoder.") : qsTr("Not available on this system."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                                         }
                                     }
                                 }

@@ -129,6 +129,68 @@ TEST_F(PreviewCacheTest, MissingMalformedAndNonLocalInputsFailWithoutPartialFile
   EXPECT_TRUE(QDir(temp.filePath(".thumbnails")).entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty());
 }
 
+TEST_F(PreviewCacheTest, NarrowAndUnalignedFramesRemainSafeAcrossRepeatedHovers) {
+  const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+  if (ffmpeg.isEmpty()) GTEST_SKIP();
+  int ticket = 100;
+  for (const QSize size : {QSize(2, 180), QSize(6, 180), QSize(10, 180),
+                           QSize(318, 180), QSize(180, 180)}) {
+    SCOPED_TRACE(QString::number(size.width()).toStdString());
+    const QString source = temp.filePath(QString("Narrow%1.mkv").arg(size.width()));
+    QProcess process;
+    process.start(ffmpeg, {"-v", "error", "-f", "lavfi", "-i",
+        QString("testsrc2=size=%1x%2:rate=15").arg(size.width()).arg(size.height()),
+        "-t", "1", "-c:v", "mpeg4", source});
+    ASSERT_TRUE(process.waitForFinished(10000));
+    ASSERT_EQ(process.exitCode(), 0) << process.readAllStandardError().toStdString();
+    for (int repeat = 0; repeat < 3; ++repeat) {
+      PreviewCache cache;
+      std::unique_ptr<QQuickImageProvider> provider(cache.createImageProvider());
+      QSignalSpy frames(&cache, &PreviewCache::previewFramesReady);
+      ASSERT_FALSE(request(cache, source, ticket++).isEmpty());
+      ASSERT_EQ(frames.count(), 1);
+      const QString key = frames.first().at(3).toString();
+      const int count = frames.first().at(4).toInt();
+      ASSERT_GT(count, 1);
+      for (int i = 0; i < count; ++i) {
+        const QImage image = provider->requestImage(key + '/' + QString::number(i), nullptr, {});
+        ASSERT_FALSE(image.isNull());
+        EXPECT_EQ(image.size(), size);
+      }
+    }
+  }
+}
+
+TEST_F(PreviewCacheTest, TruncatedRecordingsPreserveInputsAndDoNotPoisonLaterPreviews) {
+  const QString good = render("Good.mkv");
+  if (good.isEmpty()) GTEST_SKIP();
+  QFile input(good);
+  ASSERT_TRUE(input.open(QIODevice::ReadOnly));
+  const QByteArray original = input.readAll();
+  PreviewCache cache;
+  int ticket = 200;
+  for (const qsizetype length : {qsizetype(32), qsizetype(256),
+                                 original.size() / 4, original.size() - 97}) {
+    SCOPED_TRACE(length);
+    const QByteArray truncated = original.left(length);
+    const QString source = temp.filePath(QString("Truncated%1.mkv").arg(length));
+    QFile file(source);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write(truncated), truncated.size());
+    file.close();
+    QSignalSpy frames(&cache, &PreviewCache::previewFramesReady);
+    // A playable prefix may produce a preview; an invalid one must fail once,
+    // without taking down the worker or preventing the next valid hover.
+    request(cache, source, ticket++);
+    ASSERT_EQ(frames.count(), 1);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    EXPECT_EQ(file.readAll(), truncated);
+    file.close();
+    EXPECT_FALSE(request(cache, good, ticket++).isEmpty());
+    EXPECT_TRUE(QDir(temp.filePath(".thumbnails")).entryList({"*.part"}, QDir::Files).isEmpty());
+  }
+}
+
 TEST_F(PreviewCacheTest, SymlinkCacheDirectoryIsNotFollowed) {
   const QString source = render();
   if (source.isEmpty()) GTEST_SKIP();

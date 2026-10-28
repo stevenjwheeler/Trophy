@@ -81,6 +81,8 @@ public:
   static bool isScriptEnabled();
   /** Bundled package under an install prefix (AppImage included). */
   static QString findScriptSourceDirForAppDir(const QString &appDir);
+  // Locate the bundled script, including explicit overrides and dev-tree copies.
+  static QString findScriptSourceDir();
   /** Install the bundled package if missing or outdated.
    * Stays synchronous: KWinScriptInstallTest.InstallRemoveRoundTrip asserts
    * the on-disk effect (and a no-op second run) on return. Production
@@ -107,10 +109,6 @@ public slots:
   void ReportWindows(const QString &json);
 
 private:
-  // Locate the bundled script package: $TROPHY_KWIN_SCRIPT_DIR override,
-  // our own install prefix (AppImage included), installed datadir,
-  // then the CMake build-tree copy for dev runs.
-  static QString findScriptSourceDir();
   // Install/enable helpers below are static so start()'s worker can run
   // them without touching member state (safe under a racing stop()).
   static bool installScript(bool *changed);

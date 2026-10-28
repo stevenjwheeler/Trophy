@@ -8,6 +8,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QTemporaryDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDateTime>
 #include <gtest/gtest.h>
 
 #include "detection/VulkanLayer.h"
@@ -38,6 +42,21 @@ protected:
   QByteArray oldAppDir;
   QString fakeManifest;
   QString fakeLib;
+
+  bool elf(const QString &path, int bits, const QByteArray &version = {}) {
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) return false;
+    QByteArray bytes(20, '\0'); bytes.replace(0, 4, QByteArray("\x7f" "ELF", 4));
+    bytes[4] = bits == 32 ? 1 : 2; bytes[5] = 1; bytes[6] = 1;
+    bytes[16] = 3; bytes[18] = bits == 32 ? 3 : 62;
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+           file.write(bytes + version) == bytes.size() + version.size();
+  }
+  QString companion() const { return srcTree.path() + "/reporters32/libtrophy_layer.so"; }
+  QByteArray content() const {
+    QFile file(VulkanLayer::destManifestPath());
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+  }
 
   void SetUp() override {
     ASSERT_TRUE(dataHome.isValid());
@@ -74,6 +93,95 @@ protected:
       qputenv("XDG_DATA_HOME", oldXdgDataHome);
   }
 };
+
+TEST_F(VulkanLayerTest, CompanionLookupAndStatusNeverEnroll) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  EXPECT_EQ(VulkanLayer::libraryPath32ForSource(fakeManifest), companion());
+  EXPECT_FALSE(VulkanLayer::isRegistered()); EXPECT_FALSE(VulkanLayer::is32BitRegistered());
+  EXPECT_FALSE(QFileInfo::exists(PersistentReporterLib::directory()));
+}
+
+TEST_F(VulkanLayerTest, VersionComesFromRegisteredFileNotCurrentPackage) {
+  ASSERT_TRUE(elf(fakeLib, 64, QByteArray("TROPHY_HELPER_VERSION:vulkan:7") + '\0'));
+  qputenv("APPDIR", srcTree.path().toUtf8());
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath()));
+  EXPECT_EQ(VulkanLayer::helperVersion(), 7);
+  ASSERT_TRUE(elf(fakeLib, 64, QByteArray("TROPHY_HELPER_VERSION:vulkan:8") + '\0'));
+  EXPECT_EQ(VulkanLayer::helperVersion(), 7);
+  const QString bundledDir = dataHome.path() + "/trophy/vulkan_layer";
+  ASSERT_TRUE(QDir().mkpath(bundledDir));
+  ASSERT_TRUE(QFile::copy(fakeManifest, bundledDir + "/trophy_layer.json"));
+  ASSERT_TRUE(QFile::copy(fakeLib, bundledDir + "/libtrophy_layer.so"));
+  EXPECT_EQ(VulkanLayer::bundledHelperVersion(), 8);
+}
+
+TEST_F(VulkanLayerTest, BothArchitecturesPublishInOneAtomicManifestAndOptOutTogether) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  const auto root = QJsonDocument::fromJson(content()).object();
+  EXPECT_EQ(root.value("file_format_version").toString(), "1.2.1");
+  EXPECT_FALSE(root.contains("layer"));
+  const auto layers = root.value("layers").toArray(); ASSERT_EQ(layers.size(), 2);
+  EXPECT_EQ(layers[0].toObject().value("library_arch").toString(), "64");
+  EXPECT_EQ(layers[1].toObject().value("library_arch").toString(), "32");
+  EXPECT_NE(layers[0].toObject().value("name"), layers[1].toObject().value("name"));
+  EXPECT_TRUE(VulkanLayer::isRegistered()); EXPECT_TRUE(VulkanLayer::is32BitRegistered());
+  ASSERT_TRUE(VulkanLayer::removeRegistration());
+  EXPECT_FALSE(VulkanLayer::isRegistered()); EXPECT_FALSE(VulkanLayer::is32BitRegistered());
+}
+
+TEST_F(VulkanLayerTest, BadCompanionCannotReplaceExistingManifest) {
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath()));
+  const QByteArray previous = content();
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 64));
+  EXPECT_FALSE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  EXPECT_EQ(content(), previous);
+  ASSERT_TRUE(QFile::remove(companion())); ASSERT_TRUE(QFile::link(fakeLib, companion()));
+  EXPECT_FALSE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  EXPECT_EQ(content(), previous);
+}
+
+TEST_F(VulkanLayerTest, BundledArchitecturePairSurvivesUnmountAndRefreshKeepsOldVersions) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  qputenv("APPDIR", srcTree.path().toUtf8());
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  const auto first = QJsonDocument::fromJson(content()).object().value("layers").toArray();
+  const QString old32 = first[1].toObject().value("library_path").toString();
+  ASSERT_TRUE(PersistentReporterLib::isOwned(old32, "libtrophy_layer32"));
+  ASSERT_TRUE(elf(companion(), 32, "updated"));
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  const auto second = QJsonDocument::fromJson(content()).object().value("layers").toArray();
+  EXPECT_NE(second[1].toObject().value("library_path").toString(), old32);
+  EXPECT_TRUE(QFileInfo::exists(old32));
+  ASSERT_TRUE(QFile::remove(fakeLib)); ASSERT_TRUE(QFile::remove(companion()));
+  EXPECT_TRUE(VulkanLayer::isRegistered()); EXPECT_TRUE(VulkanLayer::is32BitRegistered());
+}
+
+TEST_F(VulkanLayerTest, NoCompanionRemovesOnlyTheManaged32BitEntryAndUnchangedWriteKeepsMtime) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  QFile file(VulkanLayer::destManifestPath()); ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+  const auto sentinel = QDateTime::fromSecsSinceEpoch(1000000000);
+  ASSERT_TRUE(file.setFileTime(sentinel, QFileDevice::FileModificationTime)); file.close();
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath(), companion()));
+  EXPECT_EQ(QFileInfo(file).lastModified(), sentinel);
+  ASSERT_TRUE(VulkanLayer::writeManifest(fakeManifest, fakeLib, VulkanLayer::destManifestPath()));
+  EXPECT_TRUE(VulkanLayer::isRegistered()); EXPECT_FALSE(VulkanLayer::is32BitRegistered());
+  EXPECT_TRUE(QJsonDocument::fromJson(content()).object().contains("layer"));
+}
+
+TEST_F(VulkanLayerTest, StartupDoesNotMigrateLegacyConsentButExplicitToggleCan) {
+  ASSERT_TRUE(elf(fakeLib, 64)); ASSERT_TRUE(elf(companion(), 32));
+  ASSERT_TRUE(QDir().mkpath(dataHome.path() + "/trophy"));
+  ASSERT_TRUE(QFile::link(srcTree.path(), dataHome.path() + "/trophy/vulkan_layer"));
+  ASSERT_TRUE(VulkanLayer::ensureRegistered());
+  EXPECT_FALSE(VulkanLayer::is32BitRegistered());
+  EXPECT_EQ(QJsonDocument::fromJson(content()).object().value("file_format_version").toString(), "1.0.0");
+  ASSERT_TRUE(VulkanLayer::ensureRegistered(true));
+  EXPECT_TRUE(VulkanLayer::is32BitRegistered());
+  ASSERT_TRUE(VulkanLayer::ensureRegistered()); // Refresh already-paired consent.
+  EXPECT_TRUE(VulkanLayer::is32BitRegistered());
+}
 
 TEST_F(VulkanLayerTest, WriteManifestSetsExactLibraryPath) {
   // Regression: string replacement corrupted the CMake-expanded path into

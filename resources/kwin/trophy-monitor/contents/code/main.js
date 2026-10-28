@@ -1,5 +1,6 @@
 /*
  * Trophy Monitor — KWin script (read-only).
+ * Integer helper version: KPlugin.Version in this package's metadata.json.
  *
  * Pushes a JSON snapshot of all top-level windows to Trophy over D-Bus:
  *   service:   org.trophy.Monitor

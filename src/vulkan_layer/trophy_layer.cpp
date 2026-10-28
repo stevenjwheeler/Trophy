@@ -17,6 +17,13 @@
 #include <cstdlib>
 #include <algorithm>
 
+// Independent integer helper revision, not the app/socket protocol version.
+extern "C" {
+__attribute__((used, visibility("default")))
+extern const char trophy_vulkan_helper_version[] =
+    "TROPHY_HELPER_VERSION:vulkan:1";
+}
+
 #define LAYER_NAME "VK_LAYER_TROPHY_detection"
 #define SOCKET_PATH "/tmp/trophy-detection.sock"
 

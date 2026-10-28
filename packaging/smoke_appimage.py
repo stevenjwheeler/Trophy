@@ -21,7 +21,7 @@ def smoke(image, log_path):
         env = os.environ.copy()
         for key in list(env):
             if key.startswith(("QT_", "QML_")) or key in {
-                "LD_LIBRARY_PATH", "LD_PRELOAD", "DISPLAY", "WAYLAND_DISPLAY",
+                "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "DISPLAY", "WAYLAND_DISPLAY",
                 "DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_PID",
                 "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION",
                 "KDE_FULL_SESSION", "GNOME_DESKTOP_SESSION_ID",
@@ -107,7 +107,8 @@ def smoke(image, log_path):
                     process.wait()
         output = log_path.read_text()
         if re.search(r"ReferenceError|TypeError|Cannot assign to|"
-                     r"QQmlApplicationEngine failed|Failed to initialize application|"
+                      r"QQmlApplicationEngine failed|Failed to initialize application|"
+                      r"Binding loop detected|Detected recursive rearrange|"
                      r"could not (?:find|load) the Qt platform plugin", output, re.IGNORECASE):
             raise RuntimeError("AppImage startup reported QML/platform errors")
         if process.returncode not in (0, 128 + signal.SIGTERM, -signal.SIGTERM):

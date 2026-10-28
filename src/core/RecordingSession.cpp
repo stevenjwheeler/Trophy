@@ -10,6 +10,7 @@
 #include "audio/AudioMixer.h"
 #include "audio/PipeWireAudioSource.h"
 #include "capture/IVideoCaptureSource.h"
+#include "encoding/FFmpegEncoder.h"
 #include "encoding/IEncoder.h"
 #include "muxing/IMuxer.h"
 
@@ -107,6 +108,25 @@ bool RecordingSession::start() {
 
   // Initialize state BEFORE starting any threads or callbacks
   m_frameCount = 0;
+  m_deliveredFrames = 0;
+  m_dmaBufDelivered = 0;
+  m_inputWidth = 0;
+  m_inputHeight = 0;
+  m_encodeCalls = 0;
+  m_encodeTimeUs = 0;
+  m_recentEncodeTimes.clear();
+  m_queueDepth = 0;
+  m_peakQueueDepth = 0;
+  m_transport = 0;
+  m_transportChanges = 0;
+  m_shmTransitions = 0;
+  m_outputPayloadBytes = 0;
+  m_audioStreamInfo.clear();
+  m_recentRates.clear();
+  m_rateDelivered = m_ratePayload = 0;
+  const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
+  m_rateAccepted = ffmpeg ? ffmpeg->acceptedFrames() : 0;
+  m_rateSampleUs = nowUs();
   m_audioHistoryStarted = false;
   m_usedSystemAudio = false;
   m_usedGameAudio = false;
@@ -133,7 +153,10 @@ bool RecordingSession::start() {
   for (auto &buffer : m_trackAccumulators) buffer.clear();
   m_firstCapturedVideoTimestampUs.store(-1);
   m_capturedVideoTimelineUs.store(-1);
-  m_videoFrameDurationUs = 1000000LL / std::max(1, m_encoder->fps());
+  m_videoTargetFps = m_encoder->fps();
+  m_videoFrameDurationUs = 1000000LL / (m_videoTargetFps > 0 ? m_videoTargetFps : 60);
+  m_videoRateOriginUs = -1;
+  m_videoRateSlot = -1;
   for (auto &applied : m_trackOffsetApplied)
     applied.store(false);
   m_mergedOffsetApplied.store(false);
@@ -209,6 +232,10 @@ bool RecordingSession::start() {
           qDebug() << "Added separate audio stream" << idx << "for"
                    << trackNames[i];
           m_trackToStreamMap[i] = idx;
+          m_audioStreamInfo.append(QVariantMap{
+              {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
+              {"sampleRate", s.sampleRate}, {"channels", s.channels},
+              {"bitrateKbps", s.bitrate}});
         }
       }
 
@@ -237,16 +264,30 @@ bool RecordingSession::start() {
             }
             // Delivery evidence is not inferred from nonzero levels.
             if (samples && frameCount > 0) m_audioReceived[trackIndex].store(true);
-            // Latch audio origin; a track starting after the first video
-            // frame gets a one-time encoder offset so origins agree.
+            // Initial feed and source replacement both need a truthful origin.
+            // Preserve old buffered PCM before advancing a resumed track's
+            // timestamps; a one-shot initial offset cannot represent outages.
             const int64_t inputNowUs = nowUs();
             if (!m_trackOffsetApplied[trackIndex].load()) {
               const int64_t videoStart = m_videoStartWallUs.load();
               if (videoStart >= 0 && inputNowUs > videoStart && m_audioMixer) {
-                m_audioEncoders[trackIndex]->setStartOffsetSamples(
-                    (inputNowUs - videoStart) * m_audioMixer->sampleRate() /
-                    1000000LL);
+                std::vector<EncodedPacket> pending;
+                if (!m_audioEncoders[trackIndex]->advanceToSamplePosition(
+                        (inputNowUs - videoStart) * m_audioMixer->sampleRate() / 1000000LL,
+                        pending)) {
+                  m_outputFailed.store(true);
+                  return;
+                }
+                for (auto &oldPacket : pending) {
+                  const int stream = m_trackToStreamMap[trackIndex];
+                  if (stream >= 0) {
+                    oldPacket.streamIndex = stream;
+                    writeOutputPacket(oldPacket);
+                  }
+                }
+                m_bytesWritten = m_muxer->bytesWritten();
               }
+              if (m_driftCorrectors[trackIndex]) m_driftCorrectors[trackIndex]->reset();
               m_trackOffsetApplied[trackIndex].store(true);
             }
             // Lock the track to the wall clock before encoding (timestamps
@@ -289,8 +330,13 @@ bool RecordingSession::start() {
         s.bitrate = audioConfig.bitrate;
         s.extraData = m_mergedEncoder->extraData();
         int idx = m_muxer->addStream(s);
-        if (idx >= 0)
+        if (idx >= 0) {
           qDebug() << "Added merged audio stream" << idx;
+          m_audioStreamInfo.append(QVariantMap{
+              {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
+              {"sampleRate", s.sampleRate}, {"channels", s.channels},
+              {"bitrateKbps", s.bitrate}});
+        }
       }
 
       m_audioCallbackRegistration = m_audioMixer->setTrackAudioCallback(
@@ -383,9 +429,13 @@ bool RecordingSession::start() {
       // clips then carry full video with ~10s-short audio.
       noteCapturedVideo(frame);
 
+      if (!admitVideoFrame(frame.timestamp))
+        return;
+
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
         m_videoQueue.emplace(frame);
+        noteQueueDepth();
         m_queueCv.notify_one();
       } else {
         qWarning() << "Video queue full, dropping frame";
@@ -401,6 +451,9 @@ bool RecordingSession::start() {
       // is dropped downstream (unpairable head content); late audio
       // tracks offset to this origin instead.
       noteCapturedVideo(frame);
+
+      if (!admitVideoFrame(frame.timestamp))
+        return;
 
       // Build a FrameDescriptor and dispatch (non-blocking)
       FrameDescriptor fd;
@@ -493,11 +546,68 @@ QJsonObject RecordingSession::audioHistory() const {
 }
 
 QVariantMap RecordingSession::captureHealth() const {
+  const auto now = nowUs();
   QVariantMap result{{"session", m_outputPath},
                      {"hasVideo", m_videoStartWallUs.load() >= 0},
                      {"queueDrops", QVariant::fromValue(m_queueDrops.load())},
                      {"desktopFallback", !m_desktopAudio && m_gameIsFallback},
                      {"desktopAudio", m_desktopAudio}};
+  result["deliveredFrames"] = m_deliveredFrames.load();
+  result["dmaBufFrames"] = m_dmaBufDelivered.load();
+  result["inputWidth"] = m_inputWidth.load();
+  result["inputHeight"] = m_inputHeight.load();
+  result["videoPackets"] = m_frameCount.load();
+  result["bytesWritten"] = m_bytesWritten.load();
+  result["videoSeconds"] = std::max(qint64(0), videoPositionMs()) / 1000.0;
+  result["separateAudio"] = m_separateAudioTracks;
+  result["audioBitrateKbps"] = m_audioBitrate;
+  result["audioStreams"] = m_audioStreamInfo;
+  if (m_running && m_sessionStartMs >= 0)
+    result["sessionSeconds"] = std::max(int64_t(0), now / 1000 - m_sessionStartMs) / 1000.0;
+  result["queueDepth"] = m_queueDepth.load();
+  result["peakQueueDepth"] = m_peakQueueDepth.load();
+  result["queueCapacity"] = int(MAX_QUEUE_SIZE);
+  const int transport = m_transport.load();
+  if (transport) result["transport"] = transport == 2 ? "dma-buf" : "shm";
+  result["transportChanges"] = m_transportChanges.load();
+  result["shmTransitions"] = m_shmTransitions.load();
+  if (m_capture) {
+    result["captureBackend"] = m_capture->name();
+    result["sourceLabel"] = m_capture->sourceLabel();
+    result["sourceAppId"] = m_capture->sourceProcessName();
+    if (m_capture->sourcePid()) result["sourcePid"] = m_capture->sourcePid();
+  }
+  const auto timing = m_recentEncodeTimes.summary(now);
+  result["recentEncodeSamples"] = int(timing.count);
+  if (timing.count) {
+    result["recentEncodeAverageMs"] = timing.averageMs;
+    result["recentEncodeMaximumMs"] = timing.maximumMs;
+    result["recentEncodeP95Ms"] = timing.p95Ms;
+  }
+  sampleCaptureRates(result, now);
+  const auto calls = m_encodeCalls.load();
+  if (calls > 0)
+    result["averageEncodeMs"] = double(m_encodeTimeUs.load()) / calls / 1000.0;
+  if (m_encoder) {
+    const auto config = m_encoder->config();
+    result["encoder"] = m_encoder->name();
+    result["outputWidth"] = config.width;
+    result["outputHeight"] = config.height;
+    result["targetFps"] = config.fps;
+    result["bitrateKbps"] = config.bitrate;
+    result["rateControlMode"] = config.useVBR ? "VBR" : "CBR";
+    result["preset"] = config.preset;
+    result["keyframeSeconds"] = config.keyframeInterval;
+    if (auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder)) {
+      result["acceptedFrames"] = QVariant::fromValue(ffmpeg->acceptedFrames());
+      result["encoderDrops"] = QVariant::fromValue(ffmpeg->droppedFrames());
+      result["eglImportFrames"] = QVariant::fromValue(ffmpeg->eglImportFrames());
+      result["hwMappedFrames"] = QVariant::fromValue(ffmpeg->zeroCopyFrames());
+      result["vaapiVppFrames"] = QVariant::fromValue(ffmpeg->vaapiVppFrames());
+      result["gpuScaledFrames"] = QVariant::fromValue(ffmpeg->gpuScaledFrames());
+      result["cpuInputFrames"] = QVariant::fromValue(ffmpeg->fallbackFrames());
+    }
+  }
   for (int role = 0; role < AudioMixer::kTrackCount; ++role) {
     QString status = m_audioMixer ? m_audioMixer->semanticSourceStatus(role)
                                  : QStringLiteral("unavailable");
@@ -525,8 +635,48 @@ QVariantMap RecordingSession::captureHealth() const {
     }
     result[QStringLiteral("audio%1").arg(role)] = status;
     result[QStringLiteral("audio%1Name").arg(role)] = sourceName;
+    // A suppressed Voice source is part of System, not a separately
+    // measurable signal. Never relabel Mic's physical slot as Voice.
+    const bool separateSignal = role != 1 ||
+        (!m_voiceChatApp.isEmpty() && !m_desktopAudio && !m_gameIsFallback);
+    result[QStringLiteral("audio%1Signal").arg(role)] = m_audioMixer && separateSignal
+        ? m_audioMixer->semanticAudioDiagnostics(role) : QVariantMap{};
   }
   return result;
+}
+
+void RecordingSession::sampleCaptureRates(QVariantMap &result, int64_t now) const {
+  const auto delivered = m_deliveredFrames.load();
+  const auto payload = m_outputPayloadBytes.load();
+  const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
+  const qint64 accepted = ffmpeg ? ffmpeg->acceptedFrames() : 0;
+  const auto elapsed = now - m_rateSampleUs;
+  const bool stale = elapsed > 5000000;
+  if (m_rateSampleUs >= 0 && elapsed >= 1000000 && !stale) {
+    const double seconds = elapsed / 1000000.0;
+    m_recentRates["actualCaptureFps"] = std::max(qint64(0), delivered - m_rateDelivered) / seconds;
+    if (ffmpeg)
+      m_recentRates["actualEncodeFps"] = std::max(qint64(0), accepted - m_rateAccepted) / seconds;
+    m_recentRates["actualOutputKbps"] = std::max(qint64(0), payload - m_ratePayload) * 0.008 / seconds;
+    m_recentRates["rateWindowSeconds"] = seconds;
+  }
+  if (m_rateSampleUs < 0 || elapsed < 0 || elapsed >= 1000000) {
+    // Returning to the Dashboard after a long absence needs a fresh
+    // baseline, not a many-minute average presented as a recent rate.
+    if (elapsed < 0 || stale) m_recentRates.clear();
+    m_rateSampleUs = now;
+    m_rateDelivered = delivered;
+    m_rateAccepted = accepted;
+    m_ratePayload = payload;
+  }
+  for (auto it = m_recentRates.cbegin(); it != m_recentRates.cend(); ++it)
+    result[it.key()] = it.value();
+}
+
+void RecordingSession::noteQueueDepth() {
+  const int depth = int(m_videoQueue.size());
+  m_queueDepth = depth;
+  m_peakQueueDepth = std::max(m_peakQueueDepth.load(), depth);
 }
 
 bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
@@ -537,6 +687,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
   std::lock_guard<std::mutex> lock(m_queueMutex);
   if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
     m_videoQueue.push(std::move(frame));
+    noteQueueDepth();
     // Success logs at 60fps; throttle unless TROPHY_VIDEO_DEBUG is set.
     static std::atomic<uint64_t> s_pushed{0};
     const uint64_t n = ++s_pushed;
@@ -548,6 +699,7 @@ bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
     return true;
   }
   qDebug() << "pushQueuedFrame: queue full, dropping frame";
+  noteQueueDepth();
   ++m_queueDrops;
   return false;
 }
@@ -729,12 +881,25 @@ void RecordingSession::encodingLoop() {
       if (!m_videoQueue.empty()) {
         frame = std::move(m_videoQueue.front());
         m_videoQueue.pop();
+        noteQueueDepth();
         haveFrame = true;
       }
     }
 
     EncodedPacket packet;
-    if (haveFrame && m_encoder->encodeFrame(frame, packet)) {
+    bool producedPacket = false;
+    if (haveFrame) {
+      // Host wall time, including conversion/import and driver waits. Count
+      // buffered calls too: false is not proof that the input was dropped.
+      const auto begin = std::chrono::steady_clock::now();
+      producedPacket = m_encoder->encodeFrame(frame, packet);
+      const auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - begin).count();
+      m_encodeTimeUs += durationUs;
+      m_recentEncodeTimes.record(nowUs(), durationUs);
+      ++m_encodeCalls;
+    }
+    if (producedPacket) {
       packet.streamIndex = 0;
       if (writeOutputPacket(packet)) {
         m_bytesWritten = m_muxer->bytesWritten();
@@ -757,7 +922,41 @@ void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread stopped";
 }
 
+bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
+  if (m_videoTargetFps == 0)
+    return true; // Explicit uncapped mode retains the original pass-through behaviour.
+  if (timestampUs < 0)
+    return false;
+  if (m_videoRateOriginUs < 0)
+    m_videoRateOriginUs = timestampUs;
+  if (timestampUs < m_videoRateOriginUs)
+    return false;
+
+  // One input per target-FPS time slot, rounded to the nearest slot so
+  // microsecond truncation/jitter at native 60/144 Hz doesn't halve the rate.
+  // Anchor to capture time, not the last accepted frame: 100 -> 60 must not
+  // become 50 FPS, nor should stalls create a backlog of catch-up frames.
+  // av_rescale_rnd avoids overflow and accumulated integer-period drift.
+  const int64_t slot = av_rescale_rnd(timestampUs - m_videoRateOriginUs,
+                                     m_videoTargetFps, 1000000, AV_ROUND_NEAR_INF);
+  if (slot <= m_videoRateSlot)
+    return false;
+  m_videoRateSlot = slot;
+  // Never rewrite timestamps: audio and retained video share the original clock.
+  return true;
+}
+
 void RecordingSession::noteCapturedVideo(const VideoFrame &frame) {
+  const int transport = frame.isDmaBuf ? 2 : 1;
+  const int previous = m_transport.exchange(transport);
+  if (previous && previous != transport) {
+    ++m_transportChanges;
+    if (transport == 1) ++m_shmTransitions;
+  }
+  ++m_deliveredFrames;
+  if (frame.isDmaBuf) ++m_dmaBufDelivered;
+  m_inputWidth = frame.width;
+  m_inputHeight = frame.height;
   const int64_t wall = nowUs();
   int64_t expected = -1;
   m_videoStartWallUs.compare_exchange_strong(expected, wall);
@@ -906,6 +1105,7 @@ bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
     m_outputFailed = true;
     return false;
   }
+  m_outputPayloadBytes += qint64(packet.data.size());
   return true;
 }
 
@@ -970,14 +1170,16 @@ void RecordingSession::reconcileAppTrack(int track, uint32_t pid,
   operation.generation = m_audioLookupGeneration;
   operation.game = isFallback != nullptr;
   operation.worker = std::async(std::launch::async,
-                               [lookup = m_audioNodeLookup, pid, hints] {
-    return lookup(pid, hints);
+                               [lookup = m_audioNodeLookup, pid, hints,
+                                exactBinary = !operation.game] {
+    return lookup(pid, hints, exactBinary);
   });
   m_audioLookupTimer->start();
 }
 
 RecordingSession::AudioNodeResult
-RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
+RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints,
+                                  bool exactBinary) {
 
   // Fresh lookup: PID first (exact), then name hints in order.
   uint32_t nodeId = PW_ID_ANY;
@@ -990,8 +1192,9 @@ RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
     for (const QString &hint : hints) {
       if (hint.isEmpty())
         continue;
-      nodeId = PipeWireAudioSource::findNodeByProcessName(hint, &nodeName,
-                                                          &nodeSerial);
+      nodeId = exactBinary
+                   ? PipeWireAudioSource::findNodeByBinary(hint, &nodeName, &nodeSerial)
+                   : PipeWireAudioSource::findNodeByProcessName(hint, &nodeName, &nodeSerial);
       if (nodeId != PW_ID_ANY)
         break;
     }
@@ -999,6 +1202,7 @@ RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints) {
 #else
   Q_UNUSED(pid);
   Q_UNUSED(hints);
+  Q_UNUSED(exactBinary);
 #endif
 
   return {nodeId, nodeName, nodeSerial};
@@ -1038,9 +1242,12 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   if (track < 0 || track >= kAudioTrackCount || !m_audioMixer)
     return;
   if (nodeId == PW_ID_ANY) {
-    // No live node. A previous bind died with its stream (Electron /
-    // Proton streams are recreated constantly) — forget it so the next
-    // appearance re-binds instead of being skipped as "connected".
+    // Missing Voice must be silent, including an in-flight start or a source
+    // already marked disconnected by a previous query. Unpublish immediately;
+    // the mixer's owned worker drains callbacks and native resources. Keep
+    // Game's intentional desktop fallback / existing recovery policy intact.
+    if (!isFallback)
+      m_audioMixer->removeSourceAsync(track);
     if (m_sourceConnected[track]) {
       qDebug() << "Audio node vanished for track" << track
                << "- will re-bind on return";
@@ -1079,14 +1286,15 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   // (Re)bind — replaces monitor fallback or a dead stream generation.
   // Startup skew is handled downstream instead (audio gate + encoder
   // start offsets), so binds happen the moment a node is usable.
-  m_audioMixer->addSourceAsync(PipeWireAudioSource::createApplicationSource(
-                              nodeId, nodeName, nodeSerial),
-                          track);
+  auto source = PipeWireAudioSource::createApplicationSource(
+      nodeId, nodeName, nodeSerial, isFallback ? QString() : m_voiceChatApp);
+  source->setStreamName(isFallback ? QStringLiteral("trophy-game")
+                                   : QStringLiteral("trophy-voice"));
+  m_audioMixer->addSourceAsync(std::move(source), track);
   m_sourceConnected[track] = true;
   m_boundSerial[track] = nodeSerial;
-  // A new source restarts this track's origin measurement: the encoder
-  // offset below is one-shot, and a stale flag would pin a previous
-  // source's origin onto new content (constant file-wide skew).
+  // A new source restarts this track's origin measurement so its first
+  // callback preserves any outage with a forward timestamp discontinuity.
   m_trackOffsetApplied[track].store(false);
   if (isFallback)
     *isFallback = false;

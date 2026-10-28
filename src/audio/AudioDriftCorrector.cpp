@@ -43,6 +43,17 @@ AudioDriftCorrector::AudioDriftCorrector(int sampleRate, int channels,
 
 AudioDriftCorrector::~AudioDriftCorrector() { swr_free(&m_swr); }
 
+void AudioDriftCorrector::reset() {
+  m_startUs = -1;
+  m_lastUs = -1;
+  m_totalOut = 0;
+  m_errorSmooth = 0;
+  if (m_swr) {
+    swr_close(m_swr);
+    if (swr_init(m_swr) < 0) swr_free(&m_swr);
+  }
+}
+
 int64_t AudioDriftCorrector::steadyNowUs() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())

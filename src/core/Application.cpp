@@ -15,6 +15,7 @@
 #include "AutostartManager.h"
 #include "BugReport.h"
 #include "ControlServer.h"
+#include "DiscordPresence.h"
 #include "GlobalShortcutManager.h"
 #include "NotificationService.h"
 #include "ReplayManager.h"
@@ -42,7 +43,9 @@
 #include "library/FilmstripCache.h"
 #include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
+#include "InstallInfo.h"
 #include "UpdateChecker.h"
+#include "UpdateInstaller.h"
 
 #include <QDateTime>
 #include <QDBusServiceWatcher>
@@ -79,6 +82,7 @@ Application::Application(int &argc, char **argv)
     : QApplication(argc, argv) {}
 
 Application::~Application() {
+  m_discordPresence.reset();
   // Retiring pipelines retain raw mixer/settings/storage pointers. Settle
   // managers before those dependencies (member order would destroy them first).
   if (m_gameDetector) disconnect(m_gameDetector.get(), nullptr, this, nullptr);
@@ -386,6 +390,7 @@ void Application::initializeServices() {
   m_shortcutManager = std::make_unique<GlobalShortcutManager>(this);
   m_shortcutManager->setEnabled(m_settingsManager->globalShortcutsEnabled());
   m_controlServer = std::make_unique<ControlServer>(this);
+  m_discordPresence = std::make_unique<DiscordPresence>(this);
   connect(m_controlServer.get(), &ControlServer::toggleRecordingRequested,
           this, [this]() { requestToggleRecording(); });
   connect(m_controlServer.get(), &ControlServer::saveClipRequested, this,
@@ -401,8 +406,53 @@ void Application::initializeServices() {
   // release tag — parseVersion rejects them, so a dev build
   // stays silent instead of reading as "behind".
   m_updateChecker = std::make_unique<UpdateChecker>(this);
+  m_updateChecker->setInstallKind(InstallInfo::detect());
+  const QByteArray forceFake = qgetenv("TROPHY_FORCE_FAKE_UPDATE");
+  if (!forceFake.isEmpty() && forceFake != "0") {
+    m_updateChecker->setForceFakeUpdate(true);
+    const QByteArray v = qgetenv("TROPHY_FAKE_UPDATE_VERSION");
+    if (!v.isEmpty())
+      m_updateChecker->setFakeUpdateVersion(QString::fromUtf8(v));
+  }
   m_updateChecker->setCurrentVersion(
       QCoreApplication::applicationVersion());
+
+  m_updateInstaller = std::make_unique<UpdateInstaller>(this);
+  const QByteArray forceFail = qgetenv("TROPHY_FORCE_FAIL_UPDATE");
+  if (!forceFail.isEmpty() && forceFail != "0")
+    m_updateInstaller->setForceFail(true);
+  connect(m_updateInstaller.get(), &UpdateInstaller::finished, this,
+          [this](bool ok, const QString &message) {
+            if (ok)
+              return;
+            qWarning("UpdateInstaller finished with failure: %s",
+                     message.toUtf8().constData());
+            if (m_notificationService)
+              m_notificationService->showNotification(
+                  QStringLiteral("Trophy"),
+                  QStringLiteral("Auto-update failed, we have opened the "
+                                 "releases page for you to update manually."),
+                  QStringLiteral("trophy"), 8000, 1);
+            // Auto-fallback: open the release/asset page so the user
+            // can download and install manually.
+            const QString url = m_updateChecker && !m_updateChecker->latestAssetUrl().isEmpty()
+                                    ? m_updateChecker->latestAssetUrl()
+                                    : (m_latestReleaseUrl.isEmpty()
+                                           ? QString()
+                                           : m_latestReleaseUrl);
+            if (!url.isEmpty()) {
+              QDesktopServices::openUrl(QUrl(url));
+            }
+          });
+  if (m_recordingManager) {
+    m_updateInstaller->setRecording(m_recordingManager->isRecording());
+    connect(m_recordingManager.get(), &RecordingManager::stateChanged, this,
+            [this](RecordingManager::RecordingState) {
+              if (m_updateInstaller && m_recordingManager)
+                m_updateInstaller->setRecording(
+                    m_recordingManager->isRecording());
+            });
+  }
   connect(m_updateChecker.get(), &UpdateChecker::checkFinished, this,
           [this](bool newerAvailable, const QString &latestVersion,
                  const QString &releaseUrl) {
@@ -469,6 +519,9 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());
   context->setContextProperty("replayManager", m_replayManager.get());
   context->setContextProperty("updateChecker", m_updateChecker.get());
+  context->setContextProperty("updateInstaller", m_updateInstaller.get());
+  context->setContextProperty("installKind",
+                             static_cast<int>(InstallInfo::detect()));
 }
 
 void Application::preparePlayerCaches(const QString &filePath) {
@@ -484,7 +537,33 @@ void Application::preparePlayerCaches(const QString &filePath) {
     m_previewCache->preparePreview(filePath);
 }
 
+void Application::updateDiscordPresence() {
+  if (!m_discordPresence || !m_settingsManager || !m_recordingManager || !m_replayManager)
+    return;
+  // Privacy preferences gate lookups before adopting the current capture.
+  // IPC updates are queued, so both snapshots settle before publishing.
+  m_discordPresence->setPreferences(m_settingsManager->discordPresenceEnabled(),
+      m_settingsManager->discordShowGameNames(), m_settingsManager->discordShowWhenIdle());
+  m_discordPresence->setCaptureState(m_recordingManager->isRecording(),
+      m_recordingManager->currentGameName(), m_replayManager->isActive(),
+      m_replayManager->currentGame(), m_recordingManager->capturedSteamAppId(),
+      m_replayManager->capturedSteamAppId());
+}
+
 void Application::connectSignals() {
+  connect(m_recordingManager.get(), &RecordingManager::stateChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_recordingManager.get(), &RecordingManager::currentGameNameChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_replayManager.get(), &ReplayManager::replayStateChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordPresenceEnabledChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordShowGameNamesChanged,
+          this, &Application::updateDiscordPresence);
+  connect(m_settingsManager.get(), &SettingsManager::discordShowWhenIdleChanged,
+          this, &Application::updateDiscordPresence);
+  updateDiscordPresence();
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {
@@ -547,6 +626,17 @@ void Application::connectSignals() {
         m_settingsManager->waylandRestoreTokens().keys());
   }
   connect(m_windowMonitor.get(), &WaylandWindowMonitor::windowsChanged, this, [this]() {
+            // If an authorize prompt was deferred because only a transient
+            // window (mod loader / splash) was visible, re-trigger it now
+            // that a real game window may have appeared.
+            const QString pendingAuth = !m_pendingAutoRecordGame.isEmpty()
+                                            ? m_pendingAutoRecordGame
+                                            : m_pendingDvrGame;
+            if (!pendingAuth.isEmpty() && m_gameDetector &&
+                m_gameDetector->hasVisibleWindow() &&
+                m_gameDetector->currentGameName() == pendingAuth) {
+              m_detectionDebounceTimer->start();
+            }
             if (!isCurrentCaptureGame(m_pendingWindowGame) ||
                 !m_gameDetector->hasVisibleWindow())
               return;
@@ -833,8 +923,7 @@ void Application::connectSignals() {
             // dismissal below so it never clears pending
             // state (the two notices never coexist).
             if (action == QStringLiteral("open-update")) {
-              if (!m_latestReleaseUrl.isEmpty())
-                QDesktopServices::openUrl(QUrl(m_latestReleaseUrl));
+              openUpdateDialog();
               m_notificationService->closeLastNotification();
               return;
             }
@@ -871,6 +960,16 @@ void Application::connectSignals() {
             }
             m_captureSelectionForRecording = isRecord;
             m_notificationService->showCaptureSelectionHint(game);
+            // Don't start capturing a transient window (mod loader / splash).
+            // Defer until a real game window appears.
+            if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+              qCInfo(appLog) << "Deferring capture for" << game
+                             << "(no visible game window yet)";
+              m_pendingWindowGame = game;
+              m_pendingWindowIsRecord = isRecord;
+              m_windowWaitTimer->start();
+              return;
+            }
             if (isRecord)
               m_recordingManager->startRecording(game);
             else
@@ -1248,6 +1347,14 @@ void Application::onAuthorizeDebounceFired() {
       m_pendingDvrGame.clear();
     return;
   }
+  // Retain only an eligible request while waiting for a real game
+  // window. Approval, blocking, exit or replacement must retire it even
+  // when the compositor has not published a visible window yet.
+  if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+    qCDebug(appLog) << "Deferring authorize prompt for" << pending
+                    << "(no visible game window yet)";
+    return;
+  }
   qCInfo(appLog) << "Showing authorize prompt for" << pending;
   m_notificationService->showNotification(
       "New Game: " + pending,
@@ -1574,6 +1681,42 @@ void Application::requestBookmark() {
       {}, 5000, 2);
 }
 
+void Application::installUpdate() {
+  if (!m_updateChecker || !m_updateInstaller)
+    return;
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    qWarning("installUpdate: blocked while recording");
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Stop recording before updating."), QStringLiteral("trophy"),
+          5000, 2);
+    return;
+  }
+  const int kind = static_cast<int>(InstallInfo::detect());
+  qWarning("installUpdate: kind=%d asset=%s", kind,
+           m_updateChecker->latestAssetUrl().toUtf8().constData());
+  if (kind != 0) {
+    const QString url = m_updateChecker->latestAssetUrl();
+    if (!url.isEmpty())
+      QDesktopServices::openUrl(QUrl(url));
+    return;
+  }
+  if (m_updateChecker->forceFakeUpdate()) {
+    m_updateInstaller->simulate();
+    return;
+  }
+  const QString target = QString::fromUtf8(qgetenv("APPIMAGE"));
+  m_updateInstaller->installAppImage(m_updateChecker->latestAssetUrl(),
+                                     m_updateChecker->latestDigest(),
+                                     target);
+}
+
+void Application::openUpdateDialog() {
+  showMainWindow();
+  emit updateDialogRequested();
+}
+
 QVariantMap Application::captureHealth() const {
   if (m_recordingManager && m_recordingManager->isRecording()) {
     auto result = m_recordingManager->captureHealth();
@@ -1657,11 +1800,27 @@ bool Application::setGlShimEnrolled(bool enrolled) {
   return ok;
 }
 
+int Application::glHelperVersion() const {
+  return GlShimEnrollment::helperVersion();
+}
+
+int Application::glBundledHelperVersion() const {
+  return GlShimEnrollment::bundledHelperVersion();
+}
+
+int Application::vulkanBundledHelperVersion() const {
+  return VulkanLayer::bundledHelperVersion();
+}
+
+int Application::vulkanHelperVersion() const {
+  return VulkanLayer::helperVersion();
+}
+
 bool Application::setVulkanLayerEnabled(bool enabled) {
   m_settingsManager->setVulkanLayerEnabled(enabled);
   bool ok;
   if (enabled) {
-    m_vulkanLayerRegistered = ensureVulkanLayerRegistered();
+    m_vulkanLayerRegistered = ensureVulkanLayerRegistered(true);
     ok = m_vulkanLayerRegistered;
   } else {
     ok = removeVulkanLayerRegistration();
@@ -1677,8 +1836,8 @@ bool Application::removeVulkanLayerRegistration() {
   return VulkanLayer::removeRegistration();
 }
 
-bool Application::ensureVulkanLayerRegistered() {
-  return VulkanLayer::ensureRegistered();
+bool Application::ensureVulkanLayerRegistered(bool allow32BitMigration) {
+  return VulkanLayer::ensureRegistered(allow32BitMigration);
 }
 
 } // namespace TrophyBackend

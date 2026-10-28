@@ -49,6 +49,8 @@ class WaylandWindowMonitor : public QObject {
   Q_PROPERTY(bool trackingChecking READ trackingChecking NOTIFY windowsChanged)
   Q_PROPERTY(QString gnomeHelperStatus READ gnomeHelperStatus NOTIFY windowsChanged)
   Q_PROPERTY(bool gnomeHelperInstalled READ gnomeHelperInstalled NOTIFY windowsChanged)
+  Q_PROPERTY(int helperVersion READ helperVersion NOTIFY windowsChanged)
+  Q_PROPERTY(int bundledHelperVersion READ bundledHelperVersion NOTIFY windowsChanged)
 
 public:
   explicit WaylandWindowMonitor(QObject *parent = nullptr);
@@ -76,6 +78,8 @@ public:
   bool trackingReady() const;
   QString gnomeHelperStatus() const;
   bool gnomeHelperInstalled() const;
+  int helperVersion() const;
+  int bundledHelperVersion() const;
   bool trackingChecking() const { return m_healthTimer.isActive(); }
   Q_INVOKABLE void repairTracking();
 

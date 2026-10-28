@@ -5,16 +5,21 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../controls"
 import "../styles"
 import "../views"
 import QtMultimedia
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 Page {
     id: playerPage
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var filmstrips: typeof filmstripCache !== "undefined" ? filmstripCache : null // qmllint disable unqualified
+    property var library: typeof recordingLibrary !== "undefined" ? recordingLibrary : null // qmllint disable unqualified
 
     property string filePath: ""
     property string fileTitle: ""
@@ -228,15 +233,52 @@ Page {
             recordingLibrary.saveClipRange(filePath, clipStartMs / 1000, clipEndMs / 1000)
     }
 
+    property var pendingSnapshot: null
+    property int snapshotRequest: 0
+
+    function cancelSnapshot() {
+        ++snapshotRequest
+        snapshotDialog.close()
+        pendingSnapshot = null
+    }
+
     function snapshotCurrent() {
-        if (filePath === "")
+        if (filePath === "" || snapshotDialog.visible)
             return
         var slash = filePath.lastIndexOf("/")
         var dir = slash >= 0 ? filePath.substring(0, slash) : "."
         var base = slash >= 0 ? filePath.substring(slash + 1) : filePath
         var stem = base.replace(/\.[^.]*$/, "")
         var ts = Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH-mm-ss")
-        player.snapshot(dir + "/" + stem + "_snapshot_" + ts + ".png")
+        const suggestedPath = dir + "/" + stem + "_snapshot_" + ts + ".png"
+        const request = ++snapshotRequest
+        // Retain the clicked frame, not whatever is playing when the
+        // user eventually finishes choosing a destination.
+        if (!player.captureSnapshot(function(result) {
+            if (request !== playerPage.snapshotRequest)
+                return
+            playerPage.pendingSnapshot = result
+            snapshotDialog.selectedFile = playerPage.library.localFileUrl(suggestedPath)
+            snapshotDialog.open()
+        })) {
+            player.snapshotSaved("", false)
+        }
+    }
+
+    FileDialog {
+        id: snapshotDialog
+        objectName: "playerSnapshotDialog"
+        title: qsTr("Save Screenshot")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [qsTr("PNG image (*.png)")]
+        defaultSuffix: "png"
+        onAccepted: {
+            const path = playerPage.library.localFilePath(selectedFile)
+            const frame = playerPage.pendingSnapshot
+            playerPage.pendingSnapshot = null
+            player.snapshotSaved(path, frame !== null && path !== "" && frame.saveToFile(path))
+        }
+        onRejected: playerPage.pendingSnapshot = null
     }
 
     // Tracks card height: 0 fits the content (every lane at
@@ -311,6 +353,7 @@ Page {
 
     // Open a library file (closes any current one first).
     function open(path, title, dateStr) {
+        cancelSnapshot()
         player.stop()
         mutedTracks = []
         clipMode = false
@@ -338,6 +381,7 @@ Page {
     }
 
     function close() {
+        cancelSnapshot()
         bookmarksDialog.close()
         stopAll()
         fileInfoDialog.close()
@@ -503,12 +547,17 @@ Page {
     }
 
     function seekAll(ms) {
+        // Seeking clears EndOfMedia, so remember it before moving any clock.
+        // Restart every pipeline after EOF; an ordinary paused seek stays paused.
+        var resumeAfterEnd = player.atEnd && ms < player.duration
         player.seek(ms)
         for (var i = 0; i < audioPipelines.count; i++) {
             var p = audioPipelines.objectAt(i)
             if (p && p.duration > 0)
                 p.position = Math.max(0, Math.min(p.duration, ms))
         }
+        if (resumeAfterEnd)
+            playAll()
     }
 
     Shortcut {
@@ -670,7 +719,7 @@ Page {
         anchors.margins: playerPage.playerFullscreen ? 0 : Theme.spacingLarge
         spacing: Theme.spacingMedium
 
-        // Header: back, title, time
+        // Header: back, game icon, title/date, time
         RowLayout {
             Layout.fillWidth: true
             // Hidden in fullscreen: just the video and its
@@ -683,7 +732,16 @@ Page {
                 onClicked: playerPage.close()
             }
 
+            RecordingGameIcon {
+                objectName: "playerGameIcon"
+                gameName: playerPage.infoRec ? playerPage.infoRec.gameName : ""
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                Layout.alignment: Qt.AlignVCenter
+            }
+
             ColumnLayout {
+                objectName: "playerTitleBlock"
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 spacing: 0
@@ -778,6 +836,7 @@ Page {
 
         VideoPlayer {
             id: player
+            objectName: "playerVideo"
             Layout.fillWidth: true
             Layout.fillHeight: true
             volumeLevel: playerPage.masterVolume
@@ -1768,8 +1827,8 @@ Page {
         function refresh() {
             thumbs = []
             stripDone = false
-            if (filePath !== "" && typeof filmstripCache !== "undefined" && filmstripCache !== null)
-                filmstripCache.requestThumbs(filePath, stripCount)
+            if (filePath !== "" && playerPage.filmstrips !== null)
+                playerPage.filmstrips.requestThumbs(filePath, stripCount)
         }
 
         height: laneHeight
@@ -1786,7 +1845,7 @@ Page {
         onFilePathChanged: vlane.refresh()
 
         Connections {
-            target: filmstripCache
+            target: playerPage.filmstrips
             function onFilmstripReady(readyPath, readyPaths) {
                 if (readyPath === vlane.filePath) {
                     vlane.thumbs = readyPaths
@@ -1829,6 +1888,9 @@ Page {
                     model: vlane.thumbs
 
                     Image {
+                        required property int index
+                        required property var modelData
+                        objectName: "filmstripThumb" + index
                         // Positioned by slice start, not the
                         // grab's center time: each thumb covers
                         // its own [i/count, (i+1)/count] slice,
@@ -1844,7 +1906,7 @@ Page {
                         x: (vlane.viewSpanMs > 0 ? (thumbStart - vlane.viewStartMs) / vlane.viewSpanMs * stripArea.width : 0) + 1
                         width: (vlane.viewSpanMs > 0 ? thumbSpan / vlane.viewSpanMs * stripArea.width : 0) - 2
                         height: stripArea.height
-                        source: recordingLibrary.localFileUrl(modelData)
+                        source: playerPage.library.localFileUrl(modelData)
                         fillMode: Image.PreserveAspectCrop
                         visible: vlane.viewSpanMs > 0 && x + width > 0 && x < stripArea.width
                     }
@@ -2010,18 +2072,19 @@ Page {
     // library entry so probe NOTIFYs refresh them; every row guards a
     // null entry (unknown file) with a fallback.
     component InfoRow: RowLayout {
+        id: infoRow
         property string rowName: ""
         property string rowValue: ""
         Layout.fillWidth: true
         spacing: Theme.spacingMedium
         Label {
-            text: rowName
+            text: infoRow.rowName
             color: Theme.textSecondaryColor
             font.pixelSize: Theme.fontSizeSmall
             Layout.preferredWidth: 110
         }
         Label {
-            text: rowValue
+            text: infoRow.rowValue
             color: Theme.textColor
             font.pixelSize: Theme.fontSizeSmall
             Layout.fillWidth: true

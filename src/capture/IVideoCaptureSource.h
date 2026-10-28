@@ -134,6 +134,10 @@ class IVideoCaptureSource : public QObject {
   Q_OBJECT
 
 public:
+  // A missing source/session is ambiguous: the selected window may simply
+  // have closed. Service/native/output failures are not that lifecycle event.
+  enum class CaptureErrorKind { Other, SourceUnavailable };
+  virtual CaptureErrorKind lastErrorKind() const { return CaptureErrorKind::Other; }
   using FrameCallback = std::function<void(const VideoFrame &frame)>;
 
   explicit IVideoCaptureSource(QObject *parent = nullptr) : QObject(parent) {}

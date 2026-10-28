@@ -22,7 +22,8 @@ Item {
     property url targetSource
     property url playbackSource
     property url receivedSource
-    property var cache: typeof previewCache !== "undefined" && previewCache ? previewCache : null
+    // The cache can be supplied explicitly; this default supports existing hosts.
+    property var cache: typeof previewCache !== "undefined" && previewCache ? previewCache : null // qmllint disable unqualified
     property int cacheRequestId: 0
     property bool awaitingCache: false
     readonly property url source: playbackSource

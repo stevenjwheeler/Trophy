@@ -165,7 +165,9 @@ protected:
         [this](const QList<QQmlError> &errors) {
           for (const auto &error : errors) {
             if (error.description().contains("ReferenceError") ||
-                error.description().contains("TypeError"))
+                error.description().contains("TypeError") ||
+                error.description().contains("recursive rearrange", Qt::CaseInsensitive) ||
+                error.description().contains("Binding loop", Qt::CaseInsensitive))
               scriptErrors.append(error.toString());
           }
         });
@@ -748,6 +750,84 @@ TEST_F(RecordingCardBindingTest, FailedListPreviewFallsBackUntilNextHover) {
   exerciseFailedPreview(true);
 }
 
+TEST_F(RecordingCardBindingTest, LiveGridIconFollowsCurrentGameAndModelRefresh) {
+  CardManagerFake manager;
+  manager.gameName = "Game";
+  CardIconFake detector;
+  detector.iconPath = tempDir.filePath("live-app.png");
+  QImage image(48, 48, QImage::Format_ARGB32);
+  image.fill(Qt::green);
+  ASSERT_TRUE(image.save(detector.iconPath));
+  engine.rootContext()->setContextProperty("recordingManager", &manager);
+  engine.rootContext()->setContextProperty("gameDetector", &detector);
+
+  QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("ActiveRecordingCard.qml")));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> card(component.create());
+  ASSERT_NE(card, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(card.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setWidth(340);
+  item->setHeight(280);
+  auto *icon = card->findChild<QQuickItem *>("liveGridGameIcon");
+  ASSERT_NE(icon, nullptr);
+  for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+    QTest::qWait(10);
+  ASSERT_TRUE(icon->isVisible());
+  QTest::qWait(50);
+  EXPECT_EQ(icon->width(), 40);
+  EXPECT_EQ(icon->height(), 40);
+
+  manager.gameName = "Other";
+  emit manager.changed();
+  QTest::qWait(50);
+  EXPECT_FALSE(icon->isVisible());
+
+  detector.iconPath = tempDir.filePath("missing.png");
+  manager.gameName = "Game";
+  emit manager.changed();
+  QTest::qWait(100);
+  EXPECT_FALSE(icon->isVisible());
+  detector.iconPath = tempDir.filePath("live-app.png");
+  detector.model.clear();
+  for (int n = 0; n < 100 && !icon->isVisible(); ++n)
+    QTest::qWait(10);
+  EXPECT_TRUE(icon->isVisible());
+}
+
+TEST_F(RecordingCardBindingTest, ExplicitCardDependenciesOverrideCreationContextAndStayReactive) {
+  const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
+  RecordingLibrary library(tempDir.path());
+  CardWindowFake explicitWindow;
+  for (const QString &file : {QString("RecordingCard.qml"), QString("RecordingListItem.qml")}) {
+    QQmlComponent component(&engine, QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl(file)));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> card(component.createWithInitialProperties({
+        {"recording", QVariant::fromValue(library.getRecording(path))},
+        {"library", QVariant::fromValue(&library)},
+        {"hostWindow", QVariant::fromValue(&explicitWindow)}}));
+    ASSERT_NE(card, nullptr) << component.errorString().toStdString();
+    auto *item = qobject_cast<QQuickItem *>(card.get());
+    ASSERT_NE(item, nullptr);
+    item->setParentItem(window.contentItem());
+    item->setWidth(680);
+    explicitWindow.toggleSelection(path);
+    EXPECT_TRUE(card->property("isSelected").toBool());
+    windowFake.toggleSelection(path); // The old context must not take control.
+    explicitWindow.clearSelection();
+    EXPECT_FALSE(card->property("isSelected").toBool());
+    auto *lock = card->findChild<QObject *>("captureProtectionButton");
+    ASSERT_NE(lock, nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(lock, "clicked"));
+    EXPECT_EQ(explicitWindow.protectionPath, path);
+    EXPECT_TRUE(windowFake.protectionPath.isEmpty());
+    windowFake.clearSelection();
+  }
+  waitForProbes();
+}
+
 TEST_F(RecordingCardBindingTest, AppIconsAppearOnlyWhenLoadedInBothViews) {
   const QString path = createVideo("Game_2026-01-15_20-30-00.mkv");
   const QString otherPath = createVideo("Other_2026-01-15_20-30-00.mkv");
@@ -839,9 +919,18 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   item->setSize(QSizeF(1280, 800));
   QTest::qWait(50);
   auto *card = page->findChild<QQuickItem *>("captureStatusCard");
+  auto *statusTimer = page->findChild<QObject *>("captureStatusTimer");
+  ASSERT_NE(statusTimer, nullptr);
+  statusTimer->setProperty("running", false); // snapshots are injected by this fixture
   auto *settings = page->findChild<QQuickItem *>("recordingSettingsCard");
   auto *health = page->findChild<QQuickItem *>("captureHealthStatus");
   auto *bookmark = page->findChild<QQuickItem *>("addRecordingBookmark");
+  auto *infoButton = page->findChild<QQuickItem *>("captureInfoButton");
+  auto *infoDialog = page->findChild<QObject *>("captureInfoDialog");
+  ASSERT_NE(infoButton, nullptr);
+  ASSERT_NE(infoDialog, nullptr);
+  EXPECT_FALSE(infoButton->isEnabled());
+  EXPECT_FALSE(infoButton->isVisible());
   ASSERT_NE(card, nullptr);
   ASSERT_NE(settings, nullptr);
   ASSERT_NE(health, nullptr);
@@ -858,6 +947,143 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
                        {"audio2", "capturing"}, {"desktopFallback", true},
                        {"bufferSeconds", 12}, {"bufferTargetSeconds", 30}};
     page->setProperty("captureStatus", status);
+    QTest::qWait(50);
+    EXPECT_TRUE(infoButton->isEnabled());
+    EXPECT_TRUE(infoButton->isVisible());
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                     infoButton->mapToScene(QPointF(infoButton->width() / 2,
+                                                    infoButton->height() / 2)).toPoint());
+    QTest::qWait(50);
+    EXPECT_TRUE(infoDialog->property("visible").toBool());
+    EXPECT_GT(infoDialog->property("height").toDouble(), 300);
+    // Live values are rebound, including a segment/session replacement.
+    status["deliveredFrames"] = 123;
+    status["actualCaptureFps"] = 59.3;
+    status["bitrateKbps"] = 12000;
+    status["actualOutputKbps"] = 13000;
+    status["rateControlMode"] = "VBR";
+    status["transport"] = "shm";
+    status["sourceLabel"] = "Selected window";
+    status["detectedGameKey"] = "steam_app_1422450";
+    status["detectedSteamAppId"] = "1422450";
+    status["detectedGamePid"] = 12345;
+    status["audio2Signal"] = QVariantMap{
+        {"received", true}, {"muted", false}, {"peak", 0.5}, {"rms", 0.25},
+        {"peakHold", 1.25}, {"clippingRisk", true}, {"fullScaleSamplesTotal", 3},
+        {"lastBufferAgeMs", 25}};
+    status["audioStreams"] = QVariantList{QVariantMap{
+        {"stream", 3}, {"codec", "AAC"}, {"sampleRate", 48000}, {"channels", 2}}};
+    status["session"] = mode + "-next.mkv";
+    page->setProperty("captureStatus", status);
+    QQmlExpression statValue(qmlContext(page.get()), page.get(),
+                            "captureInfoValue('deliveredFrames')");
+    EXPECT_EQ(statValue.evaluate().toString(), "123");
+    QQmlExpression unknownValue(qmlContext(page.get()), page.get(),
+                               "captureInfoValue('encoderDrops')");
+    EXPECT_EQ(unknownValue.evaluate().toString(), QString::fromUtf8("–"));
+    std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual;
+    findVisual = [&](QQuickItem *parent, const QString &name) -> QQuickItem * {
+      if (!parent) return nullptr;
+      if (parent->objectName() == name || parent->property("rowName").toString() == name)
+        return parent;
+      for (auto *child : parent->childItems())
+        if (auto *found = findVisual(child, name)) return found;
+      return nullptr;
+    };
+    auto *content = infoDialog->property("contentItem").value<QQuickItem *>();
+    auto *header = infoDialog->property("header").value<QQuickItem *>();
+    auto *footer = infoDialog->property("footer").value<QQuickItem *>();
+    auto *closeButton = findVisual(footer, "captureInfoCloseButton");
+    ASSERT_NE(footer, nullptr);
+    ASSERT_NE(closeButton, nullptr);
+    const auto closeTopLeft = closeButton->mapToItem(footer, QPointF());
+    EXPECT_GE(closeTopLeft.y(), 20);
+    EXPECT_GE(footer->width() - closeTopLeft.x() - closeButton->width(), 20);
+    EXPECT_GE(footer->height() - closeTopLeft.y() - closeButton->height(), 20);
+    ASSERT_NE(content, nullptr);
+    auto *flickable = content->property("contentItem").value<QQuickItem *>();
+    ASSERT_NE(flickable, nullptr);
+    QTest::qWait(20);
+    EXPECT_GT(flickable->property("contentHeight").toDouble(),
+              flickable->height() + 200);
+    flickable->setProperty("contentY", 200);
+    status["actualCaptureFps"] = 58.7;
+    page->setProperty("captureStatus", status);
+    QTest::qWait(20);
+    EXPECT_NEAR(flickable->property("contentY").toDouble(), 200, 1);
+    auto *captureRate = findVisual(content, "Actual capture frame rate");
+    ASSERT_NE(captureRate, nullptr);
+    EXPECT_EQ(captureRate->property("rowValue").toString(), "58.7 fps");
+    auto *targetBitrate = findVisual(content, "Target video bitrate");
+    auto *currentBitrate = findVisual(content, "Actual output bitrate (A/V payload)");
+    ASSERT_NE(targetBitrate, nullptr);
+    ASSERT_NE(currentBitrate, nullptr);
+    EXPECT_EQ(targetBitrate->property("rowValue").toString(), QString::fromUtf8("12000 kbps · VBR"));
+    EXPECT_EQ(currentBitrate->property("rowValue").toString(), QString::fromUtf8("13000 kbps · VBR"));
+    auto *transport = findVisual(content, "Delivered transport");
+    ASSERT_NE(transport, nullptr);
+    EXPECT_EQ(transport->property("rowValue").toString(), "Shared memory (SHM)");
+    for (int tabIndex : {1, 2, 0}) {
+      auto *tab = findVisual(header, QStringLiteral("captureInfoTab%1").arg(tabIndex));
+      ASSERT_NE(tab, nullptr);
+      QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                       tab->mapToScene(QPointF(tab->width() / 2, tab->height() / 2)).toPoint());
+      QTest::qWait(10);
+      EXPECT_EQ(infoDialog->property("section").toInt(), tabIndex);
+      EXPECT_TRUE(tab->property("checked").toBool());
+      EXPECT_NEAR(flickable->property("contentY").toDouble(), 0, 1);
+      if (tabIndex == 1) {
+        auto *audioStream = findVisual(content, "Audio stream 3");
+        ASSERT_NE(audioStream, nullptr);
+        EXPECT_EQ(audioStream->property("rowValue").toString(),
+                  QString::fromUtf8("AAC · 48000 Hz · 2 channels"));
+        auto *micPanel = findVisual(content, "captureAudioSignal2");
+        auto *voicePanel = findVisual(content, "captureAudioSignal1");
+        ASSERT_NE(micPanel, nullptr);
+        ASSERT_NE(voicePanel, nullptr);
+        auto *peak = findVisual(micPanel, QString::fromUtf8("Peak (≈1 s)"));
+        auto *rms = findVisual(micPanel, QString::fromUtf8("RMS (≈1 s)"));
+        auto *receipt = findVisual(micPanel, "Last audio buffer");
+        auto *voiceReceipt = findVisual(voicePanel, "Last audio buffer");
+        ASSERT_NE(peak, nullptr); ASSERT_NE(rms, nullptr);
+        ASSERT_NE(receipt, nullptr); ASSERT_NE(voiceReceipt, nullptr);
+        EXPECT_EQ(peak->property("rowValue").toString(), "-6.0 dBFS");
+        EXPECT_EQ(rms->property("rowValue").toString(), "-12.0 dBFS");
+        EXPECT_EQ(receipt->property("rowValue").toString(), "25 ms ago");
+        EXPECT_EQ(voiceReceipt->property("rowValue").toString(), "No separate source");
+        auto audioSnapshot = status;
+        auto micSignal = status["audio2Signal"].toMap();
+        micSignal["peak"] = 0.0;
+        micSignal["rms"] = 0.0;
+        micSignal["muted"] = true;
+        audioSnapshot["audio2Signal"] = micSignal;
+        page->setProperty("audioSignalSnapshot", audioSnapshot);
+        QTest::qWait(10);
+        EXPECT_EQ(findVisual(content, "captureAudioSignal2"), micPanel);
+        EXPECT_EQ(peak->property("rowValue").toString(), QString::fromUtf8("−∞ dBFS"));
+        micSignal.remove("peak"); micSignal.remove("rms");
+        micSignal["lastBufferAgeMs"] = 2000;
+        audioSnapshot["audio2Signal"] = micSignal;
+        page->setProperty("audioSignalSnapshot", audioSnapshot);
+        QTest::qWait(10);
+        EXPECT_EQ(peak->property("rowValue").toString(), QString::fromUtf8("–"));
+        EXPECT_EQ(receipt->property("rowValue").toString(), QString::fromUtf8("2.0 s ago · no recent buffers"));
+        // Restore before the next tab/session fixture iteration.
+        page->setProperty("audioSignalSnapshot", status);
+      } else if (tabIndex == 2) {
+        auto *source = findVisual(content, "Portal stream label");
+        ASSERT_NE(source, nullptr);
+        EXPECT_EQ(source->property("rowValue").toString(), "Selected window");
+        auto *steamId = findVisual(content, "Steam App ID");
+        ASSERT_NE(steamId, nullptr);
+        EXPECT_EQ(steamId->property("rowValue").toString(), "1422450");
+        auto *gamePid = findVisual(content, "Detected game PID (at capture start)");
+        ASSERT_NE(gamePid, nullptr);
+        EXPECT_EQ(gamePid->property("rowValue").toString(), "12345");
+        EXPECT_EQ(findVisual(content, "DVR session duration") != nullptr, mode == "replay");
+      }
+    }
+    ASSERT_TRUE(QMetaObject::invokeMethod(infoDialog, "close"));
     QTest::qWait(50);
     EXPECT_TRUE(health->isVisible());
     EXPECT_EQ(bookmark->isVisible(), mode == "recording");
@@ -909,7 +1135,12 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   EXPECT_NEAR(mic->y(), voice->y() + voice->height(), 1);
   QTest::qWait(260);
   const qreal expandedHeight = card->height();
+  ASSERT_TRUE(QMetaObject::invokeMethod(infoDialog, "open"));
+  EXPECT_TRUE(infoDialog->property("visible").toBool());
   page->setProperty("captureStatus", QVariantMap{});
+  EXPECT_FALSE(infoButton->isEnabled());
+  EXPECT_FALSE(infoButton->isVisible());
+  EXPECT_FALSE(infoDialog->property("visible").toBool());
   QTest::qWait(120);
   EXPECT_TRUE(health->isVisible());
   EXPECT_FALSE(health->isEnabled());
@@ -919,6 +1150,119 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
   QTest::qWait(260);
   EXPECT_FALSE(health->isVisible());
   EXPECT_NEAR(card->height(), 80, 1);
+}
+
+TEST_F(RecordingCardBindingTest, CaptureInfoRowsSettleAcrossLiveUpdatesAndResizing) {
+  for (const auto *name : {"recordingLibrary", "settingsManager", "storageManager",
+                           "replayManager", "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto url = QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, url);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr);
+  auto *item = qobject_cast<QQuickItem *>(page.get());
+  ASSERT_NE(item, nullptr);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(1280, 800));
+  auto *timer = page->findChild<QObject *>("captureStatusTimer");
+  ASSERT_NE(timer, nullptr);
+  timer->setProperty("running", false);
+  auto *dialog = page->findChild<QObject *>("captureInfoDialog");
+  ASSERT_NE(dialog, nullptr);
+  QVariantMap status{{"mode", "recording"}, {"session", "layout-fixture"},
+                     {"hasVideo", true}, {"encoder", "h264_nvenc"},
+                     {"inputWidth", 1920}, {"inputHeight", 1080},
+                     {"outputWidth", 1920}, {"outputHeight", 1080},
+                     {"actualCaptureFps", 59.9}, {"actualEncodeFps", 59.8},
+                     {"audioStreams", QVariantList{QVariantMap{{"stream", 1}, {"codec", "AAC"},
+                       {"sampleRate", 48000}, {"channels", 2}}}},
+                     {"sourceLabel", QString(180, 'W')},
+                     {"detectedGameKey", QString(200, 'x')}};
+  page->setProperty("captureStatus", status);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  for (int section : {0, 1, 2, 0}) {
+    dialog->setProperty("section", section);
+    for (int width : {1280, 720, 480, 900, 1280}) {
+      window.resize(width, 800);
+      item->setSize(QSizeF(width, 800));
+      status["actualOutputKbps"] = width * 17;
+      status["encoder"] = width % 3 ? "h264_nvenc" : QString(140, 'E');
+      status["audioStreams"] = QVariantList{QVariantMap{{"stream", 1},
+        {"codec", width % 3 ? "AAC" : QString(120, 'A')}, {"sampleRate", 48000}, {"channels", 2}}};
+      page->setProperty("captureStatus", status);
+      QTest::qWait(35);
+      auto *content = dialog->property("contentItem").value<QQuickItem *>();
+      ASSERT_NE(content, nullptr);
+      int rows = 0;
+      std::function<void(QQuickItem *)> inspect = [&](QQuickItem *parent) {
+        if (parent->property("rowName").isValid() && parent->isVisible()) {
+          ++rows;
+          EXPECT_GT(parent->width(), 100);
+          EXPECT_GT(parent->height(), 10);
+          EXPECT_LE(parent->width(), content->width() + 1);
+          const QSizeF settled = parent->size();
+          QCoreApplication::processEvents();
+          EXPECT_EQ(parent->size(), settled);
+          for (auto *child : parent->childItems())
+            if (child->isVisible()) {
+              EXPECT_GE(child->y(), 0);
+              EXPECT_LE(child->y() + child->height(), parent->height() + 1);
+            }
+        }
+        for (auto *child : parent->childItems()) inspect(child);
+      };
+      inspect(content);
+      EXPECT_GT(rows, 0);
+    }
+  }
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+  QTest::qWait(50);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  QTest::qWait(50);
+}
+
+TEST_F(RecordingCardBindingTest, DashboardActivityDurationIncludesHours) {
+  for (const auto *name : {"recordingLibrary", "settingsManager", "storageManager",
+                           "replayManager", "activityFeed", "gameDetector", "audioMixer", "app"})
+    engine.rootContext()->setContextProperty(name, QVariant::fromValue<QObject *>(nullptr));
+  const auto dashboardUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(
+      QUrl("../pages/DashboardPage.qml"));
+  QQmlComponent component(&engine, dashboardUrl);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  for (const auto &[seconds, expected] : QList<QPair<int, QString>>{
+           {0, "00:00"}, {65, "1:05"}, {3599, "59:59"}, {3600, "1:00:00"},
+           {3723, "1:02:03"}, {36000, "10:00:00"}}) {
+    QQmlExpression expression(engine.rootContext(), page.get(),
+                              QStringLiteral("formatDuration(%1)").arg(seconds));
+    EXPECT_EQ(expression.evaluate().toString(), expected);
+    EXPECT_FALSE(expression.hasError());
+  }
+}
+
+TEST_F(RecordingCardBindingTest, RecordingPillDurationIncludesHours) {
+  // Exercise the actual binding without starting the application's services.
+  const auto mainUrl = QUrl::fromLocalFile(CARD_QML_FILE).resolved(QUrl("../main.qml"));
+  QFile file(mainUrl.toLocalFile());
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const QString source = QString::fromUtf8(file.readAll());
+  const auto start = source.indexOf("var durMs =");
+  ASSERT_GE(start, 0);
+  const auto end = source.indexOf('}', start);
+  ASSERT_GT(end, start);
+  QString binding = source.mid(start, end - start);
+  binding.replace("window.recordingManager", "recordingManager");
+  for (const auto &[ms, expected] : QList<QPair<qint64, QString>>{
+           {0, "0:00"}, {65999, "1:05"}, {3599000, "59:59"}, {3600000, "1:00:00"},
+           {3723000, "1:02:03"}, {36000000, "10:00:00"}}) {
+    manager.duration = ms;
+    QQmlExpression expression(engine.rootContext(), nullptr,
+                              "(function() {" + binding + "})()");
+    EXPECT_EQ(expression.evaluate().toString(), expected);
+    EXPECT_FALSE(expression.hasError()) << expression.error().toString().toStdString();
+  }
 }
 
 TEST_F(RecordingCardBindingTest, DashboardStorageAndActivityIgnoreLibraryFilters) {

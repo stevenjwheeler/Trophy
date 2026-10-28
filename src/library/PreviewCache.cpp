@@ -21,6 +21,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/common.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -75,6 +76,41 @@ struct PreviewFrames {
 namespace {
 constexpr int kFps = 15;
 constexpr int kSeconds = 6;
+
+bool validVideoFrame(const AVFrame *frame) {
+  if (frame->width <= 0 || frame->height <= 0 ||
+      av_image_check_size(frame->width, frame->height, 0, nullptr) < 0)
+    return false;
+  const auto format = static_cast<AVPixelFormat>(frame->format);
+  const auto *descriptor = av_pix_fmt_desc_get(format);
+  if (!descriptor || !sws_isSupportedInput(format) ||
+      (descriptor->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_PAL)))
+    return false;
+  int strides[4] = {};
+  const int planes = av_pix_fmt_count_planes(format);
+  if (planes <= 0 || planes > 4 || av_image_fill_linesizes(strides, format, frame->width) < 0)
+    return false;
+  for (int plane = 0; plane < planes; ++plane) {
+    const qint64 stride = frame->linesize[plane];
+    if (!frame->data[plane] || (stride < 0 ? -stride : stride) < strides[plane])
+      return false;
+    const auto *buffer = av_frame_get_plane_buffer(frame, plane);
+    if (!buffer) return false;
+    const auto base = reinterpret_cast<uintptr_t>(buffer->data);
+    const auto data = reinterpret_cast<uintptr_t>(frame->data[plane]);
+    if (data < base || data - base >= buffer->size) return false;
+    const size_t offset = data - base;
+    const int rows = plane == 1 || plane == 2
+        ? AV_CEIL_RSHIFT(frame->height, descriptor->log2_chroma_h) : frame->height;
+    const qint64 travel = stride * (rows - 1);
+    if (travel < 0 && static_cast<uint64_t>(-travel) > offset) return false;
+    const auto forward = travel > 0 ? static_cast<uint64_t>(travel) : 0;
+    if (forward > buffer->size - offset ||
+        static_cast<size_t>(strides[plane]) > buffer->size - offset - forward)
+      return false;
+  }
+  return true;
+}
 
 class FrameProvider final : public QQuickImageProvider {
 public:
@@ -252,8 +288,7 @@ QString generate(const QString &source, const std::shared_ptr<std::atomic_bool> 
         const int64_t pts = av_rescale_rnd(ms - firstMs, kFps, 1000, AV_ROUND_DOWN);
         if (pts >= kFps * kSeconds) { sampleDone = true; av_frame_unref(frame); return true; }
         if (pts <= lastPts) { av_frame_unref(frame); continue; }
-        if (frame->width <= 0 || frame->height <= 0 || !frame->data[0] || frame->format < 0 ||
-            av_image_check_size(frame->width, frame->height, 0, nullptr) < 0 ||
+        if (!validVideoFrame(frame) ||
             av_frame_make_writable(scaled) < 0)
           return false;
         sws = sws_getCachedContext(sws, frame->width, frame->height,
@@ -326,38 +361,57 @@ PreviewResult loadFrames(const QString &cached, const std::shared_ptr<PreviewFra
   AVCodecContext *decoder = nullptr;
   AVPacket *packet = av_packet_alloc();
   AVFrame *frame = av_frame_alloc();
+  AVFrame *rgb = av_frame_alloc();
   SwsContext *sws = nullptr;
   QVector<QImage> images;
   auto work = [&] {
-    if (!ctx || !packet || !frame) return false;
+    if (!ctx || !packet || !frame || !rgb) return false;
     ctx->interrupt_callback = {[](void *opaque) -> int {
       return static_cast<Job *>(opaque)->interrupted();
     }, &job};
     if (avformat_open_input(&ctx, QFile::encodeName(cached).constData(), nullptr, nullptr) < 0 ||
-        avformat_find_stream_info(ctx, nullptr) < 0 || ctx->nb_streams != 1)
+        avformat_find_stream_info(ctx, nullptr) < 0 || ctx->nb_streams != 1 ||
+        ctx->streams[0]->codecpar->codec_id != AV_CODEC_ID_MPEG4 ||
+        ctx->streams[0]->codecpar->width <= 0 || ctx->streams[0]->codecpar->width > 320 ||
+        ctx->streams[0]->codecpar->height <= 0 || ctx->streams[0]->codecpar->height > 180)
       return false;
     const auto *codec = avcodec_find_decoder(AV_CODEC_ID_MPEG4);
     decoder = codec ? avcodec_alloc_context3(codec) : nullptr;
     if (!decoder || avcodec_parameters_to_context(decoder, ctx->streams[0]->codecpar) < 0)
       return false;
     decoder->thread_count = 1;
+    // Do not impose a max_pixels limit here: this decodes the source recording,
+    // which may be 4K or higher. validVideoFrame() guards against corrupted
+    // dimensions; the fixed 320x180 limit is only meaningful for the encoder.
     if (avcodec_open2(decoder, codec, nullptr) < 0) return false;
     int64_t first = AV_NOPTS_VALUE;
     auto receive = [&] {
       int result;
       while ((result = avcodec_receive_frame(decoder, frame)) >= 0) {
         if (job.interrupted() || frame->width <= 0 || frame->width > 320 ||
-            frame->height <= 0 || frame->height > 180 || !frame->data[0]) return false;
+            frame->height <= 0 || frame->height > 180 || !validVideoFrame(frame)) return false;
         if (images.size() >= kFps * kSeconds) return true;
-        QImage image(frame->width, frame->height, QImage::Format_RGB32);
-        if (image.isNull()) return false;
+        // swscale's SIMD paths need aligned strides and tail padding. QImage's
+        // tightly packed allocation is not a safe conversion destination for
+        // narrow/unaligned widths, even when the input video is perfectly valid.
+        if (rgb->width != frame->width || rgb->height != frame->height) {
+          av_frame_unref(rgb);
+          rgb->format = AV_PIX_FMT_RGB32;
+          rgb->width = frame->width;
+          rgb->height = frame->height;
+          if (av_frame_get_buffer(rgb, 32) < 0) return false;
+        }
+        if (av_frame_make_writable(rgb) < 0) return false;
         sws = sws_getCachedContext(sws, frame->width, frame->height,
             static_cast<AVPixelFormat>(frame->format), frame->width, frame->height,
             AV_PIX_FMT_RGB32, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-        uint8_t *data[] = {image.bits(), nullptr, nullptr, nullptr};
-        int strides[] = {int(image.bytesPerLine()), 0, 0, 0};
-        if (!sws || sws_scale(sws, frame->data, frame->linesize, 0, frame->height, data, strides) != frame->height)
+        if (!sws || sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
+                             rgb->data, rgb->linesize) != frame->height)
           return false;
+        // Detach pixels before the worker reuses/releases its conversion frame.
+        QImage image = QImage(rgb->data[0], rgb->width, rgb->height,
+                              rgb->linesize[0], QImage::Format_RGB32).copy();
+        if (image.isNull()) return false;
         const auto stamp = frame->best_effort_timestamp;
         if (first == AV_NOPTS_VALUE) first = stamp;
         const int64_t index = stamp == AV_NOPTS_VALUE || first == AV_NOPTS_VALUE ? images.size() :
@@ -379,7 +433,7 @@ PreviewResult loadFrames(const QString &cached, const std::shared_ptr<PreviewFra
     return !images.isEmpty();
   };
   const bool ok = work();
-  sws_freeContext(sws); av_frame_free(&frame); av_packet_free(&packet);
+  sws_freeContext(sws); av_frame_free(&rgb); av_frame_free(&frame); av_packet_free(&packet);
   avcodec_free_context(&decoder); avformat_close_input(&ctx);
   if (!ok || cancel->load()) {
     // A header-valid but undecodable cache must be regenerable on retry.

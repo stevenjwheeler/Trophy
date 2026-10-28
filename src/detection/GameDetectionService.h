@@ -16,6 +16,7 @@
 #include <QObject>
 #include <QSet>
 #include <QTimer>
+#include <QVariantMap>
 #include <memory>
 
 #include "GameListModel.h"
@@ -61,6 +62,9 @@ public:
   qint64 currentGamePid() const { return m_currentGamePid; }
   // Raw match key for the live game (reporter class / steam_app_<id>).
   QString currentGameKey() const { return m_currentGameKey; }
+  // Cached detector evidence only; distinct from portal stream metadata.
+  // Capture owners pin this snapshot, never borrowing a later namesake.
+  QVariantMap captureIdentityInfo(const QString &gameName) const;
   QString captureKeyForGame(const QString &name) const {
     return name == m_currentGameName && !m_currentGameKey.isEmpty()
                ? m_currentGameKey : name;
@@ -75,7 +79,7 @@ public:
    * guarantees a picker even with a valid token. Application waits for
    * this before starting a token-armed capture.
    */
-  bool hasVisibleWindow() const;
+  Q_INVOKABLE bool hasVisibleWindow() const;
 
   // Whitelist/Blacklist Management (invokable for the Games page;
   // true when the list actually changed, for UI feedback)

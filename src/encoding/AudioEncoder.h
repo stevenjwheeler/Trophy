@@ -82,6 +82,11 @@ public:
     }
   }
 
+  // Preserve a discontinuity when an existing track resumes on a new source.
+  // Pending old PCM is padded/submitted at its old timestamps (without EOF),
+  // then future input may advance to position. Never moves timestamps back.
+  bool advanceToSamplePosition(int64_t position, std::vector<EncodedPacket> &packets);
+
 signals:
   void encodingError(const QString &error);
 

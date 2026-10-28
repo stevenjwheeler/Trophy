@@ -119,14 +119,14 @@ protected:
 
   // Encode a segment: x264 @30fps GOP30 + AAC stereo. All timestamps
   // restart at 0 (as DVR rotation produces).
-  void makeSegment(const QString &path, int videoFrames) {
+  void makeSegment(const QString &path, int videoFrames, const QString &preset = "ultrafast") {
     FFmpegEncoder venc(IEncoder::EncoderType::Software_x264, "libx264");
     EncoderConfig vcfg;
     vcfg.width = 320;
     vcfg.height = 240;
     vcfg.fps = 30;
     vcfg.bitrate = 500;
-    vcfg.preset = "ultrafast";
+    vcfg.preset = preset;
     vcfg.keyframeInterval = 1;
     vcfg.inputPixelFormat = AV_PIX_FMT_BGRA;
     ASSERT_TRUE(venc.initialize(vcfg));
@@ -313,6 +313,68 @@ TEST_F(ReplayClipperTest, NativeFileSizeLimitCleansPartialAndRetries) {
     _exit(0);
   };
   EXPECT_EXIT(child(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST_F(ReplayClipperTest, ReorderedSegmentHeadsRetainReferenceKeyframes) {
+  if (!haveCodecs()) GTEST_SKIP() << "libx264/AAC unavailable";
+  QList<ReplaySegment> segments;
+  for (int i = 0; i < 3; ++i) {
+    const auto path = tempDir.path() + QString("/reordered-%1.mkv").arg(i);
+    makeSegment(path, 90, "medium"); // B-frame reordering, unlike ultrafast.
+    ASSERT_FALSE(HasFatalFailure());
+    const auto packets = readStreams(path);
+    ASSERT_EQ(packets.size(), 2);
+    ASSERT_TRUE(packets[0].first().key);
+    ASSERT_EQ(packets[0].first().dts, AV_NOPTS_VALUE);
+    segments.append({path, double(i * 3)});
+  }
+  const auto output = tempDir.path() + "/reordered-clip.mkv";
+  QString error;
+  ASSERT_TRUE(ReplayClipper::saveTail(segments, 9, output, &error)) << qPrintable(error);
+  const auto packets = readStreams(output);
+  ASSERT_EQ(packets.size(), 2);
+  int keys = 0;
+  for (const auto &packet : packets[0]) if (packet.key) ++keys;
+  // First input cuts at its first usable DTS-bearing keyframe (1s).
+  // All three GOPs of both subsequent inputs must survive, including IDR.
+  EXPECT_EQ(keys, 8);
+  EXPECT_EQ(packets[0].size(), 240);
+  AVFormatContext *input = nullptr;
+  ASSERT_GE(avformat_open_input(&input, output.toUtf8().constData(), nullptr, nullptr), 0);
+  ASSERT_GE(avformat_find_stream_info(input, nullptr), 0);
+  AVCodecContext *decoder = avcodec_alloc_context3(avcodec_find_decoder(AV_CODEC_ID_H264));
+  ASSERT_NE(decoder, nullptr);
+  ASSERT_GE(avcodec_parameters_to_context(decoder, input->streams[0]->codecpar), 0);
+  decoder->thread_count = 1;
+  decoder->err_recognition = AV_EF_EXPLODE;
+  ASSERT_GE(avcodec_open2(decoder, decoder->codec, nullptr), 0);
+  AVPacket *packet = av_packet_alloc();
+  AVFrame *frame = av_frame_alloc();
+  ASSERT_NE(packet, nullptr); ASSERT_NE(frame, nullptr);
+  int frames = 0;
+  auto drain = [&] {
+    int result;
+    while ((result = avcodec_receive_frame(decoder, frame)) >= 0) {
+      EXPECT_EQ(frame->decode_error_flags, 0);
+      EXPECT_EQ(frame->flags & AV_FRAME_FLAG_CORRUPT, 0);
+      ++frames;
+      av_frame_unref(frame);
+    }
+    EXPECT_TRUE(result == AVERROR(EAGAIN) || result == AVERROR_EOF);
+  };
+  int result;
+  while ((result = av_read_frame(input, packet)) >= 0) {
+    if (packet->stream_index == 0) {
+      EXPECT_GE(avcodec_send_packet(decoder, packet), 0);
+      drain();
+    }
+    av_packet_unref(packet);
+  }
+  EXPECT_EQ(result, AVERROR_EOF);
+  EXPECT_GE(avcodec_send_packet(decoder, nullptr), 0); drain();
+  EXPECT_EQ(frames, 240);
+  av_frame_free(&frame); av_packet_free(&packet);
+  avcodec_free_context(&decoder); avformat_close_input(&input);
 }
 
 TEST_F(ReplayClipperTest, TailCutKeepsTrailingWindow) {

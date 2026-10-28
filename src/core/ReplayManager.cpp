@@ -93,6 +93,7 @@ double ReplayManager::elapsedSec() const {
 QVariantMap ReplayManager::captureHealth() const {
   if (!isActive() || !m_session) return {};
   auto result = m_session->captureHealth();
+  result.insert(m_detectedGameInfo);
   result["mode"] = QStringLiteral("replay");
   const int target = m_settings ? m_settings->clipBufferSeconds() : 30;
   result["bufferTargetSeconds"] = target;
@@ -102,6 +103,11 @@ QVariantMap ReplayManager::captureHealth() const {
   for (const auto &segment : m_segments) buffered += segment.durationSec;
   for (const auto &segment : m_retiringSegments) buffered += segment->segment.durationSec;
   result["bufferSeconds"] = std::min(double(target), buffered);
+  result["retainedVideoSeconds"] = buffered;
+  result["dvrSessionSeconds"] = elapsedSec();
+  result["retainedSegments"] = int(m_segments.size() + m_retiringSegments.size())
+      + (m_session->videoPositionMs() >= 0 ? 1 : 0);
+  result["retiringSegments"] = int(m_retiringSegments.size());
   return result;
 }
 
@@ -270,6 +276,7 @@ void ReplayManager::clearSegments() {
 
 bool ReplayManager::beginCapture() {
   m_captureIdentity = m_gameDetector ? m_gameDetector->captureKeyForGame(m_gameName) : m_gameName;
+  m_detectedGameInfo = m_gameDetector ? m_gameDetector->captureIdentityInfo(m_gameName) : QVariantMap{};
   m_capture = m_captureFactory ? m_captureFactory() : CaptureFactory::createBestSource();
   if (!m_capture) {
     qWarning() << "Replay DVR: no capture source";
@@ -388,7 +395,13 @@ bool ReplayManager::switchSegment() {
     return false;
 
   EncoderConfig enc;
-  QSize native = m_capture->nativeResolution();
+  // A live source may resize between rotations. Keep the capture's original
+  // encoded canvas so retained segments stay stream-copy compatible; only a
+  // fresh capture chooses a new native canvas. Each encoder still fit/pads
+  // the delivered frames into that fixed output size.
+  QSize native = m_session && m_encoder
+                     ? QSize(m_encoder->width(), m_encoder->height())
+                     : m_capture->nativeResolution();
   enc.width = native.width();
   enc.height = native.height();
   if (enc.width % 2 != 0)
@@ -477,9 +490,9 @@ bool ReplayManager::switchSegment() {
   newSession->setGameIsFallback(!gameFound);
   newSession->setDesktopAudio(m_settings->audioMode() == "desktop");
   if (gameFound)
-    newSession->markSourceConnected(0);
+    newSession->markSourceConnected(0, m_lookupCache.gameNodeSerial);
   if (voiceFound && voiceTrack >= 0)
-    newSession->markSourceConnected(voiceTrack);
+    newSession->markSourceConnected(voiceTrack, m_lookupCache.voiceNodeSerial);
   if (!rebuildSources && m_session)
     newSession->inheritAudioRouting(*m_session);
   // No dispatcher: segments ARE the buffer.
@@ -606,7 +619,7 @@ ReplayManager::lookupDvrNodes(uint32_t gamePid, const QStringList &gameHints,
   }
   out.gameFound = (out.gameNodeId != 0xFFFFFFFFu);
   if (!voiceApp.isEmpty()) {
-    out.voiceNodeId = PipeWireAudioSource::findNodeByProcessName(
+    out.voiceNodeId = PipeWireAudioSource::findNodeByBinary(
         voiceApp, &out.voiceNodeName, &out.voiceNodeSerial);
     out.voiceFound = (out.voiceNodeId != 0xFFFFFFFFu);
   }
@@ -766,7 +779,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
       if (createSources) {
         auto voiceSrc = PipeWireAudioSource::createApplicationSource(
             lookup.voiceNodeId, lookup.voiceNodeName,
-            lookup.voiceNodeSerial);
+            lookup.voiceNodeSerial, vcApp);
         voiceSrc->setStreamName(QStringLiteral("trophy-voice"));
         m_audioMixer->addSourceAsync(std::move(voiceSrc), voiceTrack);
       }

@@ -10,7 +10,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
-import QtQuick.Dialogs
 
 ApplicationWindow {
     id: window
@@ -103,7 +102,7 @@ ApplicationWindow {
         if (lastSelectedIndex === -1 || !recordingLibrary) {
             // First selection in this sequence - just toggle normally
             if (recordingLibrary && currentIndex >= 0 && currentIndex < recordingLibrary.count) {
-                var recording = recordingLibrary.get(currentIndex);
+                const recording = recordingLibrary.get(currentIndex);
                 if (recording) {
                     toggleSelection(recording.filePath);
                     lastSelectedIndex = currentIndex;
@@ -117,9 +116,9 @@ ApplicationWindow {
         var temp = selectedRecordings.slice();
 
         // Select all items in the range
-        for (var i = startIdx; i <= endIdx; i++) {
+        for (let i = startIdx; i <= endIdx; i++) {
             if (recordingLibrary && i >= 0 && i < recordingLibrary.count) {
-                var rec = recordingLibrary.get(i);
+                const rec = recordingLibrary.get(i);
                 if (rec && temp.indexOf(rec.filePath) === -1) {
                     temp.push(rec.filePath);
                 }
@@ -179,9 +178,20 @@ ApplicationWindow {
             window.clearSelection();
     }
 
+    function protectedCaptureCount(paths) {
+        let count = 0;
+        for (let i = 0; i < paths.length; ++i) {
+            const rec = window.recordingLibrary ? window.recordingLibrary.getRecording(paths[i]) : null;
+            if (rec && rec.protectedFromCleanup)
+                ++count;
+        }
+        return count;
+    }
+
     function deleteSelected() {
         if (selectedRecordings.length > 0) {
-            if (window.skipDeleteConfirmation) {
+            bulkDeleteDialog.protectedCount = protectedCaptureCount(selectedRecordings);
+            if (window.skipDeleteConfirmation && bulkDeleteDialog.protectedCount === 0) {
                 performDeleteSelected();
             } else {
                 bulkDeleteDialog.open();
@@ -233,7 +243,7 @@ ApplicationWindow {
         var title = filePath;
         var dateStr = "";
         if (window.recordingLibrary) {
-            var rec = window.recordingLibrary.getRecording(filePath);
+            const rec = window.recordingLibrary.getRecording(filePath);
             if (rec) {
                 title = rec.gameName || rec.fileName || filePath;
                 if (rec.date)
@@ -245,7 +255,8 @@ ApplicationWindow {
     }
 
     function confirmDelete(filePath, fileName) {
-        if (window.skipDeleteConfirmation) {
+        deleteDialog.captureProtected = protectedCaptureCount([filePath]) > 0;
+        if (window.skipDeleteConfirmation && !deleteDialog.captureProtected) {
             if (window.storageManager) {
                 window.queueDeletion([filePath]);
             }
@@ -273,7 +284,7 @@ ApplicationWindow {
         }
         var idx = selectedRecordings.indexOf(renameDialog.filePath);
         if (idx !== -1) {
-            var temp = selectedRecordings.slice();
+            const temp = selectedRecordings.slice();
             temp[idx] = newPath;
             selectedRecordings = temp;
         }
@@ -320,14 +331,14 @@ ApplicationWindow {
 
         // Search clips
         if (recordingLibrary) {
-            for (var i = 0; i < recordingLibrary.count; i++) {
-                var clip = recordingLibrary.get(i);
+            for (let i = 0; i < recordingLibrary.count; i++) {
+                const clip = recordingLibrary.get(i);
                 if (!clip) continue;
 
-                var gameName = (clip.gameName || "").toLowerCase();
-                var fileName = (clip.fileName || "").toLowerCase();
+                const gameName = (clip.gameName || "").toLowerCase();
+                const fileName = (clip.fileName || "").toLowerCase();
                 
-                var match = gameName.includes(lowerQuery) ||
+                const match = gameName.includes(lowerQuery) ||
                             fileName.includes(lowerQuery) ||
                             matchesDate(clip.date, lowerQuery);
 
@@ -344,21 +355,22 @@ ApplicationWindow {
 
         // Search settings (names must match SettingsPage sections)
         var settings = [
-            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
+            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "original", "navy", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
             { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "zero-copy", "dma-buf"] },
             { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
+            { name: "Discord Rich Presence", section: "Discord Rich Presence", keywords: ["discord", "rich presence", "activity", "profile", "privacy", "game names", "idle"] },
             { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
             { name: "Detection Helpers", section: "Detection Helpers", keywords: ["helpers", "integration", "status", "enrolled", "game window helper", "window tracking", "vulkan", "opengl", "shim", "repair"] },
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
 
-        for (var j = 0; j < settings.length; j++) {
-            var setting = settings[j];
-            var settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
+        for (let j = 0; j < settings.length; j++) {
+            const setting = settings[j];
+            const settingMatch = (setting.name || "").toLowerCase().includes(lowerQuery) ||
                                (setting.keywords || []).some(k => { const kw = (k || "").toLowerCase(); return kw.includes(lowerQuery) || lowerQuery.includes(kw); });
 
             if (settingMatch) {
@@ -377,7 +389,7 @@ ApplicationWindow {
 
     function handleSearchResult() {
         if (globalSearchBox.searchResults.count > 0) {
-            var firstResult = globalSearchBox.searchResults.get(0);
+            const firstResult = globalSearchBox.searchResults.get(0);
             navigateToResult(firstResult);
         }
         globalSearchBox.text = "";
@@ -575,8 +587,11 @@ ApplicationWindow {
                                 text: {
                                     var durMs = window.recordingManager ? window.recordingManager.recordingDuration : 0;
                                     var dur = Math.floor(durMs / 1000);
-                                    var m = Math.floor(dur / 60);
+                                    var h = Math.floor(dur / 3600);
+                                    var m = Math.floor((dur % 3600) / 60);
                                     var s = dur % 60;
+                                    if (h > 0)
+                                        return h + ":" + m.toString().padStart(2, '0') + ":" + s.toString().padStart(2, '0');
                                     return `%1:%2`.arg(m).arg(s.toString().padStart(2, '0'));
                                 }
                                 color: "white"
@@ -679,6 +694,14 @@ ApplicationWindow {
                             id: infoPage
                             onReportBugRequested: window.app.reportBug()
                         }
+
+                        Connections {
+                            target: window.app
+                            function onUpdateDialogRequested() {
+                                window.currentPage = 3
+                                infoPage.showUpdateDialog = true
+                            }
+                        }
                     }
 
                     // In-app player: overlays the content area only,
@@ -707,17 +730,23 @@ ApplicationWindow {
                     }
 
                     // Pure black removes the usual page/shell contrast. Draw
-                    // the page's existing silhouette above its contents, with
-                    // no input handlers and no chrome in fullscreen playback.
-                    Rectangle {
+                    // top/left divider above its contents. Clip the other edges
+                    // outside the page so they don't double the window border.
+                    // No input handlers or chrome in fullscreen playback.
+                    Item {
                         anchors.fill: parent
                         z: 1
                         visible: Theme.amoled && !playerPage.playerFullscreen
-                        color: "transparent"
-                        topLeftRadius: 26
-                        bottomRightRadius: Theme.windowRadius
-                        border.width: 1
-                        border.color: Theme.borderColor
+                        clip: true
+
+                        Rectangle {
+                            width: parent.width + border.width
+                            height: parent.height + border.width
+                            color: "transparent"
+                            topLeftRadius: 26
+                            border.width: 1
+                            border.color: Theme.borderColor
+                        }
                     }
                 }
             }
@@ -833,30 +862,34 @@ ApplicationWindow {
         id: deleteDialog
         property string filePath: ""
         property string fileName: ""
+        property bool captureProtected: false
         title: qsTr("Delete Recording")
         message: qsTr("Delete '%1'? You will have 10 seconds to Undo in the app before permanent deletion.").arg(fileName)
+        warningMessage: captureProtected ? qsTr("This capture is protected from auto-cleanup. Deleting it manually will still permanently remove it after the Undo period.") : ""
         confirmText: qsTr("Delete")
         confirmColor: Theme.errorColor
-        showDontAsk: true
+        showDontAsk: !captureProtected
         onAccepted: {
             if (window.storageManager) {
                 window.queueDeletion([filePath]);
             }
-            if (deleteDialog.dontAskChecked)
+            if (deleteDialog.showDontAsk && deleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
         }
     }
 
     TrophyDialog {
         id: bulkDeleteDialog
+        property int protectedCount: 0
         title: qsTr("Delete Selected Recordings")
         message: qsTr("Delete %1 captures? You will have 10 seconds to Undo in the app before permanent deletion.").arg(window.selectedRecordings.length)
+        warningMessage: protectedCount > 0 ? qsTr("Protected captures selected: %1. Protection only prevents auto-cleanup. Deleting them manually will still permanently remove them after the Undo period.").arg(protectedCount) : ""
         confirmText: qsTr("Delete All")
         confirmColor: Theme.errorColor
-        showDontAsk: true
+        showDontAsk: protectedCount === 0
         onAccepted: {
             performDeleteSelected();
-            if (bulkDeleteDialog.dontAskChecked)
+            if (bulkDeleteDialog.showDontAsk && bulkDeleteDialog.dontAskChecked)
                 window.skipDeleteConfirmation = true;
         }
     }

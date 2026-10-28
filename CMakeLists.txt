@@ -1,7 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" TROPHY_BASE_VERSION)
+string(STRIP "${TROPHY_BASE_VERSION}" TROPHY_BASE_VERSION)
+if(NOT TROPHY_BASE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a stable X.Y.Z version")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+
 project(Trophy
-    VERSION 0.0.0
+    VERSION ${TROPHY_BASE_VERSION}
     DESCRIPTION "Game recording application for Linux"
     HOMEPAGE_URL "https://github.com/stevenjwheeler/trophy"
     LANGUAGES CXX C
@@ -25,14 +32,14 @@ endif()
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Get version from Git tag, unless CI (or the user) passes -DAPP_VERSION
+# Use VERSION/Git for local stamps, unless CI (or the user) passes -DAPP_VERSION
 # explicitly — that wins so the stamped binary always matches the
 # artifact name.
 if(DEFINED APP_VERSION AND NOT APP_VERSION STREQUAL "")
   set(GIT_VERSION ${APP_VERSION})
 else()
-  # Local builds: mirror the CI scheme (<base>-<branch>-<sha>,
-  # base = nearest tag) so a dev-branch binary never shows a
+  # Local builds: use VERSION as the base (<base>-<branch>-<sha>)
+  # so a dev-branch binary never shows a
   # raw "vX.Y.Z-N-gSHA" describe string. Exact tag checkouts
   # keep the tag itself.
   execute_process(
@@ -42,16 +49,13 @@ else()
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET
   )
-  if(GIT_EXACT_TAG)
+  if(GIT_EXACT_TAG STREQUAL "v${PROJECT_VERSION}" OR
+     GIT_EXACT_TAG STREQUAL "${PROJECT_VERSION}" OR
+     GIT_EXACT_TAG STREQUAL "v${PROJECT_VERSION}-dirty" OR
+     GIT_EXACT_TAG STREQUAL "${PROJECT_VERSION}-dirty")
     set(GIT_VERSION ${GIT_EXACT_TAG})
   else()
-    execute_process(
-        COMMAND git describe --tags --abbrev=0
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_BASE_TAG
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
+    set(GIT_BASE_TAG "v${PROJECT_VERSION}")
     execute_process(
         COMMAND git rev-parse --abbrev-ref HEAD
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -66,7 +70,9 @@ else()
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
-    if(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
+    if(GIT_BRANCH STREQUAL "main")
+      set(GIT_VERSION "${PROJECT_VERSION}")
+    elseif(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
       set(GIT_VERSION "${GIT_BASE_TAG}-${GIT_BRANCH}-${GIT_SHA}")
     else()
       # Last resort (no tags at all): stamp the sha, dirty-flagged.
@@ -253,9 +259,13 @@ set(CORE_SOURCES
     src/core/SystemTrayManager.cpp
     src/core/AutostartManager.cpp
     src/core/ControlServer.cpp
+    src/core/DiscordPresence.cpp
+    src/core/DiscordGameArtwork.cpp
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
+    src/core/InstallInfo.cpp
     src/core/UpdateChecker.cpp
+    src/core/UpdateInstaller.cpp
     src/core/WindowService.cpp
     src/core/WindowChrome.cpp
     src/core/FrameDispatcher.cpp
@@ -327,9 +337,13 @@ set(CORE_HEADERS
     src/core/SystemTrayManager.h
     src/core/AutostartManager.h
     src/core/ControlServer.h
+    src/core/DiscordPresence.h
+    src/core/DiscordGameArtwork.h
     src/core/GlobalShortcutManager.h
     src/core/ReplayManager.h
+    src/core/InstallInfo.h
     src/core/UpdateChecker.h
+    src/core/UpdateInstaller.h
     src/core/WindowService.h
     src/core/WindowChrome.h
 )
@@ -422,8 +436,9 @@ set_source_files_properties(qml/styles/Theme.qml
         QT_QML_SINGLETON_TYPE TRUE
 )
 
-# Generates .qmlls.ini files so your IDE/Linter can find the build artifacts
-set(QT_QML_GENERATE_QMLLS_INI ON)
+# Keep IDE support by default, but allow reproducible package/container builds
+# from a read-only source snapshot without trying to write .qmlls.ini there.
+option(QT_QML_GENERATE_QMLLS_INI "Generate source-tree qmlls.ini for IDEs" ON)
 
 # Optional: Forces all QML artifacts into a single folder to simplify pathing
 set(QT_QML_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml)
@@ -610,6 +625,45 @@ install(FILES resources/icons/default-apps/README.md LICENSE
 install(TARGETS trophy_layer trophy_gl_shim
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
 )
+
+# Optional separately built i386 companions. No 32-bit toolchain or runtime is
+# required for ordinary builds. Explicitly opting in also opts the packager into
+# the resulting native package's architecture-specific runtime dependencies.
+set(TROPHY_REPORTERS32_DIR "" CACHE PATH "Directory containing optional i386 reporter shared objects")
+if(TROPHY_REPORTERS32_DIR)
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+        message(FATAL_ERROR "i386 reporter companions require an x86_64 application build")
+    endif()
+    foreach(name IN ITEMS libtrophy_layer.so libtrophy_gl_shim.so)
+        set(reporter "${TROPHY_REPORTERS32_DIR}/${name}")
+        if(NOT EXISTS "${reporter}" OR IS_DIRECTORY "${reporter}" OR IS_SYMLINK "${reporter}")
+            message(FATAL_ERROR "Missing or symlinked i386 reporter: ${reporter}")
+        endif()
+        file(SIZE "${reporter}" reporter_size)
+        if(reporter_size LESS 20 OR reporter_size GREATER 16777216)
+            message(FATAL_ERROR "Invalid i386 reporter size: ${reporter}")
+        endif()
+        file(READ "${reporter}" header LIMIT 20 HEX)
+        string(LENGTH "${header}" header_length)
+        if(NOT header_length EQUAL 40 OR NOT header MATCHES "^7f454c46010101")
+            message(FATAL_ERROR "Expected little-endian ELF32 reporter: ${reporter}")
+        endif()
+        string(SUBSTRING "${header}" 32 8 elf_type_machine)
+        if(NOT elf_type_machine STREQUAL "03000300")
+            message(FATAL_ERROR "Expected i386 ET_DYN reporter: ${reporter}")
+        endif()
+    endforeach()
+    add_custom_target(trophy_reporters32 ALL
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/reporters32"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
+            "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
+            "${CMAKE_BINARY_DIR}/reporters32"
+        VERBATIM)
+    install(FILES "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
+                  "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
+        DESTINATION "lib/trophy/reporters32")
+endif()
 install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/vulkan_layer
 )
@@ -645,13 +699,21 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "video")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "")
+# dpkg-shlibdeps sees ELF dependencies, not dynamically imported QML modules,
+# image/platform plugins, PipeWire client configuration or the chime utility.
+# A clean --no-install-recommends install must still be able to load the UI.
+string(JOIN ", " CPACK_DEBIAN_PACKAGE_DEPENDS
+    qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts
+    qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtquick-templates
+    qml6-module-qtquick-effects qml6-module-qtmultimedia qml6-module-qtqml-workerscript
+    qt6-wayland qt6-svg-plugins libpipewire-0.3-common pipewire-bin)
 
 # RPM package metadata.
 set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
 set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
+set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtdeclarative, qt6-qtmultimedia, qt6-qtwayland, qt6-qtsvg, pipewire-utils")
 
 include(CPack)
 

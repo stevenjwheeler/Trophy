@@ -1,7 +1,7 @@
+pragma ComponentBehavior: Bound
 import "../styles"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 ComboBox {
     id: control
@@ -19,7 +19,7 @@ ComboBox {
         rightPadding: control.indicator.width + control.spacing
         text: control.displayText
         font: control.font
-        color: _text
+        color: control._text
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
     }
@@ -29,8 +29,8 @@ ComboBox {
         y: (control.height - height) / 2
         text: "▼"
         font.pixelSize: Theme.fontSizeSmall
-        color: (control.hovered || control.opened) ? _accent : Theme.textMutedColor
-        rotation: control.opened ? 180 : 0
+        color: (control.hovered || control.popup.visible) ? control._accent : Theme.textMutedColor
+        rotation: control.popup.visible ? 180 : 0
 
         Behavior on color {
             ColorAnimation {
@@ -56,12 +56,12 @@ ComboBox {
         border.width: control.activeFocus ? 2 : 1
         border.color: {
             if (control.activeFocus)
-                return _accent;
+                return control._accent;
 
             if (control.hovered)
-                return Qt.rgba(_accent.r, _accent.g, _accent.b, 0.5);
+                return Qt.rgba(control._accent.r, control._accent.g, control._accent.b, 0.5);
 
-            return Qt.rgba(_text.r, _text.g, _text.b, 0.15);
+            return Qt.rgba(control._text.r, control._text.g, control._text.b, 0.15);
         }
 
         Behavior on border.color {
@@ -121,21 +121,22 @@ ComboBox {
             color: Theme.cardColor
             radius: Theme.radiusSmall
             border.width: 1
-            border.color: Qt.rgba(_text.r, _text.g, _text.b, 0.2)
+            border.color: Qt.rgba(control._text.r, control._text.g, control._text.b, 0.2)
         }
 
     }
 
     delegate: ItemDelegate {
         id: itemDelegate
+        required property var modelData
 
         width: control.width - 4
         height: 32
         hoverEnabled: true
 
         contentItem: Label {
-            text: modelData
-            color: (itemDelegate.highlighted || itemDelegate.hovered) ? _accent : _text
+            text: itemDelegate.modelData
+            color: (itemDelegate.highlighted || itemDelegate.hovered) ? control._accent : control._text
             font: control.font
             elide: Text.ElideRight
             verticalAlignment: Text.AlignVCenter
@@ -143,7 +144,7 @@ ComboBox {
 
         background: Rectangle {
             // Using direct Qt.rgba to bypass the Theme function calls during hover
-            color: itemDelegate.hovered ? Qt.rgba(_accent.r, _accent.g, _accent.b, 0.1) : itemDelegate.highlighted ? Qt.rgba(_accent.r, _accent.g, _accent.b, 0.05) : "transparent"
+            color: itemDelegate.hovered ? Qt.rgba(control._accent.r, control._accent.g, control._accent.b, 0.1) : itemDelegate.highlighted ? Qt.rgba(control._accent.r, control._accent.g, control._accent.b, 0.05) : "transparent"
             radius: Theme.radiusSmall - 2
         }
 

@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
+#include <QProcess>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -55,6 +56,8 @@ static auto *env =
 // IVideoCaptureSource signal, using the manager's production connections.
 class PendingCapture : public IVideoCaptureSource {
 public:
+  CaptureErrorKind errorKind = CaptureErrorKind::Other;
+  CaptureErrorKind lastErrorKind() const override { return errorKind; }
   CaptureConfig config;
   mutable int resolutionQueries = 0;
   bool initialize(const CaptureConfig &value) override {
@@ -205,6 +208,18 @@ protected:
     ASSERT_TRUE(f.open(QIODevice::WriteOnly));
     f.write(QByteArray(size, 'x'));
     f.close();
+  }
+
+  QVariantMap diagnosticHealth(RecordingManager &recorder) {
+    // Exercise the real snapshot publication without constructing a codec.
+    const auto state = recorder.m_state;
+    recorder.m_session = std::make_unique<RecordingSession>(
+        "unused.mkv", recorder.m_captureSource.get(), nullptr, nullptr, nullptr, false, 128, 0);
+    recorder.m_state = RecordingManager::RecordingState::Recording;
+    const auto result = recorder.captureHealth();
+    recorder.m_state = state;
+    recorder.m_session.reset();
+    return result;
   }
 
   void bookmarkLifecycle() {
@@ -413,6 +428,71 @@ protected:
       capture = source.get();
       return source;
     };
+  }
+
+  void captureEndRace(int scenario) {
+    QProcess game;
+    game.start("sleep", {"30"});
+    ASSERT_TRUE(game.waitForStarted());
+    SettingsManager settings;
+    settings.setRecordingsPath(tempDir.path());
+    StorageManager storage(tempDir.path());
+    WaylandWindowMonitor monitor;
+    GameDetectionService detector;
+    detector.setWindowMonitor(&monitor);
+    detector.addToWhitelist("steam_app_42424242", "Exit fixture");
+    WindowInfo window;
+    window.pid = game.processId(); window.appId = "steam_app_42424242";
+    window.focused = window.fullscreen = true;
+    monitor.ingestSnapshot({window});
+    ASSERT_EQ(detector.currentGameKey(), "steam_app_42424242");
+    ASSERT_EQ(detector.currentGameName(), "Exit fixture");
+    RecordingManager recorder;
+    recorder.setSettingsManager(&settings);
+    recorder.setStorageManager(&storage);
+    recorder.setGameDetectionService(&detector);
+    recorder.m_captureEndGraceMs = 200;
+    QPointer<PendingCapture> capture;
+    installPendingCapture(recorder, capture);
+    recorder.m_pipelineBuilder = [&] {
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 4);
+      return true;
+    };
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
+    recorder.startRecording(scenario == 5 ? QString() : QString("Exit fixture"));
+    ASSERT_FALSE(capture.isNull());
+    recorder.completePipelineAndStart();
+    ASSERT_TRUE(recorder.isRecording());
+    capture->errorKind = scenario == 3 ? IVideoCaptureSource::CaptureErrorKind::Other
+                                     : IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
+    if (scenario == 2) {
+      window.minimized = true;
+      monitor.ingestSnapshot({window});
+      EXPECT_FALSE(detector.hasVisibleWindow()); // Not proof of game exit.
+    }
+    if (scenario == 0 || scenario == 3 || scenario == 4 || scenario == 5) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
+    if (scenario == 6) recorder.stopRecording();
+    emit capture->captureError("source vanished");
+    if (scenario == 7) {
+      QCoreApplication::processEvents();
+      recorder.onEncodingError("output write failed during stop");
+    }
+    if (scenario == 1) QTimer::singleShot(30, &game, [&] { game.terminate(); });
+    ASSERT_TRUE(waitForIdle(recorder));
+    const bool normal = scenario == 0 || scenario == 1 || scenario == 6;
+    EXPECT_EQ(saved.size(), normal ? 1 : 0);
+    EXPECT_EQ(errors.size(), normal ? 0 : 1);
+    EXPECT_EQ(finished.size(), 1);
+    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
+    if (game.state() != QProcess::NotRunning) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
   }
 
   QString outputPath(RecordingManager &recorder, const QString &game) {
@@ -773,6 +853,57 @@ TEST_F(RecordingManagerTest, StaleRestoreSettlesBeforeReauthorizationAndRetry) {
   EXPECT_EQ(started.count(), 0);
   EXPECT_EQ(errors.count(), 0);
   recorder.stopRecording();
+}
+
+TEST_F(RecordingManagerTest, CaptureSourceLossAfterGameExitSavesNormally) { captureEndRace(0); }
+TEST_F(RecordingManagerTest, CaptureSourceLossBeforeGameExitDrainsThenSavesNormally) { captureEndRace(1); }
+TEST_F(RecordingManagerTest, CaptureSourceLossWhileGameLivesStillFails) { captureEndRace(2); }
+TEST_F(RecordingManagerTest, CaptureServiceFailureIsNotHiddenByGameExit) { captureEndRace(3); }
+TEST_F(RecordingManagerTest, CaptureGameExitDoesNotHideFinalizationFailure) { captureEndRace(4); }
+TEST_F(RecordingManagerTest, ManualCaptureSourceLossDoesNotBorrowDetectedGameExit) { captureEndRace(5); }
+TEST_F(RecordingManagerTest, QueuedCaptureLossAfterExplicitStopDoesNotTurnSaveIntoError) { captureEndRace(6); }
+TEST_F(RecordingManagerTest, CaptureGameExitGraceDoesNotHideOutputFailure) { captureEndRace(7); }
+
+TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
+  SettingsManager settings;
+  settings.setRecordingsPath(tempDir.path());
+  StorageManager storage(tempDir.path());
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor);
+  detector.addToWhitelist("steam_app_1422450", "Deadlock");
+  detector.addToWhitelist("steam_app_999", "Deadlock");
+  WindowInfo window;
+  window.pid = 61010; window.appId = "steam_app_1422450";
+  window.focused = window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameName(), "Deadlock");
+  EXPECT_TRUE(detector.captureIdentityInfo("Another game").isEmpty());
+  RecordingManager recorder;
+  recorder.setSettingsManager(&settings);
+  recorder.setStorageManager(&storage);
+  recorder.setGameDetectionService(&detector);
+  QPointer<PendingCapture> capture;
+  installPendingCapture(recorder, capture);
+  recorder.startRecording("Deadlock");
+  ASSERT_FALSE(capture.isNull());
+  const auto first = diagnosticHealth(recorder);
+  EXPECT_EQ(first["detectedGameKey"].toString(), "steam_app_1422450");
+  EXPECT_EQ(first["detectedSteamAppId"].toString(), "1422450");
+  EXPECT_EQ(first["detectedGamePid"].toLongLong(), 61010);
+  EXPECT_FALSE(first.contains("sourcePid")); // never pretend this came from the portal
+  detector.addToBlacklist("steam_app_1422450");
+  window.pid = 61011; window.appId = "steam_app_999";
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameKey(), "steam_app_999");
+  EXPECT_EQ(diagnosticHealth(recorder)["detectedGameKey"], first["detectedGameKey"]);
+  EXPECT_EQ(diagnosticHealth(recorder)["detectedGamePid"], first["detectedGamePid"]);
+  recorder.stopRecording();
+  ASSERT_TRUE(waitForIdle(recorder));
+  recorder.startRecording(""); // a picker could choose something other than the detected game
+  EXPECT_FALSE(diagnosticHealth(recorder).contains("detectedGameKey"));
+  recorder.stopRecording();
+  ASSERT_TRUE(waitForIdle(recorder));
 }
 
 TEST_F(RecordingManagerTest, RestoreTokenCallbacksKeepOriginatingIdentity) {

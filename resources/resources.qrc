@@ -25,6 +25,7 @@
     <file>icons/manual-recording.svg</file>
     <file>icons/home.svg</file>
     <file>icons/gamepad.svg</file>
+    <file>icons/social.svg</file>
     <file>icons/settings.svg</file>
     <file>icons/paintbrush.svg</file>
     <file>icons/info.svg</file>
@@ -49,6 +50,7 @@
     <file>icons/edit.svg</file>
     <file>icons/scissors.svg</file>
     <file>icons/camera.svg</file>
+    <file>icons/playback-speed.svg</file>
     <file>icons/gpu.svg</file>
     <file>icons/gpu-nvidia.svg</file>
     <file>icons/gpu-amd.svg</file>

@@ -4,6 +4,26 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
 
+add_executable(test_InstallInfo test_InstallInfo.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/InstallInfo.cpp)
+target_include_directories(test_InstallInfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_InstallInfo PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_InstallInfo)
+
+add_executable(test_DiscordPresence test_DiscordPresence.cpp
+    test_DiscordGameArtwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DiscordPresence.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DiscordGameArtwork.cpp)
+target_include_directories(test_DiscordPresence PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_DiscordPresence PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Network Qt6::Test)
+gtest_discover_tests(test_DiscordPresence)
+
+add_executable(test_DiscordPresenceUi test_DiscordPresenceUi.cpp)
+target_include_directories(test_DiscordPresenceUi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_DiscordPresenceUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DiscordPresenceUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_DiscordPresenceUi)
+
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
@@ -49,6 +69,22 @@ find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME AppImageSmokeTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
+    add_test(NAME NativePackageSmokeTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativePackageSmoke.py")
+    add_test(NAME ReporterRuntimeTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterRuntimes.py")
+    add_test(NAME NativeInstallSafetyTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
+    add_test(NAME DraftReleaseTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_DraftRelease.py")
+    set(multilib_preload_includes)
+    foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
+        list(APPEND multilib_preload_includes --qt-include "${directory}")
+    endforeach()
+    add_test(NAME MultilibPreloadTest.NativeLoaders
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_MultilibPreload.py"
+            --qt-library "$<TARGET_FILE:Qt6::Core>" ${multilib_preload_includes})
+    set_tests_properties(MultilibPreloadTest.NativeLoaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
     add_test(NAME ReporterAbiTest.StaticFixtures
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterAbi.py")
 endif()
@@ -57,7 +93,7 @@ add_executable(test_PlayerProbe test_PlayerProbe.cpp)
 target_compile_definitions(test_PlayerProbe PRIVATE
     PLAYER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/PlayerPage.qml"
     AUDIO_METER_QML_FILE="${CMAKE_SOURCE_DIR}/qml/components/AudioLevelMeter.qml")
-target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+target_link_libraries(test_PlayerProbe PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test Qt6::Multimedia)
 gtest_discover_tests(test_PlayerProbe)
 
 # Background low-resolution preview generation and cache lifecycle.
@@ -131,6 +167,7 @@ endif()
 # Common includes and link libraries
 set(TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/src
+    ${VAAPI_INCLUDE_DIRS}
 )
 
 # Warning flags for every test target (warnings only — never -Werror, so
@@ -385,12 +422,12 @@ find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
     # Fake portal owns the desktop portal name only on a private bus.
     set_property(TARGET test_WaylandPortalCapture PROPERTY TEST_LAUNCHER
-        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+        "${TROPHY_DBUS_RUN_SESSION};--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf;--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
 endif()
 gtest_discover_tests(test_WaylandPortalCapture)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
     add_test(NAME WaylandPortalCaptureTest.PrivateBusIntegration
-        COMMAND "${TROPHY_DBUS_RUN_SESSION}" --
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" "--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf" --
             "${CMAKE_COMMAND}" -E env TROPHY_PRIVATE_PORTAL_TESTS=1
             $<TARGET_FILE:test_WaylandPortalCapture>)
 endif()
@@ -442,12 +479,22 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
             $<TARGET_FILE:test_AppAudioGroup>)
     set_tests_properties(AppAudioGroupTest.PrivatePipeWire PROPERTIES
-        SKIP_RETURN_CODE 77 TIMEOUT 45)
+        SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_executable(test_RecordingFailureIntegration test_RecordingFailureIntegration.cpp)
+    target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
+        Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
+    foreach(case IN ITEMS NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit TransientDeliveryStall RenegotiatedStalledCapture)
+        add_test(NAME RecordingFailureTest.${case}
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
+                $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
+        set_tests_properties(RecordingFailureTest.${case} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endforeach()
 endif()
 
 add_executable(test_ReplayManager test_ReplayManager.cpp)
 target_include_directories(test_ReplayManager PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Test)
+target_link_libraries(test_ReplayManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
 gtest_discover_tests(test_ReplayManager)
 
 add_executable(test_RecordingSession test_RecordingSession.cpp)
@@ -652,6 +699,13 @@ target_link_libraries(test_ThumbnailGenerator PRIVATE
 )
 gtest_discover_tests(test_ThumbnailGenerator)
 
+if(EGL_FOUND)
+    add_executable(test_EglDisplayLease test_EglDisplayLease.cpp)
+    target_include_directories(test_EglDisplayLease PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_EglDisplayLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::EGL)
+    gtest_discover_tests(test_EglDisplayLease)
+endif()
+
 # --- DmaBufCudaImport (Stage B: real GBM DMA-BUF -> NVENC EGL import;
 # skips without NVIDIA EGL / GBM / NVENC) ---
 if(EGL_FOUND AND GBM_FOUND)
@@ -679,6 +733,13 @@ target_link_libraries(test_DmaBufCudaImport PRIVATE
     PkgConfig::GBM
 )
 gtest_discover_tests(test_DmaBufCudaImport)
+endif()
+
+if(VAAPI_FOUND)
+    add_executable(test_VaapiVideoProcessor test_VaapiVideoProcessor.cpp)
+    target_include_directories(test_VaapiVideoProcessor PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_VaapiVideoProcessor PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
+    gtest_discover_tests(test_VaapiVideoProcessor)
 endif()
 
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---
@@ -757,6 +818,12 @@ gtest_discover_tests(test_GlShimEnrollment)
 add_executable(test_GlShimReporter test_GlShimReporter.cpp)
 target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
 gtest_discover_tests(test_GlShimReporter)
+
+add_executable(test_ReporterDlopen test_ReporterDlopen.cpp)
+target_compile_definitions(test_ReporterDlopen PRIVATE TROPHY_GL_SHIM_FILE="$<TARGET_FILE:trophy_gl_shim>")
+target_link_libraries(test_ReporterDlopen PRIVATE GTest::gtest_main dl)
+add_dependencies(test_ReporterDlopen trophy_gl_shim)
+gtest_discover_tests(test_ReporterDlopen)
 
 # --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
 add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp

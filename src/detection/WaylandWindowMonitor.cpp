@@ -10,6 +10,7 @@
 #include "HyprlandBackend.h"
 #include "KWinBackend.h"
 #include "SwayBackend.h"
+#include "DetectorVersion.h"
 
 #include <QDebug>
 #include <QMutexLocker>
@@ -155,6 +156,22 @@ QString WaylandWindowMonitor::gnomeHelperStatus() const {
 
 bool WaylandWindowMonitor::gnomeHelperInstalled() const {
   return GnomeBackend::isInstalled();
+}
+
+int WaylandWindowMonitor::bundledHelperVersion() const {
+  if (m_compositor == "kwin")
+    return DetectorVersion::metadata(KWinBackend::findScriptSourceDir() + "/metadata.json", true);
+  if (m_compositor == "gnome")
+    return DetectorVersion::metadata(":/gnome/metadata.json", false);
+  return 0;
+}
+
+int WaylandWindowMonitor::helperVersion() const {
+  if (m_compositor == "kwin")
+    return DetectorVersion::metadata(KWinBackend::installedScriptDir() + "/metadata.json", true);
+  if (m_compositor == "gnome")
+    return DetectorVersion::metadata(GnomeBackend::extensionDirectory() + "/metadata.json", false);
+  return 0; // Hyprland/Sway use compositor tools, not an installed Trophy script.
 }
 
 bool WaylandWindowMonitor::trackingReady() const {

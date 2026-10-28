@@ -8,11 +8,13 @@ T.Dialog {
     id: control
 
     property string message: ""
+    property string warningMessage: ""
     property bool showDontAsk: false
     property alias dontAskChecked: dontAskCheckbox.checked
     property string confirmText: qsTr("Confirm")
     property string cancelText: qsTr("Cancel")
     property color confirmColor: Theme.accentColor || "#3498db"
+    property bool confirmEnabled: true
     readonly property color _text: Theme.textColor || "#ffffff"
     readonly property color _textMuted: Theme.textMutedColor || "#aaaaaa"
     readonly property color _accent: Theme.accentColor || "#3498db"
@@ -33,7 +35,7 @@ T.Dialog {
     background: Rectangle {
         color: Theme.cardColor || "#212121"
         radius: Theme.radiusLarge
-        border.color: Theme.withOpacity(_text, 0.1)
+        border.color: Theme.withOpacity(control._text, 0.1)
         border.width: 1
     }
 
@@ -85,7 +87,7 @@ T.Dialog {
             Layout.fillWidth: true
             Layout.margins: Theme.spacingLarge
             Layout.bottomMargin: 0
-            color: _text
+            color: control._text
         }
 
         // Message
@@ -95,9 +97,34 @@ T.Dialog {
             Layout.topMargin: Theme.spacingMedium
             text: control.message
             wrapMode: Text.WordWrap
-            color: _textMuted
+            color: control._textMuted
             lineHeight: 1.2
             font.pixelSize: Theme.fontSizeNormal
+        }
+
+        Rectangle {
+            objectName: "dialogWarningBox"
+            visible: control.warningMessage.length > 0
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spacingLarge
+            Layout.rightMargin: Theme.spacingLarge
+            implicitHeight: warningLabel.implicitHeight + Theme.spacingMedium * 2
+            radius: Theme.radiusSmall
+            color: Theme.withOpacity(Theme.warningColor, 0.06)
+            border.color: Theme.warningColor
+            border.width: 1
+
+            Label {
+                id: warningLabel
+                objectName: "dialogWarningText"
+                anchors.fill: parent
+                anchors.margins: Theme.spacingMedium
+                text: control.warningMessage
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Theme.warningColor
+                font.pixelSize: Theme.fontSizeNormal
+            }
         }
 
         // Action Row
@@ -123,8 +150,8 @@ T.Dialog {
                     y: (dontAskCheckbox.availableHeight - height) / 2
                     radius: 6
                     // SAFE COLORS: Use the local _accent property
-                    color: dontAskCheckbox.checked ? _accent : "transparent"
-                    border.color: dontAskCheckbox.checked ? _accent : Theme.withOpacity(_text, 0.2)
+                    color: dontAskCheckbox.checked ? control._accent : "transparent"
+                    border.color: dontAskCheckbox.checked ? control._accent : Theme.withOpacity(control._text, 0.2)
 
                     Text {
                         text: "✓"
@@ -145,7 +172,7 @@ T.Dialog {
                 contentItem: Text {
                     text: dontAskCheckbox.text
                     font.pixelSize: Theme.fontSizeSmall
-                    color: _textMuted
+                    color: control._textMuted
                     // Add padding to make room for the indicator
                     leftPadding: dontAskCheckbox.indicator.width + dontAskCheckbox.spacing
                     verticalAlignment: Text.AlignVCenter
@@ -171,6 +198,8 @@ T.Dialog {
                 TrophyButton {
                     text: control.confirmText
                     baseColor: control.confirmColor
+                    enabled: control.confirmEnabled
+                    opacity: enabled ? 1 : 0.5
                     onClicked: control.accept()
                 }
 

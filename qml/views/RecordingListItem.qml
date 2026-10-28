@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+pragma ComponentBehavior: Bound
 import "../styles"
 import QtQuick
 import QtQuick.Controls
@@ -13,6 +14,10 @@ import QtQuick.Layouts
 
 ItemDelegate {
     id: root
+    // Explicit dependencies; defaults preserve engine/creation-context hosts.
+    property var hostWindow: typeof window !== "undefined" ? window : null // qmllint disable unqualified
+    property var library: typeof recordingLibrary !== "undefined" ? recordingLibrary : null // qmllint disable unqualified
+    property var recorder: typeof recordingManager !== "undefined" ? recordingManager : null // qmllint disable unqualified
 
     property var recording: null
     property bool live: false
@@ -35,7 +40,7 @@ ItemDelegate {
         if (!previewController)
             return
         if (previewEligible)
-            previewController.request(previewSurface, recordingLibrary.localFileUrl(previewPath))
+            previewController.request(previewSurface, root.library.localFileUrl(previewPath))
         else
             previewController.release(previewSurface)
     }
@@ -48,8 +53,8 @@ ItemDelegate {
         if (requestedController)
             requestedController.release(previewSurface)
     }
-    readonly property bool isSelected: !!(root.recording && window.selectedRecordings && window.selectedRecordings.indexOf(root.recording.filePath) !== -1)
-    readonly property bool isSelectionModeActive: !!(window.selectedRecordings && window.selectedRecordings.length > 0)
+    readonly property bool isSelected: !!(root.recording && root.hostWindow && root.hostWindow.selectedRecordings && root.hostWindow.selectedRecordings.indexOf(root.recording.filePath) !== -1)
+    readonly property bool isSelectionModeActive: !!(root.hostWindow && root.hostWindow.selectedRecordings && root.hostWindow.selectedRecordings.length > 0)
     readonly property bool showSelection: !root.live && (root.hovered || root.isSelectionModeActive)
     property real selectionReveal: root.showSelection ? 1 : 0
     Behavior on selectionReveal {
@@ -71,13 +76,13 @@ ItemDelegate {
             return;
         if (root.isSelectionModeActive || (modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) {
             if (modifiers & Qt.ShiftModifier)
-                window.shiftSelectRange(root.cardIndex);
+                root.hostWindow.shiftSelectRange(root.cardIndex);
             else {
-                window.toggleSelection(root.recording.filePath);
-                window.lastSelectedIndex = root.cardIndex;
+                root.hostWindow.toggleSelection(root.recording.filePath);
+                root.hostWindow.lastSelectedIndex = root.cardIndex;
             }
         } else {
-            window.openPlayer(root.recording.filePath);
+            root.hostWindow.openPlayer(root.recording.filePath);
         }
     }
 
@@ -176,10 +181,10 @@ ItemDelegate {
                     onClicked: (mouse) => {
                         if (root.recording) {
                             if (mouse.modifiers & Qt.ShiftModifier) {
-                                window.shiftSelectRange(root.cardIndex);
+                                root.hostWindow.shiftSelectRange(root.cardIndex);
                             } else {
-                                window.toggleSelection(root.recording.filePath);
-                                window.lastSelectedIndex = root.cardIndex;
+                                root.hostWindow.toggleSelection(root.recording.filePath);
+                                root.hostWindow.lastSelectedIndex = root.cardIndex;
                             }
                         }
                     }
@@ -204,7 +209,7 @@ ItemDelegate {
                 Accessible.name: qsTr("Protect from auto-cleanup")
                 ToolTip.text: root.captureProtected ? qsTr("Protected from auto-cleanup — click to unprotect") : qsTr("Protect from auto-cleanup (manual deletion still allowed)")
                 ToolTip.visible: hovered
-                onClicked: { if (root.recording) window.toggleCaptureProtection(root.recording.filePath) }
+                onClicked: { if (root.recording) root.hostWindow.toggleCaptureProtection(root.recording.filePath) }
                 background: Rectangle {
                     radius: 9
                     color: root.captureProtected ? Theme.primaryColor : "transparent"
@@ -239,7 +244,7 @@ ItemDelegate {
                 }
                 Image {
                     anchors.fill: parent
-                    source: root.recording && root.recording.thumbnailPath ? recordingLibrary.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
+                    source: root.recording && root.recording.thumbnailPath ? root.library.localFileUrl(root.recording.thumbnailPath) : "qrc:/icons/video.svg"
                     fillMode: Image.PreserveAspectCrop
                     opacity: root.recording && root.recording.thumbnailPath ? 1.0 : 0.3
                 }
@@ -256,7 +261,7 @@ ItemDelegate {
 
             RecordingGameIcon {
                 objectName: "listGameIcon"
-                gameName: root.live ? recordingManager.currentGameName : (root.recording ? root.recording.gameName : "")
+                gameName: root.live ? root.recorder.currentGameName : (root.recording ? root.recording.gameName : "")
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.margins: 6
@@ -292,7 +297,7 @@ ItemDelegate {
 
             Label {
                 objectName: "listTitle"
-                text: root.live ? (recordingManager.currentGameName || qsTr("Recording…")) : (root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : "")
+                text: root.live ? (root.recorder.currentGameName || qsTr("Recording…")) : (root.recording ? (root.isClip ? qsTr("%1 Clip").arg(root.recording.gameName || qsTr("Unknown Game")) : (root.recording.gameName || qsTr("Unknown Game"))) : "")
                 color: Theme.textColor
                 font.pixelSize: Theme.fontSizeNormal
                 font.weight: Font.Bold
@@ -314,7 +319,7 @@ ItemDelegate {
 
                 Label {
                     objectName: "listMetadata"
-                    text: root.live ? "• " + formatDuration(Math.floor(recordingManager.recordingDuration / 1000)) + " • " + formatSize(recordingManager.recordingSize) : (root.recording ? "• " + formatDuration(root.recording.duration) + " • " + formatSize(root.recording.size) : "")
+                    text: root.live ? "• " + root.formatDuration(Math.floor(root.recorder.recordingDuration / 1000)) + " • " + root.formatSize(root.recorder.recordingSize) : (root.recording ? "• " + root.formatDuration(root.recording.duration) + " • " + root.formatSize(root.recording.size) : "")
                     color: Theme.textSecondaryColor
                     font.pixelSize: Theme.fontSizeTiny
                     elide: Text.ElideRight
@@ -343,6 +348,7 @@ ItemDelegate {
             Layout.rightMargin: Theme.spacingSmall
 
             RoundButton {
+                id: playButton
                 width: 32
                 height: 32
                 icon.source: "qrc:/icons/play.svg"
@@ -353,14 +359,14 @@ ItemDelegate {
                 ToolTip.text: qsTr("Play")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: { if (root.recording) window.openPlayer(root.recording.filePath) }
+                onClicked: { if (root.recording) root.hostWindow.openPlayer(root.recording.filePath) }
 
                 background: Rectangle {
                     radius: 16
-                    color: parent.hovered ? Theme.primaryHoverColor : Theme.primaryColor
-                    border.color: parent.hovered ? "#ffffffff" : "#00ffffff"
+                    color: playButton.hovered ? Theme.primaryHoverColor : Theme.primaryColor
+                    border.color: playButton.hovered ? "#ffffffff" : "#00ffffff"
                     border.width: 1.5
-                    scale: parent.hovered ? 1.08 : 1.0
+                    scale: playButton.hovered ? 1.08 : 1.0
                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }
@@ -368,6 +374,7 @@ ItemDelegate {
             }
 
             RoundButton {
+                id: shareButton
                 objectName: "listShareExport"
                 width: 32
                 height: 32
@@ -379,19 +386,20 @@ ItemDelegate {
                 ToolTip.text: qsTr("Export to share")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: { if (root.recording) window.openShareExport(root.recording.filePath) }
+                onClicked: { if (root.recording) root.hostWindow.openShareExport(root.recording.filePath) }
                 background: Rectangle {
                     radius: 16
-                    color: parent.hovered ? "#e6353f5c" : "#b31a2238"
-                    border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                    color: shareButton.hovered ? "#e6353f5c" : "#b31a2238"
+                    border.color: shareButton.hovered ? "#b3ffffff" : "#59ffffff"
                     border.width: 1.5
-                    scale: parent.hovered ? 1.08 : 1.0
+                    scale: shareButton.hovered ? 1.08 : 1.0
                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }
             }
 
             RoundButton {
+                id: renameButton
                 width: 32
                 height: 32
                 icon.source: "qrc:/icons/edit.svg"
@@ -402,14 +410,14 @@ ItemDelegate {
                 ToolTip.text: qsTr("Rename")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: { if (root.recording) window.requestRename(root.recording.filePath, root.recording.gameName) }
+                onClicked: { if (root.recording) root.hostWindow.requestRename(root.recording.filePath, root.recording.gameName) }
 
                 background: Rectangle {
                     radius: 16
-                    color: parent.hovered ? "#e6353f5c" : "#b31a2238"
-                    border.color: parent.hovered ? "#b3ffffff" : "#59ffffff"
+                    color: renameButton.hovered ? "#e6353f5c" : "#b31a2238"
+                    border.color: renameButton.hovered ? "#b3ffffff" : "#59ffffff"
                     border.width: 1.5
-                    scale: parent.hovered ? 1.08 : 1.0
+                    scale: renameButton.hovered ? 1.08 : 1.0
                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }
@@ -417,6 +425,7 @@ ItemDelegate {
             }
 
             RoundButton {
+                id: deleteButton
                 width: 32
                 height: 32
                 icon.source: "qrc:/icons/trash.svg"
@@ -427,14 +436,14 @@ ItemDelegate {
                 ToolTip.text: qsTr("Delete")
                 ToolTip.visible: hovered
                 ToolTip.delay: 600
-                onClicked: { if (root.recording) window.confirmDelete(root.recording.filePath, root.recording.fileName) }
+                onClicked: { if (root.recording) root.hostWindow.confirmDelete(root.recording.filePath, root.recording.fileName) }
 
                 background: Rectangle {
                     radius: 16
-                    color: parent.hovered ? Theme.errorColor : "#b31a2238"
-                    border.color: parent.hovered ? "#ffffffff" : "#59ffffff"
+                    color: deleteButton.hovered ? Theme.errorColor : "#b31a2238"
+                    border.color: deleteButton.hovered ? "#ffffffff" : "#59ffffff"
                     border.width: 1.5
-                    scale: parent.hovered ? 1.08 : 1.0
+                    scale: deleteButton.hovered ? 1.08 : 1.0
                     Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }

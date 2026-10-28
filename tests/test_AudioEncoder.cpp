@@ -174,6 +174,35 @@ TEST(AudioEncoderTest, ReinitializeClearsStartOffsetAndBufferedSamples) {
   EXPECT_LT(pkt.pts, 100);
 }
 
+TEST(AudioEncoderTest, DiscontinuityPreservesBufferedTailAndNeverMovesBackwards) {
+  if (!avcodec_find_encoder(AV_CODEC_ID_AAC)) GTEST_SKIP() << "AAC unavailable";
+  AudioEncoder encoder;
+  AudioEncoderConfig config;
+  ASSERT_TRUE(encoder.initialize(config));
+  std::vector<EncodedPacket> packets;
+  std::vector<float> old((7 * 1024 + 137) * config.channels, 0.1f);
+  EncodedPacket packet;
+  if (encoder.encodeAudio(old.data(), 7 * 1024 + 137, packet)) packets.push_back(std::move(packet));
+  ASSERT_TRUE(encoder.advanceToSamplePosition(2 * config.sampleRate, packets));
+  // Old complete frames and the padded tail must keep their original origin.
+  std::vector<float> fresh(1024 * config.channels, 0.2f);
+  for (int i = 0; i < 5; ++i) {
+    if (encoder.encodeAudio(fresh.data(), 1024, packet)) packets.push_back(std::move(packet));
+  }
+  ASSERT_TRUE(encoder.advanceToSamplePosition(config.sampleRate, packets)); // Cannot rewind.
+  encoder.flush(packets);
+  int oldPackets = 0, resumedPackets = 0;
+  int64_t last = INT64_MIN;
+  for (const auto &value : packets) {
+    EXPECT_GE(value.pts, last); last = value.pts;
+    if (value.pts < 200) ++oldPackets;
+    else { EXPECT_GE(value.pts, 1970); ++resumedPackets; }
+  }
+  EXPECT_GE(oldPackets, 7);
+  EXPECT_GE(resumedPackets, 4);
+  EXPECT_LT(packets.size(), 20u); // No gap-sized silence allocation/encoding.
+}
+
 TEST(AudioEncoderTest, NanInputDoesNotCrash) {
   if (!avcodec_find_encoder(AV_CODEC_ID_AAC))
     GTEST_SKIP() << "FFmpeg AAC encoder unavailable";

@@ -13,6 +13,7 @@
 #include <QTest>
 #include <QSignalSpy>
 #include <QFile>
+#include <QFont>
 #include <memory>
 
 class ExportUiFake : public QObject {
@@ -132,6 +133,132 @@ protected:
     ASSERT_TRUE(bool(object)) << component.errorString().toStdString();
   }
 };
+TEST_F(SharingUiTest, ProtectedDeleteWarningWrapsAndCollapsesWhenUnused) {
+  create("../controls/TrophyDialog.qml", {{"title", "Delete Recording"},
+      {"message", "Delete this capture?"}, {"warningMessage", "This capture is protected from auto-cleanup. Deleting it manually will still permanently remove it after the Undo period."}});
+  ASSERT_TRUE(object);
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+  auto *box = object->findChild<QQuickItem *>("dialogWarningBox");
+  auto *label = object->findChild<QQuickItem *>("dialogWarningText");
+  ASSERT_TRUE(box);
+  ASSERT_TRUE(label);
+  ASSERT_TRUE(wait([&] { return box->isVisible() && label->height() > 0; }));
+  EXPECT_GT(box->height(), label->height());
+  EXPECT_GT(label->property("lineCount").toInt(), 1);
+  const double warningHeight = object->property("implicitHeight").toDouble();
+  object->setProperty("warningMessage", "");
+  ASSERT_TRUE(wait([&] { return !box->isVisible() && object->property("implicitHeight").toDouble() < warningHeight; }));
+  object->setProperty("warningMessage", "Protected captures selected: 2.");
+  EXPECT_TRUE(wait([&] { return box->isVisible(); }));
+}
+
+TEST_F(SharingUiTest, ProtectedDeletesCannotSkipConfirmation) {
+  QFile source(QString(SHARING_QML_DIR) + "/../main.qml");
+  ASSERT_TRUE(source.open(QIODevice::ReadOnly));
+  const QString qml = QString::fromUtf8(source.readAll());
+  // Exercise the actual main-window functions without starting application services.
+  auto function = [&](const QString &name) {
+    const auto start = qml.indexOf("    function " + name + "(");
+    const auto end = qml.indexOf("\n    }", start);
+    return qml.mid(start, end + 6 - start);
+  };
+  auto result = engine.evaluate(QStringLiteral(R"JS(
+    var queued = 0;
+    var selectedRecordings = ["plain"];
+    var deleteDialog = { opened: 0, open: function() { ++this.opened; } };
+    var bulkDeleteDialog = { opened: 0, open: function() { ++this.opened; } };
+    var window = {
+      skipDeleteConfirmation: true, storageManager: {},
+      recordingLibrary: { getRecording: function(path) {
+        return path === "missing" ? null : { protectedFromCleanup: path === "protected" };
+      } },
+      queueDeletion: function() { ++queued; }
+    };
+    function performDeleteSelected() { ++queued; }
+  )JS") + function("protectedCaptureCount") + function("confirmDelete") + function("deleteSelected") + QStringLiteral(R"JS(
+    confirmDelete("plain", "Plain");
+    if (queued !== 1 || deleteDialog.opened !== 0) throw Error("plain skip");
+    confirmDelete("protected", "Protected");
+    if (queued !== 1 || deleteDialog.opened !== 1 || !deleteDialog.captureProtected) throw Error("protected single");
+    deleteSelected();
+    if (queued !== 2 || bulkDeleteDialog.opened !== 0) throw Error("plain bulk skip");
+    selectedRecordings = ["plain", "protected", "protected", "missing"];
+    deleteSelected();
+    if (queued !== 2 || bulkDeleteDialog.opened !== 1 || bulkDeleteDialog.protectedCount !== 2) throw Error("protected bulk");
+    window.skipDeleteConfirmation = false;
+    confirmDelete("plain", "Plain");
+    if (deleteDialog.opened !== 2 || deleteDialog.captureProtected) throw Error("stale single warning");
+    selectedRecordings = ["plain"];
+    deleteSelected();
+    if (bulkDeleteDialog.opened !== 2 || bulkDeleteDialog.protectedCount !== 0) throw Error("stale bulk warning");
+    true;
+  )JS"));
+  ASSERT_FALSE(result.isError()) << result.toString().toStdString();
+  EXPECT_TRUE(result.toBool());
+}
+
+TEST_F(SharingUiTest, ComboPopupAppearanceTracksVisibilityWithoutChangingSelection) {
+  for (const bool voice : {false, true}) {
+    SCOPED_TRACE(voice ? "saved voice app" : "ordinary combo");
+    create(voice ? "../controls/VoiceAppComboBox.qml" : "../controls/TrophyComboBox.qml",
+        voice ? QVariantMap{{"savedApp", "Discord"}, {"x", 50}, {"y", 50}}
+              : QVariantMap{{"model", QStringList{"One", "Two"}}, {"currentIndex", 1}, {"x", 50}, {"y", 50}});
+    ASSERT_TRUE(object);
+    auto *popup = object->property("popup").value<QObject *>();
+    auto *indicator = object->property("indicator").value<QQuickItem *>();
+    ASSERT_NE(popup, nullptr);
+    ASSERT_NE(indicator, nullptr);
+    QTest::mouseMove(&window, QPoint(1000, 750));
+    ASSERT_TRUE(wait([&] { return !object->property("hovered").toBool() &&
+        object->property("currentIndex").toInt() == 1 && indicator->rotation() == 0; }));
+    const auto closedColor = indicator->property("color").value<QColor>();
+    const auto accent = object->property("_accent").value<QColor>();
+    EXPECT_NE(closedColor, accent);
+    QSignalSpy activated(object.get(), SIGNAL(activated(int)));
+    std::unique_ptr<QSignalSpy> selected;
+    if (voice) selected = std::make_unique<QSignalSpy>(object.get(), SIGNAL(appSelected(QString)));
+    for (int reopen = 0; reopen < 2; ++reopen) {
+      ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+      ASSERT_TRUE(wait([&] { return popup->property("visible").toBool() &&
+          indicator->rotation() == 180 && indicator->property("color").value<QColor>() == accent; }));
+      if (voice && reopen == 0) {
+        object->setProperty("apps", QVariantList{QVariantMap{{"name", "Discord Voice"}, {"binary", "discord"}}});
+        ASSERT_TRUE(wait([&] { return object->property("displayText").toString() == "Discord Voice"; }));
+      }
+      ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+      ASSERT_TRUE(wait([&] { return !popup->property("visible").toBool() &&
+          indicator->rotation() == 0 && indicator->property("color").value<QColor>() == closedColor; }));
+      EXPECT_EQ(object->property("currentIndex").toInt(), 1);
+      EXPECT_TRUE(activated.isEmpty());
+      if (voice) {
+        EXPECT_EQ(object->property("savedApp").toString(), "Discord");
+        EXPECT_TRUE(selected->isEmpty());
+      }
+    }
+    object.reset();
+    QCoreApplication::processEvents();
+  }
+}
+
+TEST_F(SharingUiTest, WindowPickerDividersKeepImplicitSizeAcrossResizeAndReopen) {
+  create("WindowPickerDialog.qml", {});
+  ASSERT_TRUE(object);
+  for (const QSize &size : {QSize(500, 600), QSize(620, 680), QSize(500, 600)}) {
+    object->setProperty("width", size.width());
+    object->setProperty("height", size.height());
+    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+    ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+    for (const auto *name : {"windowPickerTopDivider", "windowPickerBottomDivider"}) {
+      auto *divider = object->findChild<QQuickItem *>(name);
+      ASSERT_NE(divider, nullptr);
+      EXPECT_EQ(divider->implicitHeight(), 1);
+      ASSERT_TRUE(wait([&] { return divider->height() == 1 && divider->width() > 400; }));
+    }
+    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "close"));
+    ASSERT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
+  }
+}
+
 TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   create("../controls/VoiceAppComboBox.qml", {{"savedApp", "Discord"}});
   ASSERT_TRUE(object);
@@ -162,6 +289,46 @@ TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   EXPECT_EQ(object->property("displayText").toString(), "Discord");
 }
 
+TEST_F(SharingUiTest, BoundSearchDelegatesKeepRolesAcrossModelReplacementAndClicks) {
+  create("../controls/TrophySearchBox.qml", {{"width", 400}, {"x", 50}, {"y", 50}});
+  ASSERT_TRUE(object);
+  auto *popup = object->property("dropdown").value<QObject *>();
+  ASSERT_NE(popup, nullptr);
+  QSignalSpy selected(object.get(), SIGNAL(resultSelected(QVariant)));
+  ASSERT_TRUE(selected.isValid());
+  auto replace = [&](bool reverse) {
+    QQmlExpression expression(qmlContext(object.get()), object.get(),
+        QStringLiteral("searchResults.clear(); searchResults.append(%1); searchResults.append(%2)")
+            .arg(reverse ? "{type:'setting',title:'Video',subtitle:'Settings',targetIndex:2,section:'Video Recording'}"
+                         : "{type:'clip',title:'Game',subtitle:'Capture',targetIndex:7,section:''}")
+            .arg(reverse ? "{type:'clip',title:'Game',subtitle:'Capture',targetIndex:7,section:''}"
+                         : "{type:'setting',title:'Video',subtitle:'Settings',targetIndex:2,section:'Video Recording'}"));
+    expression.evaluate();
+    EXPECT_FALSE(expression.hasError()) << expression.error().toString().toStdString();
+  };
+  for (const bool reverse : {false, true}) {
+    replace(reverse);
+    ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+    auto *content = popup->property("contentItem").value<QQuickItem *>();
+    ASSERT_NE(content, nullptr);
+    ASSERT_TRUE(wait([&] { return popup->property("opened").toBool() &&
+        findItem(content, "searchResult1") != nullptr; }));
+    auto *row = findItem(content, "searchResult1");
+    ASSERT_TRUE(wait([&] { return row->width() > 0 && row->height() == 50; }));
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+        row->mapToScene(QPointF(row->width() / 2, row->height() / 2)).toPoint());
+    ASSERT_TRUE(wait([&] { return selected.size() == 1; }));
+    const auto value = selected.takeFirst()[0];
+    const auto result = value.canConvert<QJSValue>() ? value.value<QJSValue>().toVariant().toMap() : value.toMap();
+    EXPECT_EQ(result.value("type").toString(), reverse ? "clip" : "setting");
+    EXPECT_EQ(result.value("title").toString(), reverse ? "Game" : "Video");
+    EXPECT_EQ(result.value("targetIndex").toInt(), reverse ? 7 : 2);
+    EXPECT_EQ(result.value("section").toString(), reverse ? "" : "Video Recording");
+    ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+    ASSERT_TRUE(wait([&] { return !popup->property("visible").toBool(); }));
+  }
+}
+
 TEST_F(SharingUiTest, VoiceAppOnlyExplicitValidActivationChangesPreference) {
   create("../controls/VoiceAppComboBox.qml", {{"savedApp", "Discord"},
       {"apps", QVariantList{QVariantMap{{"name", "No identity"}, {"binary", ""}},
@@ -185,6 +352,220 @@ TEST_F(SharingUiTest, VoiceAppOnlyExplicitValidActivationChangesPreference) {
   object->setProperty("savedApp", "");
   ASSERT_TRUE(wait([&] { return object->property("currentIndex").toInt() == 0; }));
   EXPECT_EQ(object->property("displayText").toString(), "None");
+}
+
+TEST_F(SharingUiTest, DmaBufOptionsDisableForSoftwareWithoutChangingSavedPreference) {
+  auto read = [](const QString &path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString{};
+  };
+  const auto settings = read(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  const auto wizard = read(QString(SHARING_QML_DIR) + "/SetupWizard.qml");
+  ASSERT_FALSE(settings.isEmpty()); ASSERT_FALSE(wizard.isEmpty());
+  auto block = [](const QString &source, int start) {
+    if (start < 0) return QString{};
+    int depth = 0;
+    for (auto i = source.indexOf('{', start); i < source.size(); ++i) {
+      if (source[i] == '{') ++depth;
+      if (source[i] == '}' && --depth == 0) return source.mid(start, i - start + 1);
+    }
+    return QString{};
+  };
+  const auto rowType = block(settings, settings.indexOf("component SettingRow:"));
+  ASSERT_FALSE(rowType.isEmpty());
+  for (bool isWizard : {false, true}) {
+    const auto &source = isWizard ? wizard : settings;
+    const QString prefix = isWizard ? "wizard" : "settings";
+    SCOPED_TRACE(prefix.toStdString());
+    const auto marker = source.indexOf("objectName: \"" + prefix + "DmaBufOption\"");
+    ASSERT_GE(marker, 0);
+    const auto row = block(source, source.lastIndexOf(isWizard ? "RowLayout {" : "SettingRow {", marker));
+    ASSERT_FALSE(row.isEmpty());
+    QQmlComponent component(&engine);
+    component.setData((QStringLiteral(R"(
+      import QtQuick
+      import QtQuick.Controls
+      import QtQuick.Layouts
+      import "../controls"
+      import "../styles"
+      Item {
+        width: 640; height: 200
+        QtObject { id: settingsManager; objectName: "preferences"
+          property string encoder: "nvenc_h264"
+          property bool useDmaBuf: true
+        }
+        QtObject { id: recordingManager; objectName: "recorder"
+          property bool isRecording: false
+        }
+        QtObject { id: hardwareInfo; objectName: "hardware"
+          property string recommendedEncoderName: "nvenc_h264"
+          property bool dmaBufAvailable: true
+        }
+    )") + rowType + "\nColumnLayout { width: parent.width\n" + row + "\n}}" ).toUtf8(),
+        QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/DmaBufOptionsProbe.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+    ASSERT_TRUE(object) << component.errorString().toStdString();
+    auto *preferences = object->findChild<QObject *>("preferences");
+    auto *recorder = object->findChild<QObject *>("recorder");
+    auto *hardware = object->findChild<QObject *>("hardware");
+    auto *option = object->findChild<QQuickItem *>(prefix + "DmaBufOption");
+    auto *toggle = object->findChild<QQuickItem *>(prefix + "DmaBufSwitch");
+    ASSERT_NE(preferences, nullptr); ASSERT_NE(recorder, nullptr); ASSERT_NE(hardware, nullptr);
+    ASSERT_NE(option, nullptr); ASSERT_NE(toggle, nullptr);
+    QSignalSpy writes(preferences, SIGNAL(useDmaBufChanged()));
+    ASSERT_TRUE(writes.isValid());
+    ASSERT_TRUE(wait([&] { return toggle->width() > 0 && toggle->isEnabled(); }));
+    auto click = [&] {
+      QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+          toggle->mapToScene(QPointF(toggle->width() / 2, toggle->height() / 2)).toPoint());
+    };
+    preferences->setProperty("encoder", "x264");
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    EXPECT_DOUBLE_EQ(option->opacity(), 0.5);
+    click();
+    EXPECT_TRUE(preferences->property("useDmaBuf").toBool());
+    EXPECT_TRUE(toggle->property("checked").toBool());
+    EXPECT_TRUE(writes.isEmpty());
+    preferences->setProperty("encoder", "auto");
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    hardware->setProperty("recommendedEncoderName", "x264");
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    EXPECT_TRUE(writes.isEmpty());
+    hardware->setProperty("recommendedEncoderName", "vaapi_h264");
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    preferences->setProperty("encoder", "vaapi_h264");
+    recorder->setProperty("isRecording", true);
+    ASSERT_TRUE(wait([&] { return !toggle->isEnabled(); }));
+    click();
+    EXPECT_TRUE(writes.isEmpty());
+    recorder->setProperty("isRecording", false);
+    ASSERT_TRUE(wait([&] { return toggle->isEnabled(); }));
+    click();
+    ASSERT_TRUE(wait([&] { return !preferences->property("useDmaBuf").toBool(); }));
+    EXPECT_EQ(writes.size(), 1);
+    preferences->setProperty("encoder", "x264");
+    preferences->setProperty("encoder", "nvenc_h264");
+    EXPECT_FALSE(toggle->property("checked").toBool());
+    EXPECT_FALSE(preferences->property("useDmaBuf").toBool());
+    EXPECT_EQ(writes.size(), 1);
+    object.reset();
+  }
+}
+
+TEST_F(SharingUiTest, DetectorVersionsAppearBelowDescriptionsAndNotInStatus) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto start = page.indexOf("component HelperControls:");
+  const auto end = page.indexOf("component WarnBanner:", start);
+  ASSERT_GE(start, 0); ASSERT_GT(end, start);
+  const auto rowStart = page.indexOf("component SettingRow:");
+  const auto rowEnd = page.indexOf("component SettingStack:", rowStart);
+  ASSERT_GE(rowStart, 0); ASSERT_GT(rowEnd, rowStart);
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../styles"
+    Item { width: 700; height: 120
+  )") + page.mid(start, end - start) + page.mid(rowStart, rowEnd - rowStart) + R"(
+    HelperControls { objectName: "badge"; showAction: false
+      statusWidth: badgeWidth; text: "Enrolled"
+    }
+    SettingRow { objectName: "versions"; width: 500
+      label: "Vulkan Detection"; help: "Description"
+      showVersions: true; bundledVersion: 12; installedVersion: 1
+    }
+    })").toUtf8(), QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/DetectorBadgeProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *badge = object->findChild<QQuickItem *>("badge");
+  ASSERT_NE(badge, nullptr);
+  EXPECT_EQ(badge->property("text").toString(), "Enrolled");
+  auto *versions = object->findChild<QQuickItem *>("versions");
+  ASSERT_NE(versions, nullptr);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12");
+  versions->setProperty("helperInstalled", true);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12 · Installed: Version 1");
+  auto *label = versions->findChild<QQuickItem *>("helperVersions");
+  ASSERT_NE(label, nullptr);
+  EXPECT_TRUE(label->property("font").value<QFont>().bold());
+  versions->setProperty("installedVersion", 0);
+  EXPECT_EQ(versions->property("versionText").toString(), "Bundled: Version 12 · Installed: Version unknown");
+  badge->setProperty("text", "Installed · Working");
+  EXPECT_EQ(badge->property("text").toString(), "Installed · Working");
+  EXPECT_GE(badge->implicitWidth(), badge->property("badgeWidth").toDouble());
+}
+
+TEST_F(SharingUiTest, RecordingSizeEstimateFollowsBitrateAndEffectiveAudioLayout) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto marker = page.indexOf("objectName: \"recordingSizeEstimate\"");
+  ASSERT_GE(marker, 0);
+  const auto start = page.lastIndexOf("SettingStack {", marker);
+  int depth = 0;
+  QString source;
+  for (auto i = page.indexOf('{', start); i < page.size(); ++i) {
+    if (page[i] == '{') ++depth;
+    if (page[i] == '}' && --depth == 0) {
+      source = page.mid(start, i - start + 1);
+      break;
+    }
+  }
+  ASSERT_FALSE(source.isEmpty());
+  const auto stackStart = page.indexOf("component SettingStack:");
+  const auto stackEnd = page.indexOf("component ValuePill:", stackStart);
+  ASSERT_GE(stackStart, 0); ASSERT_GT(stackEnd, stackStart);
+  const auto stackType = page.mid(stackStart, stackEnd - stackStart);
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../controls"
+    import "../styles"
+    Item {
+      width: 700; height: 240
+      QtObject { id: settingsManager; objectName: "preferences"
+        property string audioMode: "game"
+        property bool separateAudioTracks: true
+      }
+      QtObject { id: bitrateSlider; objectName: "bitrate"
+        property real value: 15000
+      }
+  )") + stackType + "ColumnLayout { width: parent.width\n" + source + "}}" ).toUtf8(),
+      QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/SizeEstimateProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *preferences = object->findChild<QObject *>("preferences");
+  auto *bitrate = object->findChild<QObject *>("bitrate");
+  auto *estimate = object->findChild<QObject *>("recordingSizeEstimate");
+  auto *text = object->findChild<QObject *>("recordingSizeEstimateText");
+  ASSERT_NE(preferences, nullptr); ASSERT_NE(bitrate, nullptr);
+  ASSERT_NE(estimate, nullptr); ASSERT_NE(text, nullptr);
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 3);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 116820000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 minute: ~117 MB"));
+  EXPECT_TRUE(text->property("text").toString().contains("10 minutes: ~1.2 GB"));
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~7.0 GB"));
+  preferences->setProperty("audioMode", "desktop");
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 1);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 113940000);
+  preferences->setProperty("audioMode", "game");
+  preferences->setProperty("separateAudioTracks", false);
+  EXPECT_EQ(estimate->property("audioTracks").toInt(), 1);
+  bitrate->setProperty("value", 2000);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 16440000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~986 MB"));
+  preferences->setProperty("separateAudioTracks", true);
+  bitrate->setProperty("value", 50000);
+  EXPECT_DOUBLE_EQ(estimate->property("bytesPerMinute").toDouble(), 379320000);
+  EXPECT_TRUE(text->property("text").toString().contains("1 hour: ~22.8 GB"));
 }
 
 TEST_F(SharingUiTest, AudioOptionsArePairedButtonsWithLiveStateAndRecordingLock) {
@@ -258,6 +639,70 @@ TEST_F(SharingUiTest, AudioOptionsArePairedButtonsWithLiveStateAndRecordingLock)
   }
   EXPECT_EQ(preferences->property("audioMode").toString(), "game");
   EXPECT_TRUE(preferences->property("separateAudioTracks").toBool());
+}
+
+TEST_F(SharingUiTest, FrameRateOffersUncappedAndRetainsRecordingLock) {
+  QFile file(QString(SHARING_QML_DIR) + "/../pages/SettingsPage.qml");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto page = QString::fromUtf8(file.readAll());
+  const auto marker = page.indexOf("objectName: \"recordingFrameRate\"");
+  ASSERT_GE(marker, 0);
+  const auto start = page.lastIndexOf("Rectangle {", marker);
+  QString source;
+  int depth = 0;
+  for (auto i = page.indexOf('{', start); i < page.size(); ++i) {
+    if (page[i] == '{') ++depth;
+    if (page[i] == '}' && --depth == 0) {
+      source = page.mid(start, i - start + 1);
+      break;
+    }
+  }
+  ASSERT_FALSE(source.isEmpty());
+  QQmlComponent component(&engine);
+  component.setData((QStringLiteral(R"(
+    import QtQuick
+    import QtQuick.Controls
+    import QtQuick.Layouts
+    import "../styles"
+    Item {
+      width: 700; height: 100
+      QtObject { id: settingsManager; objectName: "preferences"; property int fps: 60 }
+      QtObject { id: recordingManager; objectName: "recorder"; property bool isRecording: false }
+      RowLayout { anchors.fill: parent
+  )") + source + "}}").toUtf8(),
+      QUrl::fromLocalFile(QString(SHARING_QML_DIR) + "/FrameRateProbe.qml"));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  object.reset(component.createWithInitialProperties({{"parent", QVariant::fromValue(window.contentItem())}}));
+  ASSERT_TRUE(object) << component.errorString().toStdString();
+  auto *preferences = object->findChild<QObject *>("preferences");
+  auto *recorder = object->findChild<QObject *>("recorder");
+  auto *row = object->findChild<QQuickItem *>("recordingFrameRate");
+  ASSERT_NE(preferences, nullptr); ASSERT_NE(recorder, nullptr); ASSERT_NE(row, nullptr);
+  const auto findButton = [&](const QString &name, auto &&self, QQuickItem *item) -> QQuickItem * {
+    if (item->objectName() == name) return item;
+    for (auto *child : item->childItems())
+      if (auto *found = self(name, self, child)) return found;
+    return nullptr;
+  };
+  auto *uncapped = findButton("recordingFps0", findButton, row);
+  auto *fixed = findButton("recordingFps60", findButton, row);
+  ASSERT_NE(uncapped, nullptr); ASSERT_NE(fixed, nullptr);
+  ASSERT_TRUE(wait([&] { return uncapped->width() > 0; }));
+  const auto click = [&](QQuickItem *button) {
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+        button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+  };
+  click(uncapped);
+  EXPECT_EQ(preferences->property("fps").toInt(), 0);
+  EXPECT_TRUE(uncapped->property("isChecked").toBool());
+  recorder->setProperty("isRecording", true);
+  EXPECT_FALSE(row->isEnabled());
+  click(fixed);
+  EXPECT_EQ(preferences->property("fps").toInt(), 0);
+  recorder->setProperty("isRecording", false);
+  click(fixed);
+  EXPECT_EQ(preferences->property("fps").toInt(), 60);
+  EXPECT_TRUE(fixed->property("isChecked").toBool());
 }
 
 TEST_F(SharingUiTest, ShareDialogHasVisibleControlsAndPassesAudioSelection) {
