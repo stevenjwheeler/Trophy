@@ -1338,14 +1338,6 @@ void Application::onAuthorizeDebounceFired() {
                               : m_pendingDvrGame;
   if (pending.isEmpty())
     return;
-  // Wait for a real game window (not a transient mod-loader or splash
-  // screen) before prompting.  Keep the pending state so the prompt
-  // re-fires when the actual game window appears.
-  if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
-    qCDebug(appLog) << "Deferring authorize prompt for" << pending
-                    << "(no visible game window yet)";
-    return;
-  }
   if (!shouldShowAuthorizePrompt(pending)) {
     qCInfo(appLog) << "Skipping authorize prompt for" << pending
                    << "(blocked or already approved)";
@@ -1353,6 +1345,14 @@ void Application::onAuthorizeDebounceFired() {
       m_pendingAutoRecordGame.clear();
     if (m_pendingDvrGame == pending)
       m_pendingDvrGame.clear();
+    return;
+  }
+  // Retain only an eligible request while waiting for a real game
+  // window. Approval, blocking, exit or replacement must retire it even
+  // when the compositor has not published a visible window yet.
+  if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+    qCDebug(appLog) << "Deferring authorize prompt for" << pending
+                    << "(no visible game window yet)";
     return;
   }
   qCInfo(appLog) << "Showing authorize prompt for" << pending;

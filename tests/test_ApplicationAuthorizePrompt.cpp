@@ -137,6 +137,23 @@ TEST_F(ApplicationAuthorizePromptTest, DebounceDropsApprovedPending) {
   EXPECT_TRUE(dvrPendingEmpty());
 }
 
+TEST_F(ApplicationAuthorizePromptTest, DebounceRetainsEligibleWindowlessRequestUntilApproved) {
+  setCurrent("Windowless Game");
+  armRecordPending("Windowless Game");
+  fireDebounce();
+  EXPECT_FALSE(recordPendingEmpty());
+  setToken("Windowless Game", "new-approval");
+  fireDebounce();
+  EXPECT_TRUE(recordPendingEmpty());
+}
+
+TEST_F(ApplicationAuthorizePromptTest, DebounceRetiresDeadWindowlessRequest) {
+  setCurrent("Exited Game", 2147483647);
+  armDvrPending("Exited Game");
+  fireDebounce();
+  EXPECT_TRUE(dvrPendingEmpty());
+}
+
 TEST_F(ApplicationAuthorizePromptTest, DebounceDropsBlockedPending) {
   block("Blocked Game");
   armDvrPending("Blocked Game");

@@ -69,7 +69,10 @@ public:
   // Keep pipelines idle: this suite tests the page's probe lifecycle, not
   // decoding, and never passes the fake file paths to FFmpeg.
   Q_INVOKABLE QUrl localFileUrl(const QString &path) const {
-    return realMedia ? QUrl::fromLocalFile(path) : QUrl{};
+    return realMedia || path.endsWith(".png") ? QUrl::fromLocalFile(path) : QUrl{};
+  }
+  Q_INVOKABLE QString localFilePath(const QUrl &url) const {
+    return url.isLocalFile() ? url.toLocalFile() : QString{};
   }
   // The file-info dialog looks the open path up in the library; unknown
   // here, so its rows fall back to path-derived text.
@@ -155,6 +158,117 @@ protected:
     return nullptr;
   }
 };
+
+TEST_F(PlayerProbeTest, SpeedPopupAlignsTrackNotchesAndLabels) {
+  open("/fake/game.mkv");
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  for (const auto *name : {"playerSpeedButton", "playerSeekBackButton", "playerSeekForwardButton"}) {
+    auto *button = findVisual(page.get(), name);
+    ASSERT_NE(button, nullptr);
+    EXPECT_EQ(button->implicitWidth(), 36);
+    EXPECT_EQ(button->implicitHeight(), 36);
+  }
+  auto *popup = page->findChild<QObject *>("playerSpeedPopup");
+  ASSERT_NE(popup, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(popup, "open"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return popup->property("opened").toBool(); }));
+  auto *slider = page->findChild<QQuickItem *>("playerSpeedSlider");
+  auto *content = qvariant_cast<QQuickItem *>(popup->property("contentItem"));
+  ASSERT_NE(content, nullptr);
+  ASSERT_NE(slider, nullptr);
+  EXPECT_EQ(page->property("playbackRate").toDouble(), 1.0);
+  for (int i = 0; i < 6; ++i) {
+    auto *dot = findVisual(slider, "playerSpeedNotch" + QString::number(i));
+    auto *label = findVisual(content, "playerSpeedLabel" + QString::number(i));
+    ASSERT_NE(dot, nullptr);
+    ASSERT_NE(label, nullptr);
+    EXPECT_NEAR(dot->y() + dot->height() / 2, slider->height() / 2, 0.5);
+    EXPECT_NEAR(dot->mapToScene(QPointF(dot->width() / 2, 0)).x(),
+                label->mapToScene(QPointF(label->width() / 2, 0)).x(), 0.5);
+  }
+  ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
+}
+
+TEST_F(PlayerProbeTest, SnapshotChoosesDestinationAndCancelWritesNothing) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString source = dir.filePath("Game # 100%.mkv");
+  open(source);
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *dialog = page->findChild<QObject *>("playerSnapshotDialog");
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(dialog, nullptr);
+  ASSERT_NE(video, nullptr);
+  QSignalSpy saved(video, SIGNAL(snapshotSaved(QString,bool)));
+
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const auto suggested = dialog->property("selectedFile").toUrl();
+  EXPECT_TRUE(suggested.toLocalFile().startsWith(dir.filePath("Game # 100%_snapshot_")));
+  EXPECT_TRUE(suggested.toLocalFile().endsWith(".png"));
+  EXPECT_FALSE(QFileInfo::exists(suggested.toLocalFile()));
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "reject"));
+  EXPECT_EQ(saved.count(), 0);
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_TRUE(QDir(dir.path()).entryList(QDir::Files).isEmpty());
+
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const QString destination = dir.filePath("Chosen # 50% café.png");
+  ASSERT_TRUE(dialog->setProperty("selectedFile", QUrl::fromLocalFile(destination)));
+  // Drive the acceptance handler with a chosen URL; the offscreen dialog's
+  // filename editor otherwise overwrites programmatic selections on accept.
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "accepted"));
+  ASSERT_EQ(saved.count(), 1);
+  EXPECT_EQ(saved.at(0).at(0).toString(), destination);
+  EXPECT_TRUE(saved.at(0).at(1).toBool());
+  EXPECT_FALSE(QImage(destination).isNull());
+  EXPECT_FALSE(QFileInfo::exists(suggested.toLocalFile()));
+}
+
+TEST_F(PlayerProbeTest, SnapshotCloseDiscardsFrameAndSaveFailureIsReported) {
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  open(dir.filePath("game.mkv"));
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  auto *dialog = page->findChild<QObject *>("playerSnapshotDialog");
+  auto *video = page->findChild<QObject *>("playerVideo");
+  ASSERT_NE(dialog, nullptr);
+  ASSERT_NE(video, nullptr);
+  QSignalSpy saved(video, SIGNAL(snapshotSaved(QString,bool)));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  close();
+  EXPECT_FALSE(dialog->property("visible").toBool());
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_EQ(saved.count(), 0);
+
+  open(dir.filePath("other.mkv"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  ASSERT_TRUE(QTest::qWaitFor([&] { return dialog->property("visible").toBool(); }));
+  const QString destination = dir.filePath("missing/image.png");
+  ASSERT_TRUE(dialog->setProperty("selectedFile", QUrl::fromLocalFile(destination)));
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "accepted"));
+  ASSERT_EQ(saved.count(), 1);
+  EXPECT_EQ(saved.at(0).at(0).toString(), destination);
+  EXPECT_FALSE(saved.at(0).at(1).toBool());
+  EXPECT_FALSE(QFileInfo::exists(destination));
+
+  // An already queued grab must not reopen the dialog after navigation.
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "snapshotCurrent"));
+  close();
+  QTest::qWait(50);
+  EXPECT_FALSE(dialog->property("visible").toBool());
+  EXPECT_TRUE(page->property("pendingSnapshot").isNull());
+  EXPECT_EQ(saved.count(), 1);
+}
 
 TEST_F(PlayerProbeTest, HeaderIconSitsLeftOfTitleAndCollapsesWhenUnavailable) {
   QTemporaryDir dir;

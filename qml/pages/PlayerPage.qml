@@ -12,6 +12,7 @@ import "../views"
 import QtMultimedia
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 Page {
@@ -232,15 +233,52 @@ Page {
             recordingLibrary.saveClipRange(filePath, clipStartMs / 1000, clipEndMs / 1000)
     }
 
+    property var pendingSnapshot: null
+    property int snapshotRequest: 0
+
+    function cancelSnapshot() {
+        ++snapshotRequest
+        snapshotDialog.close()
+        pendingSnapshot = null
+    }
+
     function snapshotCurrent() {
-        if (filePath === "")
+        if (filePath === "" || snapshotDialog.visible)
             return
         var slash = filePath.lastIndexOf("/")
         var dir = slash >= 0 ? filePath.substring(0, slash) : "."
         var base = slash >= 0 ? filePath.substring(slash + 1) : filePath
         var stem = base.replace(/\.[^.]*$/, "")
         var ts = Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH-mm-ss")
-        player.snapshot(dir + "/" + stem + "_snapshot_" + ts + ".png")
+        const suggestedPath = dir + "/" + stem + "_snapshot_" + ts + ".png"
+        const request = ++snapshotRequest
+        // Retain the clicked frame, not whatever is playing when the
+        // user eventually finishes choosing a destination.
+        if (!player.captureSnapshot(function(result) {
+            if (request !== playerPage.snapshotRequest)
+                return
+            playerPage.pendingSnapshot = result
+            snapshotDialog.selectedFile = playerPage.library.localFileUrl(suggestedPath)
+            snapshotDialog.open()
+        })) {
+            player.snapshotSaved("", false)
+        }
+    }
+
+    FileDialog {
+        id: snapshotDialog
+        objectName: "playerSnapshotDialog"
+        title: qsTr("Save Screenshot")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [qsTr("PNG image (*.png)")]
+        defaultSuffix: "png"
+        onAccepted: {
+            const path = playerPage.library.localFilePath(selectedFile)
+            const frame = playerPage.pendingSnapshot
+            playerPage.pendingSnapshot = null
+            player.snapshotSaved(path, frame !== null && path !== "" && frame.saveToFile(path))
+        }
+        onRejected: playerPage.pendingSnapshot = null
     }
 
     // Tracks card height: 0 fits the content (every lane at
@@ -315,6 +353,7 @@ Page {
 
     // Open a library file (closes any current one first).
     function open(path, title, dateStr) {
+        cancelSnapshot()
         player.stop()
         mutedTracks = []
         clipMode = false
@@ -342,6 +381,7 @@ Page {
     }
 
     function close() {
+        cancelSnapshot()
         bookmarksDialog.close()
         stopAll()
         fileInfoDialog.close()

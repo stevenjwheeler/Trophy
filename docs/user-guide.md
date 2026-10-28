@@ -54,7 +54,7 @@ Open a capture in the built-in player to use:
 - A filmstrip and per-track audio waveforms with shared zoom and pan.
 - Individual audio mute controls.
 - Timeline bookmarks and an editable clip range.
-- Playback speed, seek controls, fullscreen, and snapshots.
+- Playback speed, seek controls, fullscreen, and snapshots. The screenshot button captures the current frame and opens a Save dialog so you can choose the PNG's name and location; cancelling saves nothing.
 
 Use the clip editor to select a range and **Snip** it into a new capture. Snipping copies encoded streams without re-encoding; the start snaps to a preceding video keyframe, so the result may include a little extra footage.
 

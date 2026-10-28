@@ -201,6 +201,10 @@ QUrl RecordingLibrary::localFileUrl(const QString &filePath) const {
   return QUrl::fromLocalFile(filePath);
 }
 
+QString RecordingLibrary::localFilePath(const QUrl &url) const {
+  return url.isLocalFile() ? url.toLocalFile() : QString{};
+}
+
 void RecordingLibrary::deleteRecording(const QString &filePath) {
   if (m_storage && m_storage->recordingInUse(filePath)) return;
   if (!isInsideLibrary(filePath, m_libraryPath)) {
