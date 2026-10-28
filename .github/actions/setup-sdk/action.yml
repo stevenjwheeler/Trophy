@@ -1,0 +1,37 @@
+name: Set up Trophy SDK
+description: Install the pinned Qt SDK and build/test/AppImage host dependencies
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies and verify test tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        packages=(build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget zstd
+          libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev
+          libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 libvulkan-dev
+          libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber
+          libdrm-dev libgbm-dev libavcodec-dev libavformat-dev libavutil-dev
+          libswscale-dev libswresample-dev libva-dev libva-drm2 libgtest-dev
+          desktop-file-utils appstream file ffmpeg dbus-daemon)
+        for attempt in 1 2 3; do
+          if sudo apt-get update && sudo apt-get install -y --no-install-recommends "${packages[@]}"; then
+            break
+          fi
+          [[ "$attempt" != 3 ]] || exit 1
+          sleep 10
+        done
+        test -f /usr/include/vulkan/vulkan.h
+        pkg-config --exists libpipewire-0.3
+        for tool in ffmpeg ffprobe pipewire wireplumber pw-cli pw-dump dbus-run-session zstd; do
+          command -v "$tool" >/dev/null || { echo "ERROR: required tool $tool missing"; exit 1; }
+        done
+        # Do not use grep -q with pipefail: early exit can SIGPIPE ffmpeg.
+        ffmpeg -hide_banner -encoders > "$RUNNER_TEMP/trophy-fixture-encoders.txt"
+        grep 'libx264' "$RUNNER_TEMP/trophy-fixture-encoders.txt"
+    - name: Prepare pinned Qt SDK
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.12.0'
+        modules: 'qtmultimedia qtwaylandcompositor'
+        cache: 'true'

@@ -10,10 +10,16 @@ case "$profile" in
   rpm) generators=RPM; extension=rpm ;;
   *) echo 'Expected deb or rpm' >&2; exit 2 ;;
 esac
-cmake -S /source -B /work/ci-build -GNinja \
+cache_options=()
+if command -v ccache >/dev/null; then
+    export CCACHE_DIR=/work/ccache CCACHE_BASEDIR=/source CCACHE_MAXSIZE=1G
+    cache_options=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+fi
+cmake -S /source -B /work/ci-build -GNinja "${cache_options[@]}" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DAPP_VERSION="$VERSION" \
     -DCMAKE_INSTALL_PREFIX=/usr -DQT_QML_GENERATE_QMLLS_INI=OFF
 cmake --build /work/ci-build --parallel 2
+if command -v ccache >/dev/null; then ccache --show-stats; fi
 cpack --config /work/ci-build/CPackConfig.cmake -G "$generators" -B /work/ci-packages
 # A test-only later version exercises the real package-manager upgrade path;
 # this package is never copied to the release artifact directory.

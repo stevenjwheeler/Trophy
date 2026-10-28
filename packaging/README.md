@@ -24,8 +24,10 @@ your distribution's guidance. These tests do not enable third-party repositories
 or establish hardware capture/encoding on the target distribution.
 
 Use the package matching your distribution/architecture and its normal package
-manager for installation. CI normalizes these names and generates `SHA256SUMS`
-for the AppImage and native packages in one combined artifact upload. Check which
+manager for installation. CI normalizes these names and uploads AppImage,
+Ubuntu DEB/TXZ and Fedora RPM artifacts independently as their checks complete.
+A final verification job uploads `SHA256SUMS` covering all four formats without
+duplicating the package uploads. Check which
 assets were actually published on the release page; CI output does not itself
 establish release publication or package smoke-test success. AUR and Flatpak
 distribution are not maintained; do not recreate their removed packaging.

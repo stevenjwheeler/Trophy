@@ -13,6 +13,26 @@ packages can still receive updates. These are not bit-for-bit reproducible
 builds or claims of compatibility with older distributions. No host services,
 GPU devices, detection sockets or configuration directories are mounted.
 
+## CI parallelism and caches
+
+CI builds the Qt SDK application/tests once, transfers that build in a
+mode/symlink-preserving tar.zst, then runs tests without recompiling. After tests
+pass, AppImage packaging and the Ubuntu/Fedora native package jobs run in
+parallel. Each uploads its own packages immediately; a final job verifies all
+four formats and uploads a small combined checksum manifest only after every
+required check passes. Package bytes are not uploaded again as a duplicate ZIP.
+
+Native jobs restore BuildKit layers from the GitHub Actions cache separately
+for each distro's builder and clean runtime image. The runners/containers are
+still disposable: no registry images are published and no mutable installed
+runtime is reused for package lifecycle checks. A separate per-distro ccache
+reuses compiler outputs, not package-manager state. A cold/missing/evicted cache
+only makes a run slower; it does not bypass builds, tests or dependency checks.
+Dockerfile/base-image changes invalidate the relevant layers. CI also changes
+the dependency build argument weekly so repository updates are not hidden by a
+permanent layer cache; base digests remain deliberately pinned. Clearing the
+relevant Actions cache forces an earlier refresh when needed.
+
 Run from a checkout on a filesystem readable by the Docker daemon (some FUSE
 mounts are not; use a local source snapshot containing your intended changes).
 Example Ubuntu build, using an owned temporary output directory:
