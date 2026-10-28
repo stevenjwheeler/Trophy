@@ -327,7 +327,7 @@ TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
       "-c:a", "pcm_f32le"});
   if (path.isEmpty())
     GTEST_SKIP() << "ffmpeg unavailable or render failed";
-  for (quint32 legacyVersion : {1u, 2u}) {
+  for (quint32 legacyVersion : {1u, 2u, 3u}) {
   SCOPED_TRACE(legacyVersion);
   const QString sidecar = tempDir.path() + "/.thumbnails/legacy.peaks";
   ASSERT_TRUE(QDir().mkpath(QFileInfo(sidecar).absolutePath()));
@@ -358,7 +358,7 @@ TEST_F(WaveformCacheTest, LegacyNormalizedCacheIsRegenerated) {
   quint32 magic = 0, version = 0;
   updated >> magic >> version;
   EXPECT_EQ(magic, 0x54504b31u);
-  EXPECT_EQ(version, 3u);
+  EXPECT_EQ(version, 4u);
   }
 }
 
@@ -366,8 +366,10 @@ TEST_F(WaveformCacheTest, DelayedShortTrackAndInternalGapsUseSharedVideoTimeline
   const QString path = render("timeline.mkv", {
       "-f", "lavfi", "-i", "color=c=black:s=32x32:r=10:d=8",
       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
-      "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=4",
-      "-filter_complex", "[2:a]aselect='lt(t,1)+gte(t,3)',asetpts=PTS+2/TB[late]",
+      "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=2",
+      // Create a genuine timestamp discontinuity without relying on aselect
+      // (some FFmpeg versions pass audio through that filter without dropping).
+      "-filter_complex", "[2:a]asetpts=PTS+(2+2*gte(T,1))/TB[late]",
       "-map", "0:v", "-map", "1:a", "-map", "[late]",
       "-c:v", "ffv1", "-c:a", "pcm_f32le"});
   if (path.isEmpty()) GTEST_SKIP() << "ffmpeg unavailable or render failed";
@@ -654,6 +656,36 @@ TEST_F(WaveformCacheTest, EncodedMultiTrackReferenceIncludesFinalResamplerTail) 
           << "track=" << args[1].toInt() << " bucket=" << b;
   }
   EXPECT_EQ(stats.samples, total);
+}
+
+TEST_F(WaveformCacheTest, NegativeContainerOriginPreservesPrerollAndSharedTimeline) {
+  const QString path = render("negative-origin.mkv", {
+      "-itsoffset", "-0.25", "-f", "lavfi", "-i",
+      "sine=frequency=330:sample_rate=48000:duration=1",
+      "-map", "0:a", "-c:a", "pcm_f32le", "-avoid_negative_ts", "disabled"});
+  if (path.isEmpty())
+    GTEST_SKIP() << "ffmpeg unavailable or render failed";
+  AVFormatContext *ctx = nullptr;
+  ASSERT_GE(avformat_open_input(&ctx, path.toUtf8().constData(), nullptr, nullptr), 0);
+  const int probed = avformat_find_stream_info(ctx, nullptr);
+  const auto origin = ctx->start_time;
+  avformat_close_input(&ctx);
+  ASSERT_GE(probed, 0);
+  ASSERT_NE(origin, AV_NOPTS_VALUE);
+  ASSERT_LT(origin, 0); // Verify the fixture actually exercises the regression.
+  WaveformCache cache;
+  QSignalSpy spy(&cache, &WaveformCache::peaksReady);
+  cache.requestPeaks(path, 0);
+  ASSERT_TRUE(spy.wait(10000));
+  ASSERT_EQ(spy.size(), 1);
+  qint64 samples = 0;
+  const auto expected = reference(path, 0, &samples);
+  const auto actual = spy.first()[2].toList();
+  ASSERT_EQ(actual.size(), WaveformCache::kBuckets);
+  ASSERT_EQ(expected.size(), actual.size());
+  for (int b = 0; b < actual.size(); ++b)
+    EXPECT_NEAR(actual[b].toDouble(), expected[b].toDouble(), 0.0001)
+        << "bucket=" << b;
 }
 
 TEST_F(WaveformCacheTest, UpsamplingUsesCheckedLargerOutputBudgetWithoutLosingSamples) {

@@ -41,8 +41,8 @@ constexpr int kPeakRate = 8000;
 constexpr int kBlockSamples = 256;
 constexpr int kMaxTracks = 32; // same bound as the sidecar schema
 constexpr quint32 kCacheMagic = 0x54504b31; // "TPK1"
-// v3 preserves leading silence, internal gaps and unequal stream durations.
-constexpr quint32 kCacheVersion = 3;
+// v4 also discovers the shared origin before positioning negative-start audio.
+constexpr quint32 kCacheVersion = 4;
 // Keep ordinary audio legible without making near-silence look loud:
 // normalization may boost by at most 20 dB (10x).
 constexpr float kNormalizationFloor = 0.1f;
@@ -261,6 +261,12 @@ template <typename Stats>
 QVector<QVector<float>> decodeAllPeaks(
     AVFormatContext *ctx, Stats &stats,
     const std::function<int(int, qint64)> &readOverride) {
+  // Opening a container need not populate start_time (notably Matroska with
+  // AAC preroll). Discover it before pinning every track's common origin;
+  // otherwise valid negative-start samples are trimmed against a guessed zero.
+  // Probed packets remain buffered for the same forward demux pass below.
+  if (avformat_find_stream_info(ctx, nullptr) < 0)
+    return {};
   std::vector<std::unique_ptr<TrackDecoder>> states;
   QVector<int> streamToTrack(ctx->nb_streams, -1);
   int count = 0;
