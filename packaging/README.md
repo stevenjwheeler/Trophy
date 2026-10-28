@@ -32,6 +32,28 @@ assets were actually published on the release page; CI output does not itself
 establish release publication or package smoke-test success. AUR and Flatpak
 distribution are not maintained; do not recreate their removed packaging.
 
+## Drafting a release
+
+Push a new stable `vX.Y.Z` tag on a commit already merged into `main`. After
+tests, both reporter jobs and all package/checksum checks pass, CI can create a
+GitHub **draft** release with generated notes, the four packages and a flattened
+`SHA256SUMS` suitable for checking files downloaded into one directory.
+
+The tagged commit must match the commit tested by CI and be reachable from
+`origin/main`. Branch pushes, pull requests, development/prerelease tags and
+versions at or below the highest published stable release do not draft releases.
+Existing drafts and prereleases do not advance that stable-version baseline;
+an unparseable published stable tag fails closed rather than guessing. With no
+published releases, the first valid stable tag is eligible.
+
+Retries preserve existing draft titles/notes and matching assets, upload missing
+assets and refresh changed package/checksum assets while the release is still a
+draft. Checksums upload last; interrupted uploads leave an unpublished draft for
+the next successful run to repair. Already published
+releases are not intentionally modified. Wait for the draft job to finish before
+reviewing the assets/notes and clicking **Publish release** yourself. CI has no
+automatic publication step. No extra combined package ZIP is created.
+
 ## Verification
 
 An installed tree needs the executable, `libTrophy.so`, both reporter

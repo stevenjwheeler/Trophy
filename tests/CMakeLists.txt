@@ -75,6 +75,8 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterRuntimes.py")
     add_test(NAME NativeInstallSafetyTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
+    add_test(NAME DraftReleaseTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_DraftRelease.py")
     set(multilib_preload_includes)
     foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
         list(APPEND multilib_preload_includes --qt-include "${directory}")

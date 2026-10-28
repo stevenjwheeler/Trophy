@@ -417,6 +417,40 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  draft-release:
+    needs: [build, verify-packages]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    # Serialize version checks/draft updates across different release tags.
+    concurrency:
+      group: trophy-release-draft
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main for release ancestry check
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Trophy-${{ env.VERSION }}-package-*
+          path: release-input
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: Trophy-${{ env.VERSION }}-checksums
+          path: release-input
+      - name: Draft a newer main release (never publish)
+        run: |
+          python3 packaging/draft_release.py --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" --sha "$GITHUB_SHA" --assets release-input
+
   comment-pr:
     needs: verify-packages
     if: github.event_name == 'pull_request' && needs.verify-packages.result == 'success'
