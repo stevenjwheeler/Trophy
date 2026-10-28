@@ -81,8 +81,11 @@ protected:
     proc.start("ffmpeg", QStringList({"-y", "-v", "error"}) + args +
                              QStringList({path}));
     if (!proc.waitForFinished(30000) || proc.exitCode() != 0 ||
-        !QFile::exists(path))
+        !QFile::exists(path)) {
+      ADD_FAILURE() << "ffmpeg fixture failed: "
+                    << proc.readAllStandardError().toStdString();
       return QString();
+    }
     return path;
   }
 
@@ -369,7 +372,7 @@ TEST_F(WaveformCacheTest, DelayedShortTrackAndInternalGapsUseSharedVideoTimeline
       "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=2",
       // Create a genuine timestamp discontinuity without relying on aselect
       // (some FFmpeg versions pass audio through that filter without dropping).
-      "-filter_complex", "[2:a]asetpts=PTS+(2+2*gte(T,1))/TB[late]",
+      "-filter_complex", "[2:a]asetpts='PTS+(2+2*gte(T,1))/TB'[late]",
       "-map", "0:v", "-map", "1:a", "-map", "[late]",
       "-c:v", "ffv1", "-c:a", "pcm_f32le"});
   if (path.isEmpty()) GTEST_SKIP() << "ffmpeg unavailable or render failed";
