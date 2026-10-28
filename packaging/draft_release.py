@@ -152,15 +152,17 @@ def draft(repo, tag, sha, root):
             return
         ensure_remote_tag(repo, tag, sha)
         if existing is None:
-            gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
-               "--target", "main", "--title", "Trophy " + tag, "--generate-notes")
-        if existing is None:
-            pages = json.loads(gh("api", "--paginate", "--slurp", endpoint + "?per_page=100"))
-            existing = next((release for page in pages for release in page
-                             if release["tag_name"] == tag), None)
-            if existing is None:
-                raise RuntimeError("Created draft was not returned by the releases API")
-        release = api(endpoint + f"/{existing['id']}")
+            # The list endpoint can lag after creation. Use the authoritative
+            # POST response instead of immediately rediscovering a new draft
+            # through that list (which previously left empty drafts behind).
+            release = json.loads(gh("api", "--method", "POST", endpoint,
+                                    "-f", "tag_name=" + tag,
+                                    "-f", "target_commitish=" + sha,
+                                    "-f", "name=Trophy " + tag,
+                                    "-F", "draft=true", "-F", "prerelease=false",
+                                    "-F", "generate_release_notes=true"))
+        else:
+            release = api(endpoint + f"/{existing['id']}")
         if not release["draft"] or release["tag_name"] != tag or release["prerelease"]:
             raise RuntimeError("Refusing to modify a published or prerelease release")
         assets = api(endpoint + f"/{release['id']}/assets?per_page=100")
