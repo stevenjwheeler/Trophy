@@ -424,7 +424,7 @@ Page {
                         FeatureItem {
                             iconSource: "qrc:/icons/refresh.svg"
                             title: qsTr("Automatic Updates")
-                            description: qsTr("Daily release check with a one-click download page")
+                            description: qsTr("Daily release check with a one-click download page and automatic install on AppImage")
                         }
 
                     }
