@@ -113,11 +113,11 @@ jobs:
           PACKAGES="build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget \
             libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev \
             libwayland-dev libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 \
-            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire \
+            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber \
             libdrm-dev libgbm-dev libavcodec-dev libavformat-dev \
             libavutil-dev libswscale-dev libswresample-dev libva-dev \
             libva-drm2 libgtest-dev desktop-file-utils appstream \
-            dpkg-dev rpm cpio file"
+            dpkg-dev rpm cpio file ffmpeg"
           for attempt in 1 2 3; do
             echo "apt attempt $attempt/3..."
             if sudo apt-get update && sudo apt-get install -y --no-install-recommends $PACKAGES; then
@@ -135,6 +135,12 @@ jobs:
           # "Could NOT find Vulkan" at configure time.
           test -f /usr/include/vulkan/vulkan.h || { echo "ERROR: libvulkan-dev missing after apt install"; exit 1; }
           pkg-config --exists libpipewire-0.3 || { echo "ERROR: libpipewire-0.3-dev missing after apt install"; exit 1; }
+          # Software/media and private-service regressions must execute in CI,
+          # not silently skip because only development libraries were installed.
+          for tool in ffmpeg ffprobe pipewire wireplumber pw-cli pw-dump dbus-run-session; do
+            command -v "$tool" >/dev/null || { echo "ERROR: required test tool $tool missing"; exit 1; }
+          done
+          ffmpeg -hide_banner -encoders | grep -q 'libx264' || { echo "ERROR: ffmpeg libx264 fixture encoder missing"; exit 1; }
           
       - name: Restore ccache
         # Purpose-built action instead of raw actions/cache: stable key
