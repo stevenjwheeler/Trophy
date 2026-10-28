@@ -1,7 +1,14 @@
 cmake_minimum_required(VERSION 3.21)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" TROPHY_BASE_VERSION)
+string(STRIP "${TROPHY_BASE_VERSION}" TROPHY_BASE_VERSION)
+if(NOT TROPHY_BASE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain a stable X.Y.Z version")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+
 project(Trophy
-    VERSION 0.0.0
+    VERSION ${TROPHY_BASE_VERSION}
     DESCRIPTION "Game recording application for Linux"
     HOMEPAGE_URL "https://github.com/stevenjwheeler/trophy"
     LANGUAGES CXX C
@@ -25,14 +32,14 @@ endif()
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Get version from Git tag, unless CI (or the user) passes -DAPP_VERSION
+# Use VERSION/Git for local stamps, unless CI (or the user) passes -DAPP_VERSION
 # explicitly — that wins so the stamped binary always matches the
 # artifact name.
 if(DEFINED APP_VERSION AND NOT APP_VERSION STREQUAL "")
   set(GIT_VERSION ${APP_VERSION})
 else()
-  # Local builds: mirror the CI scheme (<base>-<branch>-<sha>,
-  # base = nearest tag) so a dev-branch binary never shows a
+  # Local builds: use VERSION as the base (<base>-<branch>-<sha>)
+  # so a dev-branch binary never shows a
   # raw "vX.Y.Z-N-gSHA" describe string. Exact tag checkouts
   # keep the tag itself.
   execute_process(
@@ -42,16 +49,13 @@ else()
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET
   )
-  if(GIT_EXACT_TAG)
+  if(GIT_EXACT_TAG STREQUAL "v${PROJECT_VERSION}" OR
+     GIT_EXACT_TAG STREQUAL "${PROJECT_VERSION}" OR
+     GIT_EXACT_TAG STREQUAL "v${PROJECT_VERSION}-dirty" OR
+     GIT_EXACT_TAG STREQUAL "${PROJECT_VERSION}-dirty")
     set(GIT_VERSION ${GIT_EXACT_TAG})
   else()
-    execute_process(
-        COMMAND git describe --tags --abbrev=0
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_BASE_TAG
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
+    set(GIT_BASE_TAG "v${PROJECT_VERSION}")
     execute_process(
         COMMAND git rev-parse --abbrev-ref HEAD
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -66,7 +70,9 @@ else()
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
-    if(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
+    if(GIT_BRANCH STREQUAL "main")
+      set(GIT_VERSION "${PROJECT_VERSION}")
+    elseif(GIT_BASE_TAG AND GIT_BRANCH AND GIT_SHA AND NOT GIT_BRANCH STREQUAL "HEAD")
       set(GIT_VERSION "${GIT_BASE_TAG}-${GIT_BRANCH}-${GIT_SHA}")
     else()
       # Last resort (no tags at all): stamp the sha, dirty-flagged.

@@ -2,11 +2,9 @@ name: Trophy CI
 
 on:
   push:
-    branches: [ '**' ]
-    tags: [ 'v*' ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,39 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    runs-on: ubuntu-latest
-    outputs:
-      skip: ${{ steps.check.outputs.skip }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: check
-        run: |
-          REF_TYPE="${{ github.ref_type }}"
-          REF_NAME="${{ github.ref_name }}"
-          SKIP=false
-          if [[ "$REF_TYPE" == branch && "$REF_NAME" == main ]] && git describe --exact-match --match 'v*' HEAD 2>/dev/null; then
-            echo "Release commit already covered by the tag run."
-            SKIP=true
-          elif [[ "$REF_TYPE" == tag && "$REF_NAME" == v* ]]; then
-            MAIN_REF=""
-            if git show-ref --verify --quiet refs/remotes/origin/main; then
-              MAIN_REF=origin/main
-            elif git show-ref --verify --quiet refs/heads/main; then
-              MAIN_REF=main
-            fi
-            if [[ -n "$MAIN_REF" ]] && ! git merge-base --is-ancestor HEAD "$MAIN_REF"; then
-              echo "Non-main tag already covered by the branch run."
-              SKIP=true
-            fi
-          fi
-          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
-
   build:
-    needs: gate
-    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -60,21 +26,10 @@ jobs:
       - name: Resolve version
         id: version
         env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          SHA=$(git rev-parse --short HEAD)
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          elif [[ "$BRANCH" == main ]]; then
-            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
-          elif [[ "$BRANCH" == dev ]]; then
-            BASE=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
-            VERSION="${BASE}-dev-${SHA}"
-          else
-            SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^A-Za-z0-9.-]/-/g')
-            BASE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
-            VERSION="${BASE}-${SAFE_BRANCH}-${SHA}"
-          fi
+          VERSION=$(python3 packaging/ci_version.py --event "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" --pr "$PR_NUMBER" --sha "$GITHUB_SHA")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-sdk
@@ -363,8 +318,6 @@ jobs:
           retention-days: 14
 
   reporters-multilib:
-    needs: gate
-    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -419,9 +372,9 @@ jobs:
 
   draft-release:
     needs: [build, verify-packages]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Serialize version checks/draft updates across different release tags.
+    # Serialize automatic tag creation and draft updates.
     concurrency:
       group: trophy-release-draft
       cancel-in-progress: false
@@ -429,7 +382,6 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.build.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -449,7 +401,7 @@ jobs:
       - name: Draft a newer main release (never publish)
         run: |
           python3 packaging/draft_release.py --repo "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" --sha "$GITHUB_SHA" --assets release-input
+            --version-file VERSION --sha "$GITHUB_SHA" --assets release-input
 
   comment-pr:
     needs: verify-packages

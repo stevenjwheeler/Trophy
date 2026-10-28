@@ -34,17 +34,37 @@ distribution are not maintained; do not recreate their removed packaging.
 
 ## Drafting a release
 
-Push a new stable `vX.Y.Z` tag on a commit already merged into `main`. After
-tests, both reporter jobs and all package/checksum checks pass, CI can create a
-GitHub **draft** release with generated notes, the four packages and a flattened
-`SHA256SUMS` suitable for checking files downloaded into one directory.
+1. Set the next stable `X.Y.Z` in the root `VERSION` file on `dev`.
+2. Open a pull request from `dev` into `main`. Review it and wait for CI to pass
+   before merging. Configure branch protection to require these checks if merges
+   must be technically blocked until green; workflow triggers alone do not enforce it.
+3. Merge the PR through GitHub. The resulting push to `main` runs CI again.
+4. After tests, both reporter jobs and all package/checksum checks pass, CI creates
+   `vX.Y.Z` on the tested main commit and prepares a **draft** release with
+   generated notes, the four packages and flattened `SHA256SUMS`.
+5. Review the draft and click **Publish release** yourself. CI never publishes.
 
-The tagged commit must match the commit tested by CI and be reachable from
-`origin/main`. Branch pushes, pull requests, development/prerelease tags and
-versions at or below the highest published stable release do not draft releases.
+CI runs only for pull requests targeting `main` and pushes to `main`. Pushing to
+`dev` or another branch without an open PR does not run CI; updates to a branch
+with an open main PR rerun that PR's checks. Manual tag pushes do not run CI.
+Main packages use `VERSION`; PR packages carry a PR number and commit suffix.
+
+The tested commit must match the checkout and be reachable from `origin/main`.
+Only main pushes can create tags or drafts. Versions at or below the highest
+published stable release do not draft releases, so ordinary main updates without
+a version bump do not create another release after that version is published.
 Existing drafts and prereleases do not advance that stable-version baseline;
 an unparseable published stable tag fails closed rather than guessing. With no
 published releases, the first valid stable tag is eligible.
+
+Existing tags are never moved. A retry for the same tested commit reuses its tag;
+if that version's tag already points at another commit, choose a new version in
+`VERSION` rather than silently retagging it. CI-created tags are lightweight;
+no private signing key is installed in CI.
+
+CI package and checksum artifacts expire after **14 days**; diagnostic artifacts
+after **7 days**, and the internal SDK build handoff after **1 day**. Assets copied
+to a GitHub draft/release are release attachments, not expiring Actions artifacts.
 
 Retries preserve existing draft titles/notes and matching assets, upload missing
 assets and refresh changed package/checksum assets while the release is still a

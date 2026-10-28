@@ -6,14 +6,17 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 spec = importlib.util.spec_from_file_location(
     "draft_release", Path(__file__).parents[1] / "packaging/draft_release.py")
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+import ci_version
 
 
 def entry(tag, draft=False, prerelease=False, id=1):
@@ -22,6 +25,10 @@ def entry(tag, draft=False, prerelease=False, id=1):
 
 class DraftReleaseTest(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(release.os.environ, {"GITHUB_EVENT_NAME": "push",
+                                                      "GITHUB_REF": "refs/heads/main"})
+        environment.start()
+        self.addCleanup(environment.stop)
         root = "/tmp/opencode" if Path("/tmp/opencode").is_dir() else None
         self.temp = tempfile.TemporaryDirectory(dir=root)
         self.addCleanup(self.temp.cleanup)
@@ -79,7 +86,7 @@ class DraftReleaseTest(unittest.TestCase):
 
     def run_draft(self):
         with patch.object(release, "on_main", return_value=True), \
-                patch.object(release, "verify_remote_tag"), \
+                patch.object(release, "ensure_remote_tag"), \
                 patch.object(release, "gh", side_effect=self.fake_gh):
             release.draft("owner/repo", "v1.2.3", "tested-sha", self.assets)
 
@@ -87,6 +94,29 @@ class DraftReleaseTest(unittest.TestCase):
         self.assertTrue(release.eligible("v1.10.0", [entry("v1.9.9")]))
         for tag in ("v1.2.2", "v1.1.9", "v0.9.0"):
             self.assertFalse(release.eligible(tag, self.releases))
+
+    def test_version_file_stamps_main_and_pr_builds(self):
+        path = self.root / "VERSION"
+        path.write_text("0.9.8\n")
+        sha = "a" * 40
+        self.assertEqual(ci_version.resolve(path, "push", "refs/heads/main", "", sha), "0.9.8")
+        self.assertEqual(ci_version.resolve(path, "pull_request", "refs/pull/12/merge", "12", sha),
+                         "0.9.8-pr-12-aaaaaaa")
+
+    def test_invalid_version_file_never_becomes_a_release(self):
+        path = self.root / "VERSION"
+        for value in ("", "v0.9.8", "0.9", "0.09.8", "0.9.8-rc1", "0.9.8\n1.0.0"):
+            path.write_text(value)
+            with self.assertRaises(ValueError):
+                ci_version.read_version(path)
+
+    def test_ci_version_rejects_branch_tag_and_manual_events(self):
+        path = self.root / "VERSION"
+        path.write_text("0.9.8\n")
+        for event, ref in (("push", "refs/heads/dev"), ("push", "refs/tags/v0.9.8"),
+                           ("workflow_dispatch", "refs/heads/main")):
+            with self.assertRaises(ValueError):
+                ci_version.resolve(path, event, ref, "", "a" * 40)
 
     def test_first_release_and_ignore_drafts_prereleases(self):
         self.assertTrue(release.eligible("v1.2.3", []))
@@ -113,42 +143,58 @@ class DraftReleaseTest(unittest.TestCase):
             git.assert_not_called()
             gh.assert_not_called()
 
-    def test_git_requires_tested_tag_commit_and_main_ancestry(self):
+    def test_git_requires_tested_commit_and_main_ancestry(self):
         with patch.object(release.subprocess, "check_output", return_value="tested\n"), \
                 patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
-            self.assertTrue(release.on_main("v1.2.3", "tested"))
+            self.assertTrue(release.on_main("tested"))
             self.assertEqual(run.call_args.args[0][-1], "refs/remotes/origin/main")
             with self.assertRaisesRegex(RuntimeError, "tested commit"):
-                release.on_main("v1.2.3", "different")
+                release.on_main("different")
 
     def test_git_nonmain_and_failure_are_distinguished(self):
         with patch.object(release.subprocess, "check_output", return_value="tested\n"), \
                 patch.object(release.subprocess, "run") as run:
             run.return_value.returncode = 1
-            self.assertFalse(release.on_main("v1.2.3", "tested"))
+            self.assertFalse(release.on_main("tested"))
             run.return_value.returncode = 128
             with self.assertRaisesRegex(RuntimeError, "ancestry"):
-                release.on_main("v1.2.3", "tested")
+                release.on_main("tested")
 
     def test_remote_annotated_lightweight_and_retargeted_tags(self):
         ref = "refs/tags/v1.2.3"
         for output in (f"tested\t{ref}\n", f"tag-object\t{ref}\ntested\t{ref}^{{}}\n"):
             with patch.object(release.subprocess, "check_output", return_value=output):
-                release.verify_remote_tag("v1.2.3", "tested")
-        for output in ("", f"new-commit\t{ref}\n"):
-            with patch.object(release.subprocess, "check_output", return_value=output):
-                with self.assertRaisesRegex(RuntimeError, "Remote release tag changed"):
-                    release.verify_remote_tag("v1.2.3", "tested")
+                self.assertEqual(release.remote_tag_sha("v1.2.3"), "tested")
+        with patch.object(release.subprocess, "check_output", return_value=""):
+            self.assertIsNone(release.remote_tag_sha("v1.2.3"))
+
+    def test_automatic_tag_creation_and_same_commit_retry(self):
+        with patch.object(release, "remote_tag_sha", side_effect=[None, "sha"]), \
+                patch.object(release, "gh") as gh:
+            release.ensure_remote_tag("owner/repo", "v1.2.3", "sha")
+            self.assertEqual(gh.call_args.args, ("api", "--method", "POST", "repos/owner/repo/git/refs",
+                                               "-f", "ref=refs/tags/v1.2.3", "-f", "sha=sha"))
+        with patch.object(release, "remote_tag_sha", return_value="sha"), \
+                patch.object(release, "gh") as gh:
+            release.ensure_remote_tag("owner/repo", "v1.2.3", "sha")
+            gh.assert_not_called()
+
+    def test_existing_tag_on_other_commit_is_never_moved(self):
+        with patch.object(release, "remote_tag_sha", return_value="old-sha"), \
+                patch.object(release, "gh") as gh:
+            with self.assertRaisesRegex(RuntimeError, "bump VERSION"):
+                release.ensure_remote_tag("owner/repo", "v1.2.3", "new-sha")
+            gh.assert_not_called()
 
     def test_retargeted_remote_tag_prevents_github_writes(self):
         with patch.object(release, "on_main", return_value=True), \
-                patch.object(release, "verify_remote_tag", side_effect=RuntimeError("tag changed")), \
+                patch.object(release, "ensure_remote_tag", side_effect=RuntimeError("tag changed")), \
                 patch.object(release, "gh", side_effect=self.fake_gh):
             with self.assertRaisesRegex(RuntimeError, "tag changed"):
                 release.draft("owner/repo", "v1.2.3", "sha", self.assets)
         self.assertTrue(all(call[0] == "api" for call in self.calls))
 
-    def test_real_annotated_tags_must_belong_to_main(self):
+    def test_real_tested_commits_must_belong_to_main(self):
         repo = self.root / "repository"
         repo.mkdir()
 
@@ -164,15 +210,24 @@ class DraftReleaseTest(unittest.TestCase):
         git("update-ref", "refs/remotes/origin/main", sha)
         git("tag", "-a", "v1.2.3", "-m", "Release fixture")
         with contextlib.chdir(repo):
-            self.assertTrue(release.on_main("v1.2.3", sha))
+            self.assertTrue(release.on_main(sha))
             with self.assertRaisesRegex(RuntimeError, "tested commit"):
-                release.on_main("v1.2.3", "0" * 40)
+                release.on_main("0" * 40)
         git("checkout", "-b", "dev")
         git("commit", "--allow-empty", "-m", "Unmerged fixture")
         dev_sha = git("rev-parse", "HEAD")
         git("tag", "-a", "v1.2.4", "-m", "Unmerged tag")
         with contextlib.chdir(repo):
-            self.assertFalse(release.on_main("v1.2.4", dev_sha))
+            self.assertFalse(release.on_main(dev_sha))
+
+    def test_only_main_push_can_create_tag_or_draft(self):
+        for event, ref in (("push", "refs/heads/dev"), ("push", "refs/tags/v1.2.3"),
+                           ("pull_request", "refs/pull/1/merge"), ("workflow_dispatch", "refs/heads/main")):
+            with patch.dict(release.os.environ, {"GITHUB_EVENT_NAME": event, "GITHUB_REF": ref}), \
+                    patch.object(release, "on_main") as git, patch.object(release, "gh") as gh:
+                release.draft("owner/repo", "v1.2.3", "sha", self.assets)
+                git.assert_not_called()
+                gh.assert_not_called()
 
     def test_published_release_is_never_written(self):
         self.releases.append(entry("v1.2.3", id=2))

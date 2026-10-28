@@ -15,6 +15,14 @@ GPU devices, detection sockets or configuration directories are mounted.
 
 ## CI parallelism and caches
 
+CI runs for pull requests targeting `main` and pushes to `main`, not standalone
+pushes to `dev`, other branches or tags. A release starts as a reviewed `VERSION`
+change in a dev-to-main PR. PR builds use a PR-number/SHA version suffix; main
+builds use the plain version from that file. Passing main CI can create the tag
+and **draft** release, but publication is always manual. See the complete
+[release procedure](../README.md#drafting-a-release), including existing-tag and
+published-version safeguards. These containers do not create releases themselves.
+
 CI builds the Qt SDK application/tests once, transfers that build in a
 mode/symlink-preserving tar.zst, then runs tests without recompiling. After tests
 pass, AppImage packaging and the Ubuntu/Fedora native package jobs run in

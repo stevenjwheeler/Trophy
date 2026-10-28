@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 
+from ci_version import read_version
+
 
 def version(tag):
     match = re.fullmatch(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
@@ -41,11 +43,11 @@ def eligible(tag, releases):
     return not published or candidate > max(published)
 
 
-def on_main(tag, sha):
+def on_main(sha):
     resolved = subprocess.check_output(
-        ["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True, timeout=30).strip()
+        ["git", "rev-parse", "HEAD"], text=True, timeout=30).strip()
     if resolved != sha:
-        raise RuntimeError("Release tag no longer matches the tested commit")
+        raise RuntimeError("Checkout no longer matches the tested commit")
     result = subprocess.run(["git", "merge-base", "--is-ancestor", resolved,
                              "refs/remotes/origin/main"], timeout=30)
     if result.returncode not in (0, 1):
@@ -53,7 +55,7 @@ def on_main(tag, sha):
     return result.returncode == 0
 
 
-def verify_remote_tag(tag, sha):
+def remote_tag_sha(tag):
     ref = "refs/tags/" + tag
     output = subprocess.check_output(
         ["git", "ls-remote", "--tags", "origin", ref, ref + "^{}"],
@@ -62,7 +64,19 @@ def verify_remote_tag(tag, sha):
     for line in output.splitlines():
         value, name = line.split()
         refs[name] = value
-    if refs.get(ref + "^{}", refs.get(ref)) != sha:
+    return refs.get(ref + "^{}", refs.get(ref))
+
+
+def ensure_remote_tag(repo, tag, sha):
+    current = remote_tag_sha(tag)
+    if current is not None and current != sha:
+        raise RuntimeError("Release tag already points to another commit; bump VERSION instead of moving it")
+    if current is None:
+        # A lightweight tag is created only after this main commit's complete
+        # CI/package checks pass. No pre-existing tag is ever moved or deleted.
+        gh("api", "--method", "POST", f"repos/{repo}/git/refs",
+           "-f", "ref=refs/tags/" + tag, "-f", "sha=" + sha)
+    if remote_tag_sha(tag) != sha:
         raise RuntimeError("Remote release tag changed; refusing assets from an older commit")
 
 
@@ -108,11 +122,15 @@ def prepare_assets(root, destination, tag):
 
 
 def draft(repo, tag, sha, root):
+    if (os.environ.get("GITHUB_EVENT_NAME") != "push" or
+            os.environ.get("GITHUB_REF") != "refs/heads/main"):
+        print("Not a push to main; skipping draft.")
+        return
     if not tag.startswith("v") or version(tag) is None:
         print("Not a stable vX.Y.Z release tag; skipping draft.")
         return
-    if not on_main(tag, sha):
-        print("Tag commit is not on main; skipping draft.")
+    if not on_main(sha):
+        print("Tested commit is not on main; skipping draft.")
         return
     endpoint = f"repos/{repo}/releases"
     pages = json.loads(gh("api", "--paginate", "--slurp", endpoint + "?per_page=100"))
@@ -132,7 +150,7 @@ def draft(repo, tag, sha, root):
         if not eligible(tag, [release for page in fresh for release in page]):
             print("Published baseline changed; skipping draft.")
             return
-        verify_remote_tag(tag, sha)
+        ensure_remote_tag(repo, tag, sha)
         if existing is None:
             gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
                "--target", "main", "--title", "Trophy " + tag, "--generate-notes")
@@ -173,8 +191,8 @@ def draft(repo, tag, sha, root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--tag", required=True)
+    parser.add_argument("--version-file", required=True, type=Path)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--assets", required=True, type=Path)
     args = parser.parse_args()
-    draft(args.repo, args.tag, args.sha, args.assets.resolve())
+    draft(args.repo, "v" + read_version(args.version_file), args.sha, args.assets.resolve())
