@@ -92,19 +92,40 @@ public:
     if (status != VA_STATUS_SUCCESS) return initFail("vaQueryVideoProcPipelineCaps", status);
     // Match swscale's existing SDR conversion rather than silently changing
     // the colour matrix between GPU-input and SHM portions of one recording.
+    // Drivers may replace the supplied array pointer (Mesa returns driver-owned
+    // storage). Inspect the returned list, not the original temporary buffer.
+    const auto *colors = m_caps.output_color_standards;
     const size_t count = std::min<size_t>(m_caps.num_output_color_standards, outputColors.size());
-    if (std::find(outputColors.begin(), outputColors.begin() + count,
-                  VAProcColorStandardBT601) == outputColors.begin() + count)
+    if (!colors || !count ||
+        std::find(colors, colors + count, VAProcColorStandardBT601) == colors + count)
       return initFail("VPP lacks BT.601 output", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-    // Capability arrays were stack-local; retain only the scalar limits.
+    // Capability arrays may be stack-local or driver-owned; retain only scalar limits.
     m_caps.input_color_standards = m_caps.output_color_standards = nullptr;
     m_caps.input_pixel_format = m_caps.output_pixel_format = nullptr;
     m_error.clear();
     return true;
   }
 
+  // Padded draws require a same-canvas, limited-range NV12 black surface.
+  // Clear explicitly: some drivers ignore output_background_color outside fit.
   bool process(VASurfaceID source, VASurfaceID output, int sw, int sh,
-               VARectangle fit) {
+               VARectangle fit, VASurfaceID black = VA_INVALID_SURFACE) {
+    if (!validGeometry(source, output, sw, sh, fit)) return false;
+    const bool padded = fit.x || fit.y || fit.width != m_width || fit.height != m_height;
+    if (padded) {
+      if (black == VA_INVALID_SURFACE || black == source || black == output)
+        return fail("Missing or aliased VPP black surface");
+      const VARectangle canvas{0, 0, uint16_t(m_width), uint16_t(m_height)};
+      if (!validGeometry(black, output, m_width, m_height, canvas) ||
+          !submit(black, output, m_width, m_height, canvas, false))
+        return false;
+    }
+    return submit(source, output, sw, sh, fit, true);
+  }
+
+private:
+  bool validGeometry(VASurfaceID source, VASurfaceID output, int sw, int sh,
+                     VARectangle fit) {
     if (m_context == VA_INVALID_ID || source == VA_INVALID_SURFACE ||
         std::find(m_targets.begin(), m_targets.end(), output) == m_targets.end() ||
         sw <= 0 || sh <= 0 || sw > 65535 || sh > 65535 ||
@@ -121,6 +142,11 @@ public:
         !inRange(m_width, m_caps.min_output_width, m_caps.max_output_width) ||
         !inRange(m_height, m_caps.min_output_height, m_caps.max_output_height))
       return fail("VPP dimensions outside driver capabilities");
+    return true;
+  }
+
+  bool submit(VASurfaceID source, VASurfaceID output, int sw, int sh,
+              VARectangle fit, bool rgb) {
     // A failed native destroy retains only this one buffer for retry; never
     // accumulate parameter buffers after repeated driver errors.
     if (releaseBuffer() != VA_STATUS_SUCCESS)
@@ -131,10 +157,10 @@ public:
     params.surface = source;
     params.surface_region = &input;
     params.output_region = &fit;
-    params.output_background_color = 0xff000000; // opaque black, covers every pooled output
-    params.surface_color_standard = VAProcColorStandardNone;
+    params.output_background_color = 0xff000000; // advisory; padded output is explicitly cleared above
+    params.surface_color_standard = rgb ? VAProcColorStandardNone : VAProcColorStandardBT601;
     params.output_color_standard = VAProcColorStandardBT601;
-    params.input_color_properties.color_range = VA_SOURCE_RANGE_FULL;
+    params.input_color_properties.color_range = rgb ? VA_SOURCE_RANGE_FULL : VA_SOURCE_RANGE_REDUCED;
     params.output_color_properties.color_range = VA_SOURCE_RANGE_REDUCED;
     VAStatus status = m_ops.createBuffer(m_display, m_context,
         VAProcPipelineParameterBufferType, sizeof(params), 1, &params, &m_buffer);
@@ -157,7 +183,6 @@ public:
     return true;
   }
 
-private:
   bool completeOps() const {
     return m_ops.createConfig && m_ops.destroyConfig && m_ops.createContext &&
            m_ops.destroyContext && m_ops.queryCaps && m_ops.createBuffer &&

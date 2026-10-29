@@ -9,15 +9,25 @@ struct FakeVa {
   static thread_local FakeVa *current;
   std::vector<std::string> calls;
   std::string failAt;
+  VASurfaceID failSource = VA_INVALID_SURFACE;
+  std::vector<VAProcColorStandardType> driverColors;
   VARectangle source{}, fit{};
   VAProcPipelineParameterBuffer params{};
+  struct Submission {
+    VAProcPipelineParameterBuffer params;
+    VARectangle source, fit;
+  };
+  std::vector<Submission> submissions;
   bool bt601 = true;
   uint32_t maxInput = 8192;
   FakeVa() { current = this; }
   ~FakeVa() { current = nullptr; }
   static VAStatus call(const char *name) {
     current->calls.emplace_back(name);
-    return current->failAt == name ? VA_STATUS_ERROR_OPERATION_FAILED : VA_STATUS_SUCCESS;
+    return current->failAt == name &&
+                   (current->failSource == VA_INVALID_SURFACE ||
+                    current->params.surface == current->failSource)
+               ? VA_STATUS_ERROR_OPERATION_FAILED : VA_STATUS_SUCCESS;
   }
   static VaapiVideoProcessor::Ops ops() {
     VaapiVideoProcessor::Ops ops;
@@ -55,6 +65,7 @@ struct FakeVa {
       current->fit = *current->params.output_region;
       // No borrowed stack pointers escape the fake native operation.
       current->params.surface_region = current->params.output_region = nullptr;
+      current->submissions.push_back({current->params, current->source, current->fit});
       auto status = call("buffer"); if (!status) *buffer = 13; return status;
     };
     ops.destroyBuffer = [](VADisplay, VABufferID id) {
@@ -83,7 +94,16 @@ TEST(VaapiVideoProcessorTest, FitsAndConvertsWithBlackPaddingAndSynchronizesBefo
   {
     VaapiVideoProcessor processor(FakeVa::ops());
     ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
-    ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+    ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+    ASSERT_EQ(fake.submissions.size(), 2u);
+    const auto &clear = fake.submissions.front();
+    EXPECT_EQ(clear.params.surface, 98u);
+    EXPECT_EQ(clear.source.width, 640); EXPECT_EQ(clear.source.height, 360);
+    EXPECT_EQ(clear.fit.x, 0); EXPECT_EQ(clear.fit.y, 0);
+    EXPECT_EQ(clear.fit.width, 640); EXPECT_EQ(clear.fit.height, 360);
+    EXPECT_EQ(clear.params.surface_color_standard, VAProcColorStandardBT601);
+    EXPECT_EQ(clear.params.input_color_properties.color_range, VA_SOURCE_RANGE_REDUCED);
+    EXPECT_EQ(clear.params.output_color_properties.color_range, VA_SOURCE_RANGE_REDUCED);
     EXPECT_EQ(fake.params.surface, 99u);
     EXPECT_EQ(fake.source.width, 320); EXPECT_EQ(fake.source.height, 240);
     EXPECT_EQ(fake.fit.x, 80); EXPECT_EQ(fake.fit.y, 0);
@@ -93,6 +113,7 @@ TEST(VaapiVideoProcessorTest, FitsAndConvertsWithBlackPaddingAndSynchronizesBefo
     EXPECT_EQ(fake.params.input_color_properties.color_range, VA_SOURCE_RANGE_FULL);
     EXPECT_EQ(fake.params.output_color_properties.color_range, VA_SOURCE_RANGE_REDUCED);
     EXPECT_EQ(fake.calls, (std::vector<std::string>{"config", "context", "caps", "buffer",
+                                                 "begin", "render", "end", "sync-output", "destroy-buffer", "buffer",
                                                  "begin", "render", "end", "sync-output", "destroy-buffer"}));
   }
   EXPECT_EQ(fake.calls[fake.calls.size() - 2], "destroy-context");
@@ -105,12 +126,154 @@ TEST(VaapiVideoProcessorTest, ReusesOutputContextAcrossInputResizesAndRebuildsFo
   ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
   ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
   EXPECT_EQ(fake.calls.size(), 3u);
-  EXPECT_TRUE(processor.process(99, 101, 1280, 360, {0, 90, 640, 180}));
-  EXPECT_TRUE(processor.process(99, 101, 137, 79, {8, 0, 624, 360}));
+  EXPECT_TRUE(processor.process(99, 101, 1280, 360, {0, 90, 640, 180}, 98));
+  EXPECT_TRUE(processor.process(99, 101, 137, 79, {8, 0, 624, 360}, 98));
   ASSERT_TRUE(processor.initialize(display, 1280, 720, targets));
   EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "destroy-context"), 1);
   EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "context"), 2);
 }
+
+TEST(VaapiVideoProcessorTest, FullCanvasDoesNotAllocateOrSubmitAnExtraClear) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  ASSERT_TRUE(processor.process(99, 101, 640, 360, {0, 0, 640, 360}));
+  ASSERT_EQ(fake.submissions.size(), 1u);
+  EXPECT_EQ(fake.params.surface, 99u);
+  EXPECT_EQ(fake.params.input_color_properties.color_range, VA_SOURCE_RANGE_FULL);
+}
+
+TEST(VaapiVideoProcessorTest, RejectsMissingOrAliasedBlackSurfaceBeforeSubmitting) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  for (auto black : {VASurfaceID(VA_INVALID_SURFACE), VASurfaceID(99), VASurfaceID(101)})
+    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, black));
+  EXPECT_TRUE(fake.submissions.empty());
+  EXPECT_EQ(fake.calls.size(), 3u);
+}
+
+TEST(VaapiVideoProcessorTest, EveryPaddedDrawClearsTheWholeCanvasBeforeRgb) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+  ASSERT_TRUE(processor.process(99, 101, 1280, 360, {0, 90, 640, 180}, 98));
+  ASSERT_TRUE(processor.process(99, 101, 137, 79, {8, 0, 624, 360}, 98));
+  ASSERT_EQ(fake.submissions.size(), 6u);
+  for (size_t i = 0; i < fake.submissions.size(); i += 2) {
+    const auto &clear = fake.submissions[i];
+    EXPECT_EQ(clear.params.surface, 98u);
+    EXPECT_EQ(clear.fit.x, 0); EXPECT_EQ(clear.fit.y, 0);
+    EXPECT_EQ(clear.fit.width, 640); EXPECT_EQ(clear.fit.height, 360);
+    EXPECT_EQ(fake.submissions[i + 1].params.surface, 99u);
+  }
+  // Each pass synchronizes and releases its parameter buffer before the next.
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "sync-output"), 6);
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "destroy-buffer"), 6);
+}
+
+class VaapiClearFailureTest : public ::testing::TestWithParam<const char *> {};
+TEST_P(VaapiClearFailureTest, FailedClearCannotSubmitRgbAndCanRetry) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  fake.failAt = GetParam(); fake.failSource = 98;
+  EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+  ASSERT_EQ(fake.submissions.size(), 1u);
+  EXPECT_EQ(fake.params.surface, 98u);
+  EXPECT_FALSE(processor.error().isEmpty());
+  fake.failAt.clear();
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+  EXPECT_EQ(fake.params.surface, 99u);
+}
+INSTANTIATE_TEST_SUITE_P(ClearFailures, VaapiClearFailureTest,
+    ::testing::Values("buffer", "begin", "render", "end", "sync-output", "destroy-buffer"));
+
+class VaapiRgbAfterClearFailureTest : public ::testing::TestWithParam<const char *> {};
+TEST_P(VaapiRgbAfterClearFailureTest, FailedDrawAfterClearDoesNotReportSuccess) {
+  FakeVa fake;
+  VaapiVideoProcessor processor(FakeVa::ops());
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  fake.failAt = GetParam(); fake.failSource = 99;
+  EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+  ASSERT_EQ(fake.submissions.size(), 2u);
+  EXPECT_EQ(fake.submissions.front().params.surface, 98u);
+  EXPECT_EQ(fake.params.surface, 99u);
+  EXPECT_FALSE(processor.error().isEmpty());
+  fake.failAt.clear();
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+}
+INSTANTIATE_TEST_SUITE_P(RgbFailures, VaapiRgbAfterClearFailureTest,
+    ::testing::Values("buffer", "begin", "render", "end", "sync-output", "destroy-buffer"));
+
+TEST(VaapiVideoProcessorTest, AcceptsDriverOwnedColorCapabilitiesWithoutRetainingThem) {
+  FakeVa fake;
+  auto ops = FakeVa::ops();
+  ops.queryCaps = [](VADisplay, VAContextID, VABufferID *, unsigned, VAProcPipelineCaps *caps) {
+    // Mesa returns its own array rather than filling the supplied storage.
+    auto &colors = FakeVa::current->driverColors;
+    colors = {VAProcColorStandardBT709, VAProcColorStandardBT601};
+    caps->output_color_standards = colors.data();
+    caps->num_output_color_standards = colors.size();
+    return FakeVa::call("caps");
+  };
+  VaapiVideoProcessor processor(ops);
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  EXPECT_TRUE(processor.error().isEmpty());
+  fake.driverColors.clear();
+  fake.driverColors.shrink_to_fit();
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+  EXPECT_EQ(fake.params.output_color_standard, VAProcColorStandardBT601);
+  EXPECT_EQ(fake.params.output_background_color, 0xff000000u);
+  EXPECT_EQ(fake.params.input_color_properties.color_range, VA_SOURCE_RANGE_FULL);
+  EXPECT_EQ(fake.params.output_color_properties.color_range, VA_SOURCE_RANGE_REDUCED);
+}
+
+TEST(VaapiVideoProcessorTest, RejectsDriverOwnedListWithoutBt601DespiteSuppliedStorage) {
+  FakeVa fake;
+  auto ops = FakeVa::ops();
+  ops.queryCaps = [](VADisplay, VAContextID, VABufferID *, unsigned, VAProcPipelineCaps *caps) {
+    // Supplied storage is not authoritative after the driver replaces the pointer.
+    caps->output_color_standards[0] = VAProcColorStandardBT601;
+    static VAProcColorStandardType colors[]{VAProcColorStandardBT709};
+    caps->output_color_standards = colors;
+    caps->num_output_color_standards = 1;
+    return FakeVa::call("caps");
+  };
+  VaapiVideoProcessor processor(ops);
+  EXPECT_FALSE(processor.initialize(display, 640, 360, targets));
+  EXPECT_TRUE(processor.error().contains("BT.601"));
+  EXPECT_EQ(fake.calls, (std::vector<std::string>{"config", "context", "caps",
+                                               "destroy-context", "destroy-config"}));
+}
+
+class VaapiColorListTest : public ::testing::TestWithParam<bool> {};
+TEST_P(VaapiColorListTest, RejectsNullOrEmptyReturnedListAndCanRetry) {
+  FakeVa fake;
+  auto ops = FakeVa::ops();
+  ops.queryCaps = [](VADisplay, VAContextID, VABufferID *, unsigned, VAProcPipelineCaps *caps) {
+    caps->output_color_standards[0] = VAProcColorStandardBT601;
+    if (FakeVa::current->bt601) {
+      if (GetParam()) {
+        caps->output_color_standards = nullptr;
+        caps->num_output_color_standards = 1;
+      } else {
+        caps->num_output_color_standards = 0;
+      }
+    } else {
+      caps->num_output_color_standards = 1;
+    }
+    return FakeVa::call("caps");
+  };
+  VaapiVideoProcessor processor(ops);
+  EXPECT_FALSE(processor.initialize(display, 640, 360, targets));
+  EXPECT_EQ(fake.calls.back(), "destroy-config");
+  fake.bt601 = false; // return valid supplied storage on retry
+  ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+  EXPECT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
+}
+INSTANTIATE_TEST_SUITE_P(ReturnedCapabilities, VaapiColorListTest, ::testing::Bool());
 
 TEST(VaapiVideoProcessorTest, RejectsUnsupportedColorOrGeometryBeforeSubmittingWork) {
   FakeVa fake;
@@ -140,7 +303,7 @@ TEST_P(VaapiVideoProcessorFailureTest, UnwindsAndCanRetry) {
   else
     ASSERT_TRUE(initialized);
   if (initialized) {
-    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
     if (fake.failAt == "render" || fake.failAt == "end" || fake.failAt == "sync-output") {
       EXPECT_NE(std::find(fake.calls.begin(), fake.calls.end(), "end"), fake.calls.end());
       EXPECT_NE(std::find(fake.calls.begin(), fake.calls.end(), "sync-output"), fake.calls.end());
@@ -151,7 +314,7 @@ TEST_P(VaapiVideoProcessorFailureTest, UnwindsAndCanRetry) {
   EXPECT_FALSE(processor.error().isEmpty());
   fake.failAt.clear();
   ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
-  EXPECT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+  EXPECT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
 }
 INSTANTIATE_TEST_SUITE_P(NativeFailures, VaapiVideoProcessorFailureTest,
     ::testing::Values("config", "context", "caps", "buffer", "begin", "render", "end", "sync-output", "destroy-buffer"));
@@ -171,10 +334,10 @@ TEST(VaapiVideoProcessorTest, RepeatedDestroyFailureCannotAccumulateBuffersOrSub
   VaapiVideoProcessor processor(FakeVa::ops());
   ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
   fake.failAt = "destroy-buffer";
-  EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+  EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
   const auto firstCalls = fake.calls;
   for (int retry = 0; retry < 3; ++retry) {
-    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+    EXPECT_FALSE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
     EXPECT_EQ(fake.calls.back(), "destroy-buffer");
     EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "buffer"), 1);
     EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "begin"), 1);
@@ -183,9 +346,9 @@ TEST(VaapiVideoProcessorTest, RepeatedDestroyFailureCannotAccumulateBuffersOrSub
   EXPECT_EQ(fake.calls.size(), firstCalls.size() + 3);
   EXPECT_FALSE(processor.error().isEmpty());
   fake.failAt.clear();
-  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}));
+  ASSERT_TRUE(processor.process(99, 101, 320, 240, {80, 0, 480, 360}, 98));
   EXPECT_TRUE(processor.error().isEmpty());
-  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "buffer"), 2);
-  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "begin"), 2);
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "buffer"), 3);
+  EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "begin"), 3);
   EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "context"), 1);
 }

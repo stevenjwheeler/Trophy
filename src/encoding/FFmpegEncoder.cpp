@@ -168,9 +168,11 @@ struct VaapiImportState {
   std::unique_ptr<VaapiVideoProcessor> processor;
   AVBufferRef *device = nullptr;
   AVBufferRef *inputFrames = nullptr;
+  AVFrame *black = nullptr;
   ~VaapiImportState() {
     // Destroy VPP contexts before the VADisplay/device or pools disappear.
     processor.reset();
+    av_frame_free(&black);
     av_buffer_unref(&inputFrames);
     av_buffer_unref(&device);
   }
@@ -180,6 +182,35 @@ struct VaapiImportState {
 
 #ifdef HAVE_VAAPI
 namespace {
+bool ensureVaapiBlackFrame(VaapiImportState &state, AVBufferRef *outputFrames) {
+  if (state.black && state.black->hw_frames_ctx &&
+      state.black->hw_frames_ctx->data == outputFrames->data)
+    return true;
+  av_frame_free(&state.black);
+  auto *pool = reinterpret_cast<AVHWFramesContext *>(outputFrames->data);
+  AVFrame *software = av_frame_alloc();
+  state.black = av_frame_alloc();
+  auto fail = [&] {
+    av_frame_free(&software);
+    av_frame_free(&state.black);
+    state.error = QStringLiteral("VA-API black surface allocation/upload failed");
+    return false;
+  };
+  if (!software || !state.black) return fail();
+  software->format = AV_PIX_FMT_NV12;
+  software->width = pool->width; software->height = pool->height;
+  if (av_frame_get_buffer(software, 32) < 0) return fail();
+  // Upload once per output pool, never read back captured frames. Each padded
+  // input then clears its output with a GPU VPP copy of this retained surface.
+  memset(software->data[0], 16, size_t(software->linesize[0]) * software->height);
+  memset(software->data[1], 128, size_t(software->linesize[1]) * ((software->height + 1) / 2));
+  if (av_hwframe_get_buffer(outputFrames, state.black, 0) < 0 ||
+      av_hwframe_transfer_data(state.black, software, 0) < 0)
+    return fail();
+  av_frame_free(&software);
+  return true;
+}
+
 AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
                           AVBufferRef *device, AVBufferRef *outputFrames) {
   AVFrame *drm = nullptr, *mapped = nullptr, *output = nullptr;
@@ -270,10 +301,14 @@ AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
     return fail(QStringLiteral("VA-API output surface allocation failed"));
   const QRect fit = fitVideoFrame(input.width, input.height, pool->width, pool->height, 2, 2);
   const VARectangle region{int16_t(fit.x()), int16_t(fit.y()),
-                           uint16_t(fit.width()), uint16_t(fit.height())};
+                            uint16_t(fit.width()), uint16_t(fit.height())};
+  const bool padded = fit != QRect(0, 0, pool->width, pool->height);
+  if (padded && !ensureVaapiBlackFrame(state, outputFrames))
+    return fail(state.error);
   if (!state.processor->process(VASurfaceID(uintptr_t(mapped->data[3])),
                                 VASurfaceID(uintptr_t(output->data[3])),
-                                input.width, input.height, region))
+                                input.width, input.height, region,
+                                padded ? VASurfaceID(uintptr_t(state.black->data[3])) : VA_INVALID_SURFACE))
     return fail(state.processor->error());
   // process() settles VPP before these references release the producer lease.
   av_frame_free(&mapped);
