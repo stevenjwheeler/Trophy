@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -36,8 +36,8 @@ jobs:
       - name: Restore ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: ${{ runner.os }}-ccache
-          restore-keys: ${{ runner.os }}-ccache
+          key: ubuntu24-sdk-ccache
+          restore-keys: ubuntu24-sdk-ccache
           max-size: 2G
           save-always: true
       - name: Restore GTest
@@ -45,8 +45,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/gtest_install
-          key: ${{ runner.os }}-gtest-6.12.0-${{ hashFiles('**/CMakeLists.txt') }}
-          restore-keys: ${{ runner.os }}-gtest-
+          key: ubuntu24-gtest-6.12.0-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ubuntu24-gtest-6.12.0-
       - name: Prepare GTest if not cached
         if: steps.cache-gtest.outputs.cache-hit != 'true'
         run: |
@@ -79,7 +79,7 @@ jobs:
 
   test:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -126,7 +126,7 @@ jobs:
 
   package-appimage:
     needs: [build, test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.build.outputs.version }}
       APPIMAGE_EXTRACT_AND_RUN: 1
@@ -173,10 +173,24 @@ jobs:
           images=(Trophy*.AppImage)
           test "${#images[@]}" -eq 1
           chmod +x "${images[0]}"
+          python3 packaging/check_appimage_abi.py "${images[0]}" --report "$RUNNER_TEMP/trophy-appimage-abi.json"
           python3 packaging/smoke_appimage.py "${images[0]}" --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
           TARGET="Trophy-${VERSION}-x86_64.AppImage"
           if [[ "${images[0]}" != "$TARGET" ]]; then mv "${images[0]}" "$TARGET"; fi
           sha256sum "$TARGET" > SHA256SUMS.appimage
+      - name: Smoke exact AppImage on clean Ubuntu 24.04 runtime
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/appimage-baseline-runtime"
+          mkdir -p "$evidence"
+          docker build -t trophy-appimage-runtime24:ci - < packaging/containers/appimage-runtime.Dockerfile
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$evidence,dst=/evidence" \
+            trophy-appimage-runtime24:ci python3 /source/packaging/smoke_appimage.py \
+            "/source/Trophy-${VERSION}-x86_64.AppImage" --log /evidence/startup.log
       - name: Upload AppImage immediately
         uses: actions/upload-artifact@v4
         with:
@@ -191,7 +205,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Trophy-appimage-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/trophy-appimage-smoke.log
+          path: |
+            ${{ runner.temp }}/trophy-appimage-smoke.log
+            ${{ runner.temp }}/trophy-appimage-abi.json
+            ${{ runner.temp }}/appimage-baseline-runtime/*
           if-no-files-found: ignore
           retention-days: 7
 

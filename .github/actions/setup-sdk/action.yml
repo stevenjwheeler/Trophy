@@ -7,9 +7,15 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # A newer runner must not silently raise AppImage libc requirements.
+        . /etc/os-release
+        [[ "$ID:$VERSION_ID" == "ubuntu:24.04" ]] || {
+          echo 'SDK/AppImage builds require the pinned Ubuntu 24.04 baseline' >&2
+          exit 1
+        }
         packages=(build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget zstd
           libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev
-          libxcb-shm0-dev libxcb-cursor0 libxkbcommon-x11-0 libvulkan-dev
+          libxcb-shm0-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0 libvulkan-dev
           libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber
           libdrm-dev libgbm-dev libavcodec-dev libavformat-dev libavutil-dev
           libswscale-dev libswresample-dev libva-dev libva-drm2 libgtest-dev

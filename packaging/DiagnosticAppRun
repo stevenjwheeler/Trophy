@@ -1,0 +1,23 @@
+#!/bin/sh
+# Diagnostic variant only; the release AppRun remains unchanged.
+set -eu
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+export APPDIR
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+case "${1:-}" in
+    --trophy-test-inventory)
+        cat "$APPDIR/usr/share/trophy/diagnostic-tests.json"
+        exit 0
+        ;;
+    --trophy-test)
+        shift
+        name=${1:-}
+        case "$name" in
+            test_EncoderTest|test_DmaBufCudaImport|test_VaapiVideoProcessor|test_EglDisplayLease|test_Muxer|test_EncoderFactory|test_AudioEncoder|test_AudioDriftCorrector|test_FramePipeline|test_PipeWireVideoFormat|test_PipeWireBufferLease|test_PipeWireSyncWait|test_AudioMixer) ;;
+            *) echo 'Unknown diagnostic test executable' >&2; exit 2 ;;
+        esac
+        shift
+        exec "$APPDIR/usr/bin/$name" "$@"
+        ;;
+esac
+exec "$APPDIR/usr/bin/trophy" "$@"

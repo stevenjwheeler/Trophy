@@ -67,6 +67,10 @@ gtest_discover_tests(test_GameIconProvider)
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME AppImageAbiTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageAbi.py")
+    add_test(NAME FriendBundleTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_FriendBundle.py")
     add_test(NAME AppImageSmokeTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
     add_test(NAME NativePackageSmokeTest.Harness
