@@ -1260,7 +1260,14 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   // A terminal stream/core error can kill our capture while the target node
   // remains alive with the same serial. Node identity alone is not evidence
   // that this source still works; let the normal retry replace the failed leg.
-  if (m_audioMixer->sourceOperationPending(track))
+  // A retry of the retired serial may still be initializing when this lookup
+  // completes. Do not discard a proven replacement on every retry tick: the
+  // mixer queues replacements behind retained work and retires stale starts.
+  // Same/unknown identity still waits, avoiding churn during a normal start.
+  const bool replacement = !m_boundSerial[track].isEmpty() &&
+                           !nodeSerial.isEmpty() &&
+                           nodeSerial != m_boundSerial[track];
+  if (m_audioMixer->sourceOperationPending(track) && !replacement)
     return;
   if (m_sourceConnected[track] && !m_audioMixer->sourceIsCapturing(track)) {
     m_sourceConnected[track] = false;
