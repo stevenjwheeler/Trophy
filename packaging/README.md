@@ -99,15 +99,30 @@ trusted AppImage runtime. CI runs this gate before smoke tests and artifact uplo
 SDK compiler/GTest caches use baseline-specific keys to avoid importing compiled
 objects from newer runners.
 
-### Portable friend testing (experimental)
+### Diagnostics collection
 
-See [FRIEND-TESTING.md](FRIEND-TESTING.md) for the consent-based AppImage preview,
-bundled source-free unit/native GPU tests, result collector and developer-side
-AppImage builder. Friends do not need Docker, namespaces, development dependencies
-or a full install. Live detection setup remains explicit and may leave small
-compositor/reporter integrations to clean up. GPU skips are incomplete coverage.
-Validate the exact complete kit before distribution; source fixtures alone do
-not establish portable runtime or hardware compatibility.
+`packaging/collect_diagnostics.py` gathers system information, the Trophy log (if
+present) and installed-binary details, optionally runs isolated tests when given a
+diagnostic AppImage or build directory, and packages everything into a redacted
+tar.gz for examination. It does not require Docker, namespaces or a special
+diagnostic AppImage.
+
+```sh
+python3 packaging/collect_diagnostics.py
+python3 packaging/collect_diagnostics.py --appimage /path/to/Trophy.AppImage
+python3 packaging/collect_diagnostics.py --build /path/to/build --output report.tar.gz
+```
+
+To hand someone a runnable test kit (build binaries + collection script), stage it from
+a completed build:
+
+```sh
+python3 packaging/make_test_kit.py --build /path/to/build --output /tmp/trophy-test-kit
+cd /tmp/trophy-test-kit/kit && ./run.sh
+```
+
+The kit requires a compatible Qt/FFmpeg installation on the target machine; it does
+not bundle them.
 
 An installed tree needs the executable, `libTrophy.so`, both reporter
 libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`

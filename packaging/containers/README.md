@@ -12,18 +12,16 @@ docker build -t trophy-appimage-ubuntu24 - < packaging/containers/appimage.Docke
 work=$(mktemp -d /tmp/opencode/trophy-appimage-XXXXXX)
 docker run --rm --cpus 2 --memory 4g --cap-drop ALL \
     --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
-    --env VERSION=0.9.7-friend-test \
+    --env VERSION=0.9.7-diagnostic-test \
     --mount "type=bind,src=$PWD,dst=/source,readonly" \
     --mount "type=bind,src=$work,dst=/work" \
     trophy-appimage-ubuntu24 bash /source/packaging/containers/appimage.sh
 ```
 
-The script builds the application/reporters and 13 focused source-free unit/GPU
-test executables, stages only under `/work`, packages a diagnostic AppImage,
-checks its ABI and smokes startup. It does not run the full CI suite or claim GPU
-coverage inside this device-free builder. Run the resulting kit on real hardware
-to validate native encode/decode/import/resize. No host home/runtime, services,
-GPU devices or detection socket are mounted into the builder.
+The script builds the application/reporters and the focused source-free unit/GPU
+test executables, stages only under `/work`, and checks startup. It does not
+build a diagnostic AppImage kit or run the full CI suite. No host home/runtime,
+services, GPU devices or detection socket are mounted into the builder.
 
 `appimage-runtime.Dockerfile` is the separate clean Ubuntu 24.04 startup baseline:
 only Python/D-Bus and ordinary desktop graphics/font/PipeWire client libraries,
