@@ -4,6 +4,8 @@
 
 ## Install and launch
 
+Check the [system requirements and package compatibility](#requirements) before downloading.
+
 1. Download `Trophy-<version>-x86_64.AppImage` from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest).
 2. Make the downloaded file executable, using your file manager's permissions settings or `chmod +x <filename>`.
 3. Open it from your file manager or run `./<filename>` in a terminal.
@@ -12,9 +14,7 @@ Keep the AppImage at a stable location if you enable launch-at-login. For a nati
 
 CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
 
-Current native build targets are Ubuntu 26.04 for DEB/archive and Fedora 44 for
-RPM. These packages are not guaranteed compatible with older releases or other
-Debian/RPM-based distributions.
+Choose the package for your system using the [requirements table](#package-compatibility).
 
 ### Verify the download
 
@@ -26,15 +26,65 @@ sha256sum -c SHA256SUMS
 
 The matching downloaded file should report `OK`; entries for packages you did not download may report missing files. This checks the file against the published checksum; an unsigned checksum alone does not prove publisher identity or authenticity.
 
-## Desktop requirements
+## Requirements
+
+These are the build targets and requirements for the current CI configuration.
+Previously published releases may use different baselines; check their release
+notes. A build target is not a claim that every desktop, driver or newer distro
+version has been verified.
+
+### Package compatibility
+
+All distributed binaries target **x86_64 / amd64 Linux**. Qt/FFmpeg development
+packages, a compiler and Python are not needed to run the ordinary application;
+Python is required only for the testing launcher below.
+
+| Download | Build/test baseline | What your system must provide |
+| --- | --- | --- |
+| **AppImage** | **Ubuntu 24.04** SDK baseline; other compatible glibc-based distros may work | Compatible glibc/C++ runtime, normal desktop graphics/font libraries, GPU drivers and PipeWire client libraries/configuration. Qt and FFmpeg are bundled. Normal mounting needs working FUSE support; extract-and-run avoids FUSE. |
+| **DEB** | **Ubuntu 26.04 amd64** | Compatible Ubuntu runtime packages, including Qt, FFmpeg, QML modules and PipeWire. The package manager installs declared dependencies. Other Debian-based distros and newer Ubuntu releases are not automatically guaranteed compatible. |
+| **RPM** | **Fedora 44 x86_64** | Compatible Fedora Qt, FFmpeg, Wayland and PipeWire runtime packages, installed through the package manager. Other RPM-based distros and newer Fedora releases are not automatically guaranteed compatible. |
+| **tar.xz** | **Ubuntu 26.04-compatible x86_64 environment** | Compatible native Qt/FFmpeg and desktop dependencies, supplied by you. Preserve the extracted directory layout. This is a native install-tree archive, **not a self-contained AppImage**. |
+| **Friend-testing kit** | Diagnostic AppImage built on the **Ubuntu 24.04** baseline | The AppImage's host requirements plus **Python 3.9+**, a local executable filesystem and writable space for temporary files/results. GPU validation needs compatible drivers and device access. No Docker, compiler, namespaces or full app installation is required. |
+
+For the **AppImage**, packaging rejects required symbol versions above
+**GLIBC 2.39**, **GLIBCXX 3.4.32** and **CXXABI 1.3.14**, including requirements
+from bundled libraries and plugins. These are build-policy ceilings, not a
+guarantee of compatibility with every system meeting those numbers. An individual
+artifact may require lower versions; the testing kit records its actual minimum
+glibc in `bundle.json`. Do not upgrade system libraries just to run Trophy—use a
+compatible package. See the [packaging notes](../packaging/README.md#package-formats)
+for the detailed baseline and dependency policy.
+
+The AppImage is the recommended starting point when you are not on the exact
+native-package target. If FUSE is unavailable, use extract-and-run with your
+downloaded filename, for example:
+
+```sh
+APPIMAGE_EXTRACT_AND_RUN=1 ./Trophy.AppImage
+```
+
+Fedora's official FFmpeg build may omit libx264. Software H.264 recording and
+H.264 share export require a codec-enabled FFmpeg provider; follow your distro's
+guidance rather than assuming every codec ships with the native package.
+
+The testing kit runs a focused subset of unit and native GPU tests, not the full
+CI suite. Its `--mode tests` does not need a running Wayland session or live
+portal/PipeWire services, but still needs the client/graphics libraries. Interactive
+preview/detection testing needs the desktop services below. GPU skips mean
+incomplete coverage, not successful GPU validation. See the
+[friend-testing guide](../packaging/FRIEND-TESTING.md) for running the launcher,
+reviewing reports, setup consent and cleanup.
+
+### Desktop requirements
 
 - A **Wayland** desktop session. Native Wayland and XWayland games can be captured; an X11 desktop session cannot.
 - **PipeWire**, **xdg-desktop-portal**, and a suitable compositor-specific portal backend.
-- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported.
+- Compatible GPU drivers for hardware encoding: NVIDIA NVENC or AMD/Intel VA-API where supported. Hardware encoding is optional; software H.264 is also supported when the FFmpeg build includes it. Available codecs depend on the GPU, driver and FFmpeg build.
 
 The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
 
-If the captured window changes size, Trophy keeps the recording's output canvas fixed, fitting the picture with black bars as needed. Supported NVIDIA and VA-API paths perform resize work on the GPU; unsupported DMA-BUF imports can request shared-memory fallback. Software encoding uses shared-memory capture. VA-API resize is implemented but still needs real AMD/Intel hardware validation.
+If the captured window changes size, Trophy keeps the recording's output canvas fixed, fitting the picture with black bars as needed. Supported NVIDIA and VA-API paths perform resize work on the GPU; unsupported DMA-BUF imports can request shared-memory fallback. Software encoding uses shared-memory capture. Synthetic hardware tests do not establish compatibility with every compositor, AMD/Intel driver or sustained recording workload.
 
 Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and Sway. These do not all have equivalent live verification: KDE/KWin with NVIDIA has live capture evidence; GNOME helper installation/capture and Hyprland/Sway behavior still need broader real-session verification. Hardware encoding support likewise does not guarantee every DMA-BUF capture path works.
 
