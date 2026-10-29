@@ -887,6 +887,26 @@ QString GameDetectionService::getSteamAppName(uint appId) {
   return QString();
 }
 
+QList<qint64> GameDetectionService::gameplayWindowPids(const QString &key) const {
+  if (!m_monitor || key.isEmpty())
+    return {};
+  QList<qint64> candidates;
+  for (const WindowInfo &w : m_monitor->windows()) {
+    if (w.pid <= 0 || m_pidToRawKey.value(w.pid) != key)
+      continue;
+    if (!w.fullscreen && !coversOutput(w) &&
+        !((w.outputWidth <= 0 || w.outputHeight <= 0) &&
+          w.width >= 640 && w.height >= 480))
+      continue;
+    if (!candidates.contains(w.pid))
+      candidates.append(w.pid);
+  }
+  std::sort(candidates.begin(), candidates.end());
+  if (candidates.removeOne(m_currentGamePid))
+    candidates.prepend(m_currentGamePid);
+  return candidates;
+}
+
 bool GameDetectionService::hasVisibleWindow() const {
   if (!m_monitor || m_currentGameName.isEmpty())
     return false;

@@ -219,8 +219,15 @@ void RecordingManager::startRecording(const QString &gameName,
   const QString tokenKey = m_gameDetector
                                ? m_gameDetector->captureKeyForGame(m_currentGameName)
                                : m_currentGameName;
-  if (!m_isManualRecording && m_gameDetector)
+  if (!m_isManualRecording && m_gameDetector) {
     m_detectedGameInfo = m_gameDetector->captureIdentityInfo(m_currentGameName);
+    for (const auto pid : m_gameDetector->gameplayWindowPids(tokenKey)) {
+      if (GameDetectionService::processExists(pid)) {
+        m_detectedGameInfo.insert("capturedWindowPid", pid);
+        break;
+      }
+    }
+  }
   connect(m_captureSource.get(), &IVideoCaptureSource::ready, this,
           [this, attemptSource, attemptGeneration]() {
             if (attemptGeneration == m_pipelineGeneration && attemptSource &&
@@ -1157,6 +1164,17 @@ void RecordingManager::setDetectedEncoderName(const QString &name) {
 }
 
 void RecordingManager::updateProgress() {
+  // Follow proven gameplay-window handoffs while capture is live, not a
+  // launcher gaining focus after the captured game has already exited.
+  if (m_state == RecordingState::Recording && !m_isManualRecording && m_gameDetector) {
+    for (const auto pid : m_gameDetector->gameplayWindowPids(
+             m_detectedGameInfo.value("detectedGameKey").toString())) {
+      if (GameDetectionService::processExists(pid)) {
+        m_detectedGameInfo.insert("capturedWindowPid", pid);
+        break;
+      }
+    }
+  }
   // Read the atomic latch on the owner thread, never tear down from a
   // muxer/audio/video callback. stop() still drains before inspecting it.
   if (m_state == RecordingState::Recording && m_session &&
@@ -1184,6 +1202,17 @@ bool RecordingManager::capturedGameHasEnded() const {
     return false;
   if (m_gameDetector->currentGameKey() != key)
     return true; // The detector has already retired this pinned identity.
+  const auto windowPid = m_detectedGameInfo.value("capturedWindowPid").toLongLong();
+  if (windowPid > 0 && !GameDetectionService::processExists(windowPid)) {
+    // Launchers can share the Steam identity and survive their game child.
+    // Require actual death of the pinned gameplay process, not merely a
+    // missing/minimized window. A live gameplay successor still wins.
+    for (const auto successor : m_gameDetector->gameplayWindowPids(key)) {
+      if (GameDetectionService::processExists(successor))
+        return false;
+    }
+    return true;
+  }
   // Same-identity PID handoff must not mistake a dead launcher for game exit.
   const auto pid = m_gameDetector->currentGamePid();
   return pid > 0 && !GameDetectionService::processExists(pid);

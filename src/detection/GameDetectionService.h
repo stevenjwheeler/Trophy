@@ -21,6 +21,8 @@
 
 #include "GameListModel.h"
 
+class RecordingManagerTest;
+
 namespace TrophyBackend {
 
 class GameWhitelist;
@@ -80,6 +82,9 @@ public:
    * this before starting a token-armed capture.
    */
   Q_INVOKABLE bool hasVisibleWindow() const;
+  // Cached compositor evidence for a gameplay-sized window of this stable
+  // identity. Includes minimized windows: minimizing is not process exit.
+  QList<qint64> gameplayWindowPids(const QString &key) const;
 
   // Whitelist/Blacklist Management (invokable for the Games page;
   // true when the list actually changed, for UI feedback)
@@ -171,6 +176,7 @@ private:
   // Grant the test class access to private members (fixes your build errors)
   friend class GameDetectionServiceTest;
   friend class ApplicationAuthorizePromptTest;
+  friend class ::RecordingManagerTest;
 
   // Internal identification helpers
   QString getSteamAppName(uint appId);
