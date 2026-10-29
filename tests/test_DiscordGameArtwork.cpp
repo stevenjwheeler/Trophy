@@ -12,12 +12,7 @@ namespace TrophyBackend {
 class DiscordGameArtworkTest : public testing::Test {
 protected:
   void SetUp() override {
-    if (!QCoreApplication::instance()) {
-      static int argc = 1;
-      static char name[] = "artwork-test";
-      static char *argv[] = {name, nullptr};
-      static QCoreApplication app(argc, argv);
-    }
+    ASSERT_NE(QCoreApplication::instance(), nullptr);
     network = std::make_unique<ArtworkNetwork>();
     artwork = std::make_unique<DiscordGameArtwork>(*network);
   }

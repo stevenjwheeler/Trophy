@@ -1264,6 +1264,48 @@ TEST(RecordingSessionTest, InitialPinnedSerialDetectsRecreationBeforeFirstLookup
   // Mixer was never started: replacement remains uninitialized, no host daemon.
 }
 
+TEST(RecordingSessionTest, ChangedNodeSerialIsNotDiscardedDuringOwnedSourceRetirement) {
+  for (const auto &initialSerial : {QString("original-serial"), QString("123"), QString()}) {
+    SCOPED_TRACE(initialSerial.toStdString());
+    FakeCapture capture;
+    FakeVideoEncoder encoder;
+    FakeMuxer muxer;
+    std::promise<void> entered, release;
+    class RetiringSource : public FakeAudioSource {
+    public:
+      std::promise<void> *entered;
+      std::shared_future<void> released;
+      std::atomic<bool> stopped{false};
+      void stop() override {
+        if (!stopped.exchange(true)) entered->set_value();
+        released.wait();
+        FakeAudioSource::stop();
+      }
+    };
+    AudioMixer mixer(48000, 2);
+    auto source = std::make_unique<RetiringSource>();
+    source->entered = &entered;
+    source->released = release.get_future().share();
+    mixer.addSource(std::move(source), 0);
+    RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
+                             &mixer, true, 128, 3, {});
+    session.markSourceConnected(0, initialSerial);
+    // Release before session/mixer destruction even when an assertion aborts.
+    auto releaseOnExit = std::shared_ptr<void>(nullptr, [&](void *) { release.set_value(); });
+    mixer.removeSourceAsync(0);
+    ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_TRUE(mixer.sourceOperationPending(0));
+    RecordingSessionTestPeer::deliverSameNode(session); // Lookup serial 123 while old worker is owned.
+    const QString expectedSerial = initialSerial == "original-serial" ? QString("123") : initialSerial;
+    EXPECT_EQ(session.audioRoutingState().boundSerial[0], expectedSerial);
+    EXPECT_TRUE(mixer.sourceOperationPending(0));
+    releaseOnExit.reset();
+    ASSERT_TRUE(settleMixerSources(mixer));
+    EXPECT_EQ(session.audioRoutingState().boundSerial[0], expectedSerial);
+    // Mixer never started: replacement is slotted, not connected to host audio.
+  }
+}
+
 TEST(RecordingSessionTest, SeparateTrackRebindKeepsOutageOnOriginalTimeline) {
   if (!haveAac()) GTEST_SKIP() << "AAC unavailable";
   FakeCapture capture;

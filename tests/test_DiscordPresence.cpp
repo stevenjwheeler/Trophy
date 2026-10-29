@@ -11,16 +11,20 @@
 #include <gtest/gtest.h>
 #include <memory>
 
+// Construct the application before any fixture socket/network objects, and
+// destroy it after every fixture. A function-static application in SetUp can
+// otherwise outlive Qt Network globals initialized by fixture constructors.
+int main(int argc, char **argv) {
+  QCoreApplication app(argc, argv);
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
+
 namespace TrophyBackend {
 class DiscordPresenceTest : public testing::Test {
 protected:
   void SetUp() override {
-    if (!QCoreApplication::instance()) {
-      static int argc = 1;
-      static char name[] = "discord-test";
-      static char *argv[] = {name, nullptr};
-      static QCoreApplication app(argc, argv);
-    }
+    ASSERT_NE(QCoreApplication::instance(), nullptr);
     ASSERT_TRUE(dir.isValid());
     ASSERT_TRUE(server.listen(dir.path() + "/ipc"));
     network = std::make_unique<ArtworkNetwork>();

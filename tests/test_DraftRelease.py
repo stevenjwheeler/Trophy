@@ -23,6 +23,10 @@ def entry(tag, draft=False, prerelease=False, id=1):
     return {"tag_name": tag, "draft": draft, "prerelease": prerelease, "id": id}
 
 
+def is_read(call):
+    return call[0] == "api" and "--method" not in call
+
+
 class DraftReleaseTest(unittest.TestCase):
     def setUp(self):
         environment = patch.dict(release.os.environ, {"GITHUB_EVENT_NAME": "push",
@@ -48,17 +52,21 @@ class DraftReleaseTest(unittest.TestCase):
         self.calls = []
         self.publish_on_guard = False
         self.publish_after_upload = False
+        self.stale_list_after_create = False
 
     def fake_gh(self, *args):
         self.calls.append(args)
         if args[:3] == ("api", "--paginate", "--slurp"):
+            if self.stale_list_after_create and any(item["id"] == 2 for item in self.releases):
+                return json.dumps([[item for item in self.releases if item["id"] != 2]])
             return json.dumps([self.releases])
-        if args[:2] == ("release", "create"):
-            self.assertIn("--draft", args)
-            self.assertIn("--verify-tag", args)
-            self.assertEqual(args[args.index("--target") + 1], "main")
-            self.releases.append(entry("v1.2.3", draft=True, id=2))
-            return "draft URL"
+        if args[:3] == ("api", "--method", "POST") and args[3].endswith("/releases"):
+            self.assertIn("draft=true", args)
+            self.assertIn("prerelease=false", args)
+            self.assertIn("target_commitish=tested-sha", args)
+            target = entry("v1.2.3", draft=True, id=2)
+            self.releases.append(target)
+            return json.dumps(target)
         if args[:2] == ("release", "upload"):
             for name in args[3:args.index("--repo")]:
                 path = Path(name)
@@ -192,7 +200,7 @@ class DraftReleaseTest(unittest.TestCase):
                 patch.object(release, "gh", side_effect=self.fake_gh):
             with self.assertRaisesRegex(RuntimeError, "tag changed"):
                 release.draft("owner/repo", "v1.2.3", "sha", self.assets)
-        self.assertTrue(all(call[0] == "api" for call in self.calls))
+        self.assertTrue(all(is_read(call) for call in self.calls))
 
     def test_real_tested_commits_must_belong_to_main(self):
         repo = self.root / "repository"
@@ -232,7 +240,7 @@ class DraftReleaseTest(unittest.TestCase):
     def test_published_release_is_never_written(self):
         self.releases.append(entry("v1.2.3", id=2))
         self.run_draft()
-        self.assertTrue(all(call[0] == "api" for call in self.calls))
+        self.assertTrue(all(is_read(call) for call in self.calls))
 
     def test_flat_manifest_has_exact_files_and_verifiable_hashes(self):
         output = self.root / "flat"
@@ -247,7 +255,7 @@ class DraftReleaseTest(unittest.TestCase):
         (self.assets / self.names[0]).write_bytes(b"changed")
         with self.assertRaisesRegex(RuntimeError, "Checksum mismatch"):
             self.run_draft()
-        self.assertTrue(all(call[0] == "api" for call in self.calls))
+        self.assertTrue(all(is_read(call) for call in self.calls))
 
     def test_rejects_missing_extra_duplicate_and_traversal_manifest_entries(self):
         manifest = self.assets / "SHA256SUMS"
@@ -271,14 +279,24 @@ class DraftReleaseTest(unittest.TestCase):
         self.run_draft()
         self.assertEqual(len(self.attached), 5)
         writes = [call for call in self.calls if call[0] != "api"]
-        self.assertEqual([call[1] for call in writes], ["create"] + ["upload"] * 5)
+        creations = [call for call in self.calls if call[:3] == ("api", "--method", "POST")]
+        self.assertEqual(len(creations), 1)
+        self.assertEqual([call[1] for call in writes], ["upload"] * 5)
         self.assertEqual(Path(writes[-1][3]).name, "SHA256SUMS")
+
+    def test_created_draft_uses_post_response_even_if_release_list_is_stale(self):
+        self.stale_list_after_create = True
+        self.run_draft()
+        lists = [call for call in self.calls if call[:3] == ("api", "--paginate", "--slurp")]
+        self.assertEqual(len(lists), 2) # Baseline checks only, never rediscovery.
+        self.assertEqual(len(self.attached), 5)
+        self.assertEqual(sum(call[:3] == ("api", "--method", "POST") for call in self.calls), 1)
 
     def test_existing_draft_retry_is_idempotent_and_keeps_notes(self):
         self.run_draft()
         self.calls.clear()
         self.run_draft()
-        self.assertTrue(all(call[0] == "api" for call in self.calls))
+        self.assertTrue(all(is_read(call) for call in self.calls))
 
     def test_partial_draft_uploads_only_missing_files(self):
         self.run_draft()
@@ -332,7 +350,7 @@ class DraftReleaseTest(unittest.TestCase):
         self.publish_on_guard = True
         with self.assertRaisesRegex(RuntimeError, "published"):
             self.run_draft()
-        self.assertTrue(all(call[0] == "api" for call in self.calls))
+        self.assertTrue(all(is_read(call) for call in self.calls))
 
     def test_newer_release_published_before_create_prevents_all_writes(self):
         with patch.object(release, "on_main", return_value=True), \
@@ -340,7 +358,7 @@ class DraftReleaseTest(unittest.TestCase):
                                                        json.dumps([[entry("v2.0.0")]])]) as gh:
             release.draft("owner/repo", "v1.2.3", "sha", self.assets)
             self.assertEqual(gh.call_count, 2)
-            self.assertTrue(all(call.args[0] == "api" for call in gh.call_args_list))
+            self.assertTrue(all(is_read(call.args) for call in gh.call_args_list))
 
 
 if __name__ == "__main__":

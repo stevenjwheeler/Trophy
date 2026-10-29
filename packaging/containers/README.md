@@ -1,4 +1,53 @@
-# Distro-native builds and clean package-manager checks
+# AppImage and distro-native builds
+
+## AppImage baseline builder
+
+The SDK build/test/AppImage CI jobs all run on `ubuntu-24.04`, not the moving
+`ubuntu-latest` label. `appimage.Dockerfile` provides the same OS/Qt 6.12.0 baseline
+for local diagnostic builds. Docker is **developer-only**: users receive a normal
+AppImage and Python launcher, not this filesystem or a Docker prerequisite.
+
+```sh
+docker build -t trophy-appimage-ubuntu24 - < packaging/containers/appimage.Dockerfile
+work=$(mktemp -d /tmp/opencode/trophy-appimage-XXXXXX)
+docker run --rm --cpus 2 --memory 4g --cap-drop ALL \
+    --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+    --env VERSION=0.9.7-friend-test \
+    --mount "type=bind,src=$PWD,dst=/source,readonly" \
+    --mount "type=bind,src=$work,dst=/work" \
+    trophy-appimage-ubuntu24 bash /source/packaging/containers/appimage.sh
+```
+
+The script builds the application/reporters and 13 focused source-free unit/GPU
+test executables, stages only under `/work`, packages a diagnostic AppImage,
+checks its ABI and smokes startup. It does not run the full CI suite or claim GPU
+coverage inside this device-free builder. Run the resulting kit on real hardware
+to validate native encode/decode/import/resize. No host home/runtime, services,
+GPU devices or detection socket are mounted into the builder.
+
+`appimage-runtime.Dockerfile` is the separate clean Ubuntu 24.04 startup baseline:
+only Python/D-Bus and ordinary desktop graphics/font/PipeWire client libraries,
+no Qt SDK, FFmpeg or development packages. PipeWire client libraries are an
+intentional linuxdeploy host dependency; no host daemon is connected or started.
+CI smokes the exact AppImage in this network-disabled,
+read-only runtime before uploading it; its private `/tmp` keeps service/socket
+tests away from the host. This catches dependencies accidentally supplied only
+by the SDK builder. Real Wayland rendering, portal capture and GPU execution
+still need the separate hardware test kit.
+
+Use a local source checkout readable by Docker. For a FUSE checkout that Docker
+cannot access, use an ordinary-file snapshot plus `source-provenance.json` with
+`source_revision`, boolean `source_dirty`, and a `source_sha256` path/hash map.
+The packager verifies those hashes rather than inventing a Git revision or
+discarding local changes. The source snapshot is not included in the sent kit.
+
+Both staged and finished AppImages must pass `check_appimage_abi.py`: required
+GLIBC <= 2.39, GLIBCXX <= 3.4.32 and CXXABI <= 1.3.14, across all ELF libraries,
+plugins and binaries. Preserve `abi-report.json` with build evidence. The base
+digest/Qt version are pinned; apt updates and continuous linuxdeploy tools remain
+mutable, so this is a compatibility baseline, not a bit-reproducible build claim.
+
+## Distro-native package targets
 
 The main Qt SDK build is for the AppImage. Native packages instead use the
 distribution's own Qt/FFmpeg stack: Ubuntu 26.04 for DEB/TXZ and Fedora 44 for

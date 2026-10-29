@@ -434,6 +434,11 @@ protected:
     QProcess game;
     game.start("sleep", {"30"});
     ASSERT_TRUE(game.waitForStarted());
+    QProcess launcher;
+    if (scenario >= 8) {
+      launcher.start("sleep", {"30"});
+      ASSERT_TRUE(launcher.waitForStarted());
+    }
     SettingsManager settings;
     settings.setRecordingsPath(tempDir.path());
     StorageManager storage(tempDir.path());
@@ -455,7 +460,7 @@ protected:
     QPointer<PendingCapture> capture;
     installPendingCapture(recorder, capture);
     recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 4);
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 4 && scenario != 14);
       return true;
     };
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
@@ -465,6 +470,42 @@ protected:
     ASSERT_FALSE(capture.isNull());
     recorder.completePipelineAndStart();
     ASSERT_TRUE(recorder.isRecording());
+    if (scenario >= 8) {
+      ASSERT_EQ(recorder.m_detectedGameInfo.value("capturedWindowPid").toLongLong(),
+                game.processId());
+      // Both processes report the same Steam identity. Returning focus to
+      // the launcher changes currentGamePid without changing currentGameKey.
+      detector.trackGame(launcher.processId(), "Exit fixture", "steam_app_42424242");
+      WindowInfo launcherWindow;
+      launcherWindow.pid = launcher.processId();
+      launcherWindow.appId = window.appId;
+      launcherWindow.focused = true;
+      launcherWindow.width = 500; launcherWindow.height = 350;
+      launcherWindow.outputWidth = 1920; launcherWindow.outputHeight = 1080;
+      if (scenario == 11 || scenario == 12 || scenario == 15) {
+        // A real gameplay successor, including one minimized by the user,
+        // must not be mistaken for the surviving small launcher.
+        launcherWindow.fullscreen = true;
+      }
+      monitor.ingestSnapshot({launcherWindow});
+      ASSERT_EQ(detector.currentGamePid(), launcher.processId());
+      if (scenario == 12) {
+        launcherWindow.minimized = true;
+        monitor.ingestSnapshot({launcherWindow});
+      }
+      if (scenario == 13) {
+        // A progress tick after focus returns must retain the gameplay pin.
+        recorder.updateProgress();
+        EXPECT_EQ(recorder.m_detectedGameInfo.value("capturedWindowPid").toLongLong(),
+                  game.processId()); // Small launcher never replaces the pin.
+      }
+      if (scenario == 15) {
+        recorder.updateProgress();
+        EXPECT_EQ(recorder.m_detectedGameInfo.value("capturedWindowPid").toLongLong(),
+                  launcher.processId());
+        monitor.ingestSnapshot({}); // Absence still isn't proof of death.
+      }
+    }
     capture->errorKind = scenario == 3 ? IVideoCaptureSource::CaptureErrorKind::Other
                                      : IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
     if (scenario == 2) {
@@ -472,7 +513,8 @@ protected:
       monitor.ingestSnapshot({window});
       EXPECT_FALSE(detector.hasVisibleWindow()); // Not proof of game exit.
     }
-    if (scenario == 0 || scenario == 3 || scenario == 4 || scenario == 5) {
+    if (scenario == 0 || scenario == 3 || scenario == 4 || scenario == 5 ||
+        scenario == 8 || scenario == 11 || scenario == 12 || scenario == 14 || scenario == 15) {
       game.terminate();
       ASSERT_TRUE(game.waitForFinished());
     }
@@ -482,9 +524,11 @@ protected:
       QCoreApplication::processEvents();
       recorder.onEncodingError("output write failed during stop");
     }
-    if (scenario == 1) QTimer::singleShot(30, &game, [&] { game.terminate(); });
+    if (scenario == 1 || scenario == 9)
+      QTimer::singleShot(30, &game, [&] { game.terminate(); });
     ASSERT_TRUE(waitForIdle(recorder));
-    const bool normal = scenario == 0 || scenario == 1 || scenario == 6;
+    const bool normal = scenario == 0 || scenario == 1 || scenario == 6 ||
+                        scenario == 8 || scenario == 9;
     EXPECT_EQ(saved.size(), normal ? 1 : 0);
     EXPECT_EQ(errors.size(), normal ? 0 : 1);
     EXPECT_EQ(finished.size(), 1);
@@ -492,6 +536,10 @@ protected:
     if (game.state() != QProcess::NotRunning) {
       game.terminate();
       ASSERT_TRUE(game.waitForFinished());
+    }
+    if (launcher.state() != QProcess::NotRunning) {
+      launcher.terminate();
+      ASSERT_TRUE(launcher.waitForFinished());
     }
   }
 
@@ -863,6 +911,14 @@ TEST_F(RecordingManagerTest, CaptureGameExitDoesNotHideFinalizationFailure) { ca
 TEST_F(RecordingManagerTest, ManualCaptureSourceLossDoesNotBorrowDetectedGameExit) { captureEndRace(5); }
 TEST_F(RecordingManagerTest, QueuedCaptureLossAfterExplicitStopDoesNotTurnSaveIntoError) { captureEndRace(6); }
 TEST_F(RecordingManagerTest, CaptureGameExitGraceDoesNotHideOutputFailure) { captureEndRace(7); }
+TEST_F(RecordingManagerTest, CaptureGameExitWithSurvivingLauncherSavesNormally) { captureEndRace(8); }
+TEST_F(RecordingManagerTest, CaptureLossBeforeGameExitWithSurvivingLauncherSavesNormally) { captureEndRace(9); }
+TEST_F(RecordingManagerTest, CaptureLossWithLauncherFocusedButGameAliveStillFails) { captureEndRace(10); }
+TEST_F(RecordingManagerTest, CaptureLossWithLiveGameplaySuccessorStillFails) { captureEndRace(11); }
+TEST_F(RecordingManagerTest, CaptureLossWithMinimizedGameplaySuccessorStillFails) { captureEndRace(12); }
+TEST_F(RecordingManagerTest, CaptureProgressDoesNotReplaceGamePidWithLauncherPid) { captureEndRace(13); }
+TEST_F(RecordingManagerTest, CaptureLauncherReturnDoesNotHideFinalizationFailure) { captureEndRace(14); }
+TEST_F(RecordingManagerTest, CaptureProgressFollowsGameplayHandoffWithoutBorrowingOldPidExit) { captureEndRace(15); }
 
 TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
   SettingsManager settings;

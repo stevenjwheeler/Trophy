@@ -15,9 +15,17 @@ and its host dependencies.
 Native CI builds target **Ubuntu 26.04** (DEB/archive) and **Fedora 44** (RPM),
 using each distribution's Qt/FFmpeg packages. They are not universal Debian/RPM
 packages: older distributions and different Qt private ABIs can be incompatible.
-The AppImage uses the separately bundled Qt SDK. See
+The AppImage's SDK build, tests and packaging use **Ubuntu 24.04**, with Qt 6.12.0.
+Its finished ELF payload is gated at GLIBC 2.39, GLIBCXX 3.4.32 and CXXABI 1.3.14;
+this is not a claim that every older distro, GPU driver or desktop is supported.
+The AppImage does not bundle a replacement glibc or vendor GPU drivers. Native
+DEB/TXZ/RPM packages retain their distro-specific targets above. See
 [container package checks](containers/README.md) for reproducible build/test commands.
 Headless installation/startup does not establish optional encoder availability.
+The AppImage also expects the normal host PipeWire client library/configuration
+from a PipeWire-enabled Wayland desktop; linuxdeploy intentionally excludes that
+library. Clean-baseline checks provide these ordinary desktop runtime libraries,
+not Qt/FFmpeg/development packages or a running capture service.
 In particular, Fedora's official FFmpeg-free build may omit libx264; software
 H.264/share export needs a compatible codec-enabled FFmpeg provider according to
 your distribution's guidance. These tests do not enable third-party repositories
@@ -75,6 +83,31 @@ reviewing the assets/notes and clicking **Publish release** yourself. CI has no
 automatic publication step. No extra combined package ZIP is created.
 
 ## Verification
+
+Check a trusted finished AppImage (or deployed AppDir) against the baseline:
+
+```sh
+python3 packaging/check_appimage_abi.py Trophy.AppImage --report appimage-abi.json
+```
+
+This inspects required version nodes in every ELF, including nested plugins and
+the AppImage runtime, not exported versions or just the main executable. It fails
+closed on inspection errors, unsupported system ABI requirements or versions over
+the limits. Symbol-version checks complement clean-baseline startup tests; they
+do not prove every kernel/API/driver interaction works. Extraction executes the
+trusted AppImage runtime. CI runs this gate before smoke tests and artifact upload.
+SDK compiler/GTest caches use baseline-specific keys to avoid importing compiled
+objects from newer runners.
+
+### Portable friend testing (experimental)
+
+See [FRIEND-TESTING.md](FRIEND-TESTING.md) for the consent-based AppImage preview,
+bundled source-free unit/native GPU tests, result collector and developer-side
+AppImage builder. Friends do not need Docker, namespaces, development dependencies
+or a full install. Live detection setup remains explicit and may leave small
+compositor/reporter integrations to clean up. GPU skips are incomplete coverage.
+Validate the exact complete kit before distribution; source fixtures alone do
+not establish portable runtime or hardware compatibility.
 
 An installed tree needs the executable, `libTrophy.so`, both reporter
 libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`
