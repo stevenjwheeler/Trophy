@@ -162,7 +162,19 @@ bool FFmpegMuxer::writeHeader() {
 
     AVDictionary *opts = nullptr;
     if (QString(m_formatCtx->oformat->name) == "mp4") {
-        av_dict_set(&opts, "movflags", "faststart", 0);
+        // faststart moves the moov atom to the front for web playback.
+        // hybrid_fragmented (FFmpeg >= 8.1) also writes the file in fragmented
+        // mode, so a crashed/killed recording stays playable instead of
+        // needing the trailer to be flushed on clean stop.
+        QString movflags = QStringLiteral("faststart");
+#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(62, 6, 101)
+        movflags += QStringLiteral("+hybrid_fragmented");
+#endif
+        av_dict_set(&opts, "movflags", movflags.toUtf8().constData(), 0);
+#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(62, 6, 101)
+        // use_editlist keeps edit lists consistent with fragmented output.
+        av_dict_set(&opts, "use_editlist", "1", 0);
+#endif
     } else if (QString(m_formatCtx->oformat->name).contains("matroska")) {
         // Flush clusters every second instead of the 5s default: bounds
         // how much encoded data sits in muxer RAM (invisible to live

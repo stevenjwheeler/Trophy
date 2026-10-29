@@ -19,6 +19,7 @@
 #include <QSocketNotifier>
 #include <QStandardPaths>
 #include <csignal>
+#include <cstdlib>
 #include <unistd.h>
 
 namespace {
@@ -53,6 +54,14 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setApplicationName("Trophy");
   // Notifications/tray/portal associations key on the desktop id.
   QApplication::setDesktopFileName(QStringLiteral("trophy"));
+
+  // Some users force these environment variables globally, which breaks VA-API
+  // driver auto-selection (libva then picks the wrong/missing driver) and can
+  // make EGL swaps never return under vsync. Clear them so capture/encoding
+  // can find the correct driver and is not stalled by forced vsync.
+  unsetenv("LIBVA_DRIVER_NAME");
+  unsetenv("__GL_SYNC_TO_VBLANK");
+  unsetenv("vblank_mode");
 
   // Create application
   TrophyBackend::Application app(argc, argv);

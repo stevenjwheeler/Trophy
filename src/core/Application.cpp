@@ -73,10 +73,47 @@ extern "C" {
 #include <libavutil/log.h>
 }
 #include <cstdio>
+#include <cstdlib>
 
 Q_LOGGING_CATEGORY(appLog, "trophy.app")
 
 namespace TrophyBackend {
+
+// NVIDIA's driver downclocks memory transfer rate while a process uses CUDA
+// (which NVENC does), hurting game framerate. Installing an application profile
+// with setting 0x166c5e=0 disables that behaviour for this binary. The profile
+// is user-local and harmless on non-NVIDIA systems.
+static void installNvidiaNoStablePerfLimitProfile() {
+  if (access("/proc/driver/nvidia/version", F_OK) != 0)
+    return;
+
+  const char *home = std::getenv("HOME");
+  if (!home)
+    return;
+
+  QDir dir(QString::fromUtf8(home) + "/.nv/nvidia-application-profiles-rc.d");
+  if (!dir.exists() && !dir.mkpath("."))
+    return;
+
+  QFile file(dir.filePath("10-trophy-cuda-no-stable-perf-limit"));
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    return;
+
+  static const char *profile =
+      "{\n"
+      "    \"profiles\": [\n"
+      "        {\n"
+      "            \"name\": \"TrophyCudaNoStablePerfLimit\",\n"
+      "            \"settings\": [\"0x166c5e\", 0]\n"
+      "        }\n"
+      "    ],\n"
+      "    \"rules\": [\n"
+      "        { \"pattern\": \"trophy\", \"profile\": \"TrophyCudaNoStablePerfLimit\" }\n"
+      "    ]\n"
+      "}\n";
+  file.write(profile);
+  file.close();
+}
 
 Application::Application(int &argc, char **argv)
     : QApplication(argc, argv) {}
@@ -180,6 +217,9 @@ bool Application::initialize() {
 
   setApplicationVersion(versionStr);
   qCInfo(appLog) << "Initializing Trophy - Game recording and clipping" << versionStr;
+
+  // Best-effort: prevent NVIDIA driver from downclocking while NVENC is active.
+  installNvidiaNoStablePerfLimitProfile();
 
   initializeServices();
 
