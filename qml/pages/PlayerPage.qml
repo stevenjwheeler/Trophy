@@ -270,6 +270,7 @@ Page {
         objectName: "playerSnapshotDialog"
         title: qsTr("Save Screenshot")
         fileMode: FileDialog.SaveFile
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FileDialog.DontUseNativeDialog : 0
         nameFilters: [qsTr("PNG image (*.png)")]
         defaultSuffix: "png"
         onAccepted: {

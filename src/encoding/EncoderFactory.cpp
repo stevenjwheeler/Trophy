@@ -9,6 +9,8 @@
 #include "FFmpegEncoder.h"
 
 #include <QDebug>
+#include <QFile>
+#include <QString>
 #include <algorithm>
 #include <mutex>
 #include <qdebug.h>
@@ -224,19 +226,45 @@ bool EncoderFactory::probeVaapi() {
   bool success = false;
 
   if (codec) {
-    // Use a lambda or a simple block to manage the cleanup logic
-    [&]() {
+    // Candidate device paths. Auto-detect (nullptr) can pick the wrong render
+    // node on multi-GPU / multi-driver systems, so also try each render node
+    // explicitly. Log every attempt so failures are diagnosable.
+    QStringList candidates;
+    candidates << QString(); // nullptr -> let libva/FFmpeg auto-detect
+    for (int i = 128; i < 136; ++i) {
+      QString path = QString("/dev/dri/renderD%1").arg(i);
+      if (QFile::exists(path))
+        candidates << path;
+    }
+    if (QFile::exists("/dev/dri/card0"))
+      candidates << "/dev/dri/card0";
+
+    qDebug() << "VA-API probe: LIBVA_DRIVER_NAME="
+             << qgetenv("LIBVA_DRIVER_NAME")
+             << "LIBVA_DRIVERS_PATH=" << qgetenv("LIBVA_DRIVERS_PATH");
+
+    for (const QString &devicePath : candidates) {
+      const char *dev =
+          devicePath.isEmpty() ? nullptr : devicePath.toUtf8().constData();
+
       AVBufferRef *hwDeviceCtx = nullptr;
-      if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI, nullptr,
-                                 nullptr, 0) < 0) {
-        qDebug() << "VA-API probe failed: no usable VA-API device found";
-        return;
+      int hwRc = av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_VAAPI,
+                                        dev, nullptr, 0);
+      if (hwRc < 0) {
+        qDebug() << "VA-API probe: device"
+                 << (devicePath.isEmpty() ? QStringLiteral("<auto>")
+                                          : devicePath)
+                 << "av_hwdevice_ctx_create failed, rc=" << hwRc;
+        if (hwDeviceCtx)
+          av_buffer_unref(&hwDeviceCtx);
+        continue;
       }
 
       AVCodecContext *ctx = avcodec_alloc_context3(codec);
       if (!ctx) {
+        qDebug() << "VA-API probe: avcodec_alloc_context3 failed";
         av_buffer_unref(&hwDeviceCtx);
-        return;
+        continue;
       }
 
       ctx->width = 1920;
@@ -248,7 +276,8 @@ bool EncoderFactory::probeVaapi() {
       // Create a minimal hardware frames context
       AVBufferRef *hw_frames_ref = av_hwframe_ctx_alloc(hwDeviceCtx);
       if (hw_frames_ref) {
-        AVHWFramesContext *frames_ctx = (AVHWFramesContext *)(hw_frames_ref->data);
+        AVHWFramesContext *frames_ctx =
+            (AVHWFramesContext *)(hw_frames_ref->data);
         frames_ctx->format = AV_PIX_FMT_VAAPI;
         frames_ctx->sw_format = AV_PIX_FMT_NV12;
         frames_ctx->width = ctx->width;
@@ -259,14 +288,37 @@ bool EncoderFactory::probeVaapi() {
           ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
           if (avcodec_open2(ctx, codec, nullptr) >= 0) {
             success = true;
+            qDebug() << "VA-API probe: device"
+                     << (devicePath.isEmpty() ? QStringLiteral("<auto>")
+                                              : devicePath)
+                     << "succeeded";
+          } else {
+            qDebug() << "VA-API probe: device"
+                     << (devicePath.isEmpty() ? QStringLiteral("<auto>")
+                                              : devicePath)
+                     << "avcodec_open2 failed";
           }
+        } else {
+          qDebug() << "VA-API probe: device"
+                   << (devicePath.isEmpty() ? QStringLiteral("<auto>")
+                                            : devicePath)
+                   << "av_hwframe_ctx_init failed";
         }
         av_buffer_unref(&hw_frames_ref);
+      } else {
+        qDebug() << "VA-API probe: device"
+                 << (devicePath.isEmpty() ? QStringLiteral("<auto>")
+                                          : devicePath)
+                 << "av_hwframe_ctx_alloc failed";
       }
 
       avcodec_free_context(&ctx);
       av_buffer_unref(&hwDeviceCtx);
-    }();
+
+      // Stop trying once a device succeeds.
+      if (success)
+        break;
+    }
   }
 
   qDebug() << "VA-API is" << (success ? "available" : "not available");

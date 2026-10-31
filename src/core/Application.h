@@ -42,6 +42,7 @@ class ReplayManager;
 class GlobalShortcutManager;
 class ControlServer;
 class DiscordPresence;
+class DesktopIntegration;
 } // namespace TrophyBackend
 
 namespace TrophyBackend {
@@ -61,6 +62,7 @@ class Application : public QApplication {
   Q_PROPERTY(bool canStartRecording READ canStartRecording NOTIFY recordingAvailabilityChanged)
   Q_PROPERTY(QString recordingPhase READ recordingPhase NOTIFY recordingStateChanged)
   Q_PROPERTY(bool trayAvailable READ isTrayAvailable NOTIFY trayAvailabilityChanged)
+  Q_PROPERTY(bool useNativeDialogs READ useNativeDialogs NOTIFY useNativeDialogsChanged)
   Q_PROPERTY(bool suppressNextStorageNotification READ suppressNextStorageNotification WRITE setSuppressNextStorageNotification NOTIFY suppressNextStorageNotificationChanged)
   Q_PROPERTY(bool vulkanLayerRegistered READ vulkanLayerRegistered NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimAvailable READ glShimAvailable NOTIFY detectionStatusChanged)
@@ -125,6 +127,7 @@ public:
 
   // System tray (close-to-tray, start minimized, tray quit)
   bool isTrayAvailable() const;
+  bool useNativeDialogs() const;
   // Called from QML onClosing: hides to tray when enabled, else false so
   // the default close/confirm flow runs.
   Q_INVOKABLE bool minimizeToTray();
@@ -168,6 +171,7 @@ signals:
   void currentGameChanged();
   void suppressNextStorageNotificationChanged();
   void trayAvailabilityChanged();
+  void useNativeDialogsChanged();
   void detectionStatusChanged();
   void fatalError(const QString &message);
   void updateDialogRequested();
@@ -214,6 +218,7 @@ private:
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
   std::unique_ptr<UpdateInstaller> m_updateInstaller;
+  std::unique_ptr<DesktopIntegration> m_desktopIntegration;
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
   std::unique_ptr<PreviewCache> m_previewCache;

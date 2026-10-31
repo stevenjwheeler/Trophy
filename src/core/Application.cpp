@@ -44,6 +44,7 @@
 #include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
 #include "InstallInfo.h"
+#include "DesktopIntegration.h"
 #include "UpdateChecker.h"
 #include "UpdateInstaller.h"
 
@@ -458,6 +459,11 @@ void Application::initializeServices() {
       QCoreApplication::applicationVersion());
 
   m_updateInstaller = std::make_unique<UpdateInstaller>(this);
+  m_desktopIntegration = std::make_unique<DesktopIntegration>(this);
+  if (m_desktopIntegration) {
+    connect(m_desktopIntegration.get(), &DesktopIntegration::integrationChanged,
+            this, &Application::useNativeDialogsChanged);
+  }
   const QByteArray forceFail = qgetenv("TROPHY_FORCE_FAIL_UPDATE");
   if (!forceFail.isEmpty() && forceFail != "0")
     m_updateInstaller->setForceFail(true);
@@ -560,6 +566,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("replayManager", m_replayManager.get());
   context->setContextProperty("updateChecker", m_updateChecker.get());
   context->setContextProperty("updateInstaller", m_updateInstaller.get());
+  context->setContextProperty("desktopIntegration", m_desktopIntegration.get());
   context->setContextProperty("installKind",
                              static_cast<int>(InstallInfo::detect()));
 }
@@ -1553,6 +1560,18 @@ void Application::setSuppressNextStorageNotification(bool suppress) {
 
 bool Application::isTrayAvailable() const {
   return m_trayManager && m_trayManager->isAvailable();
+}
+
+bool Application::useNativeDialogs() const {
+  // Use the host's native (portal) dialogs when the app is registered
+  // (integrated AppImage or a native install). Fall back to Qt's own
+  // dialog when not registered, where the portal dialog is broken in
+  // empty folders.
+  if (!m_desktopIntegration)
+    return true;
+  if (!m_desktopIntegration->isAppImage())
+    return true;
+  return m_desktopIntegration->isIntegrated();
 }
 
 QObject *Application::qmlRootWindow() const {

@@ -264,6 +264,7 @@ set(CORE_SOURCES
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
     src/core/InstallInfo.cpp
+    src/core/DesktopIntegration.cpp
     src/core/UpdateChecker.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowService.cpp

@@ -3,7 +3,7 @@
 set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
-export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$APPDIR/usr/lib"
 case "${1:-}" in
     --trophy-test-inventory)
         cat "$APPDIR/usr/share/trophy/diagnostic-tests.json"

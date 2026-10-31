@@ -30,9 +30,9 @@ The matching downloaded file should report `OK`; entries for packages you did no
 
 - A **Wayland** desktop session. Native Wayland and XWayland games can be captured; an X11 desktop session cannot.
 - **PipeWire**, **xdg-desktop-portal**, and a suitable compositor-specific portal backend.
-- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported.
+- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported. VA-API additionally requires the host `libva` (and a matching VA driver such as `radeonsi`/`iHD`); the AppImage deliberately uses the host's `libva` rather than bundling one, so a host/driver version mismatch cannot break VA-API detection.
 
-The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
+The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, desktop portal services, and libva for VA-API. It is not a guarantee of compatibility with every Linux distribution.
 
 If the captured window changes size, Trophy keeps the recording's output canvas fixed, fitting the picture with black bars as needed. Supported NVIDIA and VA-API paths perform resize work on the GPU; unsupported DMA-BUF imports can request shared-memory fallback. Software encoding uses shared-memory capture. VA-API resize is implemented but still needs real AMD/Intel hardware validation.
 

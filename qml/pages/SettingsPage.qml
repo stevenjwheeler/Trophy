@@ -1429,6 +1429,42 @@ Page {
 
                 }
 
+                // ================= DESKTOP INTEGRATION =================
+                SectionCard {
+                    id: desktopIntegrationCard
+                    visible: desktopIntegration && desktopIntegration.isAppImage
+                    sectionTitle: qsTr("Desktop Integration")
+                    iconSource: "qrc:/icons/settings.svg"
+                    description: qsTr("Registers Trophy with your desktop (AppImage only). Improves file dialogs and global shortcuts.")
+
+                    SettingRow {
+                        label: qsTr("Status")
+                        help: qsTr("Whether Trophy is registered as a desktop application with your portal.")
+
+                        Label {
+                            Layout.alignment: Qt.AlignVCenter
+                            text: (desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Integrated") : qsTr("Not integrated")
+                            color: (desktopIntegration && desktopIntegration.isIntegrated) ? Theme.successColor : Theme.textSecondaryColor
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Integrate")
+                        help: qsTr("Copies Trophy to a stable location and creates a desktop entry. Only needed for AppImage builds.")
+
+                        TrophyButton {
+                            Layout.alignment: Qt.AlignVCenter
+                            text: (desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
+                            enabled: desktopIntegration && desktopIntegration.isAppImage
+                            onClicked: {
+                                if (desktopIntegration)
+                                    desktopIntegration.integrate();
+                            }
+                        }
+                    }
+                }
+
                 // --- FOOTER ACTIONS ---
                 RowLayout {
                     Layout.fillWidth: true
@@ -1480,6 +1516,7 @@ Page {
         id: folderDialog
 
         title: qsTr("Select Recordings Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         onAccepted: {
             if (settingsManager)
                 settingsManager.recordingsPath = selectedFolder.toLocalFile();
@@ -1490,6 +1527,7 @@ Page {
         id: replayFolderDialog
 
         title: qsTr("Select Clip Cache Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         onAccepted: {
             if (settingsManager)
                 settingsManager.replayCachePath = selectedFolder.toLocalFile();

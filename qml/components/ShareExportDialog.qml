@@ -145,6 +145,7 @@ TrophyDialog {
         id: destinationPicker
         objectName: "shareDestinationPicker"
         title: qsTr("Choose export folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         onAccepted: {
             const path = root.exporter.localFolderPath(selectedFolder);
             if (path !== "") {

@@ -4,5 +4,10 @@
 set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
-export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Prefer host libraries (e.g. a newer FFmpeg/libva matching the host's mesa)
+# over the bundled ones, falling back to the bundle when the host lacks a
+# compatible version. Host directories are listed first; the bundled dir is
+# last-resort. libva is deliberately not bundled (see packaging) so it always
+# resolves to the host's version.
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$APPDIR/usr/lib"
 exec "$APPDIR/usr/bin/trophy" "$@"

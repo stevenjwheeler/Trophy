@@ -166,10 +166,11 @@ jobs:
           export EXTRA_PLATFORM_PLUGINS
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
+            --exclude-library 'libva*.so*' \
             --desktop-file packaging/trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --exclude-library 'libva*.so*' --output appimage
           images=(Trophy*.AppImage)
           test "${#images[@]}" -eq 1
           chmod +x "${images[0]}"

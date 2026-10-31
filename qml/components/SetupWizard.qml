@@ -867,6 +867,29 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: Theme.spacingMedium // Gap between toggle boxes and tip box
 
+                                    // Box 0: Desktop integration (AppImage only)
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spacingMedium
+                                        visible: desktopIntegration && desktopIntegration.isAppImage
+                                        TrophyButton {
+                                            text: (desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
+                                            onClicked: if (desktopIntegration) desktopIntegration.integrate()
+                                        }
+                                        ColumnLayout {
+                                            spacing: 0
+                                            Layout.fillWidth: true
+                                            Label { text: qsTr("Desktop integration"); font.weight: Font.Bold; color: Theme.textColor }
+                                            Label {
+                                                text: qsTr("Registers Trophy with your desktop for working file dialogs and shortcuts.");
+                                                font.pixelSize: Theme.fontSizeSmall;
+                                                color: Theme.textSecondaryColor;
+                                                wrapMode: Text.WordWrap;
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+
                                     // Box 1: Enable Auto-Record
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -947,6 +970,7 @@ Rectangle {
     FolderDialog {
         id: folderDialog
         title: qsTr("Select Recordings Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         currentFolder: settingsManager ? recordingLibrary.localFileUrl(settingsManager.recordingsPath) : ""
         onAccepted: {
             var path = selectedFolder.toLocalFile();
