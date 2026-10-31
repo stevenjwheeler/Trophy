@@ -13,7 +13,6 @@
 class PresenceUiApp : public QObject {
   Q_OBJECT
   Q_PROPERTY(bool vulkanLayerRegistered READ no CONSTANT)
-  Q_PROPERTY(bool glShimAvailable READ no CONSTANT)
   Q_PROPERTY(bool trayAvailable READ no CONSTANT)
 public:
   bool no() const { return false; }

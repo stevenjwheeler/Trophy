@@ -50,11 +50,11 @@ Manual recording is also available. When no game is tracked, the Record action o
 
 ## Game detection
 
-Trophy combines optional Vulkan/OpenGL reporter events with game identity and window context. Detection is conservative: not every launcher, graphics API, or runtime is covered. Use the Games page to manage recognition and blocking rules.
+Trophy combines optional Vulkan reporter events with game identity and window context. Detection is conservative: not every launcher, graphics API, or runtime is covered. Use the Games page to manage recognition and blocking rules.
 
 Both reporters are opt-in. **Neither is certified compatible with anti-cheat systems.** Leave them disabled for protected games unless the game's policy permits them. Trophy does not bypass anti-cheat software.
 
-The OpenGL option writes **session-wide `LD_PRELOAD` configuration**, which can load its library into unrelated applications too. Enable/disable changes require a fresh login environment; already-running launchers can retain the old environment. Disabling reporting is not the same as preventing a library from loading. Host/Steam-runtime and 32-bit reporter compatibility are not universally established.
+OpenGL games do not need a reporter: Steam identity from the process environment/library plus the focused-fullscreen window is enough. A non-Steam OpenGL game is recognized when you add it to the Games page; Trophy does not load a preload library into unrelated applications. Host/Steam-runtime and 32-bit reporter compatibility are not universally established.
 
 See [reporter scope and packaging cautions](../packaging/README.md#reporter-scope-and-anti-cheat-caution) for more detail.
 

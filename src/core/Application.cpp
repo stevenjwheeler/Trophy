@@ -31,7 +31,6 @@
 #include "detection/GameDetectionService.h"
 #include "detection/GameIconProvider.h"
 #include "detection/GameWhitelist.h"
-#include "detection/GlShimEnrollment.h"
 #include "detection/VulkanLayer.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "encoding/EncoderFactory.h"
@@ -201,10 +200,6 @@ bool Application::initialize() {
     removeVulkanLayerRegistration();
     m_vulkanLayerRegistered = false;
   }
-  // A portable bundle's old mount path may have vanished. Refresh only a
-  // previously opted-in GL enrollment; default-off installs remain untouched.
-  if (!GlShimEnrollment::refreshEnrolledBundle())
-    qCWarning(appLog) << "Could not refresh the opted-in GL shim enrollment";
   emit detectionStatusChanged();
   registerQmlTypes();
 
@@ -1780,32 +1775,6 @@ void Application::syncAutostartFile() {
           QString::fromUtf8(qgetenv("APPIMAGE")))) {
     qCWarning(appLog) << "Failed to sync autostart entry";
   }
-}
-
-bool Application::glShimAvailable() const {
-  return !GlShimEnrollment::libraryPath().isEmpty();
-}
-
-bool Application::glShimEnrolled() const {
-  return GlShimEnrollment::isEnrolled();
-}
-
-bool Application::glShimActive() const {
-  return GlShimEnrollment::isActiveInCurrentSession();
-}
-
-bool Application::setGlShimEnrolled(bool enrolled) {
-  const bool ok = GlShimEnrollment::setEnrolled(enrolled);
-  emit detectionStatusChanged();
-  return ok;
-}
-
-int Application::glHelperVersion() const {
-  return GlShimEnrollment::helperVersion();
-}
-
-int Application::glBundledHelperVersion() const {
-  return GlShimEnrollment::bundledHelperVersion();
 }
 
 int Application::vulkanBundledHelperVersion() const {

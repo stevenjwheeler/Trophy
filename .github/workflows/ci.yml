@@ -372,7 +372,6 @@ jobs:
         run: |
           python3 packaging/check_reporter_runtimes.py \
             "$RUNNER_TEMP/reporters$BITS/libtrophy_layer.so" \
-            "$RUNNER_TEMP/reporters$BITS/libtrophy_gl_shim.so" \
             --execute-trusted-fixtures --require-host-pass \
             --output "$RUNNER_TEMP/reporters$BITS-runtime.json"
       - name: Upload reporter test diagnostics

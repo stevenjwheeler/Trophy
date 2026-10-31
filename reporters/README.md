@@ -1,9 +1,9 @@
 # Standalone architecture-specific reporters
 
-This builds the **existing** Vulkan layer and GL shim without Qt, FFmpeg, a
-Vulkan runtime library, or the recorder application. The Vulkan loader supplies
-downstream entry points; headers alone are sufficient to build the layer.
-The socket path/protocol, opt-out and hook surface are unchanged.
+This builds the **existing** Vulkan layer without Qt, FFmpeg, a Vulkan runtime
+library, or the recorder application. The Vulkan loader supplies downstream
+entry points; headers alone are sufficient to build the layer. The socket
+path/protocol, opt-out and hook surface are unchanged.
 
 Native build (C/C++ compiler, CMake, Vulkan headers and matching GoogleTest):
 
@@ -44,20 +44,17 @@ these files under `lib/trophy/reporters32` or `reporters64`, independent of the
 distribution's system linker layout. Building/installing alone never enrolls
 anything in loader directories or writes global preload settings.
 
-To include a verified i386 pair in a normal x86_64 app install/AppImage, configure
+To include a verified i386 layer in a normal x86_64 app install/AppImage, configure
 the main build with `-DTROPHY_REPORTERS32_DIR=/path/to/reporters32-build`. It checks
-both ELF headers, copies them into the dev layout and installs them under
+the ELF header, copies it into the dev layout and installs it under
 `lib/trophy/reporters32`. Ordinary builds still require no 32-bit toolchain.
 Native packages built with this option also need compatible i386 runtime
 dependencies; don't suppress the package manager's dependency checks.
 
-**The existing global reporter controls remain the controls. There is no
-per-game OpenGL option or per-game configuration requirement.** After installing
-a companion-enabled build, explicitly re-enabling Vulkan publishes both entries
-in one atomic manifest; explicitly re-enabling GL publishes one durable global
-preload path that the glibc loader resolves separately for ELF32/ELF64 programs.
-Existing legacy enrollments stay legacy during startup refresh. GL changes
-still need a fresh login; already-running programs retain their environment.
+**The global reporter control remains the Vulkan control.** There is no
+per-game OpenGL option or per-game configuration requirement; the OpenGL
+preload shim was retired. Explicitly enabling Vulkan publishes the layer
+manifest; disabling removes it. Already-running games retain their environment.
 
 The GL path uses `$$PLATFORM` in environment.d so the environment generator hands
 a literal `$PLATFORM` to the loader. It selects immutable architecture-specific

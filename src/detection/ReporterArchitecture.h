@@ -35,8 +35,7 @@ inline QString companion32(const QString &primary) {
   const QString directory = info.absolutePath();
   const QString name = info.fileName();
   QStringList candidates{directory + "/reporters32/" + name};
-  if (QFileInfo(directory).fileName() == "gl_shim" ||
-      QFileInfo(directory).fileName() == "vulkan_layer")
+  if (QFileInfo(directory).fileName() == "vulkan_layer")
     candidates << QDir::cleanPath(directory + "/../reporters32/" + name);
   for (const auto &libdir : {QString("lib"), QString("lib64"), QString("lib/x86_64-linux-gnu")}) {
     const QString suffix = '/' + libdir + "/trophy/" + name;

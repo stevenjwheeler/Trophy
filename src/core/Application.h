@@ -63,11 +63,6 @@ class Application : public QApplication {
   Q_PROPERTY(bool trayAvailable READ isTrayAvailable NOTIFY trayAvailabilityChanged)
   Q_PROPERTY(bool suppressNextStorageNotification READ suppressNextStorageNotification WRITE setSuppressNextStorageNotification NOTIFY suppressNextStorageNotificationChanged)
   Q_PROPERTY(bool vulkanLayerRegistered READ vulkanLayerRegistered NOTIFY detectionStatusChanged)
-  Q_PROPERTY(bool glShimAvailable READ glShimAvailable NOTIFY detectionStatusChanged)
-  Q_PROPERTY(bool glShimEnrolled READ glShimEnrolled NOTIFY detectionStatusChanged)
-  Q_PROPERTY(bool glShimActive READ glShimActive NOTIFY detectionStatusChanged)
-  Q_PROPERTY(int glHelperVersion READ glHelperVersion NOTIFY detectionStatusChanged)
-  Q_PROPERTY(int glBundledHelperVersion READ glBundledHelperVersion NOTIFY detectionStatusChanged)
   Q_PROPERTY(int vulkanBundledHelperVersion READ vulkanBundledHelperVersion NOTIFY detectionStatusChanged)
   Q_PROPERTY(int vulkanHelperVersion READ vulkanHelperVersion NOTIFY detectionStatusChanged)
 
@@ -111,14 +106,8 @@ public:
   // Detection-component status for the setup wizard (live properties).
   bool vulkanLayerRegistered() const { return m_vulkanLayerRegistered; }
   Q_INVOKABLE bool setVulkanLayerEnabled(bool enabled);
-  bool glShimAvailable() const;
-  bool glShimEnrolled() const;
-  bool glShimActive() const;
-  int glHelperVersion() const;
-  int glBundledHelperVersion() const;
   int vulkanBundledHelperVersion() const;
   int vulkanHelperVersion() const;
-  Q_INVOKABLE bool setGlShimEnrolled(bool enrolled);
 
   bool suppressNextStorageNotification() const;
   void setSuppressNextStorageNotification(bool suppress);

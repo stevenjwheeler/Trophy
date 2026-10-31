@@ -72,7 +72,7 @@ Replace `<version>` with the downloaded version. The setup wizard walks you thro
 
 ## A few things to know
 
-- Game detection's Vulkan and OpenGL reporters are optional. **Anti-cheat compatibility is not guaranteed.** The OpenGL option uses session-wide preload configuration and requires a fresh login environment; [read the setup guidance](docs/getting-started.md#game-detection) before enabling it.
+- Game detection's Vulkan reporter is optional. **Anti-cheat compatibility is not guaranteed.** OpenGL games are detected from their window and Steam identity (or an explicit Games-page rule); [read the setup guidance](docs/getting-started.md#game-detection).
 - Game audio falls back to the desktop mix when an application-specific source is unavailable. That mix can include other apps; [check your audio setup](docs/user-guide.md#audio).
 - MP4 export is whole-file and uses software encoding. Snip a clip first to share a shorter range. Size targets are approximate, and HDR-to-SDR conversion is not supported.
 

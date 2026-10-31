@@ -182,38 +182,21 @@ library will be accepted. Keep optional reporters off for protected games
 unless the game's policy explicitly permits them. Trophy does not inspect,
 hide from, or bypass anti-cheat software.
 
-The current OpenGL toggle writes **session-wide** `LD_PRELOAD` configuration:
-it loads the shim into unrelated dynamically linked programs, not just games.
-Turning it off affects future login environments; already-running launchers
-and their children can retain the old preload. Log out and back in after
-disabling. `DISABLE_TROPHY_DETECTION=1` stops shim reporting, but cannot prevent
-the dynamic loader from loading a library named in `LD_PRELOAD`.
+The OpenGL preload shim has been retired: it was loaded into every
+dynamically linked application, required a fresh login to change, and only
+added early detection for non-Steam OpenGL games. OpenGL games are now covered
+by window + Steam identity (or an explicit Games-page rule). The remaining
+Vulkan layer is still optional and not certified for anti-cheat-protected
+games; keep it off unless the game's policy permits it.
 
-Prefer leaving global enrollment off and, for a known-compatible native game,
-scoping preload to its launch command (example for the native `~/.local`
-64-bit install):
+Remaining reporter verification includes real loader/driver execution, Vulkan
+fork/unload and allocation/thread-failure paths, and host/Steam ABI tests.
+Fake native-operation tests do not establish these.
 
-```sh
-env LD_PRELOAD="$HOME/.local/lib/trophy/libtrophy_gl_shim.so${LD_PRELOAD:+:$LD_PRELOAD}" /absolute/path/to/game
-```
-
-This also affects that game's child processes. It is not an anti-cheat safety
-guarantee or a validated Steam/Proton/32-bit recipe. AppImage mount paths must
-not be used as persistent launch settings. A future per-game enrollment UI
-should replace the broad session toggle, with explicit migration/consent,
-durable paths, loader-path validation and architecture/runtime checks.
-
-Shim coverage deliberately remains limited to exported GLX/EGL/SDL swap
-functions. Games resolving entry points privately may bypass it; do not add
-`dlsym`/get-proc-address interception simply to increase coverage without a
-separate compatibility review. Remaining reporter verification includes real
-loader/driver execution, Vulkan fork/unload and allocation/thread-failure paths,
-and host/Steam ABI tests. Fake native-operation tests do not establish these.
-
-Run without loading the reporters or starting a game:
+Run without loading the reporter or starting a game:
 
 ```sh
-python3 packaging/check_reporter_abi.py /path/libtrophy_layer.so /path/libtrophy_gl_shim.so
+python3 packaging/check_reporter_abi.py /path/libtrophy_layer.so
 python3 packaging/check_reporter_abi.py --sysroot /path/materialized-sysroot /path/libtrophy_layer.so
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ReporterAbi.py
 ```

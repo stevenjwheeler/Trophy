@@ -78,7 +78,7 @@ def evaluate(name, root, reporters, probes, execute):
                 row["fixture"] = {"status": "unavailable", "reason": "no unique checked runtime loader"}
                 continue
             directories = sorted({str(Path(value).parent) for value in selected.values()})
-            helper = "gl" if "gl_shim" in path.name else "vulkan"
+            helper = "vulkan"
             command = [loaders[0], "--inhibit-cache", "--library-path", ":".join(directories), str(probe), str(path), helper]
             run = subprocess.run(command, env=clean_environment(probe.parent), capture_output=True,
                                  text=True, timeout=20)

@@ -10,8 +10,8 @@ affected helper when changing it:
 
 - KWin: `KPlugin.Version` in `resources/kwin/trophy-monitor/metadata.json`.
 - GNOME: `version` in `resources/gnome/metadata.json`.
-- Vulkan/OpenGL: the `TROPHY_HELPER_VERSION` data marker in each detector's own
-  `src/vulkan_layer/trophy_layer.cpp` / `src/gl_shim/trophy_gl_shim.c` source.
+- Vulkan: the `TROPHY_HELPER_VERSION` data marker in
+  `src/vulkan_layer/trophy_layer.cpp`.
 
 These revisions are separate from the application version and do not change the
 frozen detection socket protocol. Settings reads installed script metadata and
@@ -207,7 +207,7 @@ It checks both reporter and probe dependency closures before opt-in execution:
 
 ```bash
 python3 packaging/check_reporter_runtimes.py \
-    /path/to/libtrophy_layer.so /path/to/libtrophy_gl_shim.so \
+    /path/to/libtrophy_layer.so \
     --runtime example=/path/to/materialized/sysroot \
     --execute-trusted-fixtures --output /tmp/opencode/reporter-runtimes.json
 ```

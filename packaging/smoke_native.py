@@ -56,12 +56,12 @@ def check_tree(root):
     # Qt/CMake install policy legitimately installs libraries as 0644.
     elfs = [binary, required(prefix, libdir / "libTrophy.so")]
     elfs += [required(prefix, libdir / "trophy" / name)
-             for name in ("libtrophy_layer.so", "libtrophy_gl_shim.so")]
+             for name in ("libtrophy_layer.so",)]
     companion_dir = prefix / "lib/trophy/reporters32"
     if companion_dir.exists() or companion_dir.is_symlink():
         if companion_dir.is_symlink() or not companion_dir.is_dir():
             raise RuntimeError("Invalid i386 companion directory")
-        for name in ("libtrophy_layer.so", "libtrophy_gl_shim.so"):
+        for name in ("libtrophy_layer.so",):
             companion = required(prefix, Path("lib/trophy/reporters32") / name)
             with companion.open("rb") as file:
                 header = file.read(20)

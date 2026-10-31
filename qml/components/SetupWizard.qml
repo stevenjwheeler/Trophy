@@ -440,41 +440,7 @@ Rectangle {
                                     Label { text: qsTr("Notices games starting Vulkan graphics and notifies Trophy to start recording, including Proton titles."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 }
                             }
-                            // Module 3: OpenGL detection shim (opt-in)
-                            Rectangle {
-                                Layout.alignment: Qt.AlignHCenter
-                                Layout.preferredWidth: 500
-                                implicitHeight: modGlCol.height + (Theme.spacingMedium * 2)
-                                color: Theme.withOpacity(Theme.textColor, 0.05)
-                                radius: Theme.radiusMedium
-                                border.color: Theme.borderColor
-                                ColumnLayout {
-                                    id: modGlCol
-                                    anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Theme.spacingMedium; anchors.verticalCenter: parent.verticalCenter
-                                    spacing: Theme.spacingSmall
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: Theme.spacingMedium
-                                        enabled: app && app.glShimAvailable
-                                        Label { text: qsTr("3. OpenGL Detection"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Label { text: (app && app.glShimEnrolled) ? qsTr("Enrolled") : qsTr("Not enrolled"); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
-                                        TrophySwitch { checked: app ? app.glShimEnrolled : false; onToggled: if (app) app.setGlShimEnrolled(checked) }
-                                    }
-                                    Label {
-                                        textFormat: Text.StyledText
-                                        text: qsTr("Notices games starting OpenGL graphics and notifies Trophy to start recording. Loads into any OpenGL app and %1. Changes require logging out and back in.")
-                                              .arg(app && app.glShimEnrolled
-                                                   ? '<font color="' + Theme.cautionColor + '">' + qsTr("may cause issues with anti-cheat games") + '</font>'
-                                                   : qsTr("may cause issues with anti-cheat games"))
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.textSecondaryColor
-                                        wrapMode: Text.WordWrap
-                                        Layout.fillWidth: true
-                                        opacity: (app && app.glShimAvailable) ? 1.0 : 0.5
-                                    }
-                                    Label { visible: app && !app.glShimAvailable; text: qsTr("OpenGL detection helper not found in this install."); font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
-                                }
-                            }
+                            // Module 3: removed (OpenGL shim retired)
                             Item { Layout.fillHeight: true }
                         }
                     }

@@ -86,7 +86,6 @@ def smoke(image, log_path):
                     for pattern in (
                         "usr/bin/qt.conf", "usr/lib/libTrophy.so",
                         "usr/lib/**/trophy/libtrophy_layer.so",
-                        "usr/lib/**/trophy/libtrophy_gl_shim.so",
                         "usr/plugins/platforms/libqwayland*.so",
                         "usr/plugins/platforms/libqoffscreen.so",
                         "usr/plugins/wayland-shell-integration/*.so",

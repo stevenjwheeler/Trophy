@@ -11,7 +11,7 @@ cmake -S /source -B /work/build -GNinja -DCMAKE_BUILD_TYPE=Release \
     -DQT_QML_GENERATE_QMLLS_INI=OFF \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 read -ra tests <<< "$(PYTHONPATH=/source/packaging python3 -c 'from build_friend_bundle import TESTS; print(" ".join(TESTS))')"
-cmake --build /work/build --parallel 2 --target TrophyApp trophy_layer trophy_gl_shim "${tests[@]}"
+cmake --build /work/build --parallel 2 --target TrophyApp trophy_layer "${tests[@]}"
 DESTDIR=/work/stage cmake --install /work/build
 for tool in linuxdeploy linuxdeploy-plugin-qt; do
     wget --tries=3 --waitretry=5 -q -O "/work/tools/$tool-x86_64.AppImage" \

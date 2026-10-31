@@ -203,8 +203,8 @@ endif()
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
      DESTINATION "${CMAKE_BINARY_DIR}/kwin-scripts")
 
-# Detection shims (Vulkan layer + OpenGL LD_PRELOAD shim).
-# Both report to /tmp/trophy-detection.sock with the same START/STOP protocol.
+# Detection reporter (Vulkan layer). It reports to
+# /tmp/trophy-detection.sock with the same START/STOP protocol.
 # NOTE: IEncoder has Q_OBJECT, so IEncoder.h (not a .cpp) is listed in test
 # target sources wherever FFmpegEncoder.cpp is compiled — AUTOMOC generates
 # the metaobject from the header. Same for the main Trophy target via
@@ -223,17 +223,6 @@ set_target_properties(trophy_layer PROPERTIES
     OUTPUT_NAME "trophy_layer"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/vulkan_layer"
 )
-
-add_library(trophy_gl_shim SHARED src/gl_shim/trophy_gl_shim.c)
-target_link_libraries(trophy_gl_shim PRIVATE dl)
-set_target_properties(trophy_gl_shim PROPERTIES
-    OUTPUT_NAME "trophy_gl_shim"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gl_shim"
-    C_STANDARD 11
-)
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(trophy_gl_shim PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
 
 # Generate the implicit-layer JSON next to the built Vulkan layer so
 # Application::ensureVulkanLayerRegistered() finds it in dev builds.
@@ -309,7 +298,7 @@ set(DETECTION_SOURCES
 )
 
 
-list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GlShimEnrollment.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
+list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
 
 set(LIBRARY_SOURCES
     src/library/ShareExportEngine.cpp
@@ -394,7 +383,7 @@ set(DETECTION_HEADERS
 )
 
 
-list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h src/detection/KWinBackend.h src/detection/WindowInfo.h src/detection/GlShimEnrollment.h src/detection/GnomeBackend.h src/detection/HyprlandBackend.h src/detection/SwayBackend.h src/detection/VulkanLayer.h)
+list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h src/detection/KWinBackend.h src/detection/WindowInfo.h src/detection/GnomeBackend.h src/detection/HyprlandBackend.h src/detection/SwayBackend.h src/detection/VulkanLayer.h)
 
 set(LIBRARY_HEADERS
     src/library/ShareExporter.h
@@ -626,7 +615,7 @@ install(FILES resources/icons/default-apps/README.md LICENSE
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
 )
 
-install(TARGETS trophy_layer trophy_gl_shim
+install(TARGETS trophy_layer
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
 )
 
@@ -638,7 +627,7 @@ if(TROPHY_REPORTERS32_DIR)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
         message(FATAL_ERROR "i386 reporter companions require an x86_64 application build")
     endif()
-    foreach(name IN ITEMS libtrophy_layer.so libtrophy_gl_shim.so)
+    foreach(name IN ITEMS libtrophy_layer.so)
         set(reporter "${TROPHY_REPORTERS32_DIR}/${name}")
         if(NOT EXISTS "${reporter}" OR IS_DIRECTORY "${reporter}" OR IS_SYMLINK "${reporter}")
             message(FATAL_ERROR "Missing or symlinked i386 reporter: ${reporter}")
@@ -661,11 +650,9 @@ if(TROPHY_REPORTERS32_DIR)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/reporters32"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
-            "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
             "${CMAKE_BINARY_DIR}/reporters32"
         VERBATIM)
     install(FILES "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
-                  "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
         DESTINATION "lib/trophy/reporters32")
 endif()
 install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"

@@ -1200,8 +1200,8 @@ Page {
                     sectionTitle: qsTr("Detection Helpers")
                     iconSource: "qrc:/icons/puzzle.svg"
                     description: qsTr("Integration status at a glance. Graphics helpers are optional.")
-                    readonly property real statusWidth: Math.max(vulkanControls.badgeWidth, glControls.badgeWidth)
-                    readonly property real actionWidth: Math.max(vulkanHelperSwitch.implicitWidth, glHelperSwitch.implicitWidth)
+                    readonly property real statusWidth: vulkanControls.badgeWidth
+                    readonly property real actionWidth: vulkanHelperSwitch.implicitWidth
 
                     SettingRow {
                         label: qsTr("Game Window Helper (required)")
@@ -1271,42 +1271,6 @@ Page {
                                         settingsManager.vulkanLayerEnabled = checked;
                                     if (app)
                                         app.setVulkanLayerEnabled(checked);
-                                }
-                            }
-                        }
-                    }
-
-                    SettingRow {
-                        label: qsTr("OpenGL Detection")
-                        helpTextFormat: Text.StyledText
-                        help: (app && app.glShimAvailable)
-                              ? qsTr("Notices games starting OpenGL graphics and notifies Trophy to start recording. Loads into any OpenGL app and %1. Changes require logging out and back in.")
-                                .arg(app.glShimEnrolled
-                                     ? '<font color="' + Theme.cautionColor + '">' + qsTr("may cause issues with anti-cheat games") + '</font>'
-                                     : qsTr("may cause issues with anti-cheat games"))
-                              : qsTr("OpenGL detection helper not found in this install.")
-                        rowEnabled: app ? app.glShimAvailable : false
-                        showVersions: app && app.glShimAvailable
-                        bundledVersion: app ? app.glBundledHelperVersion : 0
-                        installedVersion: app ? app.glHelperVersion : 0
-                        helperInstalled: app && app.glShimEnrolled
-
-                        HelperControls {
-                            id: glControls
-                            objectName: "glHelperStatus"
-                            statusWidth: detectionHelpersCard.statusWidth
-                            actionWidth: detectionHelpersCard.actionWidth
-                            attention: !app || !app.glShimAvailable
-                            enrolled: app && app.glShimEnrolled
-                            text: attention ? qsTr("Unavailable") : (app.glShimEnrolled ? qsTr("Enrolled") : qsTr("Not enrolled"))
-
-                            TrophySwitch {
-                                id: glHelperSwitch
-                                anchors.right: parent.right
-                                checked: app ? app.glShimEnrolled : false
-                                onToggled: {
-                                    if (app)
-                                        app.setGlShimEnrolled(checked);
                                 }
                             }
                         }

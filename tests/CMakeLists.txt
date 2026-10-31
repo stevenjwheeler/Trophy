@@ -81,14 +81,6 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
     add_test(NAME DraftReleaseTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_DraftRelease.py")
-    set(multilib_preload_includes)
-    foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
-        list(APPEND multilib_preload_includes --qt-include "${directory}")
-    endforeach()
-    add_test(NAME MultilibPreloadTest.NativeLoaders
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_MultilibPreload.py"
-            --qt-library "$<TARGET_FILE:Qt6::Core>" ${multilib_preload_includes})
-    set_tests_properties(MultilibPreloadTest.NativeLoaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
     add_test(NAME ReporterAbiTest.StaticFixtures
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterAbi.py")
 endif()
@@ -816,25 +808,6 @@ if(TROPHY_DBUS_RUN_SESSION)
         COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- ${CMAKE_COMMAND} -E env
             TROPHY_PRIVATE_GNOME_TEST=1 $<TARGET_FILE:test_GnomeBackend>)
 endif()
-
-# --- GlShimEnrollment (conf-file round-trip; hermetic via env overrides) ---
-add_executable(test_GlShimEnrollment test_GlShimEnrollment.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GlShimEnrollment.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GlShimEnrollment.h
-)
-target_include_directories(test_GlShimEnrollment PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_GlShimEnrollment PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_GlShimEnrollment)
-
-add_executable(test_GlShimReporter test_GlShimReporter.cpp)
-target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
-gtest_discover_tests(test_GlShimReporter)
-
-add_executable(test_ReporterDlopen test_ReporterDlopen.cpp)
-target_compile_definitions(test_ReporterDlopen PRIVATE TROPHY_GL_SHIM_FILE="$<TARGET_FILE:trophy_gl_shim>")
-target_link_libraries(test_ReporterDlopen PRIVATE GTest::gtest_main dl)
-add_dependencies(test_ReporterDlopen trophy_gl_shim)
-gtest_discover_tests(test_ReporterDlopen)
 
 # --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
 add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp
