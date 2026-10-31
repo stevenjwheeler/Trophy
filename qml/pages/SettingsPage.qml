@@ -21,7 +21,13 @@ Page {
     // Refresh live choices on open; the voice picker retains the saved app
     // independently because apps publish audio streams on demand.
     onVisibleChanged: {
-        if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        if (!visible)
+            return
+        if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        // Another AppImage manager may have listed Trophy since launch: settle
+        // the menu-entry visibility when the page is opened.
+        if (typeof desktopIntegration !== "undefined" && desktopIntegration)
+            desktopIntegration.refreshVisibility()
     }
 
     property var scrollTargetCard: null
@@ -1484,6 +1490,23 @@ Page {
                     }
 
                     SettingRow {
+                        objectName: "desktopIntegrationRemoveRow"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated
+                        label: qsTr("Remove menu entry")
+                        help: qsTr("Deletes Trophy's desktop entry and stops it being recreated. Capture approvals and shortcuts then have no per-app identity.")
+
+                        TrophyButton {
+                            objectName: "desktopIntegrationRemoveButton"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: qsTr("Remove")
+                            onClicked: {
+                                if (typeof desktopIntegration !== "undefined" && desktopIntegration)
+                                    desktopIntegration.removeEntry();
+                            }
+                        }
+                    }
+
+                    SettingRow {
                         objectName: "desktopIntegrationRestartRow"
                         visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.restartRequired
                         label: qsTr("Restart")
@@ -1501,6 +1524,28 @@ Page {
                                     app.restartTrophy();
                             }
                         }
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationManagedNote"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0
+                        text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0)
+                              ? qsTr("Registered by %1. Trophy uses that launcher's identity, so no second menu entry is needed.").arg(desktopIntegration.managedEntry.split("/").pop())
+                              : ""
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationHiddenNote"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered && desktopIntegration.entryHidden
+                        text: qsTr("Another AppImage manager already lists Trophy, so no second menu entry is created. Launching from that entry still uses Trophy's identity.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
 
                     Label {

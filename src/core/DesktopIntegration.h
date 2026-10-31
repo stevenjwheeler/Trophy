@@ -38,6 +38,12 @@ class DesktopIntegration : public QObject {
     Q_PROPERTY(bool restartRequired READ restartRequired NOTIFY integrationChanged)
     Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
     Q_PROPERTY(QString desktopFilePath READ desktopFilePath CONSTANT)
+    // True when our entry is hidden from menus because another AppImage
+    // manager already lists Trophy (the entry still supplies the app id).
+    Q_PROPERTY(bool entryHidden READ entryHidden NOTIFY integrationChanged)
+    // Non-empty when the identity comes from another launcher's entry (Gear
+    // Lever / AppImageLauncher) rather than our own trophy.desktop.
+    Q_PROPERTY(QString managedEntry READ managedEntry NOTIFY integrationChanged)
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusMessageChanged)
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusMessageChanged)
 
@@ -79,6 +85,21 @@ public:
     static QString portalDesktopFile(const QString &dataHome = QString(),
                                      const QStringList &systemDataDirs = QStringList());
 
+    // First-launch install: write the entry before QGuiApplication exists so
+    // the identity applies to this very process, with no wizard step and no
+    // restart. No-op unless an AppImage, no entry yet, not opted out and no
+    // AppImage manager already supplies one.
+    static bool installEntryAtStartup(const QString &dataHome = QString(),
+                                      const QStringList &systemDataDirs = QStringList());
+
+    // The desktop id this process registers as: our stable "trophy" when such
+    // an entry exists, otherwise the entry that launched us (a manager's
+    // versioned entry), otherwise "trophy".
+    static QString effectiveDesktopId(const QString &dataHome = QString(),
+                                      const QStringList &systemDataDirs = QStringList());
+
+    bool entryHidden() const;
+    QString managedEntry() const;
     QString statusMessage() const;
     bool statusIsError() const;
 
@@ -86,6 +107,13 @@ public:
     // alone. Running a moved/renamed AppImage and integrating again repoints
     // the existing entry.
     Q_INVOKABLE bool integrate();
+    // Delete our entry and stop recreating it (Settings > Remove).
+    Q_INVOKABLE bool removeEntry();
+
+    // Keep NoDisplay in sync with competingLauncher(): called from integrate(),
+    // once at startup and when Settings opens, so adding or removing the other
+    // manager's entry brings the menu entry in line without a restart.
+    Q_INVOKABLE void refreshVisibility();
 
 signals:
     void integrationChanged();
@@ -96,14 +124,21 @@ private:
     QString dataHome() const;
     QStringList applicationsDirs() const;
     QString iconTargetPath() const;
-    QString desktopEntryContents(const QString &appImage) const;
+    QString desktopEntryContents(const QString &appImage, bool hidden) const;
+    // Another .desktop in the user's application dir already launches an
+    // AppImage called Trophy (Gear Lever / AppImageLauncher). Returns that
+    // entry's path, or empty.
+    QString competingLauncher() const;
     bool installIcon();
     void refreshCaches(const QString &applicationsDir, bool iconChanged) const;
     bool applyStatus(const QString &message, bool isError);
+    bool writeEntry(const QString &appImage);
+    static bool autoInstallEnabled();
 
     QString m_dataHome;
     QStringList m_systemDataDirs;
     bool m_startedRegistered = true;
+    bool m_entryHidden = false;
     // InstallInfo::detect() shells out for native installs; QML reads
     // isAppImage() for every dialog binding, so resolve it once.
     mutable int m_appImageCache = -1;

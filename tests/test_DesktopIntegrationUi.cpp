@@ -56,6 +56,7 @@ class FakeIntegration : public QObject {
   Q_PROPERTY(bool isRegistered READ isRegistered WRITE setRegistered NOTIFY stateChanged)
   Q_PROPERTY(bool restartRequired READ restartRequired WRITE setRestartRequired NOTIFY stateChanged)
   Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
+  Q_PROPERTY(QString managedEntry READ managedEntry CONSTANT)
   Q_PROPERTY(QString statusMessage READ statusMessage WRITE setStatusMessage NOTIFY statusChanged)
   Q_PROPERTY(bool statusIsError READ statusIsError WRITE setStatusIsError NOTIFY statusChanged)
 
@@ -75,6 +76,7 @@ public:
     emit stateChanged();
   }
   bool isRegistered() const { return m_isRegistered; }
+  QString managedEntry() const { return QString(); }
   QString appImagePath() const {
     return QStringLiteral("/home/deck/Applications/Trophy-0.9.7-x86_64.AppImage");
   }

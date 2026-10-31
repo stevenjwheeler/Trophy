@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 
 namespace TrophyBackend {
@@ -46,8 +47,56 @@ QString unescapeDesktopString(const QString &in) {
     return out;
 }
 
-// First Exec= argument of a desktop entry, unquoted. Empty when missing.
-QString execTarget(const QString &desktopPath) {
+// Split a desktop-entry Exec value into arguments, honouring double quotes and
+// backslash escapes. Enough for the entries app launchers write.
+QStringList splitExec(const QString &value) {
+    QStringList out;
+    QString current;
+    bool quoted = false;
+    bool have = false;
+    for (int i = 0; i < value.size(); ++i) {
+        const QChar c = value.at(i);
+        if (c == QLatin1Char('"')) {
+            quoted = !quoted;
+            have = true;
+            continue;
+        }
+        if (c == QLatin1Char('\\') && i + 1 < value.size()) {
+            current += value.at(++i);
+            have = true;
+            continue;
+        }
+        if (c.isSpace() && !quoted) {
+            if (have) {
+                out << current;
+                current.clear();
+                have = false;
+            }
+            continue;
+        }
+        current += c;
+        have = true;
+    }
+    if (have)
+        out << current;
+    return out;
+}
+
+bool looksLikeAssignment(const QString &token) {
+    const int eq = token.indexOf(QLatin1Char('='));
+    if (eq <= 0)
+        return false;
+    for (int i = 0; i < eq; ++i) {
+        const QChar c = token.at(i);
+        if (!(c.isLetterOrNumber() || c == QLatin1Char('_')))
+            return false;
+    }
+    return true;
+}
+
+// The program an entry launches. Handles the "env VAR=value program" form that
+// AppImage managers write, which a naive first-token read reports as "env".
+QString execProgram(const QString &desktopPath) {
     QFile f(desktopPath);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return QString();
@@ -55,16 +104,13 @@ QString execTarget(const QString &desktopPath) {
         const QString line = QString::fromUtf8(f.readLine()).trimmed();
         if (!line.startsWith(QStringLiteral("Exec=")))
             continue;
-        QString value = line.mid(5).trimmed();
-        if (value.startsWith(QLatin1Char('"'))) {
-            value.remove(0, 1);
-            const int end = value.lastIndexOf(QLatin1Char('"'));
-            if (end >= 0)
-                value.truncate(end);
-            return unescapeDesktopString(value);
-        }
-        const int space = value.indexOf(QLatin1Char(' '));
-        return space >= 0 ? value.left(space) : value;
+        QStringList tokens = splitExec(line.mid(5).trimmed());
+        int i = 0;
+        if (i < tokens.size() && QFileInfo(tokens.at(i)).fileName() == QStringLiteral("env"))
+            ++i;
+        while (i < tokens.size() && looksLikeAssignment(tokens.at(i)))
+            ++i;
+        return i < tokens.size() ? tokens.at(i) : QString();
     }
     return QString();
 }
@@ -139,15 +185,44 @@ QStringList applicationsDirsFor(const QString &dataHome, const QStringList &syst
 
 } // namespace
 
-QString DesktopIntegration::portalDesktopFile(const QString &dataHome,
-                                             const QStringList &systemDataDirs) {
+namespace {
+
+QString findEntry(const QString &id, const QString &dataHome, const QStringList &systemDataDirs) {
     const QStringList dirs = applicationsDirsFor(dataHome, systemDataDirs);
     for (const QString &dir : dirs) {
-        const QString candidate = QDir(dir).filePath(desktopFileName());
+        const QString candidate = QDir(dir).filePath(id + QStringLiteral(".desktop"));
         if (QFileInfo::exists(candidate))
             return candidate;
     }
     return QString();
+}
+
+} // namespace
+
+QString DesktopIntegration::effectiveDesktopId(const QString &dataHome,
+                                              const QStringList &systemDataDirs) {
+    // Our own stable entry always wins: it keeps the id stable across manager
+    // renames and updates.
+    if (!findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs).isEmpty())
+        return QStringLiteral("trophy");
+    // Otherwise reuse the launcher that started us (Gear Lever writes
+    // trophy.appimage_<version>.desktop and launches with this hint), so an
+    // install through a manager counts as registered without a second entry.
+    const QByteArray hint = qgetenv("GIO_LAUNCHED_DESKTOP_FILE");
+    if (!hint.isEmpty()) {
+        const QFileInfo info(QString::fromLocal8Bit(hint));
+        if (info.exists() && info.suffix() == QStringLiteral("desktop")) {
+            const QString id = info.completeBaseName();
+            if (id != QStringLiteral("trophy") && !findEntry(id, dataHome, systemDataDirs).isEmpty())
+                return id;
+        }
+    }
+    return QStringLiteral("trophy");
+}
+
+QString DesktopIntegration::portalDesktopFile(const QString &dataHome,
+                                             const QStringList &systemDataDirs) {
+    return findEntry(effectiveDesktopId(dataHome, systemDataDirs), dataHome, systemDataDirs);
 }
 
 QStringList DesktopIntegration::applicationsDirs() const {
@@ -173,11 +248,18 @@ QString DesktopIntegration::registeredDesktopFile() const {
     return portalDesktopFile(dataHome(), m_systemDataDirs);
 }
 
+QString DesktopIntegration::managedEntry() const {
+    const QString entry = registeredDesktopFile();
+    if (entry.isEmpty() || entry == desktopFilePath())
+        return QString();
+    return entry;
+}
+
 bool DesktopIntegration::isIntegrated() const {
     const QString desktop = desktopFilePath();
     if (!QFileInfo::exists(desktop))
         return false;
-    const QString target = execTarget(desktop);
+    const QString target = execProgram(desktop);
     return !target.isEmpty() && QFileInfo::exists(target);
 }
 
@@ -193,7 +275,32 @@ QString DesktopIntegration::statusMessage() const { return m_statusMessage; }
 
 bool DesktopIntegration::statusIsError() const { return m_statusIsError; }
 
-QString DesktopIntegration::desktopEntryContents(const QString &appImage) const {
+QString DesktopIntegration::competingLauncher() const {
+    const QDir dir(QDir(dataHome()).filePath(QStringLiteral("applications")));
+    if (!dir.exists())
+        return QString();
+    const QStringList entries =
+        dir.entryList(QStringList{QStringLiteral("*.desktop")}, QDir::Files);
+    for (const QString &name : entries) {
+        const QString path = dir.filePath(name);
+        if (path == desktopFilePath())
+            continue;
+        // Only portable installs count: a distribution package's entry names
+        // /usr/bin/trophy and must not hide our AppImage entry.
+        const QString exec = execProgram(path);
+        if (exec.isEmpty())
+            continue;
+        const QString base = QFileInfo(exec).fileName();
+        if (base.contains(QStringLiteral("trophy"), Qt::CaseInsensitive) &&
+            base.contains(QStringLiteral("appimage"), Qt::CaseInsensitive))
+            return path;
+    }
+    return QString();
+}
+
+bool DesktopIntegration::entryHidden() const { return m_entryHidden; }
+
+QString DesktopIntegration::desktopEntryContents(const QString &appImage, bool hidden) const {
     QString out;
     out += QStringLiteral("[Desktop Entry]\n");
     out += QStringLiteral("Name=Trophy\n");
@@ -207,6 +314,15 @@ QString DesktopIntegration::desktopEntryContents(const QString &appImage) const 
     out += QStringLiteral("Keywords=game;recording;capture;video;gameplay;\n");
     out += QStringLiteral("StartupNotify=true\n");
     out += QStringLiteral("StartupWMClass=trophy\n");
+    // Still resolvable by the portal (which is all the app id needs), but not
+    // a second icon when another manager already lists Trophy. OnlyShowIn is
+    // used instead of NoDisplay because xdg-desktop-portal ignores entries
+    // marked NoDisplay - it answers "App info not found" and the app id is
+    // lost, which is exactly what registration exists to prevent. A desktop
+    // name that never matches hides the entry from menus while staying valid
+    // to the portal.
+    if (hidden)
+        out += QStringLiteral("OnlyShowIn=TROPHY-INTERNAL;\n");
     return out;
 }
 
@@ -257,6 +373,108 @@ void DesktopIntegration::refreshCaches(const QString &applicationsDir, bool icon
     }
 }
 
+void DesktopIntegration::refreshVisibility() {
+    // Never touch an entry we did not write: a distribution package owns its
+    // own Exec line and must not be rewritten to the running binary's path.
+    if (!isAppImage())
+        return;
+    const QString desktop = desktopFilePath();
+    if (!QFileInfo::exists(desktop))
+        return;
+    const bool hidden = !competingLauncher().isEmpty();
+    m_entryHidden = hidden;
+    // Only the visibility flag is refreshed here. Repointing Exec at the
+    // currently running file would silently move the registration to another
+    // manager's copy just because that entry launched this process; the
+    // registered target is kept while it still exists, and integrate() is what
+    // deliberately repoints it.
+    QString target = execProgram(desktop);
+    if (target.isEmpty() || !QFileInfo(target).isFile())
+        target = appImagePath();
+    if (target.isEmpty() || !QFileInfo(target).isFile())
+        return;
+    const QByteArray wanted = desktopEntryContents(target, hidden).toUtf8();
+    QFile existing(desktop);
+    if (existing.open(QIODevice::ReadOnly) && existing.readAll() == wanted) {
+        existing.close();
+        return;
+    }
+    existing.close();
+    QSaveFile entry(desktop);
+    if (!entry.open(QIODevice::WriteOnly | QIODevice::Text))
+        return;
+    entry.write(wanted);
+    if (entry.commit())
+        emit integrationChanged();
+}
+
+bool DesktopIntegration::autoInstallEnabled() {
+    QSettings settings(QStringLiteral("Trophy"), QStringLiteral("Trophy"));
+    return settings.value(QStringLiteral("desktopIntegration/autoInstall"), true).toBool();
+}
+
+bool DesktopIntegration::writeEntry(const QString &appImage) {
+    const QString desktop = desktopFilePath();
+    const QString competing = competingLauncher();
+    m_entryHidden = !competing.isEmpty();
+    const QByteArray wanted = desktopEntryContents(appImage, m_entryHidden).toUtf8();
+    bool entryChanged = true;
+    QFile existing(desktop);
+    if (existing.open(QIODevice::ReadOnly)) {
+        entryChanged = existing.readAll() != wanted;
+        existing.close();
+    }
+    if (entryChanged) {
+        QDir().mkpath(QFileInfo(desktop).absolutePath());
+        QSaveFile entry(desktop);
+        if (!entry.open(QIODevice::WriteOnly | QIODevice::Text))
+            return false;
+        entry.write(wanted);
+        if (!entry.commit())
+            return false;
+    }
+    const bool iconChanged = installIcon();
+    // Cache refreshes need an event loop; the startup path runs before the
+    // application object exists and the launchers pick the file up anyway.
+    if ((entryChanged || iconChanged) && QCoreApplication::instance()) {
+        refreshCaches(QFileInfo(desktop).absolutePath(), iconChanged);
+        emit integrationChanged();
+    }
+    return true;
+}
+
+bool DesktopIntegration::installEntryAtStartup(const QString &dataHome,
+                                             const QStringList &systemDataDirs) {
+    const QString appImage = QString::fromLocal8Bit(qgetenv("APPIMAGE"));
+    if (appImage.isEmpty() || !QFileInfo(appImage).isFile())
+        return false;
+    if (!autoInstallEnabled())
+        return false;
+    // Anything already there is deliberate: ours from a previous run, a
+    // distribution package, or a manager entry that supplies the identity.
+    if (!findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs).isEmpty())
+        return false;
+    if (effectiveDesktopId(dataHome, systemDataDirs) != QStringLiteral("trophy"))
+        return false;
+
+    DesktopIntegration writer(dataHome, systemDataDirs);
+    return writer.writeEntry(appImage);
+}
+
+bool DesktopIntegration::removeEntry() {
+    if (!QFileInfo::exists(desktopFilePath()))
+        return false;
+    QSettings settings(QStringLiteral("Trophy"), QStringLiteral("Trophy"));
+    settings.setValue(QStringLiteral("desktopIntegration/autoInstall"), false);
+    settings.sync();
+    const bool removed = QFile::remove(desktopFilePath());
+    m_entryHidden = false;
+    emit integrationChanged();
+    return applyStatus(removed ? QStringLiteral("Menu entry removed.")
+                               : QStringLiteral("Could not remove the menu entry."),
+                       !removed);
+}
+
 bool DesktopIntegration::integrate() {
     if (!isAppImage())
         return applyStatus(QStringLiteral("Not running as an AppImage."), true);
@@ -278,33 +496,37 @@ bool DesktopIntegration::integrate() {
         }
     }
 
+    const QString effective = effectiveDesktopId(dataHome(), m_systemDataDirs);
+    if (effective != QStringLiteral("trophy")) {
+        // Launched by a manager whose entry we must not duplicate: it already
+        // registers this process.
+        return applyStatus(
+            QStringLiteral("Trophy is started from %1, which already registers it. "
+                           "No second menu entry is needed.")
+                .arg(QFileInfo(registeredDesktopFile()).fileName()),
+            false);
+    }
+
+    {
+        QSettings settings(QStringLiteral("Trophy"), QStringLiteral("Trophy"));
+        settings.setValue(QStringLiteral("desktopIntegration/autoInstall"), true);
+    }
     const QString desktop = desktopFilePath();
-    const QByteArray wanted = desktopEntryContents(appImage).toUtf8();
-    bool entryChanged = true;
-    QFile existing(desktop);
-    if (existing.open(QIODevice::ReadOnly)) {
-        entryChanged = existing.readAll() != wanted;
-        existing.close();
-    }
-    if (entryChanged) {
-        QDir().mkpath(QFileInfo(desktop).absolutePath());
-        QSaveFile entry(desktop);
-        if (!entry.open(QIODevice::WriteOnly | QIODevice::Text))
-            return applyStatus(QStringLiteral("Could not write the desktop entry."), true);
-        entry.write(wanted);
-        if (!entry.commit())
-            return applyStatus(QStringLiteral("Could not write the desktop entry."), true);
-    }
+    const QString competing = competingLauncher();
+    const bool existedBefore = QFileInfo::exists(desktop);
+    if (!writeEntry(appImage))
+        return applyStatus(QStringLiteral("Could not write the desktop entry."), true);
+    const bool changed = !existedBefore || m_entryHidden;
 
-    const bool iconChanged = installIcon();
-    if (entryChanged || iconChanged) {
-        refreshCaches(QFileInfo(desktop).absolutePath(), iconChanged);
-        emit integrationChanged();
+    if (m_entryHidden) {
+        return applyStatus(
+            QStringLiteral("Registered. The menu entry is hidden because %1 already "
+                           "lists Trophy; launch it from there.")
+                .arg(QFileInfo(competing).fileName()),
+            false);
     }
-
-    return applyStatus(entryChanged || iconChanged
-                           ? QStringLiteral("Desktop entry installed.")
-                           : QStringLiteral("Already integrated."),
+    return applyStatus(changed ? QStringLiteral("Desktop entry installed.")
+                               : QStringLiteral("Already integrated."),
                        false);
 }
 

@@ -53,8 +53,19 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setOrganizationName("Trophy");
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
-  // Notifications/tray/portal associations key on the desktop id.
-  QApplication::setDesktopFileName(QStringLiteral("trophy"));
+  // Install the menu entry before the application object exists: the portal
+  // resolves the app id from a desktop file, and Qt registers it when
+  // QGuiApplication is constructed, so doing this here means the *first* run
+  // already has a stable identity - no wizard step and no restart. Skipped
+  // when an entry already exists or an AppImage manager supplies one.
+  TrophyBackend::DesktopIntegration::installEntryAtStartup();
+
+  // Notifications/tray/portal associations key on the desktop id. Our own
+  // entry wins when present; otherwise an AppImage manager's launcher entry
+  // (Gear Lever) may already provide the identity, so adopt its id instead of
+  // registering one the portal cannot resolve.
+  QApplication::setDesktopFileName(
+      TrophyBackend::DesktopIntegration::effectiveDesktopId());
 
   // AppImages bundle only Qt's xdgdesktopportal platform theme and Qt does not
   // select it on its own, so every file dialog silently fell back to Qt's own
