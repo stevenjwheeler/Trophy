@@ -1451,6 +1451,18 @@ Page {
                         }
                     }
 
+                    SettingStack {
+                        label: qsTr("Location")
+                        help: qsTr("The AppImage file Trophy is running from. Updates replace this file in place.")
+
+                        TrophyTextField {
+                            objectName: "desktopIntegrationLocation"
+                            Layout.fillWidth: true
+                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.appImagePath : ""
+                            readOnly: true
+                        }
+                    }
+
                     SettingRow {
                         label: qsTr("Desktop entry")
                         help: qsTr("Adds a menu entry for this AppImage and enables the system file dialog. Your file is not copied or moved.")

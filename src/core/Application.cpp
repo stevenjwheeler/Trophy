@@ -359,7 +359,10 @@ bool Application::initialize() {
     qCInfo(appLog) << "Desktop registration:" << (m_desktopIntegration->isAppImage() ? "appimage" : "installed")
                    << "entry:" << (registered.isEmpty() ? QStringLiteral("none (portal treats Trophy as a generic app; capture approvals are not per-app)")
                                                        : registered)
-                   << "native dialogs:" << useNativeDialogs();
+                   << "native dialogs:" << useNativeDialogs()
+                   << "platform theme:" << (qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME")
+                                                ? qEnvironmentVariable("QT_QPA_PLATFORMTHEME")
+                                                : QStringLiteral("(default)"));
   }
 
   qCInfo(appLog) << "Application initialized successfully";

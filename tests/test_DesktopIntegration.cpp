@@ -142,6 +142,34 @@ TEST(DesktopIntegrationTest, RegistrationLooksInEveryXdgApplicationDir) {
     EXPECT_TRUE(integration.isRegistered());
 }
 
+// main() resolves the entry before QGuiApplication exists to decide whether
+// to select the bundled portal platform theme (which is what actually makes
+// file dialogs native).
+TEST(DesktopIntegrationTest, StaticLookupFindsThePortalEntryBeforeTheAppExists) {
+    QTemporaryDir home;
+    QTemporaryDir systemShare;
+    ASSERT_TRUE(home.isValid() && systemShare.isValid());
+
+    EXPECT_TRUE(TrophyBackend::DesktopIntegration::portalDesktopFile(
+                    home.path(), QStringList{systemShare.path()})
+                    .isEmpty());
+
+    const QString systemEntry =
+        touchFile(systemShare.filePath(QStringLiteral("applications/trophy.desktop")),
+                  "[Desktop Entry]\nExec=/opt/Trophy.AppImage\n");
+    EXPECT_EQ(TrophyBackend::DesktopIntegration::portalDesktopFile(
+                  home.path(), QStringList{systemShare.path()}),
+              systemEntry);
+
+    QFile::remove(systemEntry);
+    const QString userEntry = touchFile(
+        QDir(home.path()).filePath(QStringLiteral("applications/trophy.desktop")),
+        "[Desktop Entry]\nExec=/opt/Trophy.AppImage\n");
+    EXPECT_EQ(TrophyBackend::DesktopIntegration::portalDesktopFile(
+                  home.path(), QStringList{systemShare.path()}),
+              userEntry);
+}
+
 // Idempotency: a matching entry is left byte-identical and the call says so.
 TEST(DesktopIntegrationTest, IntegrateLeavesAMatchingEntryUntouched) {
     EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR"});

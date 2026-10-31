@@ -35,6 +35,7 @@ class DesktopIntegration : public QObject {
     Q_PROPERTY(bool isAppImage READ isAppImage CONSTANT)
     Q_PROPERTY(bool isIntegrated READ isIntegrated NOTIFY integrationChanged)
     Q_PROPERTY(bool isRegistered READ isRegistered NOTIFY integrationChanged)
+    Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
     Q_PROPERTY(QString desktopFilePath READ desktopFilePath CONSTANT)
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusMessageChanged)
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusMessageChanged)
@@ -66,6 +67,11 @@ public:
 
     // The entry the portal will use, or empty when there is none.
     QString registeredDesktopFile() const;
+
+    // Same lookup without an instance, for main() before QGuiApplication
+    // exists. Empty arguments use XDG_DATA_HOME / XDG_DATA_DIRS.
+    static QString portalDesktopFile(const QString &dataHome = QString(),
+                                     const QStringList &systemDataDirs = QStringList());
 
     QString statusMessage() const;
     bool statusIsError() const;

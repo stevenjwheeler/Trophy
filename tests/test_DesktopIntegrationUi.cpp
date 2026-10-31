@@ -38,6 +38,7 @@ class FakeIntegration : public QObject {
   Q_PROPERTY(bool isAppImage READ isAppImage WRITE setAppImage NOTIFY stateChanged)
   Q_PROPERTY(bool isIntegrated READ isIntegrated WRITE setIntegrated NOTIFY stateChanged)
   Q_PROPERTY(bool isRegistered READ isRegistered WRITE setRegistered NOTIFY stateChanged)
+  Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
   Q_PROPERTY(QString statusMessage READ statusMessage WRITE setStatusMessage NOTIFY statusChanged)
   Q_PROPERTY(bool statusIsError READ statusIsError WRITE setStatusIsError NOTIFY statusChanged)
 
@@ -57,6 +58,9 @@ public:
     emit stateChanged();
   }
   bool isRegistered() const { return m_isRegistered; }
+  QString appImagePath() const {
+    return QStringLiteral("/home/deck/Applications/Trophy-0.9.7-x86_64.AppImage");
+  }
   void setRegistered(bool value) {
     if (m_isRegistered == value)
       return;
@@ -142,10 +146,12 @@ TEST(DesktopIntegrationUiTest, CardIsAppImageOnlyAndTracksRegistrationAndEntrySt
     auto *card = page->findChild<QObject *>("desktopIntegrationCard");
     auto *status = page->findChild<QObject *>("desktopIntegrationStatus");
     auto *button = page->findChild<QObject *>("desktopIntegrationButton");
+    auto *location = page->findChild<QObject *>("desktopIntegrationLocation");
     auto *message = page->findChild<QObject *>("desktopIntegrationMessage");
     ASSERT_NE(card, nullptr);
     ASSERT_NE(status, nullptr);
     ASSERT_NE(button, nullptr);
+    ASSERT_NE(location, nullptr);
     ASSERT_NE(message, nullptr);
 
     // A native/portable install must not show the section at all.
@@ -156,6 +162,10 @@ TEST(DesktopIntegrationUiTest, CardIsAppImageOnlyAndTracksRegistrationAndEntrySt
     QCoreApplication::processEvents();
     EXPECT_TRUE(card->property("visible").toBool());
     EXPECT_EQ(status->property("text").toString(), QStringLiteral("Not registered"));
+    // The section must say where the running AppImage actually is.
+    EXPECT_EQ(location->property("text").toString(),
+              QStringLiteral("/home/deck/Applications/Trophy-0.9.7-x86_64.AppImage"));
+    EXPECT_TRUE(location->property("readOnly").toBool());
     EXPECT_EQ(button->property("text").toString(), QStringLiteral("Integrate"));
 
     integration.setRegistered(true);

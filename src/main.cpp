@@ -9,6 +9,7 @@
  */
 
 #include "core/Application.h"
+#include "core/DesktopIntegration.h"
 #include "core/ControlServer.h"
 #include <QApplication>
 #include <QCommandLineParser>
@@ -54,6 +55,16 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setApplicationName("Trophy");
   // Notifications/tray/portal associations key on the desktop id.
   QApplication::setDesktopFileName(QStringLiteral("trophy"));
+
+  // AppImages bundle only Qt's xdgdesktopportal platform theme and Qt does not
+  // select it on its own, so every file dialog silently fell back to Qt's own
+  // implementation even when the desktop entry was registered. Pick it for
+  // registered AppImage runs; an explicit setting still wins.
+  if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME") &&
+      !qgetenv("APPIMAGE").isEmpty() &&
+      !TrophyBackend::DesktopIntegration::portalDesktopFile().isEmpty()) {
+    qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+  }
 
   // Some users force these environment variables globally, which breaks VA-API
   // driver auto-selection (libva then picks the wrong/missing driver) and can

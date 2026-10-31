@@ -108,10 +108,18 @@ QString DesktopIntegration::dataHome() const {
     return dir;
 }
 
-QStringList DesktopIntegration::applicationsDirs() const {
+namespace {
+
+QStringList applicationsDirsFor(const QString &dataHome, const QStringList &systemDataDirs) {
     QStringList dirs;
-    dirs << dataHome() + QStringLiteral("/applications");
-    QStringList system = m_systemDataDirs;
+    QString home = dataHome;
+    if (home.isEmpty()) {
+        home = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        if (home.isEmpty())
+            home = QDir::homePath() + QStringLiteral("/.local/share");
+    }
+    dirs << home + QStringLiteral("/applications");
+    QStringList system = systemDataDirs;
     if (system.isEmpty()) {
         const QByteArray env = qgetenv("XDG_DATA_DIRS");
         system = env.isEmpty()
@@ -125,6 +133,23 @@ QStringList DesktopIntegration::applicationsDirs() const {
     }
     dirs.removeDuplicates();
     return dirs;
+}
+
+} // namespace
+
+QString DesktopIntegration::portalDesktopFile(const QString &dataHome,
+                                             const QStringList &systemDataDirs) {
+    const QStringList dirs = applicationsDirsFor(dataHome, systemDataDirs);
+    for (const QString &dir : dirs) {
+        const QString candidate = QDir(dir).filePath(desktopFileName());
+        if (QFileInfo::exists(candidate))
+            return candidate;
+    }
+    return QString();
+}
+
+QStringList DesktopIntegration::applicationsDirs() const {
+    return applicationsDirsFor(dataHome(), m_systemDataDirs);
 }
 
 QString DesktopIntegration::appImagePath() const {
@@ -143,13 +168,7 @@ QString DesktopIntegration::iconTargetPath() const {
 }
 
 QString DesktopIntegration::registeredDesktopFile() const {
-    const QStringList dirs = applicationsDirs();
-    for (const QString &dir : dirs) {
-        const QString candidate = QDir(dir).filePath(desktopFileName());
-        if (QFileInfo::exists(candidate))
-            return candidate;
-    }
-    return QString();
+    return portalDesktopFile(dataHome(), m_systemDataDirs);
 }
 
 bool DesktopIntegration::isIntegrated() const {
