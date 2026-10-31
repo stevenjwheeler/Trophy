@@ -1,5 +1,4 @@
 #include "GameDetectionService.h"
-#include "PrerequisiteInstallers.h"
 #include "DefaultAppCatalog.h"
 #include "GameWhitelist.h"
 #include "WaylandWindowMonitor.h"
@@ -15,9 +14,7 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 
-#include <cstring>
 #include <unistd.h>
-
 #include <cerrno>
 #include <csignal>
 
@@ -141,21 +138,7 @@ void GameDetectionService::setWindowMonitor(WaylandWindowMonitor *monitor) {
 }
 
 uint GameDetectionService::steamAppIdForPid(qint64 pid) {
-  if (pid <= 0)
-    return 0;
-  QFile env(QString("/proc/%1/environ").arg(pid));
-  if (!env.open(QIODevice::ReadOnly))
-    return 0;
-  // Environ is NUL-separated KEY=VALUE records.
-  for (const QByteArray &rec : env.readAll().split('\0')) {
-    if (rec.startsWith("SteamAppId=")) {
-      bool ok = false;
-      const uint id = rec.mid(sizeof("SteamAppId=") - 1).toUInt(&ok);
-      if (ok && id > 0)
-        return id;
-    }
-  }
-  return 0;
+  return GameIdentity::steamAppIdForPid(pid);
 }
 
 QVariantMap GameDetectionService::captureIdentityInfo(const QString &gameName) const {
@@ -169,12 +152,7 @@ QVariantMap GameDetectionService::captureIdentityInfo(const QString &gameName) c
 }
 
 uint GameDetectionService::steamAppIdFromAppId(const QString &appId) {
-  static const QRegularExpression re("^steam_app_(\\d+)$",
-                                     QRegularExpression::CaseInsensitiveOption);
-  const QRegularExpressionMatch m = re.match(appId.trimmed());
-  if (!m.hasMatch())
-    return 0;
-  return m.captured(1).toUInt();
+  return GameIdentity::steamAppIdFromAppId(appId);
 }
 
 bool GameDetectionService::processLooksLikeSteamGame(qint64 pid) {
@@ -190,29 +168,7 @@ bool GameDetectionService::processLooksLikeSteamGame(qint64 pid) {
   const auto hit = m_steamCheckCache.constFind(pid);
   if (hit != m_steamCheckCache.constEnd() && now - hit->second < kCacheTtlMs)
     return hit->first;
-  bool result = false;
-  if (steamAppIdForPid(pid) > 0) {
-    result = true;
-  } else {
-    // Targeted single-PID lookup per shim event (not a /proc scan).
-    char exe[512];
-    const QString exeLink = QString("/proc/%1/exe").arg(pid);
-    ssize_t n =
-        ::readlink(exeLink.toLocal8Bit().constData(), exe, sizeof(exe) - 1);
-    if (n > 0) {
-      exe[n] = '\0';
-      if (strstr(exe, "steamapps"))
-        result = true;
-    }
-    if (!result) {
-      QFile cmd(QString("/proc/%1/cmdline").arg(pid));
-      if (cmd.open(QIODevice::ReadOnly)) {
-        const QByteArray raw = cmd.readAll();
-        if (raw.contains("steamapps"))
-          result = true;
-      }
-    }
-  }
+  bool result = GameIdentity::looksLikeSteamGame(pid);
   m_steamCheckCache.insert(pid, qMakePair(result, now));
   if (m_steamCheckCache.size() > kCacheCap) {
     for (auto it = m_steamCheckCache.begin();
@@ -271,113 +227,12 @@ GameDetectionService::resolveReporterIdentity(const QString &reporter,
                                               const QStringList &argv,
                                               uint steamAppId,
                                               const QString &winePrefix) {
-  const auto basename = [](QString path) {
-    path.replace('\\', '/');
-    return path.section('/', -1);
-  };
-  const auto wrapper = [](const QString &name) {
-    return QStringList{"wine", "wine64", "wine-preloader", "wine64-preloader",
-                       "wineserver", "proton"}.contains(name.toLower());
-  };
-  const auto helper = [](const QString &name) {
-    const QString key = GameWhitelist::normalizeKey(name);
-    return prerequisiteInstallerNames().contains(key) ||
-           QStringList{"steam", "steamwebhelper", "steam-runtime-launch-client",
-                       "steam-runtime-launcher-service", "pressure-vessel-wrap",
-                       "d3ddriverquery", "d3ddriverquery64", "steam gpu query",
-                       "wineopenxr test instance", "hellovr_vulkan", "xalia",
-                       "wineboot", "winecfg", "winedevice", "services", "explorer",
-                       "rundll32", "crashpad_handler", "unitycrashhandler64",
-                       "unitycrashhandler32", "crashreportclient"}.contains(key);
-  };
-  ReporterIdentity result;
-  result.name = reporter.trimmed();
-  QString executablePath = exe;
-  QString executable = basename(exe);
-  // Wine may rewrite argv[0] to the Windows executable, or keep the Wine
-  // loader followed by it. Never search arbitrary arguments: an installer
-  // or launcher can mention another executable without running it.
-  if (wrapper(executable)) {
-    executable.clear();
-    executablePath.clear();
-    if (!argv.isEmpty()) {
-      QString candidate = argv.first();
-      if (wrapper(basename(candidate)) && argv.size() > 1)
-        candidate = argv.at(1);
-      if (candidate.endsWith(".exe", Qt::CaseInsensitive)) {
-        executable = basename(candidate);
-        candidate.replace('\\', '/');
-        executablePath = QStringLiteral("wine:") + winePrefix + ":" + candidate;
-      }
-    }
-  }
-  result.executable = executable;
-  result.ignored = helper(basename(reporter)) || helper(executable) ||
-                   (wrapper(basename(exe)) && executable.isEmpty());
-  if (result.ignored)
-    return result;
-  const bool generic = GameWhitelist::isPlaceholderReporterKey(reporter) ||
-                       QStringList{"unity", "unreal engine", "godot", "sdl_app"}
-                           .contains(reporter.trimmed().toLower());
-  if (steamAppId > 0)
-    result.key = QStringLiteral("steam_app_%1").arg(steamAppId);
-  else if (!executable.isEmpty())
-    result.key = GameWhitelist::normalizeKey(
-        executablePath.startsWith("wine:") ? executablePath : "exe:" + executablePath);
-  else if (!generic)
-    result.key = GameWhitelist::normalizeKey(reporter);
-  if (generic && !executable.isEmpty())
-    result.name = executable;
-  // An unresolved null-name event has no identity. Even Steam evidence
-  // must not turn the shared placeholder into a display-name/token key.
-  if (generic && executable.isEmpty())
-    result.name.clear();
-  return result;
+  return GameIdentity::resolve(reporter, exe, argv, steamAppId, winePrefix);
 }
 
 GameDetectionService::ReporterIdentity GameDetectionService::reporterIdentity(
     qint64 pid, const QString &reporter, uint steamAppId) {
-  const QString exe = QFileInfo(QString("/proc/%1/exe").arg(pid)).symLinkTarget();
-  QFile command(QString("/proc/%1/cmdline").arg(pid));
-  QStringList argv;
-  if (command.open(QIODevice::ReadOnly)) {
-    const QByteArray bytes = command.read(65537);
-    if (bytes.size() <= 65536) {
-      for (const QByteArray &arg : bytes.split('\0'))
-        argv.append(QString::fromLocal8Bit(arg));
-    }
-  }
-  const QString loader = QFileInfo(exe).fileName().toLower();
-  if ((loader == "wine" || loader == "wine64" || loader.endsWith("-preloader")) &&
-      !argv.isEmpty()) {
-    int index = 0;
-    if ((argv.first() == "wine" || argv.first() == "wine64" ||
-         QFileInfo(argv.first()).fileName().endsWith("-preloader")) && argv.size() > 1)
-      index = 1;
-    QString candidate = argv.at(index);
-    candidate.replace('\\', '/');
-    static const QRegularExpression drive("^[A-Za-z]:");
-    if (candidate.endsWith(".exe", Qt::CaseInsensitive) &&
-        QDir::isRelativePath(candidate) && !drive.match(candidate).hasMatch()) {
-      const QString cwd = QFileInfo(QString("/proc/%1/cwd").arg(pid)).symLinkTarget();
-      if (!cwd.isEmpty())
-        argv[index] = QDir::cleanPath(cwd + "/" + candidate);
-    }
-  }
-  QString winePrefix;
-  QFile environment(QString("/proc/%1/environ").arg(pid));
-  if (environment.open(QIODevice::ReadOnly)) {
-    const QByteArray bytes = environment.read(65537);
-    if (bytes.size() <= 65536) {
-      for (const QByteArray &entry : bytes.split('\0')) {
-        if (entry.startsWith("WINEPREFIX="))
-          winePrefix = QString::fromLocal8Bit(entry.mid(11));
-      }
-    }
-  }
-  if (winePrefix.isEmpty())
-    winePrefix = QDir::homePath() + "/.wine";
-  return resolveReporterIdentity(reporter, exe, argv, steamAppId, winePrefix);
+  return GameIdentity::forPid(pid, reporter, steamAppId);
 }
 
 void GameDetectionService::trackGame(qint64 pid, const QString &gameName,
@@ -574,11 +429,15 @@ void GameDetectionService::onSocketReadyRead() {
       if (!pidOk || pid <= 0)
         continue;
     } else {
+      // Minimal form START:<pid> is accepted (identity is resolved
+      // server-side); the historical START:<pid>:<name>[:<appid>] form
+      // remains fully supported.
       pidEnd = line.indexOf(':', commandEnd + 1);
       if (pidEnd < 0)
-        continue;
-      pid = line.mid(commandEnd + 1, pidEnd - commandEnd - 1)
-                .toLongLong(&pidOk);
+        pid = line.mid(commandEnd + 1).toLongLong(&pidOk);
+      else
+        pid = line.mid(commandEnd + 1, pidEnd - commandEnd - 1)
+                  .toLongLong(&pidOk);
       if (!pidOk || pid <= 0)
         continue;
     }
@@ -589,36 +448,45 @@ void GameDetectionService::onSocketReadyRead() {
       if (m_activeConnections.contains(socket) &&
           m_activeConnections.value(socket) != pid)
         continue;
-      // Split only the fixed prefix. Game names may contain colons; the
-      // optional Steam app id is the final numeric field.
-      QString gameName = line.mid(pidEnd + 1);
+      // The historical form carries an optional name/app id. The minimal
+      // form leaves both empty; GameIdentity resolves them from the PID.
+      QString reporterName;
       uint steamAppId = 0;
-      const qsizetype appIdSep = gameName.lastIndexOf(':');
-      if (appIdSep >= 0) {
-        bool appIdOk = false;
-        const uint parsedAppId = gameName.mid(appIdSep + 1).toUInt(&appIdOk);
-        if (appIdOk) {
-          steamAppId = parsedAppId;
-          gameName.truncate(appIdSep);
+      if (pidEnd >= 0) {
+        QString supplied = line.mid(pidEnd + 1);
+        // Split only the fixed prefix. Game names may contain colons;
+        // the optional Steam app id is the final numeric field.
+        const qsizetype appIdSep = supplied.lastIndexOf(':');
+        if (appIdSep >= 0) {
+          bool appIdOk = false;
+          const uint parsedAppId = supplied.mid(appIdSep + 1).toUInt(&appIdOk);
+          if (appIdOk) {
+            steamAppId = parsedAppId;
+            supplied.truncate(appIdSep);
+          }
         }
+        reporterName = supplied;
       }
-      if (gameName.isEmpty())
-        continue;
-      const QString reporterName = gameName;
       if (steamAppId == 0)
         steamAppId = steamAppIdForPid(pid);
-      const ReporterIdentity identity = reporterIdentity(pid, reporterName, steamAppId);
+      const ReporterIdentity identity =
+          reporterIdentity(pid, reporterName, steamAppId);
       if (identity.ignored) {
-        qDebug() << "Ignoring helper reporter:" << reporterName << "PID:" << pid;
+        qDebug() << "Ignoring helper reporter:" << reporterName
+                 << "PID:" << pid;
         continue;
       }
-      gameName = identity.name;
+      QString gameName = identity.name;
+      if (gameName.isEmpty())
+        gameName = identity.executable;
       if (steamAppId > 0) {
         QString steamName = getSteamAppName(steamAppId);
         if (!steamName.isEmpty()) {
           gameName = steamName;
         }
       }
+      if (gameName.isEmpty())
+        continue;
 
       // Resolve the placeholder BEFORE applying exclusions. Its built-in
       // veto must not discard a positively identified Steam/native game.

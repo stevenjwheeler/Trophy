@@ -3,9 +3,14 @@
  * LD_PRELOAD library that reports OpenGL games to Trophy.
  *
  * Same socket protocol as the Vulkan layer (src/vulkan_layer/trophy_layer.cpp):
- *   START:<pid>:<name>[:<steamAppId>]
+ *   START:<pid>
  *   STOP:<pid>
  * on /tmp/trophy-detection.sock
+ *
+ * The shim reports only the PID; Trophy resolves the executable, Wine
+ * wrapper and Steam identity itself from targeted /proc/<pid> reads, so
+ * this preload stays tiny and never parses identity in-process. The
+ * historical START:<pid>:<name>[:<steamAppId>] form is still accepted.
  *
  * Hooks: glXSwapBuffers (XWayland/GLX), eglSwapBuffers (native Wayland EGL),
  *        SDL_GL_SwapWindow (SDL2 games that hide GL behind SDL).
@@ -207,26 +212,10 @@ static void notify_start_locked(void) {
     /* Kept open until unload so STOP can reuse it. */
     __atomic_store_n(&g_sock, fd, __ATOMIC_RELEASE);
 
-    char app[128];
-    app_basename(app, sizeof(app));
-    for (char *p = app; *p; ++p)
-        if (*p == '\n' || *p == '\r')
-            *p = ' ';
-
-    const char *appid = getenv("SteamAppId");
-    if (!appid || !*appid)
-        appid = "0";
-    /* Never let inherited environment data inject another protocol line. */
-    size_t appid_len = strnlen(appid, 11);
-    if (appid_len == 0 || appid_len > 10 ||
-        strspn(appid, "0123456789") != appid_len ||
-        strtoull(appid, NULL, 10) > UINT32_MAX)
-        appid = "0";
-
-    /* Single stack buffer, single send: "START:<pid>:<app>:<appid>\n" */
-    char msg[256];
-    int len = snprintf(msg, sizeof(msg), "START:%d:%s:%s\n", (int)self, app,
-                       appid);
+    /* Single stack buffer, single send: "START:<pid>\n". Identity is
+     * resolved by Trophy from /proc/<pid>; the shim never reads env here. */
+    char msg[32];
+    int len = snprintf(msg, sizeof(msg), "START:%d\n", (int)self);
     if (len > 0) {
         if ((size_t)len >= sizeof(msg)) {
             len = (int)sizeof(msg) - 1;

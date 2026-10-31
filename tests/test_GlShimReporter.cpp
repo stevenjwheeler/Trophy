@@ -109,8 +109,7 @@ TEST_F(GlShimReporterTest, ForwardsAllHooksAndPreservesErrnoAndEglResult) {
     EXPECT_EQ(sockets, 1);
     EXPECT_EQ(socketType, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK);
     EXPECT_EQ(sendFlags, MSG_NOSIGNAL | MSG_DONTWAIT);
-    EXPECT_EQ(message.find("START:12345:"), 0u);
-    EXPECT_EQ(message.substr(message.size() - 4), ":42\n");
+    EXPECT_EQ(message, "START:12345\n");
 }
 
 TEST_F(GlShimReporterTest, DisabledStillForwardsWithoutConnecting) {
@@ -162,12 +161,18 @@ TEST_F(GlShimReporterTest, RestartReconnectsOnLaterSwap) {
     EXPECT_EQ(g_notified, 2);
 }
 
-TEST_F(GlShimReporterTest, EnvironmentCannotInjectProtocolLinesOrOverflowId) {
+TEST_F(GlShimReporterTest, EnvironmentCannotInjectProtocolLines) {
+    // The shim no longer reads SteamAppId at all: identity is resolved
+    // server-side. Environment content must never change or extend the line.
     for (const char *id : {"42\nSTOP:12345", "4294967296", "-1", "", "123456789012"}) {
         setenv("SteamAppId", id, 1);
         g_notified = 0; ++fakeTime;
         notify_start();
-        EXPECT_EQ(message.substr(message.size() - 3), ":0\n");
+        const std::string expected = "START:12345\n";
+        ASSERT_GE(message.size(), expected.size());
+        EXPECT_EQ(message.compare(message.size() - expected.size(),
+                                  expected.size(), expected), 0);
+        EXPECT_EQ(message.find("STOP:"), std::string::npos);
         trophy_gl_unload();
     }
 }

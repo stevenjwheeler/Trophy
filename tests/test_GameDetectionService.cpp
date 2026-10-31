@@ -6,6 +6,7 @@
 #include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QThread>
@@ -879,6 +880,46 @@ TEST_F(GameDetectionServiceTest, SteamAppIdForPidReadsChildEnviron) {
   child.waitForFinished(5000);
   EXPECT_EQ(GameDetectionService::steamAppIdForPid(-1), 0u);
   EXPECT_EQ(GameDetectionService::steamAppIdForPid(0), 0u);
+}
+
+TEST_F(GameDetectionServiceTest, MinimalStartResolvesIdentityFromPid) {
+  // New reporters send only START:<pid>. The server must derive the
+  // executable and Steam identity itself instead of trusting the wire.
+  QTemporaryDir emptyHome;
+  ASSERT_TRUE(emptyHome.isValid());
+  const QByteArray savedHome = qgetenv("HOME");
+  qputenv("HOME", emptyHome.path().toUtf8());
+  const auto restoreHome = qScopeGuard([&] {
+    if (savedHome.isNull())
+      qunsetenv("HOME");
+    else
+      qputenv("HOME", savedHome);
+  });
+
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert("SteamAppId", "424243");
+  QProcess child;
+  child.setProcessEnvironment(env);
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_GT(pid, 0);
+  ASSERT_TRUE(waitForChildExec(pid));
+  ASSERT_TRUE(waitForSteamAppId(pid, 424243u));
+
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+  GameClient client;
+  ASSERT_TRUE(client.connect());
+  ASSERT_TRUE(client.send(QStringLiteral("START:%1\n").arg(pid)));
+  pump(500);
+
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(service->currentGameKey(), QStringLiteral("steam_app_424243"));
+  // No reporter name: the executable basename is the display fallback.
+  EXPECT_EQ(service->currentGameName(), QStringLiteral("sleep"));
+
+  child.kill();
+  child.waitForFinished(5000);
 }
 
 TEST_F(GameDetectionServiceTest, ReconcileFindsSteamEnvRunningGame) {

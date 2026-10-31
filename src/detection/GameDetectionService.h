@@ -20,6 +20,7 @@
 #include <memory>
 
 #include "GameListModel.h"
+#include "GameIdentity.h"
 
 class RecordingManagerTest;
 
@@ -180,12 +181,10 @@ private:
 
   // Internal identification helpers
   QString getSteamAppName(uint appId);
-  struct ReporterIdentity {
-    QString key;
-    QString name;
-    QString executable;
-    bool ignored = false;
-  };
+  // Identity resolution itself lives in GameIdentity (shared by the socket
+  // handler, the window reconciler and future detection sources); this
+  // alias keeps the service's existing signatures readable.
+  using ReporterIdentity = GameIdentity::ReporterIdentity;
   // Pure resolver, also used by daemon-free fixtures. Inputs come only
   // from the PID named in a START event, never a process scan.
   static ReporterIdentity resolveReporterIdentity(const QString &reporter,
