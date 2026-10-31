@@ -1504,6 +1504,16 @@ Page {
                     }
 
                     Label {
+                        objectName: "desktopIntegrationHiddenNote"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered && desktopIntegration.entryHidden
+                        text: qsTr("Another AppImage manager already lists Trophy, so no second menu entry is created. Launching from that entry still uses Trophy's identity.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
                         objectName: "desktopIntegrationMessage"
                         visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0
                         text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""

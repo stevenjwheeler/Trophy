@@ -356,6 +356,9 @@ bool Application::initialize() {
        runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
     qCInfo(appLog).noquote() << line;
   if (m_desktopIntegration) {
+    // The entry is hidden while another AppImage manager lists Trophy. If that
+    // entry has since been removed, restore ours so there is a launcher.
+    m_desktopIntegration->refreshVisibility();
     const QString registered = m_desktopIntegration->registeredDesktopFile();
     qCInfo(appLog) << "Desktop registration:" << (m_desktopIntegration->isAppImage() ? "appimage" : "installed")
                    << "entry:" << (registered.isEmpty() ? QStringLiteral("none (portal treats Trophy as a generic app; capture approvals are not per-app)")
