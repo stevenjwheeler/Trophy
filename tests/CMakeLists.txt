@@ -323,6 +323,7 @@ gtest_discover_tests(test_FilmstripCache)
 add_executable(test_SettingsManager test_SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )
@@ -370,6 +371,7 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/AudioEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
@@ -749,6 +751,7 @@ endif()
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---
 add_executable(test_EncoderFactory test_EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )
@@ -876,6 +879,7 @@ add_executable(test_HardwareInfo test_HardwareInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/core/HardwareInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/core/HardwareInfo.h
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )

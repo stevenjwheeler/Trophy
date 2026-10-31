@@ -7,6 +7,7 @@
 
 #include "EncoderFactory.h"
 #include "FFmpegEncoder.h"
+#include "core/RuntimeLibraries.h"
 
 #include <QDebug>
 #include <QFile>
@@ -22,42 +23,6 @@ extern "C" {
 }
 
 namespace TrophyBackend {
-
-namespace {
-
-// Report the libva file this process actually mapped. The AppImage prefers the
-// host's libva and falls back to its bundled copy, and a VA-API failure is
-// almost always an environment mismatch, so the log must say which one was in
-// play. /proc/self/maps lists the real file behind the resolved symlink, which
-// is exactly what the loader used.
-QString mappedLibraryPath(const QString &soname) {
-  QFile maps(QStringLiteral("/proc/self/maps"));
-  if (!maps.open(QIODevice::ReadOnly | QIODevice::Text))
-    return {};
-  while (!maps.atEnd()) {
-    const QString line = QString::fromLocal8Bit(maps.readLine());
-    const int slash = line.indexOf(QLatin1Char('/'));
-    if (slash < 0)
-      continue;
-    QString path = line.mid(slash).trimmed();
-    if (path.endsWith(QStringLiteral(" (deleted)")))
-      path.chop(10);
-    if (QFileInfo(path).fileName().startsWith(soname))
-      return path;
-  }
-  return {};
-}
-
-QString describeLibraryOrigin(const QString &path) {
-  if (path.isEmpty())
-    return QStringLiteral("unknown");
-  const QString appDir = QString::fromLocal8Bit(qgetenv("APPDIR"));
-  if (!appDir.isEmpty() && path.startsWith(appDir + QLatin1Char('/')))
-    return QStringLiteral("bundled");
-  return QStringLiteral("host");
-}
-
-} // namespace
 
 std::vector<EncoderInfo> EncoderFactory::detectAvailableEncoders() {
   static std::vector<EncoderInfo> s_cache;
@@ -282,7 +247,7 @@ bool EncoderFactory::probeVaapi() {
     const QString libvaPath = mappedLibraryPath(QStringLiteral("libva.so.2"));
     qDebug() << "VA-API probe: libva="
              << (libvaPath.isEmpty() ? QStringLiteral("<not mapped>") : libvaPath)
-             << "origin=" << describeLibraryOrigin(libvaPath);
+             << "origin=" << libraryOrigin(libvaPath);
 
     for (const QString &devicePath : candidates) {
       const char *dev =

@@ -27,10 +27,20 @@ struct LibraryInventory {
 
 // `mapsPath` is normally /proc/self/maps; `bundleRoots` are the directories
 // that count as "ours" (the AppImage payload or the installed prefix).
+// Drops roots nested inside another root.
+QStringList mergeBundleRoots(const QStringList &roots);
+
 LibraryInventory collectLibraryInventory(const QString &mapsPath,
                                          const QStringList &bundleRoots);
 
 QString formatLibraryInventory(const LibraryInventory &inventory);
+
+// Path of a currently mapped library, matched by soname prefix (so
+// "libva.so.2" finds /usr/lib/libva.so.2.2400.0).
+QString mappedLibraryPath(const QString &soname);
+
+// "bundled", "host" or "unknown", relative to $APPDIR.
+QString libraryOrigin(const QString &path);
 
 // Convenience wrapper using /proc/self/maps and the real bundle roots.
 QString runtimeLibraryReport();

@@ -37,6 +37,37 @@ bool looksLikeSharedLibrary(const QString &path) {
   return true;
 }
 
+// /proc reports a size of 0, so Qt's regular-file helpers (atEnd/readAll)
+// stop immediately; read until the kernel returns nothing instead.
+QByteArray readMaps(const QString &mapsPath) {
+  QFile maps(mapsPath);
+  if (!maps.open(QIODevice::ReadOnly))
+    return {};
+  QByteArray contents;
+  for (;;) {
+    const QByteArray chunk = maps.read(64 * 1024);
+    if (chunk.isEmpty())
+      break;
+    contents += chunk;
+  }
+  return contents;
+}
+
+// A maps line is "7f00-7f10 r-xp 00000000 08:01 42 /path/to/lib.so"; the path
+// follows the inode field, so its first slash starts the absolute path.
+QString pathFromMapsLine(const QByteArray &raw) {
+  const QString line = QString::fromLocal8Bit(raw);
+  const int slash = line.indexOf(QLatin1Char('/'));
+  if (slash < 0)
+    return {};
+  QString path = line.mid(slash).trimmed();
+  if (path.endsWith(QStringLiteral(" (deleted)")))
+    path.chop(10);
+  if (!path.startsWith(QLatin1Char('/')))
+    return {};
+  return path;
+}
+
 QStringList defaultBundleRoots() {
   QStringList roots;
   const QString appDir = QString::fromLocal8Bit(qgetenv("APPDIR"));
@@ -47,29 +78,35 @@ QStringList defaultBundleRoots() {
     roots << QDir::cleanPath(executableDir + QStringLiteral("/.."));
   roots.removeDuplicates();
   roots.removeAll(QString());
-  return roots;
+  return mergeBundleRoots(roots);
 }
 
 } // namespace
+
+// A single tree can be named twice (the AppImage mount and its usr/ parent);
+// keep only the outermost roots so the log does not repeat itself.
+QStringList mergeBundleRoots(const QStringList &roots) {
+  QStringList kept;
+  for (const QString &root : roots) {
+    bool nested = false;
+    for (const QString &other : roots) {
+      if (other != root && root.startsWith(other + QLatin1Char('/'))) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested)
+      kept << root;
+  }
+  return kept;
+}
 
 LibraryInventory collectLibraryInventory(const QString &mapsPath,
                                          const QStringList &bundleRoots) {
   LibraryInventory inventory;
   inventory.bundleRoots = bundleRoots;
 
-  QFile maps(mapsPath);
-  if (!maps.open(QIODevice::ReadOnly))
-    return inventory;
-
-  // Read explicitly instead of trusting atEnd()/readAll(): /proc reports a
-  // size of 0, which makes Qt's regular-file helpers stop immediately.
-  QByteArray contents;
-  for (;;) {
-    const QByteArray chunk = maps.read(64 * 1024);
-    if (chunk.isEmpty())
-      break;
-    contents += chunk;
-  }
+  const QByteArray contents = readMaps(mapsPath);
 
   // /proc/self/maps repeats a library once per mapping (text, data, ...), so
   // deduplicate by path before classifying.
@@ -77,14 +114,8 @@ LibraryInventory collectLibraryInventory(const QString &mapsPath,
   QSet<QString> host;
   QSet<QString> bundle;
   for (const QByteArray &raw : contents.split('\n')) {
-    const QString line = QString::fromLocal8Bit(raw);
-    const int slash = line.indexOf(QLatin1Char('/'));
-    if (slash < 0)
-      continue; // anonymous mappings and pseudo entries like [vdso]
-    QString path = line.mid(slash).trimmed();
-    if (path.endsWith(QStringLiteral(" (deleted)")))
-      path.chop(10);
-    if (!path.startsWith(QLatin1Char('/')) || seen.contains(path))
+    const QString path = pathFromMapsLine(raw);
+    if (path.isEmpty() || seen.contains(path))
       continue;
     if (!looksLikeSharedLibrary(path))
       continue;
@@ -131,6 +162,24 @@ QString formatLibraryInventory(const LibraryInventory &inventory) {
           : QStringLiteral("bundle under ") + inventory.bundleRoots.join(QStringLiteral(", "));
   appendSection(bundleTitle, inventory.bundle);
   return lines.join(QLatin1Char('\n'));
+}
+
+QString mappedLibraryPath(const QString &soname) {
+  for (const QByteArray &raw : readMaps(QStringLiteral("/proc/self/maps")).split('\n')) {
+    const QString path = pathFromMapsLine(raw);
+    if (!path.isEmpty() && QFileInfo(path).fileName().startsWith(soname))
+      return path;
+  }
+  return {};
+}
+
+QString libraryOrigin(const QString &path) {
+  if (path.isEmpty())
+    return QStringLiteral("unknown");
+  const QString appDir = QString::fromLocal8Bit(qgetenv("APPDIR"));
+  if (!appDir.isEmpty() && path.startsWith(appDir + QLatin1Char('/')))
+    return QStringLiteral("bundled");
+  return QStringLiteral("host");
 }
 
 QString runtimeLibraryReport() {

@@ -129,6 +129,35 @@ TEST(RuntimeLibraries, NonLibrariesAreIgnored) {
   EXPECT_EQ(inventory.host.at(1), QStringLiteral("/usr/lib/libfoo.so.1.2.3"));
 }
 
+TEST(RuntimeLibraries, NestedBundleRootsAreCollapsed) {
+  EXPECT_EQ(mergeBundleRoots({QStringLiteral("/opt/app"),
+                              QStringLiteral("/opt/app/usr"),
+                              QStringLiteral("/prefix")}),
+            (QStringList{QStringLiteral("/opt/app"), QStringLiteral("/prefix")}));
+}
+
+TEST(RuntimeLibraries, MappedLibraryPathFindsLiveMappings) {
+  // The VA-API diagnostic uses this; /proc reports size 0, so a QFile-based
+  // implementation that trusts atEnd() silently returns nothing.
+  const QString libc = mappedLibraryPath(QStringLiteral("libc.so.6"));
+  EXPECT_FALSE(libc.isEmpty());
+  EXPECT_TRUE(libc.startsWith(QStringLiteral("/")));
+  EXPECT_TRUE(mappedLibraryPath(QStringLiteral("libtrophy-does-not-exist.so.9")).isEmpty());
+}
+
+TEST(RuntimeLibraries, OriginUsesAppDir) {
+  const QByteArray previous = qgetenv("APPDIR");
+  qputenv("APPDIR", "/opt/trophy");
+  EXPECT_EQ(libraryOrigin(QStringLiteral("/opt/trophy/usr/lib/libQt6Core.so.6")),
+            QStringLiteral("bundled"));
+  EXPECT_EQ(libraryOrigin(QStringLiteral("/usr/lib/libva.so.2")), QStringLiteral("host"));
+  EXPECT_EQ(libraryOrigin(QString()), QStringLiteral("unknown"));
+  if (previous.isEmpty())
+    qunsetenv("APPDIR");
+  else
+    qputenv("APPDIR", previous);
+}
+
 TEST(RuntimeLibraries, LiveProcessInventoryIsUsable) {
   // /proc/self/maps reports a size of 0, which makes Qt's regular-file helpers
   // think the file is empty; this asserts the real process is actually read.
