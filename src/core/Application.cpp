@@ -31,6 +31,7 @@
 #include "detection/GameDetectionService.h"
 #include "detection/GameIconProvider.h"
 #include "detection/GameWhitelist.h"
+#include "detection/LegacyGlShimCleanup.h"
 #include "detection/VulkanLayer.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "encoding/EncoderFactory.h"
@@ -114,6 +115,10 @@ bool Application::initialize() {
 
   QString configDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/trophy";
   QDir().mkpath(configDir);
+  // The OpenGL preload shim was retired. Remove any enrollment it left so a
+  // future login does not try to load a library that is no longer shipped.
+  if (!LegacyGlShimCleanup::removeOwnedEnrollment())
+    qWarning() << "Could not remove the retired OpenGL shim enrollment";
   QString logPath = configDir + "/trophy.log";
 
   // Open log file in append mode

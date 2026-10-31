@@ -348,6 +348,12 @@ target_include_directories(test_DetectionPolicy PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_DetectionPolicy PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_DetectionPolicy)
 
+add_executable(test_LegacyGlShimCleanup test_LegacyGlShimCleanup.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/LegacyGlShimCleanup.cpp)
+target_include_directories(test_LegacyGlShimCleanup PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_LegacyGlShimCleanup PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_LegacyGlShimCleanup)
+
 add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/core/RecordingManager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/RecordingSession.cpp

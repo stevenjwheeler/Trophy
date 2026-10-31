@@ -294,6 +294,7 @@ set(DETECTION_SOURCES
     src/detection/GameDetectionService.cpp
     src/detection/GameIdentity.cpp
     src/detection/DetectionPolicy.cpp
+    src/detection/LegacyGlShimCleanup.cpp
     src/detection/GameWhitelist.cpp
 )
 
@@ -378,6 +379,7 @@ set(DETECTION_HEADERS
     src/detection/GameDetectionService.h
     src/detection/GameIdentity.h
     src/detection/DetectionPolicy.h
+    src/detection/LegacyGlShimCleanup.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
 )
