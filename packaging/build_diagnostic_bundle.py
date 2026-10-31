@@ -91,13 +91,20 @@ def main():
     env = os.environ.copy()
     env.update(APPIMAGE_EXTRACT_AND_RUN="1", LINUXDEPLOY_OUTPUT_VERSION=args.version)
     subprocess.run(command, env=env, cwd=output, check=True)
-    # libva must come from the host: bundling it pins an older version than
-    # the host's mesa/VA driver, which breaks VA-API on newer GPUs (e.g.
-    # RDNA4). Treat it as a host dependency, like PipeWire/portal/drivers.
-    for pattern in ("libva*.so*", "libva-drm*.so*", "libva-x11*.so*"):
+    # Driver/interface libraries must come from the host: bundling them pins an
+    # older version than the host's driver, which breaks the corresponding
+    # feature (VA-API, Vulkan, VDPAU, OpenCL, oneVPL) on newer systems. Treat
+    # them as host dependencies, like PipeWire/portal/drivers.
+    for pattern in ("libva*.so*", "libva-drm*.so*", "libva-x11*.so*",
+                    "libvdpau*.so*", "libvulkan*.so*", "libOpenCL*.so*",
+                    "libvpl*.so*"):
         for path in stage.rglob(pattern):
             path.unlink()
-    vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*", "*_drv_video.so", "*_dri.so")
+    vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*",
+                                            "*_drv_video.so", "*_dri.so",
+                                            "libva*.so*", "libvdpau*.so*",
+                                            "libvulkan*.so*", "libOpenCL*.so*",
+                                            "libvpl*.so*")
                         for path in stage.rglob(pattern)]
     if vendor_libraries:
         raise RuntimeError("Refusing a diagnostic AppImage with bundled vendor GPU drivers: " + str(vendor_libraries))
