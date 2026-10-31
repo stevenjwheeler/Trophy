@@ -12,7 +12,48 @@ import tempfile
 import time
 
 
-def smoke(image, log_path):
+def loaded_libraries(pid):
+    """Map library basename -> paths mapped into the running process."""
+    mapped = {}
+    for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
+        fields = line.split(None, 5)
+        if len(fields) < 6:
+            continue
+        path = fields[5].strip()
+        if path.endswith(" (deleted)"):
+            path = path[: -len(" (deleted)")]
+        if path.startswith("/"):
+            mapped.setdefault(os.path.basename(path), set()).add(path)
+    return mapped
+
+
+def check_loader(pid, payload, expect_host_libva):
+    """Verify the launcher resolved libraries the way the AppRun promises.
+
+    Qt must always come from the AppImage (a host Qt with the same soname but
+    an older version is the bug that produced "version `Qt_6.12' not found").
+    With a host libva installed, libva must come from the host, not the bundle.
+    """
+    mapped = loaded_libraries(pid)
+    prefix = str(payload) + os.sep
+    qt = mapped.get("libQt6Core.so.6", set())
+    if not qt:
+        raise RuntimeError("libQt6Core.so.6 was never loaded")
+    host_qt = sorted(p for p in qt if not p.startswith(prefix))
+    if host_qt:
+        raise RuntimeError(
+            "host Qt shadowed the bundled Qt (ABI mismatch risk): " + ", ".join(host_qt))
+    if expect_host_libva:
+        if not mapped.get("libva.so.2"):
+            raise RuntimeError("libva.so.2 was never loaded")
+        for lib in ("libva.so.2", "libva-drm.so.2", "libva-x11.so.2"):
+            bundled = sorted(p for p in mapped.get(lib, set()) if p.startswith(prefix))
+            if bundled:
+                raise RuntimeError(
+                    f"bundled {lib} was used instead of the host's: " + ", ".join(bundled))
+
+
+def smoke(image, log_path, expect_host_libva=False):
     if not shutil.which("dbus-run-session"):
         raise RuntimeError("dbus-run-session is required; refusing the live session bus")
     temp_root = "/tmp/opencode" if Path("/tmp/opencode").is_dir() else None
@@ -81,8 +122,9 @@ def smoke(image, log_path):
                 app_pid = int(lock.read_text().splitlines()[0])
                 if app_pid <= 1 or os.getpgid(app_pid) != process.pid:
                     raise RuntimeError("App lock does not belong to the smoke process group")
+                payload = Path(os.readlink(f"/proc/{app_pid}/exe")).parents[2]
+                check_loader(app_pid, payload, expect_host_libva)
                 if image.suffix == ".AppImage":
-                    payload = Path(os.readlink(f"/proc/{app_pid}/exe")).parents[2]
                     for pattern in (
                         "usr/bin/qt.conf", "usr/lib/libTrophy.so",
                         "usr/lib/**/trophy/libtrophy_layer.so",
@@ -120,12 +162,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path)
     parser.add_argument("--log", type=Path, default=Path("appimage-smoke.log"))
+    parser.add_argument("--expect-host-libva", action="store_true",
+                        help="require libva to resolve to the host, not the bundle")
     args = parser.parse_args()
     try:
         if not args.image.is_file():
             raise RuntimeError("AppImage does not exist")
         # Preserve the entry path: resolving an AppRun symlink here would
         # bypass the launcher and hide packaging defects.
-        smoke(args.image.absolute(), args.log.resolve())
+        smoke(args.image.absolute(), args.log.resolve(), args.expect_host_libva)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"Smoke test failed: {error}; log: {args.log}\n")

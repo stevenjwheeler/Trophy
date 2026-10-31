@@ -200,6 +200,21 @@ jobs:
             --mount "type=bind,src=$evidence,dst=/evidence" \
             trophy-appimage-runtime24:ci python3 /source/packaging/smoke_appimage.py \
             "/source/Trophy-${VERSION}-x86_64.AppImage" --log /evidence/startup.log
+      - name: Smoke AppImage with a host libva (host-preferred override)
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/appimage-hostva-runtime"
+          mkdir -p "$evidence"
+          docker build --build-arg WITH_HOST_LIBVA=1 \
+            -t trophy-appimage-hostva:ci - < packaging/containers/appimage-runtime.Dockerfile
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$evidence,dst=/evidence" \
+            trophy-appimage-hostva:ci python3 /source/packaging/smoke_appimage.py \
+            "/source/Trophy-${VERSION}-x86_64.AppImage" --log /evidence/startup.log \
+            --expect-host-libva
       - name: Upload AppImage immediately
         uses: actions/upload-artifact@v4
         with:
