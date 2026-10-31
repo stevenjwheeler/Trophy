@@ -4,11 +4,29 @@
 set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
-# Prefer host libraries (e.g. a newer FFmpeg/libva matching the host's mesa)
-# over the bundled ones, falling back to the bundle when the host lacks a
-# compatible version. Host directories are listed first; the bundled dir is
-# last-resort. libva/libvdpau/libvulkan/libOpenCL/libvpl are bundled as a
-# fallback for hosts without them, but the host's copies are preferred so a
-# bundled (possibly older) version never shadows a newer host driver.
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$APPDIR/usr/lib"
+# Only libva is overridden to use the host's version (when available), so a
+# bundled (possibly older) copy never shadows a newer host driver such as
+# RDNA4's. Qt/FFmpeg/etc. keep the bundled versions for ABI safety. The
+# override directory is created at runtime because APPDIR may be a read-only
+# squashfs mount.
+VA_OVERRIDE=/tmp/trophy-va-override
+mkdir -p "$VA_OVERRIDE" 2>/dev/null || VA_OVERRIDE=""
+if [ -n "$VA_OVERRIDE" ]; then
+    # Recreate symlinks each launch so stale entries from a previous machine
+    # (or a prior AppImage version) cannot linger.
+    rm -f "$VA_OVERRIDE"/libva*.so* 2>/dev/null || true
+    for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/lib64; do
+            if [ -e "$dir/$lib" ]; then
+                ln -sf "$dir/$lib" "$VA_OVERRIDE/$lib" 2>/dev/null || true
+                break
+            fi
+        done
+    done
+fi
+if [ -n "$VA_OVERRIDE" ] && [ -n "$(ls -A "$VA_OVERRIDE" 2>/dev/null)" ]; then
+    export LD_LIBRARY_PATH="$VA_OVERRIDE:$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+    export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 exec "$APPDIR/usr/bin/trophy" "$@"

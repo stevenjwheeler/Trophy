@@ -3,7 +3,24 @@
 set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:$APPDIR/usr/lib"
+VA_OVERRIDE=/tmp/trophy-va-override
+mkdir -p "$VA_OVERRIDE" 2>/dev/null || VA_OVERRIDE=""
+if [ -n "$VA_OVERRIDE" ]; then
+    rm -f "$VA_OVERRIDE"/libva*.so* 2>/dev/null || true
+    for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        for dir in /usr/lib/x86_64-linux-gnu /usr/lib /usr/lib64; do
+            if [ -e "$dir/$lib" ]; then
+                ln -sf "$dir/$lib" "$VA_OVERRIDE/$lib" 2>/dev/null || true
+                break
+            fi
+        done
+    done
+fi
+if [ -n "$VA_OVERRIDE" ] && [ -n "$(ls -A "$VA_OVERRIDE" 2>/dev/null)" ]; then
+    export LD_LIBRARY_PATH="$VA_OVERRIDE:$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+    export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 case "${1:-}" in
     --trophy-test-inventory)
         cat "$APPDIR/usr/share/trophy/diagnostic-tests.json"
