@@ -27,30 +27,64 @@ def loaded_libraries(pid):
     return mapped
 
 
+def soname_paths(mapped, soname):
+    """Paths mapped for one soname family.
+
+    A mapped file keeps its real name, so a resolved symlink shows up as
+    /usr/lib/.../libva.so.2.2000.0 rather than libva.so.2. Matching the
+    prefix is what makes the check work for both bundled (unversioned copies)
+    and host (versioned) libraries.
+    """
+    paths = set()
+    for name, found in mapped.items():
+        if name.startswith(soname):
+            paths |= found
+    return paths
+
+
 def check_loader(pid, payload, expect_host_libva):
     """Verify the launcher resolved libraries the way the AppRun promises.
 
-    Qt must always come from the AppImage (a host Qt with the same soname but
-    an older version is the bug that produced "version `Qt_6.12' not found").
-    With a host libva installed, libva must come from the host, not the bundle.
+    Qt and FFmpeg must always come from the AppImage: a host Qt with the same
+    soname but an older version is the bug that produced
+    "version `Qt_6.12' not found". With a host libva installed, the whole libva
+    set must come from one host directory, never mixed with the bundle.
+
+    Bundle assertions only apply to AppImage-style payloads; a native prefix
+    install links the host's Qt/FFmpeg by design.
     """
     mapped = loaded_libraries(pid)
     prefix = str(payload) + os.sep
-    qt = mapped.get("libQt6Core.so.6", set())
-    if not qt:
-        raise RuntimeError("libQt6Core.so.6 was never loaded")
-    host_qt = sorted(p for p in qt if not p.startswith(prefix))
-    if host_qt:
-        raise RuntimeError(
-            "host Qt shadowed the bundled Qt (ABI mismatch risk): " + ", ".join(host_qt))
+    if any(payload.glob("usr/lib/**/libTrophy.so")):
+        qt = soname_paths(mapped, "libQt6Core.so.6")
+        if not qt:
+            raise RuntimeError("libQt6Core.so.6 was never loaded")
+        for soname in ("libQt6", "libavcodec", "libavformat", "libavutil"):
+            shadowed = sorted(
+                path
+                for name, paths in mapped.items()
+                if name.startswith(soname)
+                for path in paths
+                if not path.startswith(prefix)
+            )
+            if shadowed:
+                raise RuntimeError(
+                    f"host {soname}* shadowed the bundled copy (ABI mismatch risk): "
+                    + ", ".join(shadowed))
     if expect_host_libva:
-        if not mapped.get("libva.so.2"):
-            raise RuntimeError("libva.so.2 was never loaded")
+        parents = set()
         for lib in ("libva.so.2", "libva-drm.so.2", "libva-x11.so.2"):
-            bundled = sorted(p for p in mapped.get(lib, set()) if p.startswith(prefix))
+            paths = soname_paths(mapped, lib)
+            if not paths:
+                raise RuntimeError(f"{lib} was never loaded")
+            bundled = sorted(p for p in paths if p.startswith(prefix))
             if bundled:
                 raise RuntimeError(
                     f"bundled {lib} was used instead of the host's: " + ", ".join(bundled))
+            parents |= {os.path.dirname(p) for p in paths}
+        if len(parents) != 1:
+            raise RuntimeError(
+                "libva modules came from different directories: " + ", ".join(sorted(parents)))
 
 
 def smoke(image, log_path, expect_host_libva=False):
@@ -148,6 +182,13 @@ def smoke(image, log_path, expect_host_libva=False):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
         output = log_path.read_text()
+        if any(payload.glob("usr/lib/**/libTrophy.so")):
+            # Support depends on knowing which half of the runtime was used, so
+            # a bundle that stops reporting it is a regression too.
+            for marker in ("Runtime libraries:", "from the host", "from the bundle"):
+                if marker not in output:
+                    raise RuntimeError(
+                        f"startup log is missing the runtime library inventory ({marker})")
         if re.search(r"ReferenceError|TypeError|Cannot assign to|"
                       r"QQmlApplicationEngine failed|Failed to initialize application|"
                       r"Binding loop detected|Detected recursive rearrange|"

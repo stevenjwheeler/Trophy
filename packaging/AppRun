@@ -5,62 +5,113 @@ set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
 
-# libva is the ONE library taken from the host: the VA driver
+# libva is the ONE library family taken from the host. The VA driver
 # (radeonsi_drv_video.so, iHD_drv_video.so, ...) is a host object built against
 # the host's libva, so a bundled older copy shadows it and breaks VA-API on
-# newer GPUs (RDNA4 needs libva >= 1.22). Everything else -- Qt, FFmpeg,
-# codecs -- stays bundled so no host ABI can leak in.
+# newer GPUs. Everything else -- Qt, FFmpeg, codecs -- stays bundled so no host
+# ABI can leak in (a host Qt 6.4 with the same soname as our 6.12 fails with
+# "version `Qt_6.12' not found").
 #
-# The override is a per-user directory of symlinks (APPDIR is a read-only
-# squashfs mount). A shared /tmp path would let one user's directory block
-# another user's and would be a symlink-hijack target.
-find_host_lib() {
-    lib=$1
-    for p in $(ldconfig -p 2>/dev/null | awk -v n="$lib" '$1 == n { print $NF }') \
-             "/usr/lib/x86_64-linux-gnu/$lib" "/usr/lib64/$lib" "/usr/lib/$lib"; do
-        [ -f "$p" ] || continue
-        # Only a 64-bit ELF (e_ident[EI_CLASS] == 2): ldconfig also lists
-        # 32-bit multilib copies, which must never enter a 64-bit process.
-        cls=$(od -An -t u1 -j 4 -N 1 "$p" 2>/dev/null | tr -d ' \n')
-        if [ "$cls" = "2" ]; then
-            printf '%s\n' "$p"
+# Environment overrides, both optional:
+#   TROPHY_PREFER_BUNDLED_LIBVA=1  ignore the host libva entirely
+#   TROPHY_LIBVA_DIRS=<dir>[:...]  search these directories instead of ldconfig
+#
+# The override is a per-user directory of symlinks because APPDIR is a
+# read-only squashfs mount. A shared /tmp path would let one user's directory
+# block another's and would be a symlink-hijack target.
+
+is_elf64() {
+    # e_ident[EI_CLASS] == 2 (ELFCLASS64). Rejecting anything else keeps a
+    # 32-bit multilib copy out of a 64-bit process; if this cannot be read the
+    # library is rejected, which falls back to the bundled set.
+    [ -f "$1" ] || return 1
+    [ "$(od -An -t u1 -j 4 -N 1 "$1" 2>/dev/null | tr -d ' \n')" = "2" ]
+}
+
+find_libva_dir() {
+    # Return the first directory holding a COMPLETE 64-bit libva set. All three
+    # modules must come from one directory: FFmpeg 6's libavutil links libva-x11
+    # and libva-drm as well, so mixing a host core with a bundled module (or two
+    # host generations) would be a real ABI hazard.
+    if [ -n "${TROPHY_LIBVA_DIRS:-}" ]; then
+        candidates=$(printf '%s' "$TROPHY_LIBVA_DIRS" | tr ':' ' ')
+    else
+        candidates=$(ldconfig -p 2>/dev/null \
+            | awk '$1 == "libva.so.2" { print $NF }' \
+            | sed 's:/[^/]*$::')
+        candidates="$candidates /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib"
+    fi
+    for dir in $candidates; do
+        [ -d "$dir" ] || continue
+        complete=1
+        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+            if ! is_elf64 "$dir/$lib"; then
+                complete=0
+                break
+            fi
+        done
+        if [ "$complete" = 1 ]; then
+            printf '%s\n' "$dir"
             return 0
         fi
     done
     return 1
 }
 
+VA_HOST_DIR=
+if [ "${TROPHY_PREFER_BUNDLED_LIBVA:-0}" != "1" ]; then
+    VA_HOST_DIR=$(find_libva_dir) || VA_HOST_DIR=
+fi
+
 VA_OVERRIDE=
-if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-    candidate="$XDG_RUNTIME_DIR/trophy-va"
-else
-    candidate="${TMPDIR:-/tmp}/trophy-va-$(id -u)"
+if [ -n "$VA_HOST_DIR" ]; then
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+        candidate="$XDG_RUNTIME_DIR/trophy-va"
+    else
+        candidate="${TMPDIR:-/tmp}/trophy-va-$(id -u)"
+    fi
+    # Refuse a pre-existing symlink: mkdir would fail on it and a directory we
+    # do not own could otherwise be adopted.
+    if [ ! -L "$candidate" ] \
+       && { mkdir -m 700 "$candidate" 2>/dev/null \
+            || { [ -d "$candidate" ] \
+                 && [ "$(stat -c %u "$candidate" 2>/dev/null)" = "$(id -u)" ]; }; }; then
+        chmod 700 "$candidate" 2>/dev/null || true
+        VA_OVERRIDE=$candidate
+    fi
 fi
-if mkdir -m 700 "$candidate" 2>/dev/null \
-   || { [ -d "$candidate" ] && [ "$(stat -c %u "$candidate" 2>/dev/null)" = "$(id -u)" ]; }; then
-    VA_OVERRIDE=$candidate
-    chmod 700 "$VA_OVERRIDE" 2>/dev/null || true
-fi
+
 if [ -n "$VA_OVERRIDE" ]; then
-    # Rebuild the symlinks each launch: stale entries from an earlier AppImage
-    # version or a removed host library must never linger on the search path.
-    # All three libva modules move together: FFmpeg 6's libavutil links
-    # libva-x11 as well, so overriding only part of the set would mix a bundled
-    # module with a host core.
-    rm -f "$VA_OVERRIDE/libva.so.2" "$VA_OVERRIDE/libva-drm.so.2" \
-          "$VA_OVERRIDE/libva-x11.so.2" 2>/dev/null || true
+    # Publish each entry atomically (temp + rename) so a concurrently starting
+    # instance never sees a half-built or momentarily empty directory, and
+    # replace rather than append so stale targets from an earlier AppImage
+    # version cannot linger.
     for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
-        path=$(find_host_lib "$lib") || path=
-        if [ -n "$path" ]; then
-            ln -sf "$path" "$VA_OVERRIDE/$lib" 2>/dev/null || true
+        tmp="$VA_OVERRIDE/.$lib.$$"
+        if ln -sfn "$VA_HOST_DIR/$lib" "$tmp" 2>/dev/null \
+           && mv -f "$tmp" "$VA_OVERRIDE/$lib" 2>/dev/null; then
+            :
+        else
+            rm -f "$tmp" 2>/dev/null || true
+            VA_OVERRIDE=
+            break
         fi
     done
+    # A target that disappeared since the scan also disqualifies the override:
+    # -e follows the symlink, so this detects it.
+    if [ -n "$VA_OVERRIDE" ]; then
+        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+            [ -e "$VA_OVERRIDE/$lib" ] || { VA_OVERRIDE=; break; }
+        done
+    fi
 fi
-if [ -n "$VA_OVERRIDE" ] && [ -n "$(ls -A "$VA_OVERRIDE" 2>/dev/null)" ]; then
+
+if [ -n "$VA_OVERRIDE" ]; then
     export LD_LIBRARY_PATH="$VA_OVERRIDE:$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
-    # Host has no libva: use the bundled copy so the app still starts (VA-API
-    # then simply reports unavailable, as there is no host VA driver either).
+    # No usable host libva (absent, incomplete, 32-bit or opted out): keep the
+    # bundled copy so the app still starts. VA-API then reports unavailable
+    # rather than the process dying of a missing library.
     export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 exec "$APPDIR/usr/bin/trophy" "$@"

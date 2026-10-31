@@ -79,6 +79,8 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
     add_test(NAME DraftReleaseTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_DraftRelease.py")
+    add_test(NAME AppRunLibvaTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppRun.py")
     set(multilib_preload_includes)
     foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
         list(APPEND multilib_preload_includes --qt-include "${directory}")
@@ -834,6 +836,15 @@ add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp
 target_include_directories(test_ShippedLibDirs PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ShippedLibDirs PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_ShippedLibDirs)
+
+# --- RuntimeLibraries (bundle/host inventory logged at startup) ---
+add_executable(test_RuntimeLibraries test_RuntimeLibraries.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.h
+)
+target_include_directories(test_RuntimeLibraries PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_RuntimeLibraries PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_RuntimeLibraries)
 
 # --- VulkanLayer (structural manifest writer; hermetic via XDG_DATA_HOME) ---
 add_executable(test_VulkanLayer test_VulkanLayer.cpp

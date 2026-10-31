@@ -21,6 +21,7 @@
 #include "ReplayManager.h"
 #include "HardwareInfo.h"
 #include "RecordingManager.h"
+#include "RuntimeLibraries.h"
 #include "StorageManager.h"
 #include "SystemTrayManager.h"
 #include "WindowService.h"
@@ -347,6 +348,12 @@ bool Application::initialize() {
                  << (gioEnv.isEmpty() ? QStringLiteral("none")
                                      : QString::fromLocal8Bit(gioEnv))
                  << (stdinTty ? "(likely terminal)" : "(likely launcher)");
+  // Which half of the runtime came from where: the AppImage bundles Qt/FFmpeg
+  // but prefers the host's libva and driver stack, and this is the first thing
+  // to check when a machine reports unexpected encoder or ABI behaviour.
+  for (const QString &line :
+       runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+    qCInfo(appLog).noquote() << line;
   qCInfo(appLog) << "Application initialized successfully";
   return true;
 }

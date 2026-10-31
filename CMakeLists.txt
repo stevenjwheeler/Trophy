@@ -250,6 +250,7 @@ configure_file(
 set(CORE_SOURCES
     src/core/DeletionQueue.cpp
     src/core/Application.cpp
+    src/core/RuntimeLibraries.cpp
     src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp

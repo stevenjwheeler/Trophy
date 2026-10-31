@@ -30,7 +30,9 @@ The matching downloaded file should report `OK`; entries for packages you did no
 
 - A **Wayland** desktop session. Native Wayland and XWayland games can be captured; an X11 desktop session cannot.
 - **PipeWire**, **xdg-desktop-portal**, and a suitable compositor-specific portal backend.
-- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver.
+- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver. Set `TROPHY_PREFER_BUNDLED_LIBVA=1` to force the bundled copy, or `TROPHY_LIBVA_DIRS=/path[:/path]` to point the launcher at libva installed somewhere unusual.
+
+Trophy writes an inventory of the runtime libraries it loaded to the log at startup, split into those taken from the host and those taken from the bundle. When reporting a problem, include that section: it shows which `libva`, driver and system libraries were actually in use.
 
 The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
 

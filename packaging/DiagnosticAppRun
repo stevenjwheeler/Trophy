@@ -1,51 +1,90 @@
 #!/bin/sh
 # Diagnostic variant only; the release AppRun remains unchanged.
+# The libva selection below is intentionally identical to packaging/AppRun;
+# tests/test_AppRun.py runs the same cases against both files so they cannot
+# drift apart.
 set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
-# libva is the ONE library taken from the host: the VA driver is a host object
-# built against the host's libva, so a bundled older copy shadows it and breaks
-# VA-API on newer GPUs. Everything else stays bundled. The override is a
-# per-user symlink directory so one user's copy cannot block another's.
-find_host_lib() {
-    lib=$1
-    for p in $(ldconfig -p 2>/dev/null | awk -v n="$lib" '$1 == n { print $NF }') \
-             "/usr/lib/x86_64-linux-gnu/$lib" "/usr/lib64/$lib" "/usr/lib/$lib"; do
-        [ -f "$p" ] || continue
-        cls=$(od -An -t u1 -j 4 -N 1 "$p" 2>/dev/null | tr -d ' \n')
-        if [ "$cls" = "2" ]; then
-            printf '%s\n' "$p"
+
+# libva is the ONE library family taken from the host: the VA driver is a host
+# object built against the host's libva, so a bundled older copy shadows it and
+# breaks VA-API on newer GPUs. Everything else stays bundled.
+#   TROPHY_PREFER_BUNDLED_LIBVA=1  ignore the host libva entirely
+#   TROPHY_LIBVA_DIRS=<dir>[:...]  search these directories instead of ldconfig
+
+is_elf64() {
+    [ -f "$1" ] || return 1
+    [ "$(od -An -t u1 -j 4 -N 1 "$1" 2>/dev/null | tr -d ' \n')" = "2" ]
+}
+
+find_libva_dir() {
+    if [ -n "${TROPHY_LIBVA_DIRS:-}" ]; then
+        candidates=$(printf '%s' "$TROPHY_LIBVA_DIRS" | tr ':' ' ')
+    else
+        candidates=$(ldconfig -p 2>/dev/null \
+            | awk '$1 == "libva.so.2" { print $NF }' \
+            | sed 's:/[^/]*$::')
+        candidates="$candidates /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib"
+    fi
+    for dir in $candidates; do
+        [ -d "$dir" ] || continue
+        complete=1
+        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+            if ! is_elf64 "$dir/$lib"; then
+                complete=0
+                break
+            fi
+        done
+        if [ "$complete" = 1 ]; then
+            printf '%s\n' "$dir"
             return 0
         fi
     done
     return 1
 }
 
+VA_HOST_DIR=
+if [ "${TROPHY_PREFER_BUNDLED_LIBVA:-0}" != "1" ]; then
+    VA_HOST_DIR=$(find_libva_dir) || VA_HOST_DIR=
+fi
+
 VA_OVERRIDE=
-if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-    candidate="$XDG_RUNTIME_DIR/trophy-va"
-else
-    candidate="${TMPDIR:-/tmp}/trophy-va-$(id -u)"
+if [ -n "$VA_HOST_DIR" ]; then
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+        candidate="$XDG_RUNTIME_DIR/trophy-va"
+    else
+        candidate="${TMPDIR:-/tmp}/trophy-va-$(id -u)"
+    fi
+    if [ ! -L "$candidate" ] \
+       && { mkdir -m 700 "$candidate" 2>/dev/null \
+            || { [ -d "$candidate" ] \
+                 && [ "$(stat -c %u "$candidate" 2>/dev/null)" = "$(id -u)" ]; }; }; then
+        chmod 700 "$candidate" 2>/dev/null || true
+        VA_OVERRIDE=$candidate
+    fi
 fi
-if mkdir -m 700 "$candidate" 2>/dev/null \
-   || { [ -d "$candidate" ] && [ "$(stat -c %u "$candidate" 2>/dev/null)" = "$(id -u)" ]; }; then
-    VA_OVERRIDE=$candidate
-    chmod 700 "$VA_OVERRIDE" 2>/dev/null || true
-fi
+
 if [ -n "$VA_OVERRIDE" ]; then
-    # All three libva modules move together: FFmpeg 6's libavutil links
-    # libva-x11 as well, so overriding only part of the set would mix a bundled
-    # module with a host core.
-    rm -f "$VA_OVERRIDE/libva.so.2" "$VA_OVERRIDE/libva-drm.so.2" \
-          "$VA_OVERRIDE/libva-x11.so.2" 2>/dev/null || true
     for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
-        path=$(find_host_lib "$lib") || path=
-        if [ -n "$path" ]; then
-            ln -sf "$path" "$VA_OVERRIDE/$lib" 2>/dev/null || true
+        tmp="$VA_OVERRIDE/.$lib.$$"
+        if ln -sfn "$VA_HOST_DIR/$lib" "$tmp" 2>/dev/null \
+           && mv -f "$tmp" "$VA_OVERRIDE/$lib" 2>/dev/null; then
+            :
+        else
+            rm -f "$tmp" 2>/dev/null || true
+            VA_OVERRIDE=
+            break
         fi
     done
+    if [ -n "$VA_OVERRIDE" ]; then
+        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+            [ -e "$VA_OVERRIDE/$lib" ] || { VA_OVERRIDE=; break; }
+        done
+    fi
 fi
-if [ -n "$VA_OVERRIDE" ] && [ -n "$(ls -A "$VA_OVERRIDE" 2>/dev/null)" ]; then
+
+if [ -n "$VA_OVERRIDE" ]; then
     export LD_LIBRARY_PATH="$VA_OVERRIDE:$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
     export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
