@@ -351,6 +351,11 @@ target_include_directories(test_GameWhitelist PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_GameWhitelist PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_GameWhitelist)
 
+add_executable(test_DetectionPolicy test_DetectionPolicy.cpp ${CMAKE_SOURCE_DIR}/src/detection/DetectionPolicy.cpp)
+target_include_directories(test_DetectionPolicy PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_DetectionPolicy PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_DetectionPolicy)
+
 add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/core/RecordingManager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/RecordingSession.cpp
@@ -378,6 +383,7 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/muxing/IMuxer.h
     ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameIdentity.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection/DetectionPolicy.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
     ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp
@@ -513,7 +519,7 @@ target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMA
 target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} Qt6::Concurrent ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${AVCODEC_LIBRARIES})
 gtest_discover_tests(test_Recording)
 
-add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameIdentity.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp)
+add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameIdentity.cpp ${CMAKE_SOURCE_DIR}/src/detection/DetectionPolicy.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp)
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
 target_compile_definitions(test_GameDetectionService PRIVATE TROPHY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS} Qt6::Network Qt6::DBus)

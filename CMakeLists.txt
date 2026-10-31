@@ -304,6 +304,7 @@ set(DETECTION_SOURCES
     src/detection/GameIconProvider.cpp
     src/detection/GameDetectionService.cpp
     src/detection/GameIdentity.cpp
+    src/detection/DetectionPolicy.cpp
     src/detection/GameWhitelist.cpp
 )
 
@@ -387,6 +388,7 @@ set(DETECTION_HEADERS
     src/detection/GameIconSource.h
     src/detection/GameDetectionService.h
     src/detection/GameIdentity.h
+    src/detection/DetectionPolicy.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
 )
