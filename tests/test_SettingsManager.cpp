@@ -134,6 +134,30 @@ TEST_F(SettingsManagerTest, ShareExportFolderPersistsAndResets) {
   EXPECT_TRUE(mgr->shareExportFolder().isEmpty());
 }
 
+// Registering the AppImage restarts Trophy, so the wizard has to resume where
+// it was rather than starting over.
+TEST_F(SettingsManagerTest, WizardStepPersistsAndResets) {
+  EXPECT_EQ(mgr->wizardStep(), 0);
+  QSignalSpy changed(mgr.get(), &SettingsManager::wizardStepChanged);
+  mgr->setWizardStep(5);
+  mgr->setWizardStep(5);
+  EXPECT_EQ(changed.count(), 1);
+  mgr->setWizardStep(99); // clamped to the last step
+  EXPECT_EQ(mgr->wizardStep(), 6);
+
+  mgr->setWizardStep(5);
+  SettingsManager restored;
+  restored.load();
+  EXPECT_EQ(restored.wizardStep(), 5);
+
+  // Completing setup clears the resume point.
+  restored.setSetupCompleted(true);
+  restored.setWizardStep(0);
+  SettingsManager again;
+  again.load();
+  EXPECT_EQ(again.wizardStep(), 0);
+}
+
 TEST_F(SettingsManagerTest, CustomizationDefaultsAndRoundTrip) {
   EXPECT_EQ(mgr->themeMode(), "amoled");
   EXPECT_EQ(mgr->accentColor(), "rose");

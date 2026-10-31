@@ -91,6 +91,10 @@ class SettingsManager : public QObject {
                  setInstantReplayEnabled NOTIFY instantReplayEnabledChanged)
   Q_PROPERTY(bool globalShortcutsEnabled READ globalShortcutsEnabled WRITE
                  setGlobalShortcutsEnabled NOTIFY globalShortcutsEnabledChanged)
+  // Setup wizard progress, so registering the AppImage (which needs a
+  // restart) resumes the wizard where it left off instead of starting over.
+  Q_PROPERTY(int wizardStep READ wizardStep WRITE setWizardStep
+                 NOTIFY wizardStepChanged)
   // Daily update check against the GitHub release feed (the
   // notice points at the releases page; phase 1 does not
   // download anything). Manual checks from the Info page run
@@ -235,7 +239,9 @@ public:
   void setInstantReplayEnabled(bool enabled);
 
   bool globalShortcutsEnabled() const { return m_globalShortcutsEnabled; }
+  int wizardStep() const { return m_wizardStep; }
   void setGlobalShortcutsEnabled(bool enabled);
+  void setWizardStep(int step);
 
   bool updateCheckEnabled() const { return m_updateCheckEnabled; }
   void setUpdateCheckEnabled(bool enabled);
@@ -322,6 +328,7 @@ signals:
   void startOnLoginChanged();
   void instantReplayEnabledChanged();
   void globalShortcutsEnabledChanged();
+  void wizardStepChanged();
   void updateCheckEnabledChanged();
   void notifyRecordingsChanged();
   void notifyClipsChanged();
@@ -393,6 +400,7 @@ private:
   bool m_instantReplayEnabled = true;
   // Portal global shortcuts (F9/F10); bound on user consent, never silently.
   bool m_globalShortcutsEnabled = true;
+  int m_wizardStep = 0;
   // Daily GitHub release check (default on; Info page manual
   // check always runs).
   bool m_updateCheckEnabled = true;

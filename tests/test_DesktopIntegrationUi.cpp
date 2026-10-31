@@ -38,6 +38,7 @@ public:
     emit stateChanged();
   }
   Q_INVOKABLE void restartTrophy() { ++restarts; }
+  Q_INVOKABLE bool isEncoderAvailable(const QString &) const { return true; }
   int restarts = 0;
 
 signals:
@@ -45,7 +46,6 @@ signals:
 
 private:
   bool m_canRestart = true;
-  Q_INVOKABLE bool isEncoderAvailable(const QString &) const { return true; }
 };
 
 // Stand-in for DesktopIntegration: same properties/signal shape.

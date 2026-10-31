@@ -28,9 +28,15 @@ Rectangle {
     property bool helperSetupRequested: false
 
     // Reset to first page whenever the wizard is (re-)shown
+    // Registration needs a restart, so remember the step and resume there
+    // instead of making the user walk through the wizard again.
+    onCurrentStepChanged: if (settingsManager) settingsManager.wizardStep = currentStep
+
     onVisibleChanged: {
         if (visible) {
-            currentStep = 0
+            currentStep = (settingsManager && settingsManager.wizardStep > 0 &&
+                           settingsManager.wizardStep < totalSteps)
+                          ? settingsManager.wizardStep : 0
             wizardCard.opacity = 0
             wizardCard.scale = 0.96
             wizardCardAnimation.start()
@@ -720,6 +726,16 @@ Rectangle {
                         property string toggleKey: (globalShortcuts && globalShortcuts.boundShortcuts["toggle-recording"]) || ""
                         property string clipKey: (globalShortcuts && globalShortcuts.boundShortcuts["save-clip"]) || ""
                         property bool hasKeys: toggleKey !== "" && clipKey !== ""
+                        // An unregistered AppImage is registered on the final
+                        // step, which changes the portal app id. Binding now
+                        // would file the keys against an identity that is
+                        // about to disappear, so the keys are chosen on the
+                        // first launch after the restart instead.
+                        property bool identityPending:
+                            typeof desktopIntegration !== "undefined" && desktopIntegration
+                            && desktopIntegration.isAppImage && !desktopIntegration.isRegistered
+                        property bool skipRegistration: false
+                        property bool needsRegistration: identityPending && !skipRegistration
                         ColumnLayout {
                             width: stepKeysScroll.availableWidth
                             height: Math.max(implicitHeight, stepKeysScroll.availableHeight)
@@ -731,8 +747,87 @@ Rectangle {
                                 Label { text: qsTr("Keyboard Shortcuts"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
                                 Label { text: qsTr("Two keys: record, and clip / bookmark."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
                             }
+                            // Register first: the portal stores keys per app
+                            // id, and registering restarts Trophy, so binding
+                            // before this would file them under an identity
+                            // that is about to disappear.
+                            Rectangle {
+                                visible: stepKeysScroll.needsRegistration
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.preferredWidth: 500
+                                implicitHeight: registerCol.height + (Theme.spacingMedium * 2)
+                                color: Theme.withOpacity(Theme.textColor, 0.05)
+                                radius: Theme.radiusMedium
+                                border.color: Theme.borderColor
+                                ColumnLayout {
+                                    id: registerCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.margins: Theme.spacingMedium
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: Theme.spacingSmall
+
+                                    Label {
+                                        text: qsTr("Register Trophy first")
+                                        font.weight: Font.Bold
+                                        color: Theme.textColor
+                                    }
+                                    Label {
+                                        text: qsTr("Your keys are saved per application, so Trophy has to be registered first. Registering restarts Trophy and returns you to this step, then you pick the keys.")
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.textSecondaryColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: text.length > 0
+                                        text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusIsError) ? Theme.errorColor : Theme.successColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: typeof app !== "undefined" && app && !app.canRestartTrophy
+                                        text: qsTr("Stop recording to restart and continue.")
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.textSecondaryColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    RowLayout {
+                                        spacing: Theme.spacingMedium
+                                        TrophyButton {
+                                            text: qsTr("Register and restart")
+                                            highlighted: true
+                                            enabled: typeof app !== "undefined" && app && app.canRestartTrophy
+                                            onClicked: {
+                                                if (typeof desktopIntegration === "undefined" || !desktopIntegration)
+                                                    return;
+                                                const ok = desktopIntegration.integrate();
+                                                if (ok && typeof app !== "undefined" && app && app.canRestartTrophy)
+                                                    app.restartTrophy();
+                                            }
+                                        }
+                                        TrophyButton {
+                                            text: qsTr("Not now")
+                                            onClicked: stepKeysScroll.skipRegistration = true
+                                        }
+                                    }
+                                    Label {
+                                        visible: stepKeysScroll.skipRegistration
+                                        text: qsTr("Skipped — keys set up now belong to this portable run. Register in Settings later if you want system-wide capture approvals.")
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        color: Theme.textSecondaryColor
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                            }
+
                             // User-assigned recording key
                             Rectangle {
+                                visible: !stepKeysScroll.needsRegistration
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.preferredWidth: 500
                                 implicitHeight: f9Col.height + (Theme.spacingMedium * 2)
@@ -757,6 +852,7 @@ Rectangle {
                             }
                             // User-assigned clip key
                             Rectangle {
+                                visible: !stepKeysScroll.needsRegistration
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.preferredWidth: 500
                                 implicitHeight: f10Col.height + (Theme.spacingMedium * 2)
@@ -781,6 +877,7 @@ Rectangle {
                             }
                             // Enable card
                             Rectangle {
+                                visible: !stepKeysScroll.needsRegistration
                                 Layout.alignment: Qt.AlignHCenter
                                 Layout.preferredWidth: 500
                                 implicitHeight: keysEnableCol.height + (Theme.spacingMedium * 2)
@@ -867,37 +964,6 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: Theme.spacingMedium // Gap between toggle boxes and tip box
 
-                                    // Box 0: Desktop integration (AppImage only)
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: Theme.spacingMedium
-                                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
-                                        TrophyButton {
-                                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
-                                            onClicked: if (typeof desktopIntegration !== "undefined" && desktopIntegration) desktopIntegration.integrate()
-                                        }
-                                        ColumnLayout {
-                                            spacing: 0
-                                            Layout.fillWidth: true
-                                            Label { text: qsTr("Desktop integration"); font.weight: Font.Bold; color: Theme.textColor }
-                                            Label {
-                                                text: qsTr("Registers Trophy with your desktop, so capture approvals are remembered and file dialogs work.");
-                                                font.pixelSize: Theme.fontSizeSmall;
-                                                color: Theme.textSecondaryColor;
-                                                wrapMode: Text.WordWrap;
-                                                Layout.fillWidth: true
-                                            }
-                                            Label {
-                                                visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0
-                                                text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""
-                                                font.pixelSize: Theme.fontSizeSmall;
-                                                color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusIsError) ? Theme.errorColor : Theme.successColor;
-                                                wrapMode: Text.WordWrap;
-                                                Layout.fillWidth: true
-                                            }
-                                        }
-                                    }
-
                                     // Box 1: Enable Auto-Record
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -961,21 +1027,9 @@ Rectangle {
                     TrophyButton { text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
                     Item { Layout.fillWidth: true }
                     TrophyButton {
-                        // Registration only takes effect in a new process, so on
-                        // the last step the action that finishes setup is the
-                        // one that actually applies it.
-                        // Only swap the action when the restart can actually
-                        // happen now (not recording, relaunch target present);
-                        // otherwise Finish must stay the way out of the wizard.
-                        readonly property bool restartNeeded:
-                            root.currentStep === root.totalSteps - 1
-                            && typeof desktopIntegration !== "undefined" && desktopIntegration
-                            && desktopIntegration.restartRequired
-                            && typeof app !== "undefined" && app && app.canRestartTrophy
-
-                        text: root.currentStep === root.totalSteps - 1
-                              ? (restartNeeded ? qsTr("Restart Trophy") : qsTr("Get Started"))
-                              : qsTr("Next")
+                        // Registration happens before the keyboard step, so
+                        // finishing no longer needs a restart.
+                        text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
                         visible: root.currentStep !== 3 || root.windowHelperReady
                         enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
@@ -984,11 +1038,10 @@ Rectangle {
                                 root.currentStep++
                                 return
                             }
-                            // Finish first so the wizard does not return after
-                            // the relaunch, then apply the registration.
-                            if (settingsManager) settingsManager.setupCompleted = true
-                            if (restartNeeded && typeof app !== "undefined" && app && app.restartTrophy)
-                                app.restartTrophy()
+                            if (settingsManager) {
+                                settingsManager.setupCompleted = true
+                                settingsManager.wizardStep = 0
+                            }
                         }
                     }
                 }

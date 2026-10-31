@@ -127,6 +127,7 @@ void SettingsManager::load() {
   m_startOnLogin = general["startOnLogin"].toBool(false);
   m_instantReplayEnabled = general["instantReplay"].toBool(true);
   m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
+  m_wizardStep = qBound(0, general["wizardStep"].toInt(0), 6);
   m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
   m_libraryListView = general["libraryListView"].toBool(false);
@@ -280,6 +281,7 @@ void SettingsManager::save() {
   general["startOnLogin"] = m_startOnLogin;
   general["instantReplay"] = m_instantReplayEnabled;
   general["globalShortcuts"] = m_globalShortcutsEnabled;
+  general["wizardStep"] = m_wizardStep;
   general["updateCheck"] = m_updateCheckEnabled;
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;
@@ -416,6 +418,7 @@ void SettingsManager::loadDefaults() {
   m_startOnLogin = false;
   m_instantReplayEnabled = true;
   m_globalShortcutsEnabled = true;
+  m_wizardStep = 0;
   m_updateCheckEnabled = true;
   // DVR segment dir: empty means the /tmp default. Reset like every other
   // persisted value.
@@ -665,6 +668,15 @@ void SettingsManager::setGlobalShortcutsEnabled(bool enabled) {
     m_globalShortcutsEnabled = enabled;
     save();
     emit globalShortcutsEnabledChanged();
+  }
+}
+
+void SettingsManager::setWizardStep(int step) {
+  const int clamped = qBound(0, step, 6);
+  if (m_wizardStep != clamped) {
+    m_wizardStep = clamped;
+    save();
+    emit wizardStepChanged();
   }
 }
 
