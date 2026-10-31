@@ -36,7 +36,7 @@ class LauncherCase(unittest.TestCase):
         # Stand-in payload binary: it only reports the environment the launcher
         # built, so the fixture never needs a real Trophy build.
         probe = self.appdir / "usr/bin/trophy"
-        probe.write_text('#!/bin/sh\nprintf "%s\\n" "${LD_LIBRARY_PATH:-}"\n')
+        probe.write_text('#!/bin/sh\nprintf "%s\\n" "${LD_LIBRARY_PATH:-}" "${XDG_DATA_DIRS:-}"\n')
         probe.chmod(0o755)
         self.payload_lib = self.appdir / "usr/lib"
 
@@ -74,7 +74,8 @@ class LauncherCase(unittest.TestCase):
         result = subprocess.run(["/bin/sh", str(script)], env=env,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout.strip()
+        self.last_lines = result.stdout.strip().splitlines()
+        return self.last_lines[0]
 
     def runtime_dir(self):
         directory = self.tmp / "runtime"
@@ -170,6 +171,25 @@ class LauncherCase(unittest.TestCase):
         empty.mkdir()
         value = self.run_apprun(host_dirs=[empty])
         self.assertEqual(value, str(self.payload_lib))
+
+    def data_dirs(self, script=SCRIPTS[0], **kwargs):
+        self.run_apprun(script, **kwargs)
+        return self.last_lines[1].split(":")
+
+    def test_payload_data_dir_comes_first_so_the_portal_resolves_the_app_id(self):
+        # The mount carries usr/share/applications/trophy.desktop; the portal
+        # needs it in the caller's XDG_DATA_DIRS to know whether this process
+        # is Trophy, without installing anything.
+        dirs = self.data_dirs(extra_env={"XDG_DATA_DIRS": "/usr/share"})
+        self.assertEqual(dirs[0], str(self.appdir / "usr/share"))
+        self.assertIn("/usr/share", dirs)
+        # Nothing to preserve: the spec default follows the payload.
+        dirs = self.data_dirs()
+        self.assertEqual(dirs, [str(self.appdir / "usr/share"),
+                                "/usr/local/share", "/usr/share"])
+        # The diagnostic launcher must behave identically.
+        self.assertEqual(self.data_dirs(SCRIPTS[1], extra_env={"XDG_DATA_DIRS": "/usr/share"}),
+                         [str(self.appdir / "usr/share"), "/usr/share"])
 
     def test_diagnostic_launcher_matches_release(self):
         # The diagnostic AppRun duplicates the selection logic; identical

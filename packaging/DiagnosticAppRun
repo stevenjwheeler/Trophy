@@ -7,6 +7,18 @@ set -eu
 APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
 export APPDIR
 
+# The AppImage ships usr/share/applications/trophy.desktop. Putting the mount's
+# data dirs first lets the desktop portal resolve Trophy's app id without
+# installing anything, so capture approvals and global shortcuts belong to
+# Trophy on every launch - even one started from another manager's entry.
+# An explicit XDG_DATA_DIRS is preserved after it; the spec default is used
+# when the variable was unset.
+if [ -n "${XDG_DATA_DIRS:-}" ]; then
+    export XDG_DATA_DIRS="$APPDIR/usr/share:$XDG_DATA_DIRS"
+else
+    export XDG_DATA_DIRS="$APPDIR/usr/share:/usr/local/share:/usr/share"
+fi
+
 # libva is the ONE library family taken from the host: the VA driver is a host
 # object built against the host's libva, so a bundled older copy shadows it and
 # breaks VA-API on newer GPUs. Everything else stays bundled.
