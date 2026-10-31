@@ -341,17 +341,10 @@ void DesktopIntegration::refreshVisibility() {
         return;
     const bool hidden = !competingLauncher().isEmpty();
     m_entryHidden = hidden;
-    // Only the visibility flag is refreshed here. Repointing Exec at the
-    // currently running file would silently move the registration to another
-    // manager's copy just because that entry launched this process; the
-    // registered target is kept while it still exists, and integrate() is what
-    // deliberately repoints it.
-    QString target = execProgram(desktop);
-    if (target.isEmpty() || !QFileInfo(target).isFile())
-        target = appImagePath();
-    if (target.isEmpty() || !QFileInfo(target).isFile())
+    const QString appImage = appImagePath();
+    if (appImage.isEmpty() || !QFileInfo(appImage).isFile())
         return;
-    const QByteArray wanted = desktopEntryContents(target, hidden).toUtf8();
+    const QByteArray wanted = desktopEntryContents(appImage, hidden).toUtf8();
     QFile existing(desktop);
     if (existing.open(QIODevice::ReadOnly) && existing.readAll() == wanted) {
         existing.close();
