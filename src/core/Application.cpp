@@ -373,6 +373,20 @@ bool Application::initialize() {
                                                 : QStringLiteral("(default)"));
   }
 
+  const QString toVersion = QCoreApplication::applicationVersion();
+  if (UpdateInstaller::shouldAnnounceUpdate(m_postUpdateFromVersion, toVersion)) {
+    if (m_notificationService) {
+      m_notificationService->showQueuedNotification(
+          QStringLiteral("Trophy updated"),
+          UpdateInstaller::updateNoticeBody(m_postUpdateFromVersion, toVersion),
+          QString(), 8000, 1);
+    }
+    qCInfo(appLog) << "Updated from" << m_postUpdateFromVersion << "to"
+                   << toVersion << "- post-update notice shown";
+  } else if (!m_postUpdateFromVersion.isEmpty()) {
+    qCInfo(appLog) << "Relaunched by the updater for the same version"
+                   << toVersion << "- no notice";
+  }
   qCInfo(appLog) << "Application initialized successfully";
   return true;
 }

@@ -105,7 +105,7 @@ The **`.thumbnails/` directory** contains disposable thumbnails, filmstrips, wav
 
 ## Updates
 
-Trophy can check GitHub Releases for a newer version. The check runs automatically once per day while the app is open, and you can run it manually from **Info → Check for updates**. If a newer version is available, Trophy shows the version and a download/install action; on an AppImage install it can update automatically. If the check fails, Trophy reports that it could not check for updates instead of claiming you are up to date.
+Trophy can check GitHub Releases for a newer version. The check runs automatically once per day while the app is open, and you can run it manually from **Info → Check for updates**. If a newer version is available, Trophy shows the version and a download/install action; on an AppImage install it can update automatically. After installing, Trophy replaces the AppImage, restarts itself and shows a "Trophy updated" notification naming the old and new versions — including when you have **Start minimized** enabled, so the restart is never silent. If the check fails, Trophy reports that it could not check for updates instead of claiming you are up to date.
 
 ## Appearance and closing
 

@@ -300,6 +300,13 @@ target_include_directories(test_UpdateChecker PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_UpdateChecker)
 
+# --- UpdateInstaller (generated helper script + post-update notice) ---
+add_executable(test_UpdateInstaller test_UpdateInstaller.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/UpdateInstaller.cpp)
+target_include_directories(test_UpdateInstaller PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_UpdateInstaller PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
+gtest_discover_tests(test_UpdateInstaller)
+
 # --- WaveformCache (renders fixtures via ffmpeg CLI, skips without it) ---
 add_executable(test_WaveformCache test_WaveformCache.cpp
     ${CMAKE_SOURCE_DIR}/src/library/WaveformCache.cpp
