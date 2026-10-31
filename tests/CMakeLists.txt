@@ -10,6 +10,13 @@ target_include_directories(test_InstallInfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_InstallInfo PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
 gtest_discover_tests(test_InstallInfo)
 
+add_executable(test_AppRestart test_AppRestart.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppRestart.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppRestart.h)
+target_include_directories(test_AppRestart PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_AppRestart PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_AppRestart)
+
 add_executable(test_DesktopIntegration test_DesktopIntegration.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.h

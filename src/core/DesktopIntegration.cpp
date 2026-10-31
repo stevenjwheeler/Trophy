@@ -91,7 +91,9 @@ DesktopIntegration::DesktopIntegration(QObject *parent)
 DesktopIntegration::DesktopIntegration(const QString &dataHome,
                                        const QStringList &systemDataDirs,
                                        QObject *parent)
-    : QObject(parent), m_dataHome(dataHome), m_systemDataDirs(systemDataDirs) {}
+    : QObject(parent), m_dataHome(dataHome), m_systemDataDirs(systemDataDirs) {
+    m_startedRegistered = isRegistered();
+}
 
 bool DesktopIntegration::isAppImage() const {
     if (m_appImageCache < 0)
@@ -177,6 +179,10 @@ bool DesktopIntegration::isIntegrated() const {
         return false;
     const QString target = execTarget(desktop);
     return !target.isEmpty() && QFileInfo::exists(target);
+}
+
+bool DesktopIntegration::restartRequired() const {
+    return !m_startedRegistered && isRegistered();
 }
 
 bool DesktopIntegration::isRegistered() const {
@@ -297,8 +303,7 @@ bool DesktopIntegration::integrate() {
     }
 
     return applyStatus(entryChanged || iconChanged
-                           ? QStringLiteral("Desktop entry installed. Restart Trophy so the "
-                                            "portal uses it.")
+                           ? QStringLiteral("Desktop entry installed.")
                            : QStringLiteral("Already integrated."),
                        false);
 }

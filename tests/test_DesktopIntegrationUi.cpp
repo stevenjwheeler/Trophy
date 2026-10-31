@@ -26,9 +26,25 @@ class IntegrationUiApp : public QObject {
   Q_PROPERTY(bool vulkanLayerRegistered READ no CONSTANT)
   Q_PROPERTY(bool glShimAvailable READ no CONSTANT)
   Q_PROPERTY(bool trayAvailable READ no CONSTANT)
+  Q_PROPERTY(bool canRestartTrophy READ canRestartTrophy WRITE setCanRestartTrophy NOTIFY stateChanged)
 
 public:
   bool no() const { return false; }
+  bool canRestartTrophy() const { return m_canRestart; }
+  void setCanRestartTrophy(bool value) {
+    if (m_canRestart == value)
+      return;
+    m_canRestart = value;
+    emit stateChanged();
+  }
+  Q_INVOKABLE void restartTrophy() { ++restarts; }
+  int restarts = 0;
+
+signals:
+  void stateChanged();
+
+private:
+  bool m_canRestart = true;
   Q_INVOKABLE bool isEncoderAvailable(const QString &) const { return true; }
 };
 
@@ -38,6 +54,7 @@ class FakeIntegration : public QObject {
   Q_PROPERTY(bool isAppImage READ isAppImage WRITE setAppImage NOTIFY stateChanged)
   Q_PROPERTY(bool isIntegrated READ isIntegrated WRITE setIntegrated NOTIFY stateChanged)
   Q_PROPERTY(bool isRegistered READ isRegistered WRITE setRegistered NOTIFY stateChanged)
+  Q_PROPERTY(bool restartRequired READ restartRequired WRITE setRestartRequired NOTIFY stateChanged)
   Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
   Q_PROPERTY(QString statusMessage READ statusMessage WRITE setStatusMessage NOTIFY statusChanged)
   Q_PROPERTY(bool statusIsError READ statusIsError WRITE setStatusIsError NOTIFY statusChanged)
@@ -65,6 +82,13 @@ public:
     if (m_isRegistered == value)
       return;
     m_isRegistered = value;
+    emit stateChanged();
+  }
+  bool restartRequired() const { return m_restartRequired; }
+  void setRestartRequired(bool value) {
+    if (m_restartRequired == value)
+      return;
+    m_restartRequired = value;
     emit stateChanged();
   }
   QString statusMessage() const { return m_statusMessage; }
@@ -100,6 +124,7 @@ private:
   bool m_isAppImage = false;
   bool m_isIntegrated = false;
   bool m_isRegistered = false;
+  bool m_restartRequired = false;
   QString m_statusMessage;
   bool m_statusIsError = false;
 };
@@ -147,11 +172,15 @@ TEST(DesktopIntegrationUiTest, CardIsAppImageOnlyAndTracksRegistrationAndEntrySt
     auto *status = page->findChild<QObject *>("desktopIntegrationStatus");
     auto *button = page->findChild<QObject *>("desktopIntegrationButton");
     auto *location = page->findChild<QObject *>("desktopIntegrationLocation");
+    auto *restartRow = page->findChild<QObject *>("desktopIntegrationRestartRow");
+    auto *restartButton = page->findChild<QObject *>("desktopIntegrationRestartButton");
     auto *message = page->findChild<QObject *>("desktopIntegrationMessage");
     ASSERT_NE(card, nullptr);
     ASSERT_NE(status, nullptr);
     ASSERT_NE(button, nullptr);
     ASSERT_NE(location, nullptr);
+    ASSERT_NE(restartRow, nullptr);
+    ASSERT_NE(restartButton, nullptr);
     ASSERT_NE(message, nullptr);
 
     // A native/portable install must not show the section at all.

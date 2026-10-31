@@ -1479,6 +1479,26 @@ Page {
                         }
                     }
 
+                    SettingRow {
+                        objectName: "desktopIntegrationRestartRow"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.restartRequired
+                        label: qsTr("Restart")
+                        help: (typeof app !== "undefined" && app && !app.canRestartTrophy)
+                              ? qsTr("Stop recording to restart and apply this.")
+                              : qsTr("File dialogs and capture approvals use Trophy's desktop identity after a restart.")
+
+                        TrophyButton {
+                            objectName: "desktopIntegrationRestartButton"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: qsTr("Restart now")
+                            enabled: typeof app !== "undefined" && app && app.canRestartTrophy
+                            onClicked: {
+                                if (typeof app !== "undefined" && app && app.restartTrophy)
+                                    app.restartTrophy();
+                            }
+                        }
+                    }
+
                     Label {
                         objectName: "desktopIntegrationMessage"
                         visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0

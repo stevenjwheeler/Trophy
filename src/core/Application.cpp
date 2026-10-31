@@ -45,6 +45,7 @@
 #include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
 #include "InstallInfo.h"
+#include "AppRestart.h"
 #include "DesktopIntegration.h"
 #include "UpdateChecker.h"
 #include "UpdateInstaller.h"
@@ -1788,6 +1789,57 @@ void Application::installUpdate() {
   m_updateInstaller->installAppImage(m_updateChecker->latestAssetUrl(),
                                      m_updateChecker->latestDigest(),
                                      target);
+}
+
+QString Application::restartTarget() const {
+  // Prefer the AppImage the user launched: the executable path of a mounted
+  // AppImage disappears when this process exits.
+  QString target = QString::fromUtf8(qgetenv("APPIMAGE"));
+  if (target.isEmpty() && !qgetenv("APPDIR").isEmpty())
+    return QString();
+  if (target.isEmpty())
+    target = QCoreApplication::applicationFilePath();
+  const QFileInfo info(target);
+  return info.isFile() && info.isExecutable() ? info.absoluteFilePath() : QString();
+}
+
+bool Application::canRestartTrophy() const {
+  if (m_recordingManager && m_recordingManager->isRecording())
+    return false;
+  return !restartTarget().isEmpty();
+}
+
+bool Application::restartTrophy() {
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    qWarning("restartTrophy: blocked while recording");
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Stop recording before restarting."),
+          QStringLiteral("trophy"), 5000, 2);
+    return false;
+  }
+
+  const QString target = restartTarget();
+  if (target.isEmpty()) {
+    qWarning("restartTrophy: no relaunch target; cannot restart");
+    return false;
+  }
+
+  if (!AppRestart::scheduleAfterExit(target)) {
+    qWarning("restartTrophy: could not schedule the relaunch of %s",
+             target.toUtf8().constData());
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Could not restart Trophy automatically. Quit and start it again."),
+          QStringLiteral("trophy"), 6000, 2);
+    return false;
+  }
+
+  qCInfo(appLog) << "Restarting after exit:" << target;
+  QCoreApplication::quit();
+  return true;
 }
 
 void Application::openUpdateDialog() {

@@ -961,13 +961,34 @@ Rectangle {
                     TrophyButton { text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
                     Item { Layout.fillWidth: true }
                     TrophyButton {
-                        text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
+                        // Registration only takes effect in a new process, so on
+                        // the last step the action that finishes setup is the
+                        // one that actually applies it.
+                        // Only swap the action when the restart can actually
+                        // happen now (not recording, relaunch target present);
+                        // otherwise Finish must stay the way out of the wizard.
+                        readonly property bool restartNeeded:
+                            root.currentStep === root.totalSteps - 1
+                            && typeof desktopIntegration !== "undefined" && desktopIntegration
+                            && desktopIntegration.restartRequired
+                            && typeof app !== "undefined" && app && app.canRestartTrophy
+
+                        text: root.currentStep === root.totalSteps - 1
+                              ? (restartNeeded ? qsTr("Restart Trophy") : qsTr("Get Started"))
+                              : qsTr("Next")
                         highlighted: true
                         visible: root.currentStep !== 3 || root.windowHelperReady
                         enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
                         onClicked: {
-                            if (root.currentStep < root.totalSteps - 1) root.currentStep++
-                            else if (settingsManager) settingsManager.setupCompleted = true
+                            if (root.currentStep < root.totalSteps - 1) {
+                                root.currentStep++
+                                return
+                            }
+                            // Finish first so the wizard does not return after
+                            // the relaunch, then apply the registration.
+                            if (settingsManager) settingsManager.setupCompleted = true
+                            if (restartNeeded && typeof app !== "undefined" && app && app.restartTrophy)
+                                app.restartTrophy()
                         }
                     }
                 }

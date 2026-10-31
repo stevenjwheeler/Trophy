@@ -35,6 +35,7 @@ class DesktopIntegration : public QObject {
     Q_PROPERTY(bool isAppImage READ isAppImage CONSTANT)
     Q_PROPERTY(bool isIntegrated READ isIntegrated NOTIFY integrationChanged)
     Q_PROPERTY(bool isRegistered READ isRegistered NOTIFY integrationChanged)
+    Q_PROPERTY(bool restartRequired READ restartRequired NOTIFY integrationChanged)
     Q_PROPERTY(QString appImagePath READ appImagePath CONSTANT)
     Q_PROPERTY(QString desktopFilePath READ desktopFilePath CONSTANT)
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusMessageChanged)
@@ -68,6 +69,11 @@ public:
     // The entry the portal will use, or empty when there is none.
     QString registeredDesktopFile() const;
 
+    // True when this process started unregistered and has been registered
+    // since: the portal app id and the platform theme (native file dialogs)
+    // are fixed at startup, so only a new process picks them up.
+    bool restartRequired() const;
+
     // Same lookup without an instance, for main() before QGuiApplication
     // exists. Empty arguments use XDG_DATA_HOME / XDG_DATA_DIRS.
     static QString portalDesktopFile(const QString &dataHome = QString(),
@@ -97,6 +103,7 @@ private:
 
     QString m_dataHome;
     QStringList m_systemDataDirs;
+    bool m_startedRegistered = true;
     // InstallInfo::detect() shells out for native installs; QML reads
     // isAppImage() for every dialog binding, so resolve it once.
     mutable int m_appImageCache = -1;
