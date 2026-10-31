@@ -110,6 +110,10 @@ lists the single public page, not its section anchors or GitHub documentation.
   PNG link. Keep a useful `alt` and `data-screenshot` label on each screenshot.
 - Keep compatibility and anti-cheat cautions aligned with the user documentation.
   Do not imply all compositor/GPU combinations have been verified.
+- `docs/getting-started.md#requirements` is the canonical requirements section;
+  its `#package-compatibility` table covers AppImage, native packages and the
+  friend-testing kit. Keep the hero, compatibility and download links pointing
+  there rather than maintaining a second package/version table on the website.
 - The three theme cards appear side by side (stacked on mobile), with AMOLED
   first/default. Its screenshot reuses `assets/dashboard-grid.png`; Charcoal and
   Original use the supplied `assets/theme_charcoal.png` and `assets/theme_original.png`.
