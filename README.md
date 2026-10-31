@@ -53,9 +53,11 @@ DMA-BUF capture avoids CPU pixel copies where the compositor, driver, and encode
 
 Recordings use MKV for crash-resilient recording; share exports create separate MP4 files. A clean dark interface, configurable accent colors, and a system tray keep the controls close without getting in the way.
 
-**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Capture, global shortcuts, and game detection depend on your compositor and portal backend. See the [setup and compatibility guide](docs/getting-started.md).
+**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Capture, global shortcuts, and game detection depend on your compositor and portal backend. See the [system requirements and package compatibility](docs/getting-started.md#requirements).
 
 ## Get Trophy
+
+**Before downloading:** check the [requirements table for AppImage, DEB, RPM, tar.xz and the testing kit](docs/getting-started.md#package-compatibility).
 
 Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest), make it executable, and launch it:
 
