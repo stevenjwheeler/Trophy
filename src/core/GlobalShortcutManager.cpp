@@ -164,6 +164,13 @@ void GlobalShortcutManager::ensureResponseSubscription() {
   m_responseSubscribed = true;
 }
 
+void GlobalShortcutManager::setLastError(const QString &message) {
+  if (m_lastError == message)
+    return;
+  m_lastError = message;
+  emit lastErrorChanged();
+}
+
 void GlobalShortcutManager::clearRequest() {
   m_requestTimeout.stop();
   // No per-request disconnect: the Response subscription is permanent
@@ -188,6 +195,11 @@ void GlobalShortcutManager::watchRequest(const QDBusPendingCall &call,
     if (requestPath.isEmpty()) {
       qWarning() << "GlobalShortcuts" << (binding ? "BindShortcuts" : "CreateSession")
                  << "failed or gave no valid request path:" << reply.errorMessage();
+      const QString detail = reply.errorMessage().trimmed();
+      setLastError(detail.isEmpty()
+                       ? (binding ? tr("The system rejected the shortcut binding.")
+                                  : tr("The system could not open a shortcut session."))
+                       : detail);
       clearRequest();
       retireUnboundSession();
       return;
@@ -299,6 +311,7 @@ void GlobalShortcutManager::onBindResponse(unsigned int response,
   clearRequest();
   if (response != 0) {
     qWarning() << "GlobalShortcuts bind failed or was cancelled";
+    setLastError(tr("The system cancelled the shortcut approval."));
     // A cancelled bind leaves no usable session: drop the handle and
     // its signal connections so a retry goes through the full
     // CreateSession flow instead of landing on reconfigure forever.
@@ -319,6 +332,7 @@ void GlobalShortcutManager::onBindResponse(unsigned int response,
     return;
   }
   applyBoundShortcuts(bound);
+  setLastError(QString());
   qDebug() << "Global shortcuts bound:" << m_boundShortcuts.keys();
 }
 

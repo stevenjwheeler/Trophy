@@ -910,6 +910,14 @@ Rectangle {
                                         }
                                     }
                                     Label {
+                                        objectName: "stepKeysError"
+                                        visible: globalShortcuts && globalShortcuts.lastError.length > 0
+                                        text: (globalShortcuts && globalShortcuts.lastError.length > 0)
+                                              ? qsTr("The system rejected this: %1").arg(globalShortcuts.lastError)
+                                              : ""
+                                        font.pixelSize: Theme.fontSizeSmall; color: Theme.errorColor; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                    }
+                                    Label {
                                         visible: !stepKeysScroll.hasKeys
                                         text: qsTr("Skip this and Trophy will ask on next launch instead.")
                                         font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor

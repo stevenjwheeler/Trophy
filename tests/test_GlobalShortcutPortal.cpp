@@ -454,8 +454,14 @@ TEST_F(GlobalShortcutPortalTest, MalformedAndErrorMethodRepliesAllowFullRetry) {
       EXPECT_TRUE(session(manager).isEmpty());
       EXPECT_FALSE(timerActive(manager));
       EXPECT_FALSE(manager.isBound());
+      // The failure must be visible: the portal rejecting a bind is otherwise
+      // indistinguishable from a button that does nothing.
+      EXPECT_FALSE(manager.lastError().isEmpty());
+      if (mode == "Error")
+        EXPECT_EQ(manager.lastError(), QStringLiteral("injected method error"));
       control("Configure", {""});
       finishRetry(manager);
+      EXPECT_TRUE(manager.lastError().isEmpty());
     }
   }
 }

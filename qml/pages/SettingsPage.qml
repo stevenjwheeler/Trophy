@@ -1383,7 +1383,11 @@ Page {
 
                     SettingRow {
                         label: qsTr("Enable global shortcuts")
-                        help: (globalShortcuts && globalShortcuts.bound) ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.") : qsTr("Two keys that work from anywhere: recording toggle and clip/bookmark. The system asks for approval when you turn this on.")
+                        help: (globalShortcuts && globalShortcuts.lastError.length > 0)
+                              ? qsTr("The system rejected this: %1").arg(globalShortcuts.lastError)
+                              : ((globalShortcuts && globalShortcuts.bound)
+                                 ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.")
+                                 : qsTr("Two keys that work from anywhere: recording toggle and clip/bookmark. The system asks for approval when you turn this on."))
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter

@@ -67,6 +67,10 @@ class GlobalShortcutManager : public QObject {
   Q_PROPERTY(bool bound READ isBound NOTIFY boundChanged)
   Q_PROPERTY(QVariantMap boundShortcuts READ boundShortcuts NOTIFY boundChanged)
   Q_PROPERTY(bool enabled READ isEnabled WRITE setEnabled NOTIFY enabledChanged)
+  // Why the last request failed, for the UI. Empty once a request succeeds.
+  // The portal rejects binds outright when the caller has no app id, which is
+  // indistinguishable from "nothing happened" without this.
+  Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
 public:
   static constexpr const char *kToggleRecordingId = "toggle-recording";
@@ -78,6 +82,7 @@ public:
   bool isBound() const { return m_bound; }
   QVariantMap boundShortcuts() const { return m_boundShortcuts; }
   bool isEnabled() const { return m_enabled; }
+  QString lastError() const { return m_lastError; }
 
   // Shortcut catalogue (ids, descriptions, preferred triggers).
   static QList<PortalShortcut> shortcutDefinitions();
@@ -113,6 +118,7 @@ signals:
   void availabilityChanged();
   void boundChanged();
   void enabledChanged();
+  void lastErrorChanged();
   void toggleRecordingRequested();
   void saveClipRequested();
 
@@ -137,6 +143,7 @@ private:
   void retireUnboundSession();
   quint64 beginRequest(bool binding);
   void clearRequest();
+  void setLastError(const QString &message);
   void watchRequest(const QDBusPendingCall &call, quint64 generation,
                      bool binding);
   void queryAvailability();
@@ -155,6 +162,7 @@ private:
   QVariantMap m_boundShortcuts;
   bool m_bound = false;
   bool m_enabled = true;
+  QString m_lastError;
   bool m_available = false;
   quint64 m_availabilityGeneration = 0;
   QTimer m_availabilityTimeout;
