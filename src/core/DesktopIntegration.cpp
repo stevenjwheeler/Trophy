@@ -298,7 +298,10 @@ QString DesktopIntegration::competingLauncher() const {
     return QString();
 }
 
-bool DesktopIntegration::entryHidden() const { return m_entryHidden; }
+bool DesktopIntegration::entryHidden() const {
+    // Derived, not cached: a fresh instance must report what the file says.
+    return !competingLauncher().isEmpty();
+}
 
 QString DesktopIntegration::desktopEntryContents(const QString &appImage, bool hidden) const {
     QString out;
@@ -382,7 +385,6 @@ void DesktopIntegration::refreshVisibility() {
     if (!QFileInfo::exists(desktop))
         return;
     const bool hidden = !competingLauncher().isEmpty();
-    m_entryHidden = hidden;
     // Only the visibility flag is refreshed here. Repointing Exec at the
     // currently running file would silently move the registration to another
     // manager's copy just because that entry launched this process; the
@@ -408,6 +410,24 @@ void DesktopIntegration::refreshVisibility() {
         emit integrationChanged();
 }
 
+namespace {
+bool g_installedAtStartup = false;
+}
+
+bool DesktopIntegration::consumeStartupInstall() {
+    const bool installed = g_installedAtStartup;
+    g_installedAtStartup = false;
+    return installed;
+}
+
+void DesktopIntegration::refreshCachesAfterStartup() {
+    const QString desktop = desktopFilePath();
+    if (!QFileInfo::exists(desktop))
+        return;
+    refreshCaches(QFileInfo(desktop).absolutePath(), true);
+    emit integrationChanged();
+}
+
 bool DesktopIntegration::autoInstallEnabled() {
     QSettings settings(QStringLiteral("Trophy"), QStringLiteral("Trophy"));
     return settings.value(QStringLiteral("desktopIntegration/autoInstall"), true).toBool();
@@ -416,8 +436,8 @@ bool DesktopIntegration::autoInstallEnabled() {
 bool DesktopIntegration::writeEntry(const QString &appImage) {
     const QString desktop = desktopFilePath();
     const QString competing = competingLauncher();
-    m_entryHidden = !competing.isEmpty();
-    const QByteArray wanted = desktopEntryContents(appImage, m_entryHidden).toUtf8();
+    const bool hidden = !competing.isEmpty();
+    const QByteArray wanted = desktopEntryContents(appImage, hidden).toUtf8();
     bool entryChanged = true;
     QFile existing(desktop);
     if (existing.open(QIODevice::ReadOnly)) {
@@ -454,11 +474,15 @@ bool DesktopIntegration::installEntryAtStartup(const QString &dataHome,
     // distribution package, or a manager entry that supplies the identity.
     if (!findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs).isEmpty())
         return false;
-    if (effectiveDesktopId(dataHome, systemDataDirs) != QStringLiteral("trophy"))
-        return false;
 
+    // A manager's entry is a launcher, not a reason to give up our own: writing
+    // ours (hidden by OnlyShowIn when that manager lists Trophy) is what keeps
+    // the app id stable instead of following the manager's versioned name.
     DesktopIntegration writer(dataHome, systemDataDirs);
-    return writer.writeEntry(appImage);
+    const bool written = writer.writeEntry(appImage);
+    if (written)
+        g_installedAtStartup = true;
+    return written;
 }
 
 bool DesktopIntegration::removeEntry() {
@@ -468,7 +492,6 @@ bool DesktopIntegration::removeEntry() {
     settings.setValue(QStringLiteral("desktopIntegration/autoInstall"), false);
     settings.sync();
     const bool removed = QFile::remove(desktopFilePath());
-    m_entryHidden = false;
     emit integrationChanged();
     return applyStatus(removed ? QStringLiteral("Menu entry removed.")
                                : QStringLiteral("Could not remove the menu entry."),
@@ -496,17 +519,6 @@ bool DesktopIntegration::integrate() {
         }
     }
 
-    const QString effective = effectiveDesktopId(dataHome(), m_systemDataDirs);
-    if (effective != QStringLiteral("trophy")) {
-        // Launched by a manager whose entry we must not duplicate: it already
-        // registers this process.
-        return applyStatus(
-            QStringLiteral("Trophy is started from %1, which already registers it. "
-                           "No second menu entry is needed.")
-                .arg(QFileInfo(registeredDesktopFile()).fileName()),
-            false);
-    }
-
     {
         QSettings settings(QStringLiteral("Trophy"), QStringLiteral("Trophy"));
         settings.setValue(QStringLiteral("desktopIntegration/autoInstall"), true);
@@ -516,9 +528,9 @@ bool DesktopIntegration::integrate() {
     const bool existedBefore = QFileInfo::exists(desktop);
     if (!writeEntry(appImage))
         return applyStatus(QStringLiteral("Could not write the desktop entry."), true);
-    const bool changed = !existedBefore || m_entryHidden;
+    const bool changed = !existedBefore || !competing.isEmpty();
 
-    if (m_entryHidden) {
+    if (!competing.isEmpty()) {
         return applyStatus(
             QStringLiteral("Registered. The menu entry is hidden because %1 already "
                            "lists Trophy; launch it from there.")

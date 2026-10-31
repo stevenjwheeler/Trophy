@@ -356,6 +356,10 @@ bool Application::initialize() {
        runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
     qCInfo(appLog).noquote() << line;
   if (m_desktopIntegration) {
+    // A startup install happens before any event loop, so the launcher and
+    // icon caches are refreshed here instead.
+    if (DesktopIntegration::consumeStartupInstall())
+        m_desktopIntegration->refreshCachesAfterStartup();
     // The entry is hidden while another AppImage manager lists Trophy. If that
     // entry has since been removed, restore ours so there is a launcher.
     m_desktopIntegration->refreshVisibility();

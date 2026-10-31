@@ -92,6 +92,12 @@ public:
     static bool installEntryAtStartup(const QString &dataHome = QString(),
                                       const QStringList &systemDataDirs = QStringList());
 
+    // True once, if this process installed the entry at startup: the callers
+    // then refresh the launcher/icon caches, which cannot run that early
+    // (no event loop yet).
+    static bool consumeStartupInstall();
+    void refreshCachesAfterStartup();
+
     // The desktop id this process registers as: our stable "trophy" when such
     // an entry exists, otherwise the entry that launched us (a manager's
     // versioned entry), otherwise "trophy".
@@ -138,7 +144,6 @@ private:
     QString m_dataHome;
     QStringList m_systemDataDirs;
     bool m_startedRegistered = true;
-    bool m_entryHidden = false;
     // InstallInfo::detect() shells out for native installs; QML reads
     // isAppImage() for every dialog binding, so resolve it once.
     mutable int m_appImageCache = -1;

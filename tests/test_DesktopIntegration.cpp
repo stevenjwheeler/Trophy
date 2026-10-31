@@ -325,38 +325,41 @@ TEST(DesktopIntegrationTest, DistroEntryIsNotACompetingLauncher) {
     EXPECT_FALSE(readFile(integration.desktopFilePath()).contains(QStringLiteral("OnlyShowIn=TROPHY-INTERNAL;")));
 }
 
-// Installing through an AppImage manager is a supported alternative: its entry
-// registers the process, so it counts as integrated and must not be duplicated.
-TEST(DesktopIntegrationTest, ManagerInstalledEntryCountsAsRegistered) {
+// A manager's entry is a launcher, not an identity: installing through one
+// still gets our hidden entry, so the app id stays stable instead of following
+// the manager's versioned filename.
+TEST(DesktopIntegrationTest, ManagerInstallStillGetsAStableHiddenEntry) {
     EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR",
-                  "GIO_LAUNCHED_DESKTOP_FILE"});
+                  "GIO_LAUNCHED_DESKTOP_FILE", "XDG_CONFIG_HOME"});
     QTemporaryDir data;
+    QTemporaryDir config;
     QTemporaryDir images;
-    ASSERT_TRUE(data.isValid() && images.isValid());
-    // The AppImage the manager owns, and the entry it launches through.
+    ASSERT_TRUE(data.isValid() && config.isValid() && images.isValid());
+    qputenv("XDG_CONFIG_HOME", config.path().toLocal8Bit());
     const QString managed =
         touchFile(images.filePath(QStringLiteral("trophy.appimage_0_9_7.appimage")), "managed");
     const QString entry = touchFile(
         QDir(data.path()).filePath(QStringLiteral("applications/trophy.appimage_0_9_7.desktop")),
         (QStringLiteral("[Desktop Entry]\nExec=env DESKTOPINTEGRATION=1 ") + managed +
          QStringLiteral("\n")).toUtf8());
-    qputenv("TROPHY_FAKE_INSTALL_KIND", "appimage");
     qputenv("APPIMAGE", managed.toLocal8Bit());
     qputenv("GIO_LAUNCHED_DESKTOP_FILE", entry.toLocal8Bit());
     qunsetenv("APPDIR");
+    qunsetenv("TROPHY_FAKE_INSTALL_KIND");
 
+    ASSERT_TRUE(TrophyBackend::DesktopIntegration::installEntryAtStartup(data.path(), QStringList()));
     TrophyBackend::DesktopIntegration integration(data.path(), QStringList());
+    // Our entry exists, hidden from menus, and wins the id lookup.
+    EXPECT_TRUE(QFileInfo::exists(integration.desktopFilePath()));
+    EXPECT_TRUE(readFile(integration.desktopFilePath())
+                    .contains(QStringLiteral("OnlyShowIn=TROPHY-INTERNAL;")));
     EXPECT_EQ(TrophyBackend::DesktopIntegration::effectiveDesktopId(data.path(), QStringList()),
-              QStringLiteral("trophy.appimage_0_9_7"));
+              QStringLiteral("trophy"));
     EXPECT_TRUE(integration.isRegistered());
-    EXPECT_EQ(integration.managedEntry(), entry);
-    EXPECT_FALSE(integration.isIntegrated());   // we did not write an entry
-
-    // Registering must not add a competing entry, and must say why.
-    EXPECT_TRUE(integration.integrate());
-    EXPECT_FALSE(QFileInfo::exists(integration.desktopFilePath()));
-    EXPECT_TRUE(integration.statusMessage().contains(QStringLiteral("already registers it")))
-        << integration.statusMessage().toStdString();
+    EXPECT_TRUE(integration.entryHidden());
+    // The startup install is reported once, so the caches can be refreshed.
+    EXPECT_TRUE(TrophyBackend::DesktopIntegration::consumeStartupInstall());
+    EXPECT_FALSE(TrophyBackend::DesktopIntegration::consumeStartupInstall());
 }
 
 // Our own stable entry wins over a manager's versioned one.
