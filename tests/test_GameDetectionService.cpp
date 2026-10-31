@@ -411,14 +411,17 @@ TEST_F(GameDetectionServiceTest, GenericFallbackNameIgnored) {
   service->addToWhitelist("Real Game", "Real Game");
   GameClient game;
   ASSERT_TRUE(game.connect());
-  ASSERT_TRUE(game.send("START:5555:Real Game\n"));
+  // A pid above Linux's maximum pid_max can never name a live process, so
+  // the reporter key cannot resolve to whatever happens to own 5555 today
+  // (a running Discord once did, which broke this test).
+  ASSERT_TRUE(game.send("START:9999999:Real Game\n"));
   pump(300);
   ASSERT_EQ(service->currentGameName(), "Real Game");
 
   // The Vulkan layer's generic fallback is blacklisted, so it must neither
   // clobber the specific name nor create a second detection.
   QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
-  ASSERT_TRUE(sendLine("START:5555:Unknown Vulkan Game:0\n"));
+  ASSERT_TRUE(sendLine("START:9999999:Unknown Vulkan Game:0\n"));
   pump(300);
   EXPECT_EQ(service->currentGameName(), "Real Game");
   EXPECT_EQ(spy.count(), 0);
