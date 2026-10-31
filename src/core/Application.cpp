@@ -32,6 +32,7 @@
 #include "detection/GameIconProvider.h"
 #include "detection/GameWhitelist.h"
 #include "detection/LegacyGlShimCleanup.h"
+#include "detection/PipeWireStreamWatcher.h"
 #include "detection/VulkanLayer.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "encoding/EncoderFactory.h"
@@ -83,6 +84,8 @@ Application::Application(int &argc, char **argv)
 
 Application::~Application() {
   m_discordPresence.reset();
+  // Stop the watcher's worker before the detector/services it reports into.
+  m_pipeWireWatcher.reset();
   // Retiring pipelines retain raw mixer/settings/storage pointers. Settle
   // managers before those dependencies (member order would destroy them first).
   if (m_gameDetector) disconnect(m_gameDetector.get(), nullptr, this, nullptr);
@@ -294,6 +297,8 @@ bool Application::initialize() {
   }
 
   m_gameDetector->start();
+  if (m_pipeWireWatcher)
+    m_pipeWireWatcher->start(2000);
   // Launch context: portal restore tokens are attributed per app identity,
   // so a token saved by a terminal run may not restore in a launcher run
   // (and vice versa). GIO_LAUNCHED_DESKTOP_FILE only exists for gio/GNOME
@@ -330,6 +335,12 @@ void Application::initializeServices() {
   m_windowMonitor = std::make_unique<WaylandWindowMonitor>(this);
   m_windowService->setWindowMonitor(m_windowMonitor.get());
   m_gameDetector->setWindowMonitor(m_windowMonitor.get());
+  // Desktop-agnostic launch/PID signal: PipeWire exposes the owning process
+  // on every playback stream, independent of the compositor.
+  m_pipeWireWatcher = std::make_unique<PipeWireStreamWatcher>(this);
+  m_pipeWireWatcher->setSnapshotFunction(
+      [] { return PipeWireAudioSource::enumerateAudioApps(); });
+  m_gameDetector->setStreamWatcher(m_pipeWireWatcher.get());
   // Required infrastructure: migrate the former opt-in without removing an
   // existing script, including when upgrading from an opted-out installation.
   m_settingsManager->setWindowTrackingEnabled(true);

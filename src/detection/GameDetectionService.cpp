@@ -2,6 +2,7 @@
 #include "DefaultAppCatalog.h"
 #include "DetectionPolicy.h"
 #include "GameWhitelist.h"
+#include "PipeWireStreamWatcher.h"
 #include "WaylandWindowMonitor.h"
 #include "WindowInfo.h"
 
@@ -136,6 +137,53 @@ void GameDetectionService::setWindowMonitor(WaylandWindowMonitor *monitor) {
     connect(m_monitor, &WaylandWindowMonitor::windowsChanged, this,
             &GameDetectionService::onMonitorWindowsChanged);
   }
+}
+
+void GameDetectionService::setStreamWatcher(PipeWireStreamWatcher *watcher) {
+  if (m_streamWatcher)
+    disconnect(m_streamWatcher, nullptr, this, nullptr);
+  m_streamWatcher = watcher;
+  if (m_streamWatcher) {
+    connect(m_streamWatcher, &PipeWireStreamWatcher::streamAppeared, this,
+            &GameDetectionService::onAudioStreamAppeared);
+  }
+}
+
+void GameDetectionService::onAudioStreamAppeared(const AudioStreamInfo &stream) {
+  if (stream.pid <= 0 || m_pidToGameName.contains(stream.pid))
+    return;
+  const QString reporter =
+      stream.binary.isEmpty() ? stream.name : stream.binary;
+  const uint sid = steamAppIdForPid(stream.pid);
+  const ReporterIdentity identity = reporterIdentity(stream.pid, reporter, sid);
+  if (identity.ignored)
+    return;
+  QString key = identity.key;
+  QString name = identity.name;
+  if (name.isEmpty())
+    name = identity.executable;
+  if (sid > 0) {
+    key = QStringLiteral("steam_app_%1").arg(sid);
+    const QString steamName = getSteamAppName(sid);
+    if (!steamName.isEmpty())
+      name = steamName;
+  }
+  if (key.isEmpty() || name.isEmpty())
+    return;
+  if (isBlacklistedIdentity(key, name))
+    return;
+  // Audio alone is not game evidence: require Steam identity or an explicit
+  // user rule (the same bar as window reconciliation).
+  const bool evidence = sid > 0 || m_whitelist->isWhitelisted(name) ||
+                        m_whitelist->isWhitelisted(key) ||
+                        processLooksLikeSteamGame(stream.pid);
+  if (!evidence)
+    return;
+  if (m_pidToRawKey.key(GameWhitelist::normalizeKey(key), 0) != 0)
+    return;
+  qDebug() << "Detected game from PipeWire stream:" << name
+           << "(PID:" << stream.pid << ")";
+  trackGame(stream.pid, name, key);
 }
 
 uint GameDetectionService::steamAppIdForPid(qint64 pid) {
@@ -760,8 +808,17 @@ QString GameDetectionService::getSteamAppName(uint appId) {
 }
 
 QList<qint64> GameDetectionService::gameplayWindowPids(const QString &key) const {
-  if (!m_monitor || key.isEmpty())
+  if (key.isEmpty())
     return {};
+  if (!m_monitor) {
+    // No window provider: fall back to the tracked process itself so capture
+    // handoff/liveness logic still works on a compositor without window info.
+    if (m_currentGamePid > 0 &&
+        m_pidToRawKey.value(m_currentGamePid) == key &&
+        processExists(m_currentGamePid))
+      return {m_currentGamePid};
+    return {};
+  }
   QList<qint64> candidates;
   for (const WindowInfo &w : m_monitor->windows()) {
     if (w.pid <= 0 || m_pidToRawKey.value(w.pid) != key)
@@ -780,8 +837,15 @@ QList<qint64> GameDetectionService::gameplayWindowPids(const QString &key) const
 }
 
 bool GameDetectionService::hasVisibleWindow() const {
-  if (!m_monitor || m_currentGameName.isEmpty())
+  if (m_currentGameName.isEmpty())
     return false;
+  if (!m_monitor) {
+    // Window tracking is optional enrichment. Without it, the tracked
+    // process being alive is the best available "the game is running" signal;
+    // the portal restore step may still defer if the compositor wants a
+    // concrete window.
+    return m_currentGamePid > 0 && processExists(m_currentGamePid);
+  }
   for (const WindowInfo &w : m_monitor->windows()) {
     if (w.pid <= 0 || w.minimized)
       continue;

@@ -18,6 +18,7 @@
 
 #include "detection/GameDetectionService.h"
 #include "detection/GameListModel.h"
+#include "detection/PipeWireStreamWatcher.h"
 #include "detection/WaylandWindowMonitor.h"
 #include "detection/WindowInfo.h"
 
@@ -250,6 +251,11 @@ protected:
   bool looksLikeSteam(qint64 pid) {
     return service->processLooksLikeSteamGame(pid);
   }
+  void audioStream(qint64 pid, const QString &binary) {
+    service->onAudioStreamAppeared(
+        TrophyBackend::AudioStreamInfo{0, pid, binary, binary});
+  }
+  void detachWindowMonitor() { service->setWindowMonitor(nullptr); }
   void ageSteamVerdict(qint64 pid, bool verdict, bool expired) {
     service->m_steamCheckCache.insert(
         pid, qMakePair(verdict, service->m_uptimeClock.elapsed() -
@@ -917,6 +923,99 @@ TEST_F(GameDetectionServiceTest, MinimalStartResolvesIdentityFromPid) {
   EXPECT_EQ(service->currentGameKey(), QStringLiteral("steam_app_424243"));
   // No reporter name: the executable basename is the display fallback.
   EXPECT_EQ(service->currentGameName(), QStringLiteral("sleep"));
+
+  child.kill();
+  child.waitForFinished(5000);
+}
+
+TEST_F(GameDetectionServiceTest, SteamGameDetectedFromAudioStream) {
+  // PipeWire gives the owning PID on every compositor; Steam evidence then
+  // makes it a confident game without any window protocol.
+  QTemporaryDir emptyHome;
+  ASSERT_TRUE(emptyHome.isValid());
+  const QByteArray savedHome = qgetenv("HOME");
+  qputenv("HOME", emptyHome.path().toUtf8());
+  const auto restoreHome = qScopeGuard([&] {
+    if (savedHome.isNull())
+      qunsetenv("HOME");
+    else
+      qputenv("HOME", savedHome);
+  });
+
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert("SteamAppId", "424245");
+  QProcess child;
+  child.setProcessEnvironment(env);
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_GT(pid, 0);
+  ASSERT_TRUE(waitForChildExec(pid));
+  ASSERT_TRUE(waitForSteamAppId(pid, 424245u));
+
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+  audioStream(pid, QStringLiteral("sleep"));
+  pump(300);
+
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(service->currentGameKey(), QStringLiteral("steam_app_424245"));
+  EXPECT_EQ(service->currentGameName(), QStringLiteral("sleep"));
+
+  child.kill();
+  child.waitForFinished(5000);
+}
+
+TEST_F(GameDetectionServiceTest, UnknownAudioStreamIsIgnored) {
+  QProcess child;
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_TRUE(waitForChildExec(pid));
+
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+  audioStream(pid, QStringLiteral("sleep"));
+  pump(300);
+
+  EXPECT_EQ(spy.count(), 0);
+  EXPECT_FALSE(service->isGameRunning());
+
+  child.kill();
+  child.waitForFinished(5000);
+}
+
+TEST_F(GameDetectionServiceTest, WhitelistedAudioStreamIsDetected) {
+  ASSERT_TRUE(service->addToWhitelist("sleep", "Sleep"));
+  QProcess child;
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_TRUE(waitForChildExec(pid));
+
+  QSignalSpy spy(service.get(), &GameDetectionService::gameDetected);
+  audioStream(pid, QStringLiteral("sleep"));
+  pump(300);
+
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(service->currentGameName(), QStringLiteral("Sleep"));
+
+  child.kill();
+  child.waitForFinished(5000);
+}
+
+TEST_F(GameDetectionServiceTest, NoWindowMonitorFallsBackToProcessLiveness) {
+  QProcess child;
+  child.start("sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted(5000));
+  const qint64 pid = child.processId();
+  ASSERT_TRUE(waitForChildExec(pid));
+
+  detachWindowMonitor();
+  track(pid, "No Window Game", "no-window-game");
+
+  EXPECT_TRUE(service->hasVisibleWindow());
+  const auto pids = service->gameplayWindowPids("no-window-game");
+  ASSERT_EQ(pids.size(), 1);
+  EXPECT_EQ(pids.first(), pid);
 
   child.kill();
   child.waitForFinished(5000);

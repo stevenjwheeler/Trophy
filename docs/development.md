@@ -21,6 +21,29 @@ than inheriting the current app's revision. This identifies files, not a running
 game's mapped library or the code currently loaded by the compositor/login.
 Hyprland/Sway use compositor tools, so no Trophy script version is claimed.
 
+## Detection data sources
+
+Detection is evidence-based and deliberately does not require any one
+compositor API:
+
+- **Reporter events** — the optional Vulkan layer reports `START:<pid>` (or the
+  historical name/app-id form) and Trophy resolves identity from `/proc`.
+- **PipeWire playback streams** — every audio node carries
+  `application.process.id` and `application.process.binary`, giving a
+  desktop-agnostic launch/PID signal. `PipeWireStreamWatcher` snapshots those
+  off the GUI thread and diffs them. Audio alone is not evidence: the process
+  must also be a Steam title or match an explicit Games-page rule.
+- **Window context** — `WaylandWindowMonitor` still supplies focus,
+  fullscreen/coverage, geometry and the window picker. It is optional
+  enrichment for detection, not the source of identity.
+- **`ToplevelRegistry`** — binds `ext-foreign-toplevel-list-v1` for a standard
+  window list (app_id/title/identifier, no PID/focus/fullscreen). KWin and
+  Mutter did not expose this global in 2026, so it is a fallback for
+  compositors that do rather than a replacement for their window backends.
+
+The corresponding rule set is `DetectionPolicy`; new sources should feed it
+evidence instead of adding another ad-hoc confidence branch.
+
 ## Dependencies
 
 - CMake 3.21+, a C++20 compiler, and pkg-config.

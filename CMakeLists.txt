@@ -197,6 +197,34 @@ if(ENABLE_NVENC)
     endif()
 endif()
 
+# Cross-compositor window list: the only standard Wayland toplevel listing.
+pkg_check_modules(WAYLAND_CLIENT IMPORTED_TARGET wayland-client)
+find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
+if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE)
+    message(STATUS "Wayland toplevel registry enabled")
+    set(TROPHY_TOPLEVEL_PROTOCOL_DIR "${CMAKE_BINARY_DIR}/wayland-protocols")
+    set(TROPHY_TOPLEVEL_PROTOCOL_XML
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/detection/protocols/ext-foreign-toplevel-list-v1.xml")
+    add_custom_command(
+        OUTPUT
+            "${TROPHY_TOPLEVEL_PROTOCOL_DIR}/ext-foreign-toplevel-list-client-protocol.h"
+            "${TROPHY_TOPLEVEL_PROTOCOL_DIR}/ext-foreign-toplevel-list-protocol.c"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${TROPHY_TOPLEVEL_PROTOCOL_DIR}"
+        COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header
+            "${TROPHY_TOPLEVEL_PROTOCOL_XML}"
+            "${TROPHY_TOPLEVEL_PROTOCOL_DIR}/ext-foreign-toplevel-list-client-protocol.h"
+        COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code
+            "${TROPHY_TOPLEVEL_PROTOCOL_XML}"
+            "${TROPHY_TOPLEVEL_PROTOCOL_DIR}/ext-foreign-toplevel-list-protocol.c"
+        DEPENDS "${TROPHY_TOPLEVEL_PROTOCOL_XML}"
+        VERBATIM)
+    add_compile_definitions(HAVE_WAYLAND_TOPLEVEL)
+    set(TROPHY_WAYLAND_CLIENT_LIB PkgConfig::WAYLAND_CLIENT)
+else()
+    message(STATUS "Wayland toplevel registry unavailable (wayland-client or wayland-scanner missing)")
+    set(TROPHY_WAYLAND_CLIENT_LIB "")
+endif()
+
 # KWin monitor script: copy its contents to the build tree for dev runs
 # (KWinBackend looks in <appDir>/kwin-scripts/trophy-monitor); install
 # the same tree for packages.
@@ -295,8 +323,15 @@ set(DETECTION_SOURCES
     src/detection/GameIdentity.cpp
     src/detection/DetectionPolicy.cpp
     src/detection/LegacyGlShimCleanup.cpp
+    src/detection/ToplevelModel.cpp
+    src/detection/ToplevelRegistry.cpp
+    src/detection/PipeWireStreamWatcher.cpp
     src/detection/GameWhitelist.cpp
 )
+if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE)
+    list(APPEND DETECTION_SOURCES
+        "${TROPHY_TOPLEVEL_PROTOCOL_DIR}/ext-foreign-toplevel-list-protocol.c")
+endif()
 
 
 list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
@@ -380,6 +415,9 @@ set(DETECTION_HEADERS
     src/detection/GameIdentity.h
     src/detection/DetectionPolicy.h
     src/detection/LegacyGlShimCleanup.h
+    src/detection/ToplevelModel.h
+    src/detection/ToplevelRegistry.h
+    src/detection/PipeWireStreamWatcher.h
     src/detection/GameListModel.h
     src/detection/GameWhitelist.h
 )
@@ -516,6 +554,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${AVUTIL_INCLUDE_DIRS}
     ${SWSCALE_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
+    ${TROPHY_TOPLEVEL_PROTOCOL_DIR}
 )
 
 # Link libraries
@@ -535,6 +574,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     PkgConfig::SWSCALE
     PkgConfig::SWRESAMPLE
     Qt6::Network
+    ${TROPHY_WAYLAND_CLIENT_LIB}
 )
 
 if(PIPEWIRE_FOUND)

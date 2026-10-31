@@ -30,6 +30,7 @@ class PreviewCache;
 class ShareExporter;
 class DeletionQueue;
 class GameDetectionService;
+class PipeWireStreamWatcher;
 class NotificationService;
 class AudioMixer;
 class WindowService;
@@ -188,6 +189,7 @@ private:
   std::unique_ptr<RecordingLibrary> m_recordingLibrary;
   std::unique_ptr<ActivityFeed> m_activityFeed;
   std::unique_ptr<GameDetectionService> m_gameDetector;
+  std::unique_ptr<PipeWireStreamWatcher> m_pipeWireWatcher;
   std::unique_ptr<NotificationService> m_notificationService;
   std::unique_ptr<HardwareInfo> m_hardwareInfo;
   std::unique_ptr<AudioMixer> m_audioMixer;

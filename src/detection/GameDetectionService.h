@@ -28,7 +28,9 @@ namespace TrophyBackend {
 
 class GameWhitelist;
 class WaylandWindowMonitor;
+class PipeWireStreamWatcher;
 struct WindowInfo;
+struct AudioStreamInfo;
 class GameDetectionServiceTest; // Forward declaration for unit testing
 
 class GameDetectionService : public QObject {
@@ -139,6 +141,15 @@ public:
    */
   void setWindowMonitor(WaylandWindowMonitor *monitor);
 
+  /**
+   * @brief Attach the desktop-agnostic PipeWire stream signal.
+   *
+   * A playback stream gives a PID and binary name on any compositor. It is
+   * evidence only when the process is a Steam title or an explicit rule
+   * matches; arbitrary audio apps are ignored.
+   */
+  void setStreamWatcher(PipeWireStreamWatcher *watcher);
+
   // SteamAppId/SteamGameId from a process environment (what the Vulkan
   // layer reads via getenv, but usable for any PID after the fact).
   static uint steamAppIdForPid(qint64 pid);
@@ -205,6 +216,7 @@ private:
   bool isBlacklistedIdentity(const QString &rawKey,
                              const QString &displayName) const;
   bool processLooksLikeSteamGame(qint64 pid);
+  void onAudioStreamAppeared(const AudioStreamInfo &stream);
 
   void trackGame(qint64 pid, const QString &gameName,
                  const QString &rawKey = QString());
@@ -293,6 +305,7 @@ private:
   QElapsedTimer m_uptimeClock;
 
   WaylandWindowMonitor *m_monitor = nullptr;
+  PipeWireStreamWatcher *m_streamWatcher = nullptr;
   std::unique_ptr<GameWhitelist> m_whitelist;
 
   // Games-page list model (owned here so the pointer stays stable).

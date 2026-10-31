@@ -748,6 +748,8 @@ static void infoMatchGather(const struct spa_dict *props, uint32_t id,
   app["name"] = display;
   app["binary"] = binary ? QString::fromUtf8(binary) : "";
   app["nodeId"] = id;
+  const char *pid = spa_dict_lookup(props, PW_KEY_APP_PROCESS_ID);
+  app["pid"] = pid ? QString::fromUtf8(pid).toLongLong() : 0;
   req->apps.append(app);
 }
 
@@ -1033,11 +1035,6 @@ QVariantList PipeWireAudioSource::enumerateAudioApps() {
   InfoMatchRequest req;
   req.gatherAll = true;
   runInfoMatch(req);
-  for (const QVariant &app : req.apps) {
-    const QVariantMap m = app.toMap();
-    qDebug() << "Audio app found:" << m.value("name").toString()
-             << "-> ID:" << m.value("nodeId").toUInt();
-  }
   return req.apps;
 }
 
