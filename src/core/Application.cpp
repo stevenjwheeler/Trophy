@@ -21,6 +21,7 @@
 #include "ReplayManager.h"
 #include "HardwareInfo.h"
 #include "RecordingManager.h"
+#include "RuntimeLibraries.h"
 #include "StorageManager.h"
 #include "SystemTrayManager.h"
 #include "WindowService.h"
@@ -44,6 +45,8 @@
 #include "library/PreviewCache.h"
 #include "settings/SettingsManager.h"
 #include "InstallInfo.h"
+#include "AppRestart.h"
+#include "DesktopIntegration.h"
 #include "UpdateChecker.h"
 #include "UpdateInstaller.h"
 
@@ -73,10 +76,47 @@ extern "C" {
 #include <libavutil/log.h>
 }
 #include <cstdio>
+#include <cstdlib>
 
 Q_LOGGING_CATEGORY(appLog, "trophy.app")
 
 namespace TrophyBackend {
+
+// NVIDIA's driver downclocks memory transfer rate while a process uses CUDA
+// (which NVENC does), hurting game framerate. Installing an application profile
+// with setting 0x166c5e=0 disables that behaviour for this binary. The profile
+// is user-local and harmless on non-NVIDIA systems.
+static void installNvidiaNoStablePerfLimitProfile() {
+  if (access("/proc/driver/nvidia/version", F_OK) != 0)
+    return;
+
+  const char *home = std::getenv("HOME");
+  if (!home)
+    return;
+
+  QDir dir(QString::fromUtf8(home) + "/.nv/nvidia-application-profiles-rc.d");
+  if (!dir.exists() && !dir.mkpath("."))
+    return;
+
+  QFile file(dir.filePath("10-trophy-cuda-no-stable-perf-limit"));
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    return;
+
+  static const char *profile =
+      "{\n"
+      "    \"profiles\": [\n"
+      "        {\n"
+      "            \"name\": \"TrophyCudaNoStablePerfLimit\",\n"
+      "            \"settings\": [\"0x166c5e\", 0]\n"
+      "        }\n"
+      "    ],\n"
+      "    \"rules\": [\n"
+      "        { \"pattern\": \"trophy\", \"profile\": \"TrophyCudaNoStablePerfLimit\" }\n"
+      "    ]\n"
+      "}\n";
+  file.write(profile);
+  file.close();
+}
 
 Application::Application(int &argc, char **argv)
     : QApplication(argc, argv) {}
@@ -180,6 +220,9 @@ bool Application::initialize() {
 
   setApplicationVersion(versionStr);
   qCInfo(appLog) << "Initializing Trophy - Game recording and clipping" << versionStr;
+
+  // Best-effort: prevent NVIDIA driver from downclocking while NVENC is active.
+  installNvidiaNoStablePerfLimitProfile();
 
   initializeServices();
 
@@ -306,6 +349,30 @@ bool Application::initialize() {
                  << (gioEnv.isEmpty() ? QStringLiteral("none")
                                      : QString::fromLocal8Bit(gioEnv))
                  << (stdinTty ? "(likely terminal)" : "(likely launcher)");
+  // Which half of the runtime came from where: the AppImage bundles Qt/FFmpeg
+  // but prefers the host's libva and driver stack, and this is the first thing
+  // to check when a machine reports unexpected encoder or ABI behaviour.
+  for (const QString &line :
+       runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+    qCInfo(appLog).noquote() << line;
+  if (m_desktopIntegration) {
+    // A startup install happens before any event loop, so the launcher and
+    // icon caches are refreshed here instead.
+    if (DesktopIntegration::consumeStartupInstall())
+        m_desktopIntegration->refreshCachesAfterStartup();
+    // The entry is hidden while another AppImage manager lists Trophy. If that
+    // entry has since been removed, restore ours so there is a launcher.
+    m_desktopIntegration->refreshVisibility();
+    const QString registered = m_desktopIntegration->registeredDesktopFile();
+    qCInfo(appLog) << "Desktop registration:" << (m_desktopIntegration->isAppImage() ? "appimage" : "installed")
+                   << "entry:" << (registered.isEmpty() ? QStringLiteral("none (portal treats Trophy as a generic app; capture approvals are not per-app)")
+                                                       : registered)
+                   << "native dialogs:" << useNativeDialogs()
+                   << "platform theme:" << (qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME")
+                                                ? qEnvironmentVariable("QT_QPA_PLATFORMTHEME")
+                                                : QStringLiteral("(default)"));
+  }
+
   qCInfo(appLog) << "Application initialized successfully";
   return true;
 }
@@ -418,6 +485,11 @@ void Application::initializeServices() {
       QCoreApplication::applicationVersion());
 
   m_updateInstaller = std::make_unique<UpdateInstaller>(this);
+  m_desktopIntegration = std::make_unique<DesktopIntegration>(this);
+  if (m_desktopIntegration) {
+    connect(m_desktopIntegration.get(), &DesktopIntegration::integrationChanged,
+            this, &Application::useNativeDialogsChanged);
+  }
   const QByteArray forceFail = qgetenv("TROPHY_FORCE_FAIL_UPDATE");
   if (!forceFail.isEmpty() && forceFail != "0")
     m_updateInstaller->setForceFail(true);
@@ -520,6 +592,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("replayManager", m_replayManager.get());
   context->setContextProperty("updateChecker", m_updateChecker.get());
   context->setContextProperty("updateInstaller", m_updateInstaller.get());
+  context->setContextProperty("desktopIntegration", m_desktopIntegration.get());
   context->setContextProperty("installKind",
                              static_cast<int>(InstallInfo::detect()));
 }
@@ -1515,6 +1588,19 @@ bool Application::isTrayAvailable() const {
   return m_trayManager && m_trayManager->isAvailable();
 }
 
+bool Application::useNativeDialogs() const {
+  // Use the host's native (portal) dialogs when the portal can resolve our
+  // app id: a trophy.desktop exists in an XDG application directory, either
+  // from our own integration, a distro package, or a third-party AppImage
+  // manager. Otherwise fall back to Qt's own dialog, which does not depend on
+  // portal app-id registration.
+  if (!m_desktopIntegration)
+    return true;
+  if (!m_desktopIntegration->isAppImage())
+    return true;
+  return m_desktopIntegration->isRegistered();
+}
+
 QObject *Application::qmlRootWindow() const {
   if (!m_engine || m_engine->rootObjects().isEmpty()) {
     return nullptr;
@@ -1710,6 +1796,57 @@ void Application::installUpdate() {
   m_updateInstaller->installAppImage(m_updateChecker->latestAssetUrl(),
                                      m_updateChecker->latestDigest(),
                                      target);
+}
+
+QString Application::restartTarget() const {
+  // Prefer the AppImage the user launched: the executable path of a mounted
+  // AppImage disappears when this process exits.
+  QString target = QString::fromUtf8(qgetenv("APPIMAGE"));
+  if (target.isEmpty() && !qgetenv("APPDIR").isEmpty())
+    return QString();
+  if (target.isEmpty())
+    target = QCoreApplication::applicationFilePath();
+  const QFileInfo info(target);
+  return info.isFile() && info.isExecutable() ? info.absoluteFilePath() : QString();
+}
+
+bool Application::canRestartTrophy() const {
+  if (m_recordingManager && m_recordingManager->isRecording())
+    return false;
+  return !restartTarget().isEmpty();
+}
+
+bool Application::restartTrophy() {
+  if (m_recordingManager && m_recordingManager->isRecording()) {
+    qWarning("restartTrophy: blocked while recording");
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Stop recording before restarting."),
+          QStringLiteral("trophy"), 5000, 2);
+    return false;
+  }
+
+  const QString target = restartTarget();
+  if (target.isEmpty()) {
+    qWarning("restartTrophy: no relaunch target; cannot restart");
+    return false;
+  }
+
+  if (!AppRestart::scheduleAfterExit(target)) {
+    qWarning("restartTrophy: could not schedule the relaunch of %s",
+             target.toUtf8().constData());
+    if (m_notificationService)
+      m_notificationService->showNotification(
+          QStringLiteral("Trophy"),
+          QStringLiteral("Could not restart Trophy automatically. Quit and start it again."),
+          QStringLiteral("trophy"), 6000, 2);
+    return false;
+  }
+
+  qCInfo(appLog) << "Restarting after exit:" << target;
+  QCoreApplication::quit();
+  return true;
 }
 
 void Application::openUpdateDialog() {

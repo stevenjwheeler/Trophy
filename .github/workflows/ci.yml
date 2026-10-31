@@ -166,13 +166,22 @@ jobs:
           export EXTRA_PLATFORM_PLUGINS
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
+            --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
             --desktop-file packaging/trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
+            --output appimage
           images=(Trophy*.AppImage)
           test "${#images[@]}" -eq 1
           chmod +x "${images[0]}"
+          # Refuse to ship an AppImage that bundles host driver/interface libs.
+          if (rm -rf /tmp/_verify_sq && mkdir -p /tmp/_verify_sq && cd /tmp/_verify_sq && APPIMAGE_EXTRACT_AND_RUN=1 "$GITHUB_WORKSPACE/${images[0]}" --appimage-extract >/dev/null 2>&1); then
+            bad=$(find /tmp/_verify_sq/squashfs-root -type f \( -name 'libcuda*.so*' -o -name 'libnvidia-*.so*' -o -name '*_drv_video.so' -o -name '*_dri.so' \) | head)
+            if [[ -n "$bad" ]]; then echo "ERROR: bundled host driver/interface libs found:"; echo "$bad"; exit 1; fi
+            rm -rf /tmp/_verify_sq
+          fi
           python3 packaging/check_appimage_abi.py "${images[0]}" --report "$RUNNER_TEMP/trophy-appimage-abi.json"
           python3 packaging/smoke_appimage.py "${images[0]}" --log "$RUNNER_TEMP/trophy-appimage-smoke.log"
           TARGET="Trophy-${VERSION}-x86_64.AppImage"
@@ -191,6 +200,21 @@ jobs:
             --mount "type=bind,src=$evidence,dst=/evidence" \
             trophy-appimage-runtime24:ci python3 /source/packaging/smoke_appimage.py \
             "/source/Trophy-${VERSION}-x86_64.AppImage" --log /evidence/startup.log
+      - name: Smoke AppImage with a host libva (host-preferred override)
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/appimage-hostva-runtime"
+          mkdir -p "$evidence"
+          docker build --build-arg WITH_HOST_LIBVA=1 \
+            -t trophy-appimage-hostva:ci - < packaging/containers/appimage-runtime.Dockerfile
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$evidence,dst=/evidence" \
+            trophy-appimage-hostva:ci python3 /source/packaging/smoke_appimage.py \
+            "/source/Trophy-${VERSION}-x86_64.AppImage" --log /evidence/startup.log \
+            --expect-host-libva
       - name: Upload AppImage immediately
         uses: actions/upload-artifact@v4
         with:

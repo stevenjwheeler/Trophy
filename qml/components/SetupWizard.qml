@@ -28,9 +28,15 @@ Rectangle {
     property bool helperSetupRequested: false
 
     // Reset to first page whenever the wizard is (re-)shown
+    // Registration needs a restart, so remember the step and resume there
+    // instead of making the user walk through the wizard again.
+    onCurrentStepChanged: if (settingsManager) settingsManager.wizardStep = currentStep
+
     onVisibleChanged: {
         if (visible) {
-            currentStep = 0
+            currentStep = (settingsManager && settingsManager.wizardStep > 0 &&
+                           settingsManager.wizardStep < totalSteps)
+                          ? settingsManager.wizardStep : 0
             wizardCard.opacity = 0
             wizardCard.scale = 0.96
             wizardCardAnimation.start()
@@ -813,6 +819,14 @@ Rectangle {
                                         }
                                     }
                                     Label {
+                                        objectName: "stepKeysError"
+                                        visible: globalShortcuts && globalShortcuts.lastError.length > 0
+                                        text: (globalShortcuts && globalShortcuts.lastError.length > 0)
+                                              ? qsTr("The system rejected this: %1").arg(globalShortcuts.lastError)
+                                              : ""
+                                        font.pixelSize: Theme.fontSizeSmall; color: Theme.errorColor; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                    }
+                                    Label {
                                         visible: !stepKeysScroll.hasKeys
                                         text: qsTr("Skip this and Trophy will ask on next launch instead.")
                                         font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor
@@ -930,13 +944,22 @@ Rectangle {
                     TrophyButton { text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
                     Item { Layout.fillWidth: true }
                     TrophyButton {
+                        // Registration happens before the app starts, so
+                        // finishing needs no restart: this just closes the
+                        // wizard.
                         text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
                         visible: root.currentStep !== 3 || root.windowHelperReady
                         enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
                         onClicked: {
-                            if (root.currentStep < root.totalSteps - 1) root.currentStep++
-                            else if (settingsManager) settingsManager.setupCompleted = true
+                            if (root.currentStep < root.totalSteps - 1) {
+                                root.currentStep++
+                                return
+                            }
+                            if (settingsManager) {
+                                settingsManager.setupCompleted = true
+                                settingsManager.wizardStep = 0
+                            }
                         }
                     }
                 }
@@ -947,6 +970,7 @@ Rectangle {
     FolderDialog {
         id: folderDialog
         title: qsTr("Select Recordings Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         currentFolder: settingsManager ? recordingLibrary.localFileUrl(settingsManager.recordingsPath) : ""
         onAccepted: {
             var path = selectedFolder.toLocalFile();

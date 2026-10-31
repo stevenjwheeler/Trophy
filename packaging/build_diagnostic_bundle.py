@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="New directory outside the source tree")
     parser.add_argument("--version", required=True)
     parser.add_argument("--qt-plugin", action="store_true", help="Run linuxdeploy's Qt plugin if the input AppDir is not yet deployed")
+    parser.add_argument("--skip-abi-check", action="store_true", help="Skip the Ubuntu 24.04 ABI baseline gate (local/non-portable builds only)")
     parser.add_argument("--source-provenance", type=Path,
                         help="Trusted snapshot metadata when building without a .git directory")
     args = parser.parse_args()
@@ -90,14 +91,19 @@ def main():
     env = os.environ.copy()
     env.update(APPIMAGE_EXTRACT_AND_RUN="1", LINUXDEPLOY_OUTPUT_VERSION=args.version)
     subprocess.run(command, env=env, cwd=output, check=True)
-    vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*", "*_drv_video.so", "*_dri.so")
+    # True vendor GPU drivers must never be bundled: they are tied to the host
+    # kernel/driver and cannot be relocated. libva/libvdpau/libvulkan/libOpenCL/
+    # libvpl are intentionally left bundled as a fallback for hosts without them;
+    # the AppRun prefers the host's copies when available (see packaging/AppRun).
+    vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*",
+                                            "*_drv_video.so", "*_dri.so")
                         for path in stage.rglob(pattern)]
     if vendor_libraries:
         raise RuntimeError("Refusing a diagnostic AppImage with bundled vendor GPU drivers: " + str(vendor_libraries))
     abi = check_abi(stage)
     (output / "abi-report.json").write_text(json.dumps(abi, indent=2) + "\n")
-    if not abi["passed"]:
-        raise RuntimeError("AppDir exceeds Ubuntu 24.04 ABI baseline; see abi-report.json. Rebuild on the baseline, not the host.")
+    if not args.skip_abi_check and not abi["passed"]:
+        raise RuntimeError("AppDir exceeds Ubuntu 24.04 ABI baseline; see abi-report.json. Rebuild on the baseline, not the host, or pass --skip-abi-check for a non-portable local build.")
     metadata = {"schema": 2, "version": args.version, "tests": list(TESTS),
                 "scope": "Focused source-free unit and real GPU tests, not the full CI suite",
                 **provenance,
@@ -123,15 +129,15 @@ def main():
     (output / "Trophy.AppImage").chmod(0o755)
     abi = check_abi(output / "Trophy.AppImage")
     (output / "abi-report.json").write_text(json.dumps(abi, indent=2) + "\n")
-    if not abi["passed"]:
+    if not args.skip_abi_check and not abi["passed"]:
         raise RuntimeError("Finished diagnostic AppImage exceeds ABI baseline; see abi-report.json")
-    for name in ("friend_test.py", "FRIEND-TESTING.md"):
-        shutil.copyfile(source / "packaging" / name, output / name)
+    shutil.copyfile(source / "packaging" / "collect_diagnostics.py", output / "collect_diagnostics.py")
     metadata["sha256"] = {name: digest(output / name) for name in (
-        "Trophy.AppImage", "friend_test.py", "FRIEND-TESTING.md")}
+        "Trophy.AppImage", "collect_diagnostics.py")}
     (output / "bundle.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    print("Friend kit:", output)
-    print("Send Trophy.AppImage, friend_test.py, FRIEND-TESTING.md and bundle.json only.")
+    print("Diagnostics kit:", output)
+    print("Send Trophy.AppImage and collect_diagnostics.py.")
+    print("Run: python3 collect_diagnostics.py --appimage ./Trophy.AppImage")
     print("AppDir is retained for developer inspection; no source/rootfs is distributed.")
 
 

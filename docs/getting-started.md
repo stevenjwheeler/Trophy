@@ -10,6 +10,8 @@
 
 Keep the AppImage at a stable location if you enable launch-at-login. For a native prefix install, see [building from source](development.md).
 
+An AppImage is not installed into your desktop's application directories, so the system portal does not recognise it as an application. That matters beyond the file picker: the portal stores screen-capture approvals per application, so an unregistered Trophy shares the generic entry used by any unregistered program. The wizard's **Desktop integration** action (also in **Settings → Desktop Integration**) adds a menu entry for the AppImage where you keep it — the file is not copied or moved — after which approvals are stored for Trophy itself. Until then Trophy uses its own file dialog, which does not depend on the portal. Integrating after you have already approved capture asks for approval once more, because the approval moves to Trophy's new identity.
+
 CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
 
 Current native build targets are Ubuntu 26.04 for DEB/archive and Fedora 44 for
@@ -30,7 +32,9 @@ The matching downloaded file should report `OK`; entries for packages you did no
 
 - A **Wayland** desktop session. Native Wayland and XWayland games can be captured; an X11 desktop session cannot.
 - **PipeWire**, **xdg-desktop-portal**, and a suitable compositor-specific portal backend.
-- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported.
+- Compatible GPU drivers for hardware encoding. Available encoders depend on the GPU, driver, and FFmpeg build; software H.264 is also supported. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver. Set `TROPHY_PREFER_BUNDLED_LIBVA=1` to force the bundled copy, or `TROPHY_LIBVA_DIRS=/path[:/path]` to point the launcher at libva installed somewhere unusual.
+
+Trophy writes an inventory of the runtime libraries it loaded to the log at startup, split into those taken from the host and those taken from the bundle. When reporting a problem, include that section: it shows which `libva`, driver and system libraries were actually in use.
 
 The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
 
@@ -41,10 +45,11 @@ Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and S
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
-2. Explicitly install the required window helper when prompted. Ordinary startup does not install or enable compositor integrations.
-3. Choose whether to enable optional game-detection reporters. Read the cautions below first.
-4. Assign recording and clip/bookmark shortcuts, or configure native desktop shortcuts if the portal does not support them.
-5. Start a game and authorize its capture when prompted. Saved approvals can restore capture on later sessions; stale approvals may need authorization again.
+2. With an AppImage, Trophy adds its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — its launcher entry supplies the same identity and no second entry is created.
+3. Explicitly install the required window helper when prompted. Ordinary startup does not install or enable compositor integrations.
+4. Choose whether to enable optional game-detection reporters. Read the cautions below first.
+5. Assign recording and clip/bookmark shortcuts, or configure native desktop shortcuts if the portal does not support them.
+6. Start a game and authorize its capture when prompted. Saved approvals can restore capture on later sessions; stale approvals may need authorization again.
 
 Manual recording is also available. When no game is tracked, the Record action opens the system capture picker. When a game is tracked, it targets that game.
 

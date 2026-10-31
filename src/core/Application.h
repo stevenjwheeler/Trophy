@@ -42,6 +42,7 @@ class ReplayManager;
 class GlobalShortcutManager;
 class ControlServer;
 class DiscordPresence;
+class DesktopIntegration;
 } // namespace TrophyBackend
 
 namespace TrophyBackend {
@@ -54,6 +55,9 @@ class Application : public QApplication {
 
   // Properties exposed to QML
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY recordingStateChanged)
+  // Whether restartTrophy() could work right now (not recording, relaunch
+  // target present). The wizard only offers a restart when this is true.
+  Q_PROPERTY(bool canRestartTrophy READ canRestartTrophy NOTIFY recordingStateChanged)
   Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY currentGameChanged)
   Q_PROPERTY(bool isWayland READ isWayland CONSTANT)
   Q_PROPERTY(bool captureAvailable READ captureAvailable NOTIFY captureAvailabilityChanged)
@@ -61,6 +65,7 @@ class Application : public QApplication {
   Q_PROPERTY(bool canStartRecording READ canStartRecording NOTIFY recordingAvailabilityChanged)
   Q_PROPERTY(QString recordingPhase READ recordingPhase NOTIFY recordingStateChanged)
   Q_PROPERTY(bool trayAvailable READ isTrayAvailable NOTIFY trayAvailabilityChanged)
+  Q_PROPERTY(bool useNativeDialogs READ useNativeDialogs NOTIFY useNativeDialogsChanged)
   Q_PROPERTY(bool suppressNextStorageNotification READ suppressNextStorageNotification WRITE setSuppressNextStorageNotification NOTIFY suppressNextStorageNotificationChanged)
   Q_PROPERTY(bool vulkanLayerRegistered READ vulkanLayerRegistered NOTIFY detectionStatusChanged)
   Q_PROPERTY(bool glShimAvailable READ glShimAvailable NOTIFY detectionStatusChanged)
@@ -98,6 +103,7 @@ public:
 
   // Property getters
   bool isRecording() const;
+  bool canRestartTrophy() const;
   QString currentGameName() const;
   bool isWayland() const;
   bool captureAvailable() const { return m_captureAvailable; }
@@ -125,6 +131,8 @@ public:
 
   // System tray (close-to-tray, start minimized, tray quit)
   bool isTrayAvailable() const;
+  bool useNativeDialogs() const;
+  QString restartTarget() const;
   // Called from QML onClosing: hides to tray when enabled, else false so
   // the default close/confirm flow runs.
   Q_INVOKABLE bool minimizeToTray();
@@ -135,6 +143,9 @@ public:
   Q_INVOKABLE void requestReplay();
   Q_INVOKABLE void requestBookmark();
   Q_INVOKABLE void installUpdate();
+  // Relaunch Trophy so the desktop registration, portal app id and native
+  // file dialogs apply. Refuses while recording, like installUpdate().
+  Q_INVOKABLE bool restartTrophy();
   Q_INVOKABLE void openUpdateDialog();
   Q_INVOKABLE QVariantMap captureHealth() const;
   // Track mute that follows the active pipeline (the dashboard meters).
@@ -168,6 +179,7 @@ signals:
   void currentGameChanged();
   void suppressNextStorageNotificationChanged();
   void trayAvailabilityChanged();
+  void useNativeDialogsChanged();
   void detectionStatusChanged();
   void fatalError(const QString &message);
   void updateDialogRequested();
@@ -214,6 +226,7 @@ private:
   std::unique_ptr<QQmlApplicationEngine> m_engine;
   std::unique_ptr<UpdateChecker> m_updateChecker;
   std::unique_ptr<UpdateInstaller> m_updateInstaller;
+  std::unique_ptr<DesktopIntegration> m_desktopIntegration;
   std::unique_ptr<WaveformCache> m_waveformCache;
   std::unique_ptr<FilmstripCache> m_filmstripCache;
   std::unique_ptr<PreviewCache> m_previewCache;

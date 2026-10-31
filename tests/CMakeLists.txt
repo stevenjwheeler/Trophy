@@ -10,6 +10,22 @@ target_include_directories(test_InstallInfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_InstallInfo PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
 gtest_discover_tests(test_InstallInfo)
 
+add_executable(test_AppRestart test_AppRestart.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppRestart.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/AppRestart.h)
+target_include_directories(test_AppRestart PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_AppRestart PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_AppRestart)
+
+add_executable(test_DesktopIntegration test_DesktopIntegration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.h
+    ${CMAKE_SOURCE_DIR}/src/core/InstallInfo.cpp)
+target_include_directories(test_DesktopIntegration PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_DesktopIntegration PRIVATE
+    GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_DesktopIntegration)
+
 add_executable(test_DiscordPresence test_DiscordPresence.cpp
     test_DiscordGameArtwork.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DiscordPresence.cpp
@@ -23,6 +39,12 @@ target_include_directories(test_DiscordPresenceUi PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_compile_definitions(test_DiscordPresenceUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
 target_link_libraries(test_DiscordPresenceUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_DiscordPresenceUi)
+
+add_executable(test_DesktopIntegrationUi test_DesktopIntegrationUi.cpp)
+target_include_directories(test_DesktopIntegrationUi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_DesktopIntegrationUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DesktopIntegrationUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_DesktopIntegrationUi)
 
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
@@ -69,8 +91,6 @@ find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME AppImageAbiTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageAbi.py")
-    add_test(NAME FriendBundleTest.Harness
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_FriendBundle.py")
     add_test(NAME AppImageSmokeTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
     add_test(NAME NativePackageSmokeTest.Harness
@@ -81,6 +101,8 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
     add_test(NAME DraftReleaseTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_DraftRelease.py")
+    add_test(NAME AppRunLibvaTest.Harness
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppRun.py")
     set(multilib_preload_includes)
     foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
         list(APPEND multilib_preload_includes --qt-include "${directory}")
@@ -323,6 +345,7 @@ gtest_discover_tests(test_FilmstripCache)
 add_executable(test_SettingsManager test_SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp 
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )
@@ -370,6 +393,7 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/AudioEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
@@ -749,6 +773,7 @@ endif()
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---
 add_executable(test_EncoderFactory test_EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )
@@ -837,6 +862,15 @@ target_include_directories(test_ShippedLibDirs PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_ShippedLibDirs PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_ShippedLibDirs)
 
+# --- RuntimeLibraries (bundle/host inventory logged at startup) ---
+add_executable(test_RuntimeLibraries test_RuntimeLibraries.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.h
+)
+target_include_directories(test_RuntimeLibraries PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_RuntimeLibraries PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_RuntimeLibraries)
+
 # --- VulkanLayer (structural manifest writer; hermetic via XDG_DATA_HOME) ---
 add_executable(test_VulkanLayer test_VulkanLayer.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/VulkanLayer.cpp
@@ -867,6 +901,7 @@ add_executable(test_HardwareInfo test_HardwareInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/core/HardwareInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/core/HardwareInfo.h
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/FFmpegEncoder.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/IEncoder.h
 )

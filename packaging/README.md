@@ -26,10 +26,35 @@ The AppImage also expects the normal host PipeWire client library/configuration
 from a PipeWire-enabled Wayland desktop; linuxdeploy intentionally excludes that
 library. Clean-baseline checks provide these ordinary desktop runtime libraries,
 not Qt/FFmpeg/development packages or a running capture service.
+
 In particular, Fedora's official FFmpeg-free build may omit libx264; software
 H.264/share export needs a compatible codec-enabled FFmpeg provider according to
 your distribution's guidance. These tests do not enable third-party repositories
 or establish hardware capture/encoding on the target distribution.
+
+### Runtime library selection
+
+The AppImage bundles Qt, FFmpeg and the codec libraries, and takes the rest from
+the host: glibc/libstdc++, the loader, Mesa/Vulkan drivers, the VA driver
+(`*_drv_video.so`), NVIDIA/CUDA, PipeWire client libraries, libdrm/libgbm and
+X11/xcb.
+
+`libva` is the one library family deliberately preferred from the host. The VA
+driver is a host object built against the host's libva, so a bundled older copy
+shadows it and can make VA-API unavailable on newer GPUs. `packaging/AppRun`
+builds a per-user symlink directory (`$XDG_RUNTIME_DIR/trophy-va`, else
+`${TMPDIR:-/tmp}/trophy-va-<uid>`, mode 0700) holding the host's `libva.so.2`,
+`libva-drm.so.2` and `libva-x11.so.2`, and prepends it to `LD_LIBRARY_PATH`.
+All three are taken together from one directory, and only when each is a 64-bit
+ELF; otherwise the bundled set is used so the application still starts.
+
+- `TROPHY_PREFER_BUNDLED_LIBVA=1` forces the bundled libva.
+- `TROPHY_LIBVA_DIRS=/path[:/path]` searches those directories instead of
+  `ldconfig` and the standard multiarch paths.
+
+At startup the application logs a `Runtime libraries:` inventory listing the
+libraries mapped from the host and from the bundle. It is the first thing to
+read when encoder availability or ABI behaviour looks wrong.
 
 Use the package matching your distribution/architecture and its normal package
 manager for installation. CI normalizes these names and uploads AppImage,
@@ -99,15 +124,30 @@ trusted AppImage runtime. CI runs this gate before smoke tests and artifact uplo
 SDK compiler/GTest caches use baseline-specific keys to avoid importing compiled
 objects from newer runners.
 
-### Portable friend testing (experimental)
+### Diagnostics collection
 
-See [FRIEND-TESTING.md](FRIEND-TESTING.md) for the consent-based AppImage preview,
-bundled source-free unit/native GPU tests, result collector and developer-side
-AppImage builder. Friends do not need Docker, namespaces, development dependencies
-or a full install. Live detection setup remains explicit and may leave small
-compositor/reporter integrations to clean up. GPU skips are incomplete coverage.
-Validate the exact complete kit before distribution; source fixtures alone do
-not establish portable runtime or hardware compatibility.
+`packaging/collect_diagnostics.py` gathers system information, the Trophy log (if
+present) and installed-binary details, optionally runs isolated tests when given a
+diagnostic AppImage or build directory, and packages everything into a redacted
+tar.gz for examination. It does not require Docker, namespaces or a special
+diagnostic AppImage.
+
+```sh
+python3 packaging/collect_diagnostics.py
+python3 packaging/collect_diagnostics.py --appimage /path/to/Trophy.AppImage
+python3 packaging/collect_diagnostics.py --build /path/to/build --output report.tar.gz
+```
+
+To hand someone a runnable test kit (build binaries + collection script), stage it from
+a completed build:
+
+```sh
+python3 packaging/make_test_kit.py --build /path/to/build --output /tmp/trophy-test-kit
+cd /tmp/trophy-test-kit/kit && ./run.sh
+```
+
+The kit requires a compatible Qt/FFmpeg installation on the target machine; it does
+not bundle them.
 
 An installed tree needs the executable, `libTrophy.so`, both reporter
 libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`

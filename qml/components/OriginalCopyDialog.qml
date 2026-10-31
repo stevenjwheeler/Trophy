@@ -7,6 +7,7 @@ FolderDialog {
     signal queued()
     signal copyFailed(string message)
     title: qsTr("Copy original captures to folder")
+    options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
     onAccepted: {
         const destination = root.exporter.localFolderPath(selectedFolder);
         if (!destination) {

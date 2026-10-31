@@ -250,6 +250,7 @@ configure_file(
 set(CORE_SOURCES
     src/core/DeletionQueue.cpp
     src/core/Application.cpp
+    src/core/RuntimeLibraries.cpp
     src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
@@ -264,6 +265,8 @@ set(CORE_SOURCES
     src/core/GlobalShortcutManager.cpp
     src/core/ReplayManager.cpp
     src/core/InstallInfo.cpp
+    src/core/AppRestart.cpp
+    src/core/DesktopIntegration.cpp
     src/core/UpdateChecker.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowService.cpp
@@ -523,6 +526,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${SWRESAMPLE_INCLUDE_DIRS}
 )
 
+if(VAAPI_FOUND)
+    # Headers only: libva/libva-drm are deliberately not linked so they do not
+    # become DT_NEEDED of libTrophy.so. VaapiVideoProcessor dlopens libva at
+    # runtime, so the app still starts on hosts without libva installed and
+    # VA-API simply reports unavailable. This also avoids bundling a stale
+    # libva in the AppImage.
+    target_include_directories(${PROJECT_NAME} PRIVATE ${VAAPI_INCLUDE_DIRS})
+endif()
+
 # Link libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core
@@ -546,9 +558,9 @@ if(PIPEWIRE_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::PIPEWIRE)
 endif()
 
-if(VAAPI_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::VAAPI)
-endif()
+# VAAPI is intentionally not linked (see include block above): libva/libva-drm
+# must not be DT_NEEDED so the app starts without them and VA-API degrades
+# gracefully. VaapiVideoProcessor dlopens libva at runtime.
 
 if(LIBDRM_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBDRM)

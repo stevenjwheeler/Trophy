@@ -9,6 +9,7 @@
  */
 
 #include "core/Application.h"
+#include "core/DesktopIntegration.h"
 #include "core/ControlServer.h"
 #include <QApplication>
 #include <QCommandLineParser>
@@ -19,6 +20,7 @@
 #include <QSocketNotifier>
 #include <QStandardPaths>
 #include <csignal>
+#include <cstdlib>
 #include <unistd.h>
 
 namespace {
@@ -51,8 +53,37 @@ int main(int argc, char *argv[]) {
   QCoreApplication::setOrganizationName("Trophy");
   QCoreApplication::setOrganizationDomain("org.trophy.recorder");
   QCoreApplication::setApplicationName("Trophy");
-  // Notifications/tray/portal associations key on the desktop id.
-  QApplication::setDesktopFileName(QStringLiteral("trophy"));
+  // Install the menu entry before the application object exists: the portal
+  // resolves the app id from a desktop file, and Qt registers it when
+  // QGuiApplication is constructed, so doing this here means the *first* run
+  // already has a stable identity - no wizard step and no restart. Skipped
+  // when an entry already exists or an AppImage manager supplies one.
+  TrophyBackend::DesktopIntegration::installEntryAtStartup();
+
+  // Notifications/tray/portal associations key on the desktop id. Our own
+  // entry wins when present; otherwise an AppImage manager's launcher entry
+  // (Gear Lever) may already provide the identity, so adopt its id instead of
+  // registering one the portal cannot resolve.
+  QApplication::setDesktopFileName(
+      TrophyBackend::DesktopIntegration::effectiveDesktopId());
+
+  // AppImages bundle only Qt's xdgdesktopportal platform theme and Qt does not
+  // select it on its own, so every file dialog silently fell back to Qt's own
+  // implementation even when the desktop entry was registered. Pick it for
+  // registered AppImage runs; an explicit setting still wins.
+  if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME") &&
+      !qgetenv("APPIMAGE").isEmpty() &&
+      !TrophyBackend::DesktopIntegration::portalDesktopFile().isEmpty()) {
+    qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+  }
+
+  // Some users force these environment variables globally, which breaks VA-API
+  // driver auto-selection (libva then picks the wrong/missing driver) and can
+  // make EGL swaps never return under vsync. Clear them so capture/encoding
+  // can find the correct driver and is not stalled by forced vsync.
+  unsetenv("LIBVA_DRIVER_NAME");
+  unsetenv("__GL_SYNC_TO_VBLANK");
+  unsetenv("vblank_mode");
 
   // Create application
   TrophyBackend::Application app(argc, argv);

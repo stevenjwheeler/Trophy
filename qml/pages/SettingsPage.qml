@@ -21,7 +21,13 @@ Page {
     // Refresh live choices on open; the voice picker retains the saved app
     // independently because apps publish audio streams on demand.
     onVisibleChanged: {
-        if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        if (!visible)
+            return
+        if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        // Another AppImage manager may have listed Trophy since launch: settle
+        // the menu-entry visibility when the page is opened.
+        if (typeof desktopIntegration !== "undefined" && desktopIntegration)
+            desktopIntegration.refreshVisibility()
     }
 
     property var scrollTargetCard: null
@@ -1383,7 +1389,11 @@ Page {
 
                     SettingRow {
                         label: qsTr("Enable global shortcuts")
-                        help: (globalShortcuts && globalShortcuts.bound) ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.") : qsTr("Two keys that work from anywhere: recording toggle and clip/bookmark. The system asks for approval when you turn this on.")
+                        help: (globalShortcuts && globalShortcuts.lastError.length > 0)
+                              ? qsTr("The system rejected this: %1").arg(globalShortcuts.lastError)
+                              : ((globalShortcuts && globalShortcuts.bound)
+                                 ? qsTr("Turning this off takes effect immediately — bound keys are simply ignored while off.")
+                                 : qsTr("Two keys that work from anywhere: recording toggle and clip/bookmark. The system asks for approval when you turn this on."))
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1427,6 +1437,130 @@ Page {
                         }
                     }
 
+                }
+
+                // ================= DESKTOP INTEGRATION =================
+                SectionCard {
+                    id: desktopIntegrationCard
+                    objectName: "desktopIntegrationCard"
+                    visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
+                    sectionTitle: qsTr("Desktop Integration")
+                    iconSource: "qrc:/icons/settings.svg"
+                    description: qsTr("Registers Trophy with your desktop portal. Capture approvals are remembered per application.")
+
+                    SettingRow {
+                        label: qsTr("Status")
+                        help: qsTr("Whether a Trophy desktop entry exists for your portal to find.")
+
+                        HelperStatusBadge {
+                            objectName: "desktopIntegrationStatus"
+                            Layout.alignment: Qt.AlignVCenter
+                            healthy: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered
+                            attention: !healthy
+                            text: !healthy ? qsTr("Not registered")
+                                           : ((typeof desktopIntegration !== "undefined" && desktopIntegration
+                                               && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0)
+                                              ? qsTr("Registered · Launcher entry")
+                                              : qsTr("Registered"))
+                        }
+                    }
+
+                    SettingStack {
+                        label: qsTr("Location")
+                        help: qsTr("The AppImage file Trophy is running from. Updates replace this file in place.")
+
+                        TrophyTextField {
+                            objectName: "desktopIntegrationLocation"
+                            Layout.fillWidth: true
+                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.appImagePath : ""
+                            readOnly: true
+                        }
+                    }
+
+                    SettingRow {
+                        label: qsTr("Desktop entry")
+                        help: qsTr("Adds a menu entry for this AppImage and enables the system file dialog. Your file is not copied or moved.")
+
+                        TrophyButton {
+                            objectName: "desktopIntegrationButton"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
+                            enabled: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
+                            onClicked: {
+                                if (desktopIntegration)
+                                    desktopIntegration.integrate();
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        objectName: "desktopIntegrationRemoveRow"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated
+                        label: qsTr("Remove menu entry")
+                        help: qsTr("Deletes Trophy's desktop entry and stops it being recreated. Capture approvals and shortcuts then have no per-app identity.")
+
+                        TrophyButton {
+                            objectName: "desktopIntegrationRemoveButton"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: qsTr("Remove")
+                            onClicked: {
+                                if (typeof desktopIntegration !== "undefined" && desktopIntegration)
+                                    desktopIntegration.removeEntry();
+                            }
+                        }
+                    }
+
+                    SettingRow {
+                        objectName: "desktopIntegrationRestartRow"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.restartRequired
+                        label: qsTr("Restart")
+                        help: (typeof app !== "undefined" && app && !app.canRestartTrophy)
+                              ? qsTr("Stop recording to restart and apply this.")
+                              : qsTr("File dialogs and capture approvals use Trophy's desktop identity after a restart.")
+
+                        TrophyButton {
+                            objectName: "desktopIntegrationRestartButton"
+                            Layout.alignment: Qt.AlignVCenter
+                            text: qsTr("Restart now")
+                            enabled: typeof app !== "undefined" && app && app.canRestartTrophy
+                            onClicked: {
+                                if (typeof app !== "undefined" && app && app.restartTrophy)
+                                    app.restartTrophy();
+                            }
+                        }
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationManagedNote"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0
+                        text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0)
+                              ? qsTr("Registered by %1. Trophy uses that launcher's identity, so no second menu entry is needed.").arg(desktopIntegration.managedEntry.split("/").pop())
+                              : ""
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationHiddenNote"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered && desktopIntegration.entryHidden
+                        text: qsTr("Another AppImage manager already lists Trophy, so no second menu entry is created. Launching from that entry still uses Trophy's identity.")
+                        color: Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationMessage"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0
+                        text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""
+                        color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusIsError) ? Theme.errorColor : Theme.successColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
                 }
 
                 // --- FOOTER ACTIONS ---
@@ -1480,6 +1614,7 @@ Page {
         id: folderDialog
 
         title: qsTr("Select Recordings Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         onAccepted: {
             if (settingsManager)
                 settingsManager.recordingsPath = selectedFolder.toLocalFile();
@@ -1490,6 +1625,7 @@ Page {
         id: replayFolderDialog
 
         title: qsTr("Select Clip Cache Folder")
+        options: typeof app !== "undefined" && app && !app.useNativeDialogs ? FolderDialog.DontUseNativeDialog : 0
         onAccepted: {
             if (settingsManager)
                 settingsManager.replayCachePath = selectedFolder.toLocalFile();
