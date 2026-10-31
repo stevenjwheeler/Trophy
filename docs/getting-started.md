@@ -10,6 +10,8 @@
 
 Keep the AppImage at a stable location if you enable launch-at-login. For a native prefix install, see [building from source](development.md).
 
+An AppImage is not installed into your desktop's application directories, so the system portal does not recognise it as an application. That matters beyond the file picker: the portal stores screen-capture approvals per application, so an unregistered Trophy shares the generic entry used by any unregistered program. The wizard's **Desktop integration** action (also in **Settings → Desktop Integration**) adds a menu entry for the AppImage where you keep it — the file is not copied or moved — after which approvals are stored for Trophy itself. Until then Trophy uses its own file dialog, which does not depend on the portal. Integrating after you have already approved capture asks for approval once more, because the approval moves to Trophy's new identity.
+
 CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
 
 Current native build targets are Ubuntu 26.04 for DEB/archive and Fedora 44 for

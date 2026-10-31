@@ -169,6 +169,9 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
                         "usr/plugins/wayland-shell-integration/*.so",
                         "usr/plugins/wayland-graphics-integration-client/*.so",
                         "usr/plugins/multimedia/*.so",
+                        # Unregistered AppImages fall back to Qt's own folder
+                        # picker, which only exists in the QML payload.
+                        "usr/qml/**/FolderDialog.qml",
                         "usr/share/applications/trophy.desktop",
                         "usr/share/trophy/vulkan_layer/trophy_layer.json",
                         "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",

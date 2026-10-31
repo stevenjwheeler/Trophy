@@ -10,6 +10,15 @@ target_include_directories(test_InstallInfo PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_InstallInfo PRIVATE GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
 gtest_discover_tests(test_InstallInfo)
 
+add_executable(test_DesktopIntegration test_DesktopIntegration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/DesktopIntegration.h
+    ${CMAKE_SOURCE_DIR}/src/core/InstallInfo.cpp)
+target_include_directories(test_DesktopIntegration PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_DesktopIntegration PRIVATE
+    GTest::GTest GTest::gtest_main Qt6::Core Qt6::Test)
+gtest_discover_tests(test_DesktopIntegration)
+
 add_executable(test_DiscordPresence test_DiscordPresence.cpp
     test_DiscordGameArtwork.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DiscordPresence.cpp
@@ -23,6 +32,12 @@ target_include_directories(test_DiscordPresenceUi PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_compile_definitions(test_DiscordPresenceUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
 target_link_libraries(test_DiscordPresenceUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_DiscordPresenceUi)
+
+add_executable(test_DesktopIntegrationUi test_DesktopIntegrationUi.cpp)
+target_include_directories(test_DesktopIntegrationUi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_DesktopIntegrationUi PRIVATE SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DesktopIntegrationUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_DesktopIntegrationUi)
 
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp

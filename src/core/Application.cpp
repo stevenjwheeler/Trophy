@@ -354,6 +354,14 @@ bool Application::initialize() {
   for (const QString &line :
        runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
     qCInfo(appLog).noquote() << line;
+  if (m_desktopIntegration) {
+    const QString registered = m_desktopIntegration->registeredDesktopFile();
+    qCInfo(appLog) << "Desktop registration:" << (m_desktopIntegration->isAppImage() ? "appimage" : "installed")
+                   << "entry:" << (registered.isEmpty() ? QStringLiteral("none (portal treats Trophy as a generic app; capture approvals are not per-app)")
+                                                       : registered)
+                   << "native dialogs:" << useNativeDialogs();
+  }
+
   qCInfo(appLog) << "Application initialized successfully";
   return true;
 }
@@ -1570,15 +1578,16 @@ bool Application::isTrayAvailable() const {
 }
 
 bool Application::useNativeDialogs() const {
-  // Use the host's native (portal) dialogs when the app is registered
-  // (integrated AppImage or a native install). Fall back to Qt's own
-  // dialog when not registered, where the portal dialog is broken in
-  // empty folders.
+  // Use the host's native (portal) dialogs when the portal can resolve our
+  // app id: a trophy.desktop exists in an XDG application directory, either
+  // from our own integration, a distro package, or a third-party AppImage
+  // manager. Otherwise fall back to Qt's own dialog, which does not depend on
+  // portal app-id registration.
   if (!m_desktopIntegration)
     return true;
   if (!m_desktopIntegration->isAppImage())
     return true;
-  return m_desktopIntegration->isIntegrated();
+  return m_desktopIntegration->isRegistered();
 }
 
 QObject *Application::qmlRootWindow() const {

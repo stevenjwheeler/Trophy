@@ -873,17 +873,25 @@ Rectangle {
                                         spacing: Theme.spacingMedium
                                         visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
                                         TrophyButton {
-                                            text: (desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
-                                            onClicked: if (desktopIntegration) desktopIntegration.integrate()
+                                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
+                                            onClicked: if (typeof desktopIntegration !== "undefined" && desktopIntegration) desktopIntegration.integrate()
                                         }
                                         ColumnLayout {
                                             spacing: 0
                                             Layout.fillWidth: true
                                             Label { text: qsTr("Desktop integration"); font.weight: Font.Bold; color: Theme.textColor }
                                             Label {
-                                                text: qsTr("Registers Trophy with your desktop for working file dialogs and shortcuts.");
+                                                text: qsTr("Registers Trophy with your desktop, so capture approvals are remembered and file dialogs work.");
                                                 font.pixelSize: Theme.fontSizeSmall;
                                                 color: Theme.textSecondaryColor;
+                                                wrapMode: Text.WordWrap;
+                                                Layout.fillWidth: true
+                                            }
+                                            Label {
+                                                visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0
+                                                text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""
+                                                font.pixelSize: Theme.fontSizeSmall;
+                                                color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusIsError) ? Theme.errorColor : Theme.successColor;
                                                 wrapMode: Text.WordWrap;
                                                 Layout.fillWidth: true
                                             }

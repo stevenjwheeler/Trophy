@@ -1432,28 +1432,31 @@ Page {
                 // ================= DESKTOP INTEGRATION =================
                 SectionCard {
                     id: desktopIntegrationCard
+                    objectName: "desktopIntegrationCard"
                     visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
                     sectionTitle: qsTr("Desktop Integration")
                     iconSource: "qrc:/icons/settings.svg"
-                    description: qsTr("Registers Trophy with your desktop (AppImage only). Improves file dialogs and global shortcuts.")
+                    description: qsTr("Registers Trophy with your desktop portal. Capture approvals are remembered per application.")
 
                     SettingRow {
                         label: qsTr("Status")
-                        help: qsTr("Whether Trophy is registered as a desktop application with your portal.")
+                        help: qsTr("Whether a Trophy desktop entry exists for your portal to find.")
 
                         Label {
+                            objectName: "desktopIntegrationStatus"
                             Layout.alignment: Qt.AlignVCenter
-                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Integrated") : qsTr("Not integrated")
-                            color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? Theme.successColor : Theme.textSecondaryColor
+                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered) ? qsTr("Registered") : qsTr("Not registered")
+                            color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered) ? Theme.successColor : Theme.textSecondaryColor
                             font.pixelSize: Theme.fontSizeSmall
                         }
                     }
 
                     SettingRow {
-                        label: qsTr("Integrate")
-                        help: qsTr("Copies Trophy to a stable location and creates a desktop entry. Only needed for AppImage builds.")
+                        label: qsTr("Desktop entry")
+                        help: qsTr("Adds a menu entry for this AppImage and enables the system file dialog. Your file is not copied or moved.")
 
                         TrophyButton {
+                            objectName: "desktopIntegrationButton"
                             Layout.alignment: Qt.AlignVCenter
                             text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
                             enabled: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
@@ -1462,6 +1465,16 @@ Page {
                                     desktopIntegration.integrate();
                             }
                         }
+                    }
+
+                    Label {
+                        objectName: "desktopIntegrationMessage"
+                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusMessage.length > 0
+                        text: (typeof desktopIntegration !== "undefined" && desktopIntegration) ? desktopIntegration.statusMessage : ""
+                        color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.statusIsError) ? Theme.errorColor : Theme.successColor
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
                 }
 
