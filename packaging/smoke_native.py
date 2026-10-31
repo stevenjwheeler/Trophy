@@ -125,7 +125,8 @@ def extract_archive(archive, destination):
 
 def verify(root, log):
     prefix = check_tree(root)
-    smoke(prefix / "bin/trophy", log)
+    # Native prefixes link the host's Qt/FFmpeg by design.
+    smoke(prefix / "bin/trophy", log, expect_bundled_runtime=False)
     print(f"Native payload/linkage/startup passed: {prefix}")
 
 
