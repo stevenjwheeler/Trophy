@@ -871,7 +871,7 @@ Rectangle {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
-                                        visible: desktopIntegration && desktopIntegration.isAppImage
+                                        visible: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isAppImage
                                         TrophyButton {
                                             text: (desktopIntegration && desktopIntegration.isIntegrated) ? qsTr("Repair") : qsTr("Integrate")
                                             onClicked: if (desktopIntegration) desktopIntegration.integrate()
