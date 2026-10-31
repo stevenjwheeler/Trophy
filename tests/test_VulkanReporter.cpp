@@ -175,12 +175,11 @@ TEST_F(IsolatedVulkanReporterTest, InvalidCreateAndLookupInputsAreRejected) {
   EXPECT_EQ(snapshot().createCalls, 0u);
 }
 
-TEST_F(IsolatedVulkanReporterTest, ApplicationNameCannotInjectProtocolLines) {
+TEST_F(IsolatedVulkanReporterTest, ApplicationNameDoesNotEnterProtocol) {
   ASSERT_EQ(createInstance("Game\nSTOP:123\r"), VK_SUCCESS);
   const std::string messages = snapshot().messages;
-  EXPECT_EQ(messages.find(":Game STOP:123 :"), messages.find("START:") +
-      std::string("START:").size() + std::to_string(getpid()).size());
-  EXPECT_EQ(messages.find('\n'), messages.size() - 1);
+  EXPECT_EQ(messages, "START:" + std::to_string(getpid()) + "\n");
+  EXPECT_EQ(messages.find("STOP:"), std::string::npos);
 }
 
 TEST_F(IsolatedVulkanReporterTest, TrackedInstanceReportsStartAndStopAndForwards) {
@@ -199,11 +198,9 @@ TEST_F(IsolatedVulkanReporterTest, TrackedInstanceReportsStartAndStopAndForwards
   EXPECT_EQ(result.connectCalls, 1u);
   EXPECT_EQ(result.closeCalls, 1u);
   EXPECT_EQ(result.sendCalls, 2u);
-  const char *steamId = getenv("SteamAppId");
   const std::string pid = std::to_string(getpid());
   EXPECT_EQ(std::string(result.messages),
-            "START:" + pid + ":Game: With Colon:" +
-                (steamId ? steamId : "0") + "\nSTOP:" + pid + "\n");
+            "START:" + pid + "\nSTOP:" + pid + "\n");
   EXPECT_EQ(gipa(handle, "vkNonexistentFunction"), nullptr);
 }
 
@@ -227,10 +224,8 @@ TEST_F(IsolatedVulkanReporterTest, FailedStartSendReconnectsAndResends) {
   EXPECT_EQ(reconnected.socketCalls, 2u);
   EXPECT_EQ(reconnected.connectCalls, 2u);
   EXPECT_EQ(reconnected.closeCalls, 1u);
-  const char *steamId = getenv("SteamAppId");
   const std::string pid = std::to_string(getpid());
-  const std::string start = "START:" + pid + ":Reconnect game:" +
-                            (steamId ? steamId : "0") + "\n";
+  const std::string start = "START:" + pid + "\n";
   EXPECT_EQ(std::string(reconnected.messages), start);
 
   destroy(liveInstance, nullptr);

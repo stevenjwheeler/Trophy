@@ -14,8 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
-#include <cstdlib>
-#include <algorithm>
+#include <cstring>
 
 // Independent integer helper revision, not the app/socket protocol version.
 extern "C" {
@@ -32,7 +31,6 @@ namespace {
 struct LayerData {
     PFN_vkGetInstanceProcAddr nextGetInstanceProcAddr;
     int socket_fd = -1;
-    std::string app_name;
     uint64_t generation = 0;
 };
 
@@ -51,7 +49,7 @@ bool socket_is_alive(int fd) {
                            errno == EINTR));
 }
 
-void notify_app(int& fd, const char* app_name) {
+void notify_app(int& fd) {
     // Revalidate a cached connection so a Trophy restart causes the next
     // instance creation to reconnect and report again.
     if (fd != -1) {
@@ -76,20 +74,10 @@ void notify_app(int& fd, const char* app_name) {
         }
     }
 
-    const char* steam_appid = getenv("SteamAppId");
-    if (!steam_appid || !*steam_appid || strnlen(steam_appid, 11) > 10 ||
-        strspn(steam_appid, "0123456789") != strlen(steam_appid) ||
-        strtoull(steam_appid, nullptr, 10) > UINT32_MAX)
-        steam_appid = "0";
-
-    std::string name(app_name ? app_name : "Unknown Vulkan Game",
-                     strnlen(app_name ? app_name : "Unknown Vulkan Game", 256));
-    std::replace(name.begin(), name.end(), '\n', ' ');
-    std::replace(name.begin(), name.end(), '\r', ' ');
-
-    std::string msg = "START:" + std::to_string(getpid()) + ":" + 
-                     name + ":" +
-                     steam_appid + "\n";
+    // Report only the PID. Trophy resolves the executable, Wine wrapper and
+    // Steam identity server-side from targeted /proc/<pid> reads, so the
+    // layer never parses the environment or builds a multi-field line.
+    std::string msg = "START:" + std::to_string(getpid()) + "\n";
     if (send(fd, msg.c_str(), msg.length(), MSG_NOSIGNAL | MSG_DONTWAIT) !=
         static_cast<ssize_t>(msg.length())) {
         // Server went away mid-report: drop the cached fd so the
@@ -107,27 +95,25 @@ void ensureConnectionWatch() {
                 // Snapshot reconnect candidates under lock. Networking is
                 // nonblocking and runs unlocked; backlog pressure is retried
                 // on the next tick, never waited out on a loader thread.
-                struct Reconnect { void *instance; std::string name; uint64_t generation; };
+                struct Reconnect { void *instance; uint64_t generation; };
                 std::vector<Reconnect> pending;
                 {
                     std::lock_guard<std::mutex> lock(g_lock);
                     for (auto& entry : g_instance_data) {
                         if (entry.second.socket_fd == -1) {
-                            pending.push_back({entry.first, entry.second.app_name,
-                                               entry.second.generation});
+                            pending.push_back({entry.first, entry.second.generation});
                         } else if (!socket_is_alive(entry.second.socket_fd)) {
                             // Tear the dead fd down here so no open
                             // descriptor crosses the unlock boundary.
                             close(entry.second.socket_fd);
                             entry.second.socket_fd = -1;
-                            pending.push_back({entry.first, entry.second.app_name,
-                                               entry.second.generation});
+                            pending.push_back({entry.first, entry.second.generation});
                         }
                     }
                 }
                 for (auto& item : pending) {
                     int fresh = -1;
-                    notify_app(fresh, item.name.c_str());
+                    notify_app(fresh);
                     std::lock_guard<std::mutex> lock(g_lock);
                     auto it = g_instance_data.find(item.instance);
                     if (it == g_instance_data.end() ||
@@ -186,23 +172,17 @@ VKAPI_ATTR VkResult VKAPI_CALL Trophy_CreateInstance(
         // Loader dispatch tables may be shared by several instances. The
         // instance handle, not its first word, uniquely owns this state.
         void* key = *pInstance;
-        const char* app_name = nullptr;
-        if (pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->pApplicationName) {
-            app_name = pCreateInfo->pApplicationInfo->pApplicationName;
-        }
-        const std::string name = app_name ? app_name : "Unknown Vulkan Game";
         {
             // Map mutation stays under lock. A fresh entry starts
             // disconnected (fd -1) so no open fd crosses below.
             std::lock_guard<std::mutex> lock(g_lock);
             LayerData& data = g_instance_data[key];
             data.nextGetInstanceProcAddr = gipa;
-            data.app_name = name;
             data.generation = ++g_next_generation;
         }
         // Nonblocking notification runs without the loader-state lock.
         int fresh = -1;
-        notify_app(fresh, name.c_str());
+        notify_app(fresh);
         {
             std::lock_guard<std::mutex> lock(g_lock);
             auto it = g_instance_data.find(key);
