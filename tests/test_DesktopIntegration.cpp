@@ -264,6 +264,47 @@ TEST(DesktopIntegrationTest, ManagerEntryMakesOursHiddenButStillRegistered) {
     EXPECT_FALSE(readFile(integration.desktopFilePath()).contains(QStringLiteral("NoDisplay=true")));
 }
 
+// The refresh only settles visibility: launching from another manager's copy
+// must not silently repoint the registered Exec at that file, and the entry is
+// repointed only when the registered target has disappeared.
+TEST(DesktopIntegrationTest, RefreshKeepsTheRegisteredTargetStable) {
+    EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR"});
+    QTemporaryDir data;
+    QTemporaryDir images;
+    ASSERT_TRUE(data.isValid() && images.isValid());
+    qputenv("TROPHY_FAKE_INSTALL_KIND", "appimage");
+    qunsetenv("APPDIR");
+
+    const QString registered = touchFile(images.filePath(QStringLiteral("Trophy-0.9.7-x86_64.AppImage")),
+                                         "registered");
+    qputenv("APPIMAGE", registered.toLocal8Bit());
+    TrophyBackend::DesktopIntegration integration(data.path(), QStringList());
+    ASSERT_TRUE(integration.integrate());
+    ASSERT_TRUE(readFile(integration.desktopFilePath()).contains(registered));
+
+    // Another manager's copy is running, and it has its own entry.
+    const QString managerCopy =
+        touchFile(images.filePath(QStringLiteral("trophy.appimage_0_9_8.appimage")), "manager");
+    touchFile(QDir(data.path()).filePath(QStringLiteral("applications/trophy.appimage_0_9_7.desktop")),
+              (QStringLiteral("[Desktop Entry]\nExec=env DESKTOPINTEGRATION=1 ") + managerCopy +
+               QStringLiteral("\n")).toUtf8());
+    qputenv("APPIMAGE", managerCopy.toLocal8Bit());
+    integration.refreshVisibility();
+
+    QString entry = readFile(integration.desktopFilePath());
+    EXPECT_TRUE(entry.contains(QStringLiteral("NoDisplay=true")));
+    // Exec still names the registered copy, not the one that launched us.
+    EXPECT_TRUE(entry.contains(registered));
+    EXPECT_FALSE(entry.contains(managerCopy));
+
+    // The registered copy goes away: now the entry follows the running file.
+    QFile::remove(registered);
+    integration.refreshVisibility();
+    entry = readFile(integration.desktopFilePath());
+    EXPECT_TRUE(entry.contains(managerCopy));
+    EXPECT_TRUE(entry.contains(QStringLiteral("NoDisplay=true")));
+}
+
 // A distribution package's entry names /usr/bin/trophy; that is a different
 // installation and must not hide our AppImage entry.
 TEST(DesktopIntegrationTest, DistroEntryIsNotACompetingLauncher) {

@@ -91,10 +91,10 @@ public:
     // the existing entry.
     Q_INVOKABLE bool integrate();
 
-    // Keep NoDisplay in sync with competingLauncher(): called from integrate()
-    // and once at startup, so removing the other manager's entry brings the
-    // menu entry back instead of leaving the user with no launcher.
-    void refreshVisibility();
+    // Keep NoDisplay in sync with competingLauncher(): called from integrate(),
+    // once at startup and when Settings opens, so adding or removing the other
+    // manager's entry brings the menu entry in line without a restart.
+    Q_INVOKABLE void refreshVisibility();
 
 signals:
     void integrationChanged();

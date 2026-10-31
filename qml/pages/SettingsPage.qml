@@ -21,7 +21,13 @@ Page {
     // Refresh live choices on open; the voice picker retains the saved app
     // independently because apps publish audio streams on demand.
     onVisibleChanged: {
-        if (visible && audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        if (!visible)
+            return
+        if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
+        // Another AppImage manager may have listed Trophy since launch: settle
+        // the menu-entry visibility when the page is opened.
+        if (typeof desktopIntegration !== "undefined" && desktopIntegration)
+            desktopIntegration.refreshVisibility()
     }
 
     property var scrollTargetCard: null
