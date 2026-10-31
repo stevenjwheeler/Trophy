@@ -944,16 +944,10 @@ Rectangle {
                     TrophyButton { text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
                     Item { Layout.fillWidth: true }
                     TrophyButton {
-                        // The registration is already live, so the restart here
-                        // is about starting the finished setup cleanly. If it
-                        // cannot happen (recording, no relaunch target) the
-                        // button stays a plain finish so nobody is trapped.
-                        readonly property bool restartPossible:
-                            typeof app !== "undefined" && app && app.canRestartTrophy
-
-                        text: root.currentStep === root.totalSteps - 1
-                              ? (restartPossible ? qsTr("Restart Trophy") : qsTr("Get Started"))
-                              : qsTr("Next")
+                        // Registration happens before the app starts, so
+                        // finishing needs no restart: this just closes the
+                        // wizard.
+                        text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
                         visible: root.currentStep !== 3 || root.windowHelperReady
                         enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
@@ -966,8 +960,6 @@ Rectangle {
                                 settingsManager.setupCompleted = true
                                 settingsManager.wizardStep = 0
                             }
-                            if (restartPossible && typeof app !== "undefined" && app)
-                                app.restartTrophy()
                         }
                     }
                 }
