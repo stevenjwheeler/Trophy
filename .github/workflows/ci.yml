@@ -166,26 +166,19 @@ jobs:
           export EXTRA_PLATFORM_PLUGINS
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
-            --exclude-library 'libva.so*' --exclude-library 'libva-drm.so*' \
-            --exclude-library 'libva-x11.so*' --exclude-library 'libvdpau.so*' \
-            --exclude-library 'libvulkan.so*' --exclude-library 'libOpenCL.so*' \
-            --exclude-library 'libvpl.so*' --exclude-library 'libcuda*.so*' \
-            --exclude-library 'libnvidia-*.so*' \
+            --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
             --desktop-file packaging/trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --exclude-library 'libva.so*' --exclude-library 'libva-drm.so*' \
-            --exclude-library 'libva-x11.so*' --exclude-library 'libvdpau.so*' \
-            --exclude-library 'libvulkan.so*' --exclude-library 'libOpenCL.so*' \
-            --exclude-library 'libvpl.so*' --exclude-library 'libcuda*.so*' \
-            --exclude-library 'libnvidia-*.so*' --output appimage
+            --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
+            --output appimage
           images=(Trophy*.AppImage)
           test "${#images[@]}" -eq 1
           chmod +x "${images[0]}"
           # Refuse to ship an AppImage that bundles host driver/interface libs.
           if (rm -rf /tmp/_verify_sq && mkdir -p /tmp/_verify_sq && cd /tmp/_verify_sq && APPIMAGE_EXTRACT_AND_RUN=1 "$GITHUB_WORKSPACE/${images[0]}" --appimage-extract >/dev/null 2>&1); then
-            bad=$(find /tmp/_verify_sq/squashfs-root -type f \( -name 'libva.so*' -o -name 'libva-drm.so*' -o -name 'libva-x11.so*' -o -name 'libvdpau.so*' -o -name 'libvulkan.so*' -o -name 'libOpenCL.so*' -o -name 'libvpl.so*' -o -name 'libcuda*.so*' -o -name 'libnvidia-*.so*' -o -name '*_drv_video.so' -o -name '*_dri.so' \) | head)
+            bad=$(find /tmp/_verify_sq/squashfs-root -type f \( -name 'libcuda*.so*' -o -name 'libnvidia-*.so*' -o -name '*_drv_video.so' -o -name '*_dri.so' \) | head)
             if [[ -n "$bad" ]]; then echo "ERROR: bundled host driver/interface libs found:"; echo "$bad"; exit 1; fi
             rm -rf /tmp/_verify_sq
           fi

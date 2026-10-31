@@ -91,23 +91,12 @@ def main():
     env = os.environ.copy()
     env.update(APPIMAGE_EXTRACT_AND_RUN="1", LINUXDEPLOY_OUTPUT_VERSION=args.version)
     subprocess.run(command, env=env, cwd=output, check=True)
-    # Driver/interface libraries must come from the host: bundling them pins an
-    # older version than the host's driver, which breaks the corresponding
-    # feature (VA-API, Vulkan, VDPAU, OpenCL, oneVPL) on newer systems. Treat
-    # them as host dependencies, like PipeWire/portal/drivers.
-    # Use precise loader sonames (libfoo.so*) so Qt plugins such as
-    # libvulkan-server.so are not mistaken for the host loader.
-    for pattern in ("libva.so*", "libva-drm.so*", "libva-x11.so*",
-                    "libvdpau.so*", "libvulkan.so*", "libOpenCL.so*",
-                    "libvpl.so*"):
-        for path in stage.rglob(pattern):
-            path.unlink()
+    # True vendor GPU drivers must never be bundled: they are tied to the host
+    # kernel/driver and cannot be relocated. libva/libvdpau/libvulkan/libOpenCL/
+    # libvpl are intentionally left bundled as a fallback for hosts without them;
+    # the AppRun prefers the host's copies when available (see packaging/AppRun).
     vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*",
-                                            "*_drv_video.so", "*_dri.so",
-                                            "libva.so*", "libva-drm.so*",
-                                            "libva-x11.so*", "libvdpau.so*",
-                                            "libvulkan.so*", "libOpenCL.so*",
-                                            "libvpl.so*")
+                                            "*_drv_video.so", "*_dri.so")
                         for path in stage.rglob(pattern)]
     if vendor_libraries:
         raise RuntimeError("Refusing a diagnostic AppImage with bundled vendor GPU drivers: " + str(vendor_libraries))
