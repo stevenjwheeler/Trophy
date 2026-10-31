@@ -226,64 +226,6 @@ TEST(DesktopIntegrationTest, MovedAppImageIsRepaired) {
     EXPECT_TRUE(QFileInfo::exists(newImage));
 }
 
-// A manager that versions its entry (Gear Lever) gives Trophy a different app
-// id. Our entry still provides the identity, so keep it installed but out of
-// the menu: one icon, and launching from the manager's entry still resolves as
-// Trophy.
-TEST(DesktopIntegrationTest, ManagerEntryMakesOursHiddenButStillRegistered) {
-    EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR"});
-    QTemporaryDir data;
-    QTemporaryDir images;
-    ASSERT_TRUE(data.isValid() && images.isValid());
-    const QString image = touchFile(images.filePath(QStringLiteral("Trophy-0.9.7-x86_64.AppImage")));
-    ASSERT_FALSE(image.isEmpty());
-    qputenv("TROPHY_FAKE_INSTALL_KIND", "appimage");
-    qputenv("APPIMAGE", image.toLocal8Bit());
-    qunsetenv("APPDIR");
-
-    // Gear Lever's entry for its own managed copy of Trophy.
-    touchFile(QDir(data.path()).filePath(QStringLiteral("applications/trophy.appimage_0_9_7.desktop")),
-              "[Desktop Entry]\nExec=env DESKTOPINTEGRATION=1 /home/deck/Applications/trophy.appimage_0_9_7.appimage\n");
-
-    TrophyBackend::DesktopIntegration integration(data.path(), QStringList());
-    ASSERT_TRUE(integration.integrate()) << integration.statusMessage().toStdString();
-
-    const QString entry = readFile(integration.desktopFilePath());
-    EXPECT_TRUE(entry.contains(QStringLiteral("NoDisplay=true")));
-    EXPECT_TRUE(integration.entryHidden());
-    EXPECT_TRUE(integration.isRegistered());   // identity still resolves
-    EXPECT_TRUE(integration.isIntegrated());
-    EXPECT_TRUE(integration.statusMessage().contains(QStringLiteral("hidden")))
-        << integration.statusMessage().toStdString();
-
-    // The manager's entry is removed: ours must come back to the menu rather
-    // than leaving the user with nothing to click.
-    QFile::remove(QDir(data.path()).filePath(QStringLiteral("applications/trophy.appimage_0_9_7.desktop")));
-    integration.refreshVisibility();
-    EXPECT_FALSE(integration.entryHidden());
-    EXPECT_FALSE(readFile(integration.desktopFilePath()).contains(QStringLiteral("NoDisplay=true")));
-}
-
-// A distribution package's entry names /usr/bin/trophy; that is a different
-// installation and must not hide our AppImage entry.
-TEST(DesktopIntegrationTest, DistroEntryIsNotACompetingLauncher) {
-    EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR"});
-    QTemporaryDir data;
-    QTemporaryDir images;
-    ASSERT_TRUE(data.isValid() && images.isValid());
-    const QString image = touchFile(images.filePath(QStringLiteral("Trophy.AppImage")));
-    qputenv("TROPHY_FAKE_INSTALL_KIND", "appimage");
-    qputenv("APPIMAGE", image.toLocal8Bit());
-    qunsetenv("APPDIR");
-
-    touchFile(QDir(data.path()).filePath(QStringLiteral("applications/trophy.desktop.dist-package")),
-              "[Desktop Entry]\nExec=/usr/bin/trophy\n");
-    TrophyBackend::DesktopIntegration integration(data.path(), QStringList());
-    ASSERT_TRUE(integration.integrate());
-    EXPECT_FALSE(integration.entryHidden());
-    EXPECT_FALSE(readFile(integration.desktopFilePath()).contains(QStringLiteral("NoDisplay=true")));
-}
-
 TEST(DesktopIntegrationTest, NonAppImageInstallDoesNothing) {
     EnvGuard env({"TROPHY_FAKE_INSTALL_KIND", "APPIMAGE", "APPDIR"});
     QTemporaryDir data;
