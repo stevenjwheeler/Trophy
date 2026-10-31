@@ -1452,12 +1452,16 @@ Page {
                         label: qsTr("Status")
                         help: qsTr("Whether a Trophy desktop entry exists for your portal to find.")
 
-                        Label {
+                        HelperStatusBadge {
                             objectName: "desktopIntegrationStatus"
                             Layout.alignment: Qt.AlignVCenter
-                            text: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered) ? qsTr("Registered") : qsTr("Not registered")
-                            color: (typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered) ? Theme.successColor : Theme.textSecondaryColor
-                            font.pixelSize: Theme.fontSizeSmall
+                            healthy: typeof desktopIntegration !== "undefined" && desktopIntegration && desktopIntegration.isRegistered
+                            attention: !healthy
+                            text: !healthy ? qsTr("Not registered")
+                                           : ((typeof desktopIntegration !== "undefined" && desktopIntegration
+                                               && desktopIntegration.managedEntry && desktopIntegration.managedEntry.length > 0)
+                                              ? qsTr("Registered · Launcher entry")
+                                              : qsTr("Registered"))
                         }
                     }
 

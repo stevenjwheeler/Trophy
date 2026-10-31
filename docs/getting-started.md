@@ -45,7 +45,7 @@ Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and S
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
-2. With an AppImage, the wizard offers **Register Trophy** on the keyboard-shortcuts step. Registering restarts Trophy and returns straight to that step, because the portal stores shortcuts and capture approvals per application. Skipping it is fine: keys then belong to the portable run instead.
+2. With an AppImage, Trophy adds its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — its launcher entry supplies the same identity and no second entry is created.
 3. Explicitly install the required window helper when prompted. Ordinary startup does not install or enable compositor integrations.
 4. Choose whether to enable optional game-detection reporters. Read the cautions below first.
 5. Assign recording and clip/bookmark shortcuts, or configure native desktop shortcuts if the portal does not support them.
