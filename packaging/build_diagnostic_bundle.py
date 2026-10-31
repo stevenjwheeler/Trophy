@@ -95,16 +95,19 @@ def main():
     # older version than the host's driver, which breaks the corresponding
     # feature (VA-API, Vulkan, VDPAU, OpenCL, oneVPL) on newer systems. Treat
     # them as host dependencies, like PipeWire/portal/drivers.
-    for pattern in ("libva*.so*", "libva-drm*.so*", "libva-x11*.so*",
-                    "libvdpau*.so*", "libvulkan*.so*", "libOpenCL*.so*",
-                    "libvpl*.so*"):
+    # Use precise loader sonames (libfoo.so*) so Qt plugins such as
+    # libvulkan-server.so are not mistaken for the host loader.
+    for pattern in ("libva.so*", "libva-drm.so*", "libva-x11.so*",
+                    "libvdpau.so*", "libvulkan.so*", "libOpenCL.so*",
+                    "libvpl.so*"):
         for path in stage.rglob(pattern):
             path.unlink()
     vendor_libraries = [path for pattern in ("libcuda.so*", "libnvidia-*.so*",
                                             "*_drv_video.so", "*_dri.so",
-                                            "libva*.so*", "libvdpau*.so*",
-                                            "libvulkan*.so*", "libOpenCL*.so*",
-                                            "libvpl*.so*")
+                                            "libva.so*", "libva-drm.so*",
+                                            "libva-x11.so*", "libvdpau.so*",
+                                            "libvulkan.so*", "libOpenCL.so*",
+                                            "libvpl.so*")
                         for path in stage.rglob(pattern)]
     if vendor_libraries:
         raise RuntimeError("Refusing a diagnostic AppImage with bundled vendor GPU drivers: " + str(vendor_libraries))
