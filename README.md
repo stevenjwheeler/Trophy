@@ -57,7 +57,7 @@ Recordings use MKV for crash-resilient recording; share exports create separate 
 
 ## Get Trophy
 
-**Before downloading:** check the [requirements table for AppImage, DEB, RPM, tar.xz and the testing kit](https://gettrophy.app/docs/getting-started.html#package-compatibility).
+**Before downloading:** check the [requirements table for AppImage, DEB, RPM and tar.xz](https://gettrophy.app/docs/getting-started.html#package-compatibility).
 
 Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest), make it executable, and launch it:
 
