@@ -154,7 +154,8 @@ An installed tree needs the executable, `libTrophy.so`, both reporter
 libraries, desktop/icon metadata, and the KWin script. Check `readelf -d`
 for the executable's prefix-relative RUNPATH and `ldd` with
 `LD_LIBRARY_PATH` unset. Native/AppImage AppStream metadata must launch
-`trophy.desktop`.
+`io.github.stevenjwheeler.Trophy.desktop` (a reverse-DNS app id is required
+by portal backends such as GNOME's GlobalShortcuts provider).
 
 Check a trusted extracted native prefix/DESTDIR tree or a CPack tar.xz with:
 

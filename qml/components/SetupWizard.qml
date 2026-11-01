@@ -25,6 +25,10 @@ Rectangle {
     property int currentStep: 0
     property int totalSteps: 7 // Welcome, Storage, Audio, Modules, Hardware, Shortcuts, Finish
     readonly property bool windowHelperReady: windowMonitor && windowMonitor.trackingReady
+    // On GNOME the helper is installed but needs a logout/login to be discovered
+    // and enabled (via the autostart entry). Allow proceeding once installed.
+    readonly property bool windowHelperCanProceed: windowMonitor && (windowMonitor.trackingReady
+        || (windowMonitor.compositorName === "gnome" && windowMonitor.gnomeHelperInstalled))
     property bool helperSetupRequested: false
 
     // Reset to first page whenever the wizard is (re-)shown
@@ -377,7 +381,7 @@ Rectangle {
                                 color: Theme.withOpacity(Theme.textColor, 0.05)
                                 radius: Theme.radiusMedium
                                 border.width: 1
-                                border.color: root.windowHelperReady ? Theme.successColor : Theme.errorColor
+                                border.color: root.windowHelperCanProceed ? Theme.successColor : Theme.errorColor
                                 Behavior on border.color { ColorAnimation { duration: Theme.animationNormal } }
                                 ColumnLayout {
                                     id: modTrackCol
@@ -387,7 +391,7 @@ Rectangle {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
                                         Label { text: qsTr("1. Game Window Helper — %1").arg(windowMonitor ? windowMonitor.compositorName : qsTr("unknown compositor")); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Label { text: windowMonitor && windowMonitor.trackingReady ? qsTr("Working") : (windowMonitor && windowMonitor.trackingChecking ? qsTr("Checking…") : qsTr("Needs attention")); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
+                                        Label { text: windowMonitor && windowMonitor.trackingReady ? qsTr("Working") : (windowMonitor && windowMonitor.trackingChecking ? qsTr("Checking…") : (windowMonitor && windowMonitor.compositorName === "gnome" && windowMonitor.gnomeHelperInstalled ? qsTr("Awaiting login") : qsTr("Needs attention"))); color: Theme.textColor; font.pixelSize: Theme.fontSizeSmall }
                                     }
                                     Label {
                                         text: qsTr("Provides window identity, focus and fullscreen state for game detection, the window picker and capture restoration.%1 Screen capture still requires separate authorization.")
@@ -881,6 +885,41 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: Theme.spacingMedium // Gap between toggle boxes and tip box
 
+                                    // GNOME: remind about logout/login for the helper
+                                    Rectangle {
+                                        visible: windowMonitor && windowMonitor.compositorName === "gnome" && !windowMonitor.trackingReady
+                                        Layout.fillWidth: true
+                                        implicitHeight: gnomeReminderCol.height + (Theme.spacingSmall * 2)
+                                        color: Theme.withOpacity(Theme.highlightedColor, 0.1)
+                                        radius: Theme.radiusSmall
+                                        border.width: 1
+                                        border.color: Theme.highlightedColor
+
+                                        ColumnLayout {
+                                            id: gnomeReminderCol
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.margins: Theme.spacingSmall
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 2
+
+                                            Label {
+                                                text: qsTr("One more step for game detection")
+                                                font.weight: Font.Bold
+                                                color: Theme.textColor
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Label {
+                                                text: qsTr("The Trophy Window Helper was installed. Log out and back in to finish setting it up — it will be enabled automatically on your next login. Until then, game detection uses window titles only.")
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                color: Theme.textSecondaryColor
+                                                wrapMode: Text.WordWrap
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+
                                     // Box 1: Enable Auto-Record
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -907,7 +946,7 @@ Rectangle {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
-                                        enabled: app ? app.trayAvailable : true
+                                        enabled: app ? (app.trayAvailable || app.runWithoutTraySupported) : true
                                         opacity: enabled ? 1.0 : 0.5
                                         TrophySwitch {
                                             checked: settingsManager ? settingsManager.startOnLogin : false
@@ -918,7 +957,9 @@ Rectangle {
                                             Layout.fillWidth: true
                                             Label { text: qsTr("Start on login"); font.weight: Font.Bold; color: Theme.textColor }
                                             Label {
-                                                text: qsTr("Launch automatically when you log in (starts minimized to the tray).");
+                                                text: (app && app.trayAvailable)
+                                                      ? qsTr("Launch automatically when you log in (starts minimized to the tray).")
+                                                      : qsTr("Launch automatically when you log in (starts in the background; launch Trophy again to show it).");
                                                 font.pixelSize: Theme.fontSizeSmall;
                                                 color: Theme.textSecondaryColor;
                                                 wrapMode: Text.WordWrap;
@@ -949,8 +990,8 @@ Rectangle {
                         // wizard.
                         text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
-                        visible: root.currentStep !== 3 || root.windowHelperReady
-                        enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperReady
+                        visible: root.currentStep !== 3 || root.windowHelperCanProceed
+                        enabled: (root.currentStep !== 3 && root.currentStep !== root.totalSteps - 1) || root.windowHelperCanProceed
                         onClicked: {
                             if (root.currentStep < root.totalSteps - 1) {
                                 root.currentStep++

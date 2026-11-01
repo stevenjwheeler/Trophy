@@ -354,7 +354,7 @@ TEST(DesktopIntegrationTest, ManagerInstallStillGetsAStableHiddenEntry) {
     EXPECT_TRUE(readFile(integration.desktopFilePath())
                     .contains(QStringLiteral("OnlyShowIn=TROPHY-INTERNAL;")));
     EXPECT_EQ(TrophyBackend::DesktopIntegration::effectiveDesktopId(data.path(), QStringList()),
-              QStringLiteral("trophy"));
+              QStringLiteral("io.github.stevenjwheeler.Trophy"));
     EXPECT_TRUE(integration.isRegistered());
     EXPECT_TRUE(integration.entryHidden());
     // The startup install is reported once, so the caches can be refreshed.
@@ -383,7 +383,7 @@ TEST(DesktopIntegrationTest, OurEntryBeatsAManagersVersionedId) {
     qunsetenv("APPDIR");
 
     EXPECT_EQ(TrophyBackend::DesktopIntegration::effectiveDesktopId(data.path(), QStringList()),
-              QStringLiteral("trophy"));
+              QStringLiteral("io.github.stevenjwheeler.Trophy"));
 }
 
 // The entry is installed before QGuiApplication exists, so the first run

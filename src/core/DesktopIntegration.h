@@ -23,7 +23,7 @@ namespace TrophyBackend {
  * with every other unregistered app, and loses them once it becomes
  * registered.
  *
- * Integration writes only $XDG_DATA_HOME/applications/trophy.desktop (plus
+ * Integration writes only $XDG_DATA_HOME/applications/io.github.stevenjwheeler.Trophy.desktop (plus
  * the icon), naming the AppImage where the user keeps it. The file is never
  * copied or moved: the built-in updater replaces $APPIMAGE in place, so the
  * entry keeps working across updates. Registration is checked the way the
@@ -42,7 +42,7 @@ class DesktopIntegration : public QObject {
     // manager already lists Trophy (the entry still supplies the app id).
     Q_PROPERTY(bool entryHidden READ entryHidden NOTIFY integrationChanged)
     // Non-empty when the identity comes from another launcher's entry (Gear
-    // Lever / AppImageLauncher) rather than our own trophy.desktop.
+    // Lever / AppImageLauncher) rather than our own reverse-DNS entry.
     Q_PROPERTY(QString managedEntry READ managedEntry NOTIFY integrationChanged)
     Q_PROPERTY(QString statusMessage READ statusMessage NOTIFY statusMessageChanged)
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusMessageChanged)
@@ -62,13 +62,13 @@ public:
     // The AppImage file this process was launched from ($APPIMAGE).
     QString appImagePath() const;
 
-    // Our own entry: $XDG_DATA_HOME/applications/trophy.desktop.
+    // Our own entry: $XDG_DATA_HOME/applications/io.github.stevenjwheeler.Trophy.desktop.
     QString desktopFilePath() const;
 
     // True when our entry exists and the AppImage it names still exists.
     bool isIntegrated() const;
 
-    // True when any XDG application directory has a trophy.desktop, which is
+    // True when any XDG application directory has the reverse-DNS entry (or the pre-migration trophy.desktop), which is
     // what xdg-desktop-portal resolves the app id against.
     bool isRegistered() const;
 

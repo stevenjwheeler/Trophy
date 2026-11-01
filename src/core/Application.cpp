@@ -300,13 +300,13 @@ bool Application::initialize() {
     m_trayManager->setRecording(m_recordingManager->isRecording(),
                                  m_recordingManager->currentGameName());
     emit trayAvailabilityChanged();
-    if (m_settingsManager->startMinimized() || m_forceMinimized) {
-      qCInfo(appLog) << "Starting minimized to system tray";
-      setMainWindowVisible(false);
-    }
   } else {
-    qCInfo(appLog) << "No system tray host; running with plain window";
+    qCInfo(appLog) << "No system tray host detected";
   }
+
+  // Start minimized does not depend on a tray icon: GNOME has no legacy tray,
+  // but hiding still works because launching Trophy again restores the window.
+  applyStartupVisibility();
 
   syncAutostartFile();
 
@@ -1602,9 +1602,22 @@ bool Application::isTrayAvailable() const {
   return m_trayManager && m_trayManager->isAvailable();
 }
 
+bool Application::isRunWithoutTraySupported() const {
+  // GNOME has no StatusNotifierItem tray by default. Hiding the window still
+  // keeps Trophy (and recordings) alive; the single-instance guard restores
+  // the window when Trophy is launched again. Note this does NOT make the
+  // app appear in GNOME's "Background Apps": that list is fed by the
+  // xdg-desktop-portal background monitor, which only enumerates Flatpak
+  // instances, so native/AppImage apps cannot register there.
+  const QString desktop = (qgetenv("XDG_CURRENT_DESKTOP") + " " +
+                           qgetenv("XDG_SESSION_DESKTOP"))
+                              .toUpper();
+  return desktop.contains("GNOME");
+}
+
 bool Application::useNativeDialogs() const {
   // Use the host's native (portal) dialogs when the portal can resolve our
-  // app id: a trophy.desktop exists in an XDG application directory, either
+  // app id: a reverse-DNS desktop entry exists in an XDG application directory, either
   // from our own integration, a distro package, or a third-party AppImage
   // manager. Otherwise fall back to Qt's own dialog, which does not depend on
   // portal app-id registration.
@@ -1642,18 +1655,53 @@ void Application::setMainWindowVisible(bool visible) {
 
 void Application::showMainWindow() { setMainWindowVisible(true); }
 
+bool Application::applyStartupVisibility() {
+  const bool requested =
+      (m_settingsManager && m_settingsManager->startMinimized()) || m_forceMinimized;
+  if (!requested)
+    return false;
+  // Only hide when there is a way back: a tray icon, or a desktop where
+  // hiding is supported (relaunching Trophy shows the running window).
+  if (!(isTrayAvailable() || isRunWithoutTraySupported())) {
+    qCInfo(appLog) << "Start minimized requested, but this desktop has no tray "
+                      "host and no background mode; showing the window";
+    return false;
+  }
+  if (isTrayAvailable()) {
+    qCInfo(appLog) << "Starting minimized to system tray";
+  } else {
+    qCInfo(appLog) << "Starting hidden in the background (no tray host; launch "
+                      "Trophy again to show the window)";
+    // Without a tray icon there is no visual sign Trophy is running; say so
+    // once. The updater's relaunch already announces itself with its own
+    // notice, so skip the duplicate there.
+    if (m_notificationService && m_postUpdateFromVersion.isEmpty()) {
+      m_notificationService->showNotification(
+          "Trophy started in the background",
+          "Trophy is running. Launch Trophy again to open the window.",
+          "trophy", 5000, 1);
+    }
+  }
+  setMainWindowVisible(false);
+  return true;
+}
+
 bool Application::minimizeToTray() {
-  if (!isTrayAvailable() || !m_settingsManager->minimizeToTray()) {
+  if (!(isTrayAvailable() || isRunWithoutTraySupported()) ||
+      !m_settingsManager->minimizeToTray()) {
     return false;
   }
   setMainWindowVisible(false);
   if (!m_minimizeNotifyShown) {
     m_minimizeNotifyShown = true;
+    const bool onTray = isTrayAvailable();
     m_notificationService->showNotification(
         "Trophy minimized",
         m_recordingManager->isRecording()
-            ? "Recording continues in the background. Right-click the tray icon to stop."
-            : "Trophy keeps running in the system tray.",
+            ? (onTray ? "Recording continues in the background. Right-click the tray icon to stop."
+                      : "Recording continues in the background. Launch Trophy again to open the window.")
+            : (onTray ? "Trophy keeps running in the system tray."
+                      : "Trophy keeps running in the background. Launch Trophy again to open the window."),
         "trophy", 5000, 1);
   }
   return true;

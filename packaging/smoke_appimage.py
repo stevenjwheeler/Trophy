@@ -172,7 +172,7 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
                         # Unregistered AppImages fall back to Qt's own folder
                         # picker, which only exists in the QML payload.
                         "usr/qml/**/FolderDialog.qml",
-                        "usr/share/applications/trophy.desktop",
+                        "usr/share/applications/io.github.stevenjwheeler.Trophy.desktop",
                         "usr/share/trophy/vulkan_layer/trophy_layer.json",
                         "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",
                         "usr/share/metainfo/*.metainfo.xml",

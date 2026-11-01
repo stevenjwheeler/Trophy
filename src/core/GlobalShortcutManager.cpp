@@ -384,9 +384,30 @@ void GlobalShortcutManager::reconfigureShortcuts() {
   // the spec'd way to ask, and it does show UI — on KDE that means the
   // System Settings keybinds page rather than a compact prompt. Better a
   // heavyweight dialog than a button that does nothing.
+  //
+  // Shortcuts are configured exclusively through the portal: the desktop's
+  // GlobalShortcuts backend owns the UI (KDE and GNOME both ship one).
+  // Watch the reply only to surface a rejection; never launch compositor
+  // settings, which would not edit the portal-bound triggers anyway.
   QVariantMap options;
-  QDBusConnection::sessionBus().asyncCall(portalCall("ConfigureShortcuts",
-      {QVariant::fromValue(QDBusObjectPath(m_sessionHandle)), QString(), options}), 10000);
+  auto call = portalCall("ConfigureShortcuts",
+      {QVariant::fromValue(QDBusObjectPath(m_sessionHandle)), QString(), options});
+  auto pending = QDBusConnection::sessionBus().asyncCall(call, 10000);
+  auto *watcher = new QDBusPendingCallWatcher(pending, this);
+  connect(watcher, &QDBusPendingCallWatcher::finished, this,
+          [this](QDBusPendingCallWatcher *finished) {
+    const QDBusMessage reply = finished->reply();
+    finished->deleteLater();
+    if (reply.type() == QDBusMessage::ReplyMessage) {
+      qDebug() << "ConfigureShortcuts accepted by the portal";
+      return;
+    }
+    qWarning() << "ConfigureShortcuts failed:" << reply.errorMessage();
+    const QString detail = reply.errorMessage().trimmed();
+    setLastError(detail.isEmpty()
+                     ? tr("The system could not open the shortcut editor.")
+                     : detail);
+  });
 }
 
 void GlobalShortcutManager::handleActivated(

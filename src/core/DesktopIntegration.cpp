@@ -21,7 +21,17 @@ namespace TrophyBackend {
 
 namespace {
 
-QString desktopFileName() { return QStringLiteral("trophy.desktop"); }
+// Reverse-DNS desktop id. xdg-desktop-portal (and several portal backends,
+// notably GNOME's GlobalShortcuts provider) require a valid reverse-DNS app
+// id; a bare "trophy" is rejected, which made ConfigureShortcuts silently
+// discard requests and hid Trophy from the desktop's shortcut UI.
+const char *kDesktopId = "io.github.stevenjwheeler.Trophy";
+QString desktopFileName() { return QString::fromLatin1(kDesktopId) +
+                                   QStringLiteral(".desktop"); }
+// Pre-migration entry written by older Trophy versions (and still used by
+// some distro packages). Kept readable so existing registrations keep working
+// until the new entry is written.
+QString legacyDesktopFileName() { return QStringLiteral("trophy.desktop"); }
 
 // Quote one Exec argument per the Desktop Entry spec: the value stays a single
 // argument even when the path contains spaces.
@@ -201,10 +211,15 @@ QString findEntry(const QString &id, const QString &dataHome, const QStringList 
 
 QString DesktopIntegration::effectiveDesktopId(const QString &dataHome,
                                               const QStringList &systemDataDirs) {
-    // Our own stable entry always wins: it keeps the id stable across manager
-    // renames and updates.
+    const QString ourId = QString::fromLatin1(kDesktopId);
+    // Our own stable reverse-DNS entry always wins.
+    if (!findEntry(ourId, dataHome, systemDataDirs).isEmpty())
+        return ourId;
+    // A pre-migration entry is ours too: keep the runtime identity on the new
+    // id so the portal sees a valid app id, and the next startup install
+    // writes the renamed entry alongside it.
     if (!findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs).isEmpty())
-        return QStringLiteral("trophy");
+        return ourId;
     // Otherwise reuse the launcher that started us (Gear Lever writes
     // trophy.appimage_<version>.desktop and launches with this hint), so an
     // install through a manager counts as registered without a second entry.
@@ -213,16 +228,23 @@ QString DesktopIntegration::effectiveDesktopId(const QString &dataHome,
         const QFileInfo info(QString::fromLocal8Bit(hint));
         if (info.exists() && info.suffix() == QStringLiteral("desktop")) {
             const QString id = info.completeBaseName();
-            if (id != QStringLiteral("trophy") && !findEntry(id, dataHome, systemDataDirs).isEmpty())
+            if (id != QStringLiteral("trophy") &&
+                !findEntry(id, dataHome, systemDataDirs).isEmpty())
                 return id;
         }
     }
-    return QStringLiteral("trophy");
+    return ourId;
 }
 
 QString DesktopIntegration::portalDesktopFile(const QString &dataHome,
                                              const QStringList &systemDataDirs) {
-    return findEntry(effectiveDesktopId(dataHome, systemDataDirs), dataHome, systemDataDirs);
+    const QString entry =
+        findEntry(effectiveDesktopId(dataHome, systemDataDirs), dataHome, systemDataDirs);
+    if (!entry.isEmpty())
+        return entry;
+    // Fall back to the pre-migration entry so an old distro package (or an
+    // install that has not run its startup migration yet) still registers.
+    return findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs);
 }
 
 QStringList DesktopIntegration::applicationsDirs() const {
@@ -470,9 +492,8 @@ bool DesktopIntegration::installEntryAtStartup(const QString &dataHome,
         return false;
     if (!autoInstallEnabled())
         return false;
-    // Anything already there is deliberate: ours from a previous run, a
-    // distribution package, or a manager entry that supplies the identity.
-    if (!findEntry(QStringLiteral("trophy"), dataHome, systemDataDirs).isEmpty())
+    // Our reverse-DNS entry already exists: nothing to migrate.
+    if (!findEntry(QString::fromLatin1(kDesktopId), dataHome, systemDataDirs).isEmpty())
         return false;
 
     // A manager's entry is a launcher, not a reason to give up our own: writing
@@ -480,8 +501,21 @@ bool DesktopIntegration::installEntryAtStartup(const QString &dataHome,
     // the app id stable instead of following the manager's versioned name.
     DesktopIntegration writer(dataHome, systemDataDirs);
     const bool written = writer.writeEntry(appImage);
-    if (written)
+    if (written) {
+        // Drop our old bare-id entry from the user's data home so menus do not
+        // show Trophy twice. A distro package owns /usr/share, so only the
+        // writable copy is removed.
+        const QString legacy = QDir(dataHome.isEmpty()
+                                        ? writer.dataHome()
+                                        : dataHome)
+                                   .filePath(QStringLiteral("applications/") +
+                                             legacyDesktopFileName());
+        if (QFileInfo::exists(legacy) &&
+            execProgram(legacy).contains(QStringLiteral("trophy"),
+                                         Qt::CaseInsensitive))
+            QFile::remove(legacy);
         g_installedAtStartup = true;
+    }
     return written;
 }
 

@@ -70,7 +70,7 @@ def check_tree(root):
                 raise RuntimeError(f"Expected regular i386 ET_DYN companion: {companion}")
             elfs.append(companion)
     for relative in (
-        "share/applications/trophy.desktop",
+        "share/applications/io.github.stevenjwheeler.Trophy.desktop",
         "share/icons/hicolor/scalable/apps/trophy.svg",
         "share/trophy/vulkan_layer/trophy_layer.json",
         "share/trophy/kwin/trophy-monitor/metadata.json",
@@ -81,9 +81,10 @@ def check_tree(root):
         required(prefix, relative)
     metainfo = required(prefix, "share/metainfo/io.github.stevenjwheeler.Trophy.metainfo.xml")
     launchables = ET.parse(metainfo).getroot().findall("launchable")
-    if not any(item.get("type") == "desktop-id" and item.text == "trophy.desktop"
+    expected_launchable = "io.github.stevenjwheeler.Trophy.desktop"
+    if not any(item.get("type") == "desktop-id" and item.text == expected_launchable
                for item in launchables):
-        raise RuntimeError("AppStream launchable must name trophy.desktop")
+        raise RuntimeError(f"AppStream launchable must name {expected_launchable}")
     manifest = json.loads((prefix / "share/trophy/vulkan_layer/trophy_layer.json").read_text())
     layer = manifest.get("layer") if isinstance(manifest, dict) else None
     library_path = layer.get("library_path") if isinstance(layer, dict) else None

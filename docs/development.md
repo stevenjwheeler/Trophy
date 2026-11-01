@@ -82,6 +82,15 @@ Normal developer builds keep generation enabled by default.
 
 The install includes `libTrophy.so`, reporter libraries, and desktop integration as well as the executable. **Do not copy only the binary.** Ensure `~/.local/bin` is on `PATH` for native CLI shortcuts. Reconfigure after changing branches/commits if you need the displayed configure-time version stamp refreshed.
 
+Desktop and autostart entries use the reverse-DNS id
+`io.github.stevenjwheeler.Trophy.desktop`. Do not rename them back to
+`trophy.desktop`: xdg-desktop-portal derives a host app's id from the launching
+systemd unit, and portal backends (notably GNOME's GlobalShortcuts provider)
+reject ids without a dot. Global shortcuts are portal-only
+(`org.freedesktop.portal.GlobalShortcuts`); keep new shortcut code on that path
+rather than adding compositor-specific hooks. Runtime capture, shortcut binding
+and configure requests all require the desktop's portal backend to be present.
+
 ## Development and tests
 
 ```bash

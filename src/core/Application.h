@@ -17,6 +17,7 @@
 // Forward declarations
 namespace TrophyBackend {
 class ApplicationAudioProbeTest;
+class ApplicationStartupVisibilityTest;
 class UpdateChecker;
 class UpdateInstaller;
 class RecordingManager;
@@ -65,6 +66,11 @@ class Application : public QApplication {
   Q_PROPERTY(bool canStartRecording READ canStartRecording NOTIFY recordingAvailabilityChanged)
   Q_PROPERTY(QString recordingPhase READ recordingPhase NOTIFY recordingStateChanged)
   Q_PROPERTY(bool trayAvailable READ isTrayAvailable NOTIFY trayAvailabilityChanged)
+  // Desktops where hiding the window is still a usable "keep running"
+  // action without a legacy tray icon (GNOME). There is no tray/Background
+  // Apps entry in that case — the single-instance guard restores the window
+  // when Trophy is launched again — so the UI explains that trade-off.
+  Q_PROPERTY(bool runWithoutTraySupported READ isRunWithoutTraySupported CONSTANT)
   Q_PROPERTY(bool useNativeDialogs READ useNativeDialogs NOTIFY useNativeDialogsChanged)
   Q_PROPERTY(bool suppressNextStorageNotification READ suppressNextStorageNotification WRITE setSuppressNextStorageNotification NOTIFY suppressNextStorageNotificationChanged)
   Q_PROPERTY(bool vulkanLayerRegistered READ vulkanLayerRegistered NOTIFY detectionStatusChanged)
@@ -131,6 +137,7 @@ public:
 
   // System tray (close-to-tray, start minimized, tray quit)
   bool isTrayAvailable() const;
+  bool isRunWithoutTraySupported() const;
   bool useNativeDialogs() const;
   QString restartTarget() const;
   // Called from QML onClosing: hides to tray when enabled, else false so
@@ -323,6 +330,12 @@ private:
   static constexpr int kUpdateCheckDelayMs = 10000;
   QObject *qmlRootWindow() const;
   void setMainWindowVisible(bool visible);
+  // Hides the freshly loaded window when the user asked to start minimized
+  // (setting or --minimized) and this desktop has a way back. Returns true
+  // when the window was hidden. GNOME has no legacy tray, but relaunching
+  // Trophy restores the window, so hiding still works there.
+  bool applyStartupVisibility();
+  friend class ApplicationStartupVisibilityTest;
   void syncAutostartFile();
   // Shared pw-play helper behind both chimes (resource -> cache file).
   void playChime(const QString &resource, const QString &fileName,

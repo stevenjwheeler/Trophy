@@ -15,7 +15,12 @@
 namespace TrophyBackend {
 
 namespace {
-const char *kDesktopFileName = "trophy.desktop";
+// Reverse-DNS id: GNOME derives the portal app id from the autostart unit
+// name (app-<id>@autostart.service), and a bare "trophy" is rejected by
+// portal backends such as GNOME's GlobalShortcuts provider.
+const char *kDesktopFileName = "io.github.stevenjwheeler.Trophy.desktop";
+// Entry written by older versions; migrated/removed on the next sync.
+const char *kLegacyDesktopFileName = "trophy.desktop";
 const char *kMarker = "# Managed by Trophy - safe to delete to disable autostart";
 
 // Desktop Entry Exec quoting: a path with spaces (or other
@@ -62,21 +67,33 @@ AutostartManager::AutostartManager(const QString &configHomeOverride,
                                    QObject *parent)
     : QObject(parent), m_configHomeOverride(configHomeOverride) {}
 
-QString AutostartManager::filePath() const {
+QString AutostartManager::autostartDir() const {
   const QString base = m_configHomeOverride.isEmpty()
                            ? QStandardPaths::writableLocation(
                                  QStandardPaths::ConfigLocation)
                            : m_configHomeOverride;
-  return base + "/autostart/" + QString::fromLatin1(kDesktopFileName);
+  return base + "/autostart";
+}
+
+QString AutostartManager::filePath() const {
+  return autostartDir() + "/" + QString::fromLatin1(kDesktopFileName);
+}
+
+QString AutostartManager::legacyFilePath() const {
+  return autostartDir() + "/" + QString::fromLatin1(kLegacyDesktopFileName);
+}
+
+static bool entryIsOurs(const QString &path) {
+  QFile f(path);
+  if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    return false;
+  return f.readAll().contains(QByteArray(kMarker));
 }
 
 bool AutostartManager::isEnabled() const {
-  QFile f(filePath());
-  if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
-    return false;
-  }
-  QTextStream in(&f);
-  return in.readAll().contains(QString::fromLatin1(kMarker));
+  // Treat the pre-migration entry as enabled too: it is ours, and the next
+  // enable/disable sync moves or removes it.
+  return entryIsOurs(filePath()) || entryIsOurs(legacyFilePath());
 }
 
 QString AutostartManager::launchCommand(const QString &execPath,
@@ -88,16 +105,23 @@ QString AutostartManager::launchCommand(const QString &execPath,
 bool AutostartManager::setEnabled(bool enabled, const QString &execPath,
                                  const QString &appImagePath) {
   const QString path = filePath();
+  const QString legacy = legacyFilePath();
+  const bool legacyOurs = entryIsOurs(legacy);
   if (!enabled) {
     // Only remove entries we own; leave foreign ones alone.
-    if (!isEnabled()) {
+    const bool hadOurs = entryIsOurs(path);
+    if (!hadOurs && !legacyOurs) {
       return true; // nothing of ours to remove
     }
-    return QFile::remove(path);
+    if (hadOurs && !QFile::remove(path))
+      return false;
+    if (legacyOurs && !QFile::remove(legacy))
+      return false;
+    return true;
   }
 
   // Enabling must not replace a user-maintained entry either.
-  if (QFile::exists(path) && !isEnabled()) {
+  if (QFile::exists(path) && !entryIsOurs(path)) {
     return false;
   }
 
@@ -118,6 +142,12 @@ bool AutostartManager::setEnabled(bool enabled, const QString &execPath,
       << "Terminal=false\n"
       << "Categories=AudioVideo;Game;\n"
       << "X-GNOME-Autostart-enabled=true\n";
+  out.flush();
+  f.close();
+  // The old bare-id entry would keep its own (invalid) autostart unit name,
+  // so remove it once the new entry is written.
+  if (legacyOurs)
+    QFile::remove(legacy);
   return true;
 }
 
