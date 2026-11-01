@@ -391,6 +391,9 @@ bool ReplayManager::switchSegment() {
   // recording: encoder init alone costs hundreds of ms, and paying it
   // up-front is what makes the handoff gapless.
   auto newEncoder = EncoderFactory::create(m_settings->encoder());
+  if (newEncoder)
+    qInfo() << "DVR video encoder: setting" << m_settings->encoder()
+            << "resolved to" << newEncoder->name();
   if (!newEncoder)
     return false;
 

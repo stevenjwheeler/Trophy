@@ -70,10 +70,18 @@ public:
   bool stopPending() const { return m_stopWorker.valid(); }
   void retireAudioLookups();
 
+  // Test hook: fire the stall guard after `frames` input frames without an
+  // output packet, once `timeoutMs` has elapsed.
+  void setStallGuardForTesting(int frames, int timeoutMs);
+  QString outputErrorTextForTesting() const { return outputErrorText(); }
+
   bool isRunning() const { return m_running; }
   // Packet callbacks only latch failure; owners inspect after stop() has
   // drained all producers. No reentrant teardown signal is emitted.
   bool outputFailed() const { return m_outputFailed.load(); }
+  // Human-readable reason for a stalled/failed output (empty when none).
+  // A stuck encoder used to surface only as "finalize failed" long after.
+  QString outputErrorText() const;
   bool outputSucceeded() const {
     return m_outputFinalized.load() && !m_outputFailed.load();
   }
@@ -160,6 +168,7 @@ private:
   bool m_asyncHandoff = false;
   bool m_finishCaptureStop = false;
   bool writeOutputPacket(const EncodedPacket &packet);
+  void setOutputError(const QString &text);
   // Caller holds m_mergeMutex; silence fills missing slots after bounded grace.
   void drainMergedAudio(int channels, bool flushTail = false);
   void noteCapturedVideo(const VideoFrame &frame);
@@ -257,6 +266,13 @@ private:
 
   std::atomic<bool> m_running{false};
   std::atomic<bool> m_outputFailed{false};
+  // "Encoder accepted frames but emitted nothing" guard. Defaults are tuned
+  // for real encoders; tests tighten them.
+  std::atomic<int64_t> m_stallFrameLimit{30};
+  std::atomic<int64_t> m_stallTimeoutMs{5000};
+  std::atomic<int64_t> m_videoPacketsWritten{0};
+  mutable std::mutex m_outputErrorMutex;
+  QString m_outputErrorText;
   std::atomic<bool> m_outputFinalized{false};
   std::atomic<qint64> m_frameCount{0};
   std::atomic<qint64> m_bytesWritten{0};

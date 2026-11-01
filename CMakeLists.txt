@@ -251,6 +251,7 @@ set(CORE_SOURCES
     src/core/DeletionQueue.cpp
     src/core/Application.cpp
     src/core/RuntimeLibraries.cpp
+    src/core/CrashHandler.cpp
     src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
@@ -508,6 +509,12 @@ target_link_libraries(${PROJECT_NAME}App PRIVATE
     Qt6::QuickControls2
     Qt6::Widgets
 )
+
+# Fatal-signal reports include a backtrace; -rdynamic keeps symbol names in it
+# instead of bare addresses, which is what makes a user's crash report useful.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(${PROJECT_NAME}App PRIVATE -rdynamic)
+endif()
 
 # Set executable output name
 set_target_properties(${PROJECT_NAME}App PROPERTIES
