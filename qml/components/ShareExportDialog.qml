@@ -27,6 +27,7 @@ TrophyDialog {
     property bool tracksLoaded: false
     property string folderError: ""
     // The copy keeps the source codec; warn when that is not H.264.
+    readonly property string codecLabel: root.currentInfo.videoCodecLabel || root.currentInfo.videoCodec || ""
     readonly property bool codecWarning: {
         const info = root.currentInfo;
         return !!info && info.shareable === false && (info.videoCodec || "") !== "";
@@ -199,7 +200,10 @@ TrophyDialog {
                 objectName: "shareCopySection"
                 sectionTitle: qsTr("Copy")
                 iconSource: "qrc:/icons/video.svg"
-                description: qsTr("Instant MP4 · original quality")
+                description: root.codecWarning
+                    ? qsTr("Instant MP4 · %1 may not upload everywhere").arg(root.codecLabel)
+                    : qsTr("Instant MP4 · original quality")
+                descriptionColor: root.codecWarning ? Theme.warningColor : Theme.textSecondaryColor
                 Label {
                     Layout.fillWidth: true
                     text: qsTr("Video is copied without re-encoding, so this finishes in seconds and loses nothing. The selected tracks are mixed into one stereo track because chat apps cannot switch between tracks.")
@@ -211,7 +215,7 @@ TrophyDialog {
                     objectName: "shareCodecNote"
                     Layout.fillWidth: true
                     visible: root.codecWarning
-                    text: qsTr("This recording uses %1 video. The copy keeps that codec, which some sites and players may not accept — record H.264 for the widest compatibility.").arg(currentInfo.videoCodec || "")
+                    text: qsTr("This recording is %1. The copy keeps that codec, which some sites and players may not accept — record H.264 for the widest compatibility.").arg(root.codecLabel)
                     color: Theme.warningColor
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap

@@ -793,7 +793,7 @@ TEST_F(SharingUiTest, BatchReviewsIndependentAudioLayoutsAndQueuesAllWithSharedS
 }
 TEST_F(SharingUiTest, CopySectionExplainsMergedAudioAndWarnsAboutNonH264Codecs) {
   exporter.captureData["/fake/Game.mkv"] = QVariantMap{{"tracks", QVariantList{}},
-      {"videoCodec", "hevc"}, {"shareable", false}};
+      {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"}, {"shareable", false}};
   create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
       {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
   ASSERT_TRUE(object);
@@ -811,7 +811,12 @@ TEST_F(SharingUiTest, CopySectionExplainsMergedAudioAndWarnsAboutNonH264Codecs) 
   ASSERT_TRUE(wait([&] { return section->property("expansionProgress").toDouble() >= 0.999; }));
   EXPECT_TRUE(object->property("codecWarning").toBool());
   EXPECT_TRUE(note->isVisible());
-  EXPECT_TRUE(note->property("text").toString().contains("hevc"));
+  // Friendly labels, not raw FFmpeg names.
+  EXPECT_TRUE(note->property("text").toString().contains("HEVC (H.265)"));
+  EXPECT_FALSE(note->property("text").toString().contains("hevc"));
+  // The warning is also visible while the card is collapsed.
+  EXPECT_TRUE(section->property("description").toString().contains("HEVC (H.265)"));
+  EXPECT_TRUE(section->property("description").toString().contains("may not upload"));
   QMetaObject::invokeMethod(object->findChild<QObject *>("startShareExport"), "clicked");
   EXPECT_EQ(exporter.exports, 1);
 }

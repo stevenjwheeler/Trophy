@@ -293,6 +293,26 @@ TEST_F(ShareExportTest, InspectAndMixProducesFastStartCompatibleMp4) {
   EXPECT_DOUBLE_EQ(progress.load(), 1.0);
   EXPECT_TRUE(QFile::exists(source));
 }
+TEST_F(ShareExportTest, FriendlyCodecLabelsAndShareability) {
+  const auto info = ShareExportEngine::inspect(source, cancel);
+  EXPECT_EQ(info.value("videoCodec").toString(), "mpeg4");
+  EXPECT_EQ(info.value("videoCodecLabel").toString(), "MPEG-4 Part 2");
+  EXPECT_FALSE(info.value("shareable").toBool());
+  EXPECT_TRUE(info.value("copyable").toBool());
+
+  const QString h264 = directory.filePath("GameH264.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=320x180:rate=30:duration=0.5", "-c:v", "libx264",
+      "-pix_fmt", "yuv420p", h264});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  const auto h = ShareExportEngine::inspect(h264, cancel);
+  EXPECT_EQ(h.value("videoCodecLabel").toString(), "H.264");
+  EXPECT_TRUE(h.value("shareable").toBool());
+  EXPECT_TRUE(h.value("copyable").toBool());
+}
+
 TEST_F(ShareExportTest, CopiesVideoPacketsVerbatim) {
   const auto expected = videoDigest(source);
   ASSERT_GT(expected.first, 0);

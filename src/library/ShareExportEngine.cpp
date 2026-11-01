@@ -219,6 +219,17 @@ AVStream *addStream(Output &out, AVCodecContext *codec) {
   return stream;
 }
 
+QString shareVideoCodecLabel(AVCodecID id) {
+  switch (id) {
+  case AV_CODEC_ID_H264: return QStringLiteral("H.264");
+  case AV_CODEC_ID_HEVC: return QStringLiteral("HEVC (H.265)");
+  case AV_CODEC_ID_AV1: return QStringLiteral("AV1");
+  case AV_CODEC_ID_MPEG4: return QStringLiteral("MPEG-4 Part 2");
+  case AV_CODEC_ID_VP9: return QStringLiteral("VP9");
+  default: return QString::fromUtf8(avcodec_get_name(id));
+  }
+}
+
 bool copyableVideo(AVCodecID id) {
   // Containers we write are MP4; these are the video codecs MP4 can carry.
   return id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_HEVC || id == AV_CODEC_ID_AV1 ||
@@ -300,6 +311,7 @@ QVariantMap ShareExportEngine::inspect(const QString &source, std::atomic_bool &
     return {{"tracks", tracks},
             {"durationSeconds", input->duration > 0 ? double(input->duration) / AV_TIME_BASE : 0.0},
             {"videoCodec", videoCodec},
+            {"videoCodecLabel", shareVideoCodecLabel(videoCodecId)},
             // Copy needs a video codec MP4 can carry; it keeps the original
             // codec, so H.264 is the one every sharing service accepts.
             {"copyable", copyableVideo(videoCodecId)},
