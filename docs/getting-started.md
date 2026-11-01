@@ -94,7 +94,7 @@ guidance rather than assuming every codec ships with the native package.
 - Compatible GPU drivers for hardware encoding: NVIDIA NVENC or AMD/Intel VA-API where supported. Hardware encoding is optional; software H.264 is also supported when the FFmpeg build includes it. Available codecs depend on the GPU, driver and FFmpeg build. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver. Set `TROPHY_PREFER_BUNDLED_LIBVA=1` to force the bundled copy, or `TROPHY_LIBVA_DIRS=/path[:/path]` to point the launcher at libva installed somewhere unusual.
 - A system tray host is optional. KDE Plasma provides one; on GNOME, install the
   **AppIndicator and KStatusNotifierItem Support** extension if you want a tray
-  icon. Trophy runs without one — see [Closing and the tray](#closing-and-the-tray).
+  icon. Trophy runs without one — see [Closing and the tray](user-guide.md#closing-and-the-tray).
 
 ### Supported desktops
 
