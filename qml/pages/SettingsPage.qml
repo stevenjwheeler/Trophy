@@ -1215,7 +1215,7 @@ Page {
                               .arg(windowMonitor && windowMonitor.compositorName === "kwin"
                                    ? qsTr(" On KDE this uses a read-only KWin script.")
                                    : (windowMonitor && windowMonitor.compositorName === "gnome"
-                                      ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation. %1").arg(windowMonitor.gnomeHelperStatus) : ""))
+                                      ? qsTr(" On GNOME this uses the Trophy Window Helper Shell extension. Logout/login may be required after installation.") : ""))
 
                         showVersions: windowMonitor && (windowMonitor.compositorName === "kwin" || windowMonitor.compositorName === "gnome")
                         bundledVersion: windowMonitor ? windowMonitor.bundledHelperVersion : 0
@@ -1239,7 +1239,7 @@ Page {
                                             ? (windowMonitor.kwinScriptEnabled ? qsTr("Installed · Not reporting") : qsTr("Installed · Disabled"))
                                             : qsTr("Not installed"))
                                         : (windowMonitor && windowMonitor.compositorName === "gnome"
-                                           ? (windowMonitor.gnomeHelperInstalled ? qsTr("Installed · Not reporting") : qsTr("Not installed"))
+                                           ? (windowMonitor.gnomeHelperInstalled ? qsTr("Installed · Awaiting login") : qsTr("Not installed"))
                                            : qsTr("Unavailable"))))
                             TrophyButton {
                                 id: helperRepair
@@ -1250,6 +1250,15 @@ Page {
                                 onClicked: if (windowMonitor) windowMonitor.repairTracking()
                             }
                         }
+                    }
+
+                    Label {
+                        visible: windowMonitor && windowMonitor.compositorName === "gnome" && !windowMonitor.trackingReady
+                        text: windowMonitor ? windowMonitor.gnomeHelperStatus : ""
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.textSecondaryColor
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
 
                     SettingRow {

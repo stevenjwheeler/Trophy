@@ -198,14 +198,14 @@ TEST_F(GnomeBackendTest, RestartRejectsReplyFromPreviousGeneration) {
   EXPECT_TRUE(backend.isActive());
 }
 
-TEST_F(GnomeBackendTest, MissingEnableToolExplainsLoginAndManualEnable) {
+TEST_F(GnomeBackendTest, MissingEnableToolExplainsLoginAndAutomaticEnable) {
   QTemporaryDir temp;
   const QByteArray oldPath = qgetenv("PATH");
   qputenv("PATH", temp.path().toUtf8());
   const QString result = install(temp.filePath("extension"));
   qputenv("PATH", oldPath);
   EXPECT_TRUE(result.contains("Log out"));
-  EXPECT_TRUE(result.contains("enable Trophy Window Helper"));
+  EXPECT_TRUE(result.contains("enabled automatically"));
   EXPECT_TRUE(QFile::exists(temp.filePath("extension/extension.js")));
 }
 

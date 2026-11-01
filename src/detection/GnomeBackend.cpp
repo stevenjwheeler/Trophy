@@ -78,18 +78,41 @@ QString GnomeBackend::installHelper(const QString &directory) {
       return tr("Cannot write the GNOME helper files.");
   }
 
+  // Create an autostart entry that enables the extension on next login, since
+  // GNOME Shell only discovers new extensions at startup. This avoids requiring
+  // the user to manually run `gnome-extensions enable` after logging back in.
+  const QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + "/autostart";
+  const QString autostartPath = autostartDir + "/trophy-gnome-helper-enable.desktop";
+  QDir().mkpath(autostartDir);
+  QFile autostartFile(autostartPath);
+  if (autostartFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    const QByteArray autostartContent =
+        ("[Desktop Entry]\n"
+         "Type=Application\n"
+         "Name=Trophy GNOME Helper Enable\n"
+         "Comment=One-time automatic enable of the Trophy Window Helper GNOME extension installed by Trophy\n"
+         "Exec=sh -c \"gnome-extensions enable trophy-monitor@trophy; rm -f '" + autostartPath.toUtf8() + "'\"\n"
+         "Terminal=false\n"
+         "NoDisplay=true\n"
+         "X-GNOME-Autostart-enabled=true\n");
+    autostartFile.write(autostartContent);
+    autostartFile.close();
+  }
+
   const QString exe = QStandardPaths::findExecutable("gnome-extensions");
   if (exe.isEmpty())
-    return tr("Helper installed. Log out and back in, then enable Trophy Window Helper in GNOME Extensions.");
+    return tr("Helper installed. Log out and back in; it will be enabled automatically on your next login.");
   QProcess process;
   process.start(exe, {"enable", kUuid});
   if (!process.waitForFinished(3000)) {
     process.kill();
     process.waitForFinished(1000);
-    return tr("Helper installed, but enabling timed out. Check GNOME Extensions; logout/login may be required.");
+    return tr("Helper installed. Log out and back in; it will be enabled automatically on your next login. (Enabling timed out this session.)");
   }
   if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
-    return tr("Helper installed. Log out and back in, then enable Trophy Window Helper in GNOME Extensions. Check that your GNOME version is supported.");
+    return tr("Helper installed. Log out and back in; it will be enabled automatically on your next login. Check that your GNOME version is supported.");
+  // Enable succeeded (shell already knew about it): remove the autostart entry.
+  QFile::remove(autostartPath);
   return tr("Helper enabled. Waiting for GNOME to report windows. If it does not, check GNOME Extensions for errors or log out and back in.");
 }
 
@@ -207,7 +230,7 @@ void GnomeBackend::refresh() {
     QString reason = status();
     if (reason.isEmpty() || m_active)
       reason = isInstalled()
-          ? tr("GNOME helper is not responding. Enable Trophy Window Helper in GNOME Extensions; logout/login may be required. Repair retries installation and enabling.")
+          ? tr("Helper installed. Log out and back in; it will be enabled automatically on your next login.")
           : tr("GNOME helper is not installed. Choose Install helper. A logout/login may be required after installation.");
     unavailable(reason, generation);
     return;
