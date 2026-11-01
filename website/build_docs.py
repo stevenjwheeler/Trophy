@@ -47,15 +47,17 @@ PAGES = (
         "source": "docs/development.md",
         "slug": "development",
         "title": "Building and contributing",
-        "summary": "Dependencies, building, running the test suites, and contribution notes.",
-    },
-    {
-        "source": "packaging/README.md",
-        "slug": "packaging",
-        "title": "Packaging and diagnostics",
-        "summary": "Package formats, runtime library selection, diagnostics collection and reporter cautions.",
+        "summary": "Dependencies, building, the test suites, packaging and diagnostics.",
+        "includes": ({"source": "packaging/README.md", "heading": "Packaging and diagnostics"},),
     },
 )
+
+# Guides that are folded into another page rather than published separately.
+ALIASES = {
+    include["source"]: page["slug"]
+    for page in PAGES
+    for include in page.get("includes", ())
+}
 
 MARKDOWN_EXTENSIONS = ("extra", "sane_lists", "toc", "codehilite")
 MARKDOWN_CONFIG = {
@@ -158,7 +160,7 @@ REDIRECT_TEMPLATE = """<!DOCTYPE html>
 
 
 
-def slug_target(target: str, source: str) -> str:
+def slug_target(target: str, source: str, current_slug: str) -> str:
     """Map a Markdown link onto its published page, or onto GitHub."""
     if target.startswith(("http://", "https://", "mailto:", "#", "data:")):
         return target
@@ -175,16 +177,18 @@ def slug_target(target: str, source: str) -> str:
         if part != ".":
             parts.append(part)
     key = "/".join(parts)
-    for page in PAGES:
-        if page["source"] == key:
-            return f"{page['slug']}.html{suffix}"
-    return f"{REPO_BLOB}/{key}{suffix}"
+    owner = next((p["slug"] for p in PAGES if p["source"] == key), None) or ALIASES.get(key)
+    if owner is None:
+        return f"{REPO_BLOB}/{key}{suffix}"
+    if owner == current_slug and fragment:
+        return f"#{fragment}"
+    return f"{owner}.html{suffix}"
 
 
-def rewrite_links(rendered: str, source: str) -> str:
+def rewrite_links(rendered: str, source: str, current_slug: str) -> str:
     def replace(match: re.Match[str]) -> str:
         prefix, target, suffix = match.groups()
-        return f"{prefix}{slug_target(target, source)}{suffix}"
+        return f"{prefix}{slug_target(target, source, current_slug)}{suffix}"
 
     rendered = re.sub(r'(<a\b[^>]*?\bhref=")([^"]+)(")', replace, rendered)
     rendered = re.sub(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', replace, rendered)
@@ -247,14 +251,44 @@ def pager_html(index: int) -> str:
     return f'<nav class="doc-pager" aria-label="Documentation pages">{"".join(parts)}</nav>'
 
 
-def render_page(page: dict, source_text: str) -> tuple[str, list[dict]]:
-    body = source_text.lstrip()
-    # The title and the GitHub breadcrumb are handled by the page header instead.
+def strip_front_matter(text: str) -> str:
+    body = text.lstrip()
+    # The title and the GitHub breadcrumb belong to the page header instead.
     body = re.sub(r"^# .*\n", "", body, count=1).lstrip()
-    body = re.sub(r"^\[Back to README\][^\n]*\n", "", body, count=1).lstrip()
+    return re.sub(r"^\[Back to README\][^\n]*\n", "", body, count=1).lstrip()
+
+
+def demote_headings(text: str) -> str:
+    """Push headings down one level, skipping fenced code blocks."""
+    out, fenced = [], False
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        if not fenced:
+            match = re.match(r"^(#{2,5}) ", line)
+            if match:
+                line = f"#{line}"
+        out.append(line)
+    return "".join(out)
+
+
+def render_markdown(body: str, source: str, slug: str) -> tuple[str, list[dict]]:
     converter = markdown.Markdown(extensions=list(MARKDOWN_EXTENSIONS), extension_configs=MARKDOWN_CONFIG)
-    content = rewrite_links(converter.convert(body), page["source"])
-    return content, converter.toc_tokens
+    return rewrite_links(converter.convert(body), source, slug), converter.toc_tokens
+
+
+def render_page(page: dict, source_text: str) -> tuple[str, list[dict]]:
+    content, tokens = render_markdown(strip_front_matter(source_text), page["source"], page["slug"])
+    for include in page.get("includes", ()):
+        included = (ROOT / include["source"]).read_text(encoding="utf-8")
+        body = demote_headings(strip_front_matter(included))
+        body = f"## {include['heading']}\n\n{body}"
+        html, included_tokens = render_markdown(body, include["source"], page["slug"])
+        content = f"{content}\n{html}"
+        tokens = tokens + included_tokens
+    return content, tokens
 
 
 def main() -> int:

@@ -66,7 +66,7 @@ chmod +x Trophy-<version>-x86_64.AppImage
 ./Trophy-<version>-x86_64.AppImage
 ```
 
-CI also produces `.tar.xz`, `.deb`, and `.rpm` packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/packaging.html) for details.
+CI also produces `.tar.xz`, `.deb`, and `.rpm` packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
 
 Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and the desktop integration Trophy needs for game detection. Game capture requires your authorization through the system portal.
 
@@ -82,7 +82,7 @@ The full documentation is on the website at **[gettrophy.app/docs](https://gettr
 
 Found a problem or have an idea? [Open an issue](https://github.com/stevenjwheeler/Trophy/issues). Trophy's bug-report action can prepare version, system, and recent log details for you to review before sharing.
 
-Code and documentation contributions are welcome. See the [development guide](https://gettrophy.app/docs/development.html) for build and test instructions, and [packaging notes](https://gettrophy.app/docs/packaging.html) for AppImage and integration details.
+Code and documentation contributions are welcome. See the [development guide](https://gettrophy.app/docs/development.html) for build and test instructions, and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for AppImage and integration details.
 
 Trophy is free and open-source software under the [GNU GPL v3](LICENSE), built with [Qt](https://www.qt.io/), [FFmpeg](https://ffmpeg.org/), and [PipeWire](https://pipewire.org/).
 
