@@ -1602,9 +1602,22 @@ bool Application::isTrayAvailable() const {
   return m_trayManager && m_trayManager->isAvailable();
 }
 
+bool Application::isRunWithoutTraySupported() const {
+  // GNOME has no StatusNotifierItem tray by default. Hiding the window still
+  // keeps Trophy (and recordings) alive; the single-instance guard restores
+  // the window when Trophy is launched again. Note this does NOT make the
+  // app appear in GNOME's "Background Apps": that list is fed by the
+  // xdg-desktop-portal background monitor, which only enumerates Flatpak
+  // instances, so native/AppImage apps cannot register there.
+  const QString desktop = (qgetenv("XDG_CURRENT_DESKTOP") + " " +
+                           qgetenv("XDG_SESSION_DESKTOP"))
+                              .toUpper();
+  return desktop.contains("GNOME");
+}
+
 bool Application::useNativeDialogs() const {
   // Use the host's native (portal) dialogs when the portal can resolve our
-  // app id: a trophy.desktop exists in an XDG application directory, either
+  // app id: a reverse-DNS desktop entry exists in an XDG application directory, either
   // from our own integration, a distro package, or a third-party AppImage
   // manager. Otherwise fall back to Qt's own dialog, which does not depend on
   // portal app-id registration.
@@ -1643,7 +1656,8 @@ void Application::setMainWindowVisible(bool visible) {
 void Application::showMainWindow() { setMainWindowVisible(true); }
 
 bool Application::minimizeToTray() {
-  if (!isTrayAvailable() || !m_settingsManager->minimizeToTray()) {
+  if (!(isTrayAvailable() || isRunWithoutTraySupported()) ||
+      !m_settingsManager->minimizeToTray()) {
     return false;
   }
   setMainWindowVisible(false);

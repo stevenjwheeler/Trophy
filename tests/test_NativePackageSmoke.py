@@ -32,7 +32,8 @@ class NativePackageSmokeTest(unittest.TestCase):
         for relative in (
             "bin/trophy", f"{libdir}/libTrophy.so",
             f"{libdir}/trophy/libtrophy_layer.so", f"{libdir}/trophy/libtrophy_gl_shim.so",
-            "share/applications/trophy.desktop", "share/icons/hicolor/scalable/apps/trophy.svg",
+            "share/applications/io.github.stevenjwheeler.Trophy.desktop",
+            "share/icons/hicolor/scalable/apps/trophy.svg",
             "share/trophy/kwin/trophy-monitor/metadata.json",
             "share/trophy/kwin/trophy-monitor/contents/code/main.js",
             "share/licenses/trophy/default-app-icons/LICENSE",
@@ -47,7 +48,8 @@ class NativePackageSmokeTest(unittest.TestCase):
         path.write_text(json.dumps({"layer": {"library_path": "/build/template.so"}}))
         path = self.prefix / "share/metainfo/io.github.stevenjwheeler.Trophy.metainfo.xml"
         path.parent.mkdir(parents=True)
-        path.write_text('<component><launchable type="desktop-id">trophy.desktop</launchable></component>')
+        path.write_text('<component><launchable type="desktop-id">'
+                        'io.github.stevenjwheeler.Trophy.desktop</launchable></component>')
 
     def output(self, args):
         if args[0] == "readelf":

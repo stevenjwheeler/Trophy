@@ -206,8 +206,13 @@ SourceMeta querySourceMetadata(uint32_t targetId) {
           if (id == d->clientId) {
             QString name = d->clientNames[id];
             if (!name.isEmpty() &&
-                (d->name.isEmpty() || d->name.contains("kwin") ||
-                 d->name.contains("wayland"))) {
+                (d->name.isEmpty() ||
+                 d->name.toLower().contains("kwin") ||
+                 d->name.toLower().contains("wayland") ||
+                 d->name.toLower().contains("gnome") ||
+                 d->name.toLower().contains("mutter") ||
+                 d->name.toLower().contains("sway") ||
+                 d->name.toLower().contains("hypr"))) {
               d->name = name;
             }
             d->found = true;
@@ -234,8 +239,13 @@ SourceMeta querySourceMetadata(uint32_t targetId) {
           if (d->clientNames.contains(d->clientId)) {
             QString clientName = d->clientNames[d->clientId];
             if (!clientName.isEmpty() &&
-                (d->name.isEmpty() || d->name.contains("kwin") ||
-                 d->name.contains("wayland"))) {
+                (d->name.isEmpty() ||
+                 d->name.toLower().contains("kwin") ||
+                 d->name.toLower().contains("wayland") ||
+                 d->name.toLower().contains("gnome") ||
+                 d->name.toLower().contains("mutter") ||
+                 d->name.toLower().contains("sway") ||
+                 d->name.toLower().contains("hypr"))) {
               d->name = clientName;
             }
           }
@@ -947,7 +957,11 @@ void WaylandPortalCapture::applySourceMetadata(const QString &name,
   // when the portal one is empty or the PipeWire one is a specific,
   // PID-backed identity; the PID always refines the portal's.
   const bool isGeneric = name.contains("kwin", Qt::CaseInsensitive) ||
-                         name.contains("wayland", Qt::CaseInsensitive);
+                          name.contains("wayland", Qt::CaseInsensitive) ||
+                          name.contains("gnome", Qt::CaseInsensitive) ||
+                          name.contains("mutter", Qt::CaseInsensitive) ||
+                          name.contains("sway", Qt::CaseInsensitive) ||
+                          name.contains("hypr", Qt::CaseInsensitive);
   if (m_sourceLabel.isEmpty() || (!isGeneric && pid != 0)) {
     m_sourceLabel = name;
   }

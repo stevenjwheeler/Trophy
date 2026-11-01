@@ -84,7 +84,7 @@ def main():
         target.chmod(0o755)
         command += ["--executable", str(target)]
     command += ["--executable", str(stage / "usr/bin/trophy"),
-                "--desktop-file", str(source / "packaging/trophy.desktop"),
+                "--desktop-file", str(source / "packaging/io.github.stevenjwheeler.Trophy.desktop"),
                 "--icon-file", str(source / "resources/icons/trophy.svg")]
     if args.qt_plugin:
         command += ["--plugin", "qt"]

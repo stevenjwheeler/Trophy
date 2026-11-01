@@ -1341,12 +1341,18 @@ Page {
                     id: trayCard
                     sectionTitle: qsTr("System Tray")
                     iconSource: "qrc:/icons/tray.svg"
-                    description: qsTr("How Trophy behaves when you close it or log in.")
+                    description: (app && !app.trayAvailable && app.runWithoutTraySupported)
+                                 ? qsTr("No legacy system tray host was detected. Trophy can still keep running when closed; launch Trophy again to bring the window back. For a tray icon on GNOME, install the “AppIndicator and KStatusNotifierItem Support” extension.")
+                                 : ((app && !app.trayAvailable && !app.runWithoutTraySupported)
+                                    ? qsTr("No system tray host was detected on this desktop. The options below stay disabled until one is available.")
+                                    : qsTr("How Trophy behaves when you close it or log in."))
 
                     SettingRow {
                         label: qsTr("Minimize to tray on close")
-                        help: qsTr("Closing the window keeps Trophy (and any recording) running in the system tray instead of quitting.")
-                        rowEnabled: app ? app.trayAvailable : false
+                        help: (app && app.trayAvailable)
+                              ? qsTr("Closing the window keeps Trophy (and any recording) running in the system tray instead of quitting.")
+                              : qsTr("Closing the window keeps Trophy (and any recording) running in the background instead of quitting. Launch Trophy again to show the window.")
+                        rowEnabled: app ? (app.trayAvailable || app.runWithoutTraySupported) : false
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1361,7 +1367,7 @@ Page {
                     SettingRow {
                         label: qsTr("Start minimized")
                         help: qsTr("Launch Trophy directly into the system tray without showing the window.")
-                        rowEnabled: app ? app.trayAvailable : false
+                        rowEnabled: app ? (app.trayAvailable || app.runWithoutTraySupported) : false
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter
@@ -1375,8 +1381,8 @@ Page {
 
                     SettingRow {
                         label: qsTr("Start on login")
-                        help: qsTr("Launch Trophy automatically when you log in (starts minimized to the tray). Pairs well with Start minimized.")
-                        rowEnabled: app ? app.trayAvailable : false
+                        help: qsTr("Launch Trophy automatically when you log in. Pairs well with Start minimized.")
+                        rowEnabled: true
 
                         TrophySwitch {
                             Layout.alignment: Qt.AlignVCenter

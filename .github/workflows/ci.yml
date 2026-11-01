@@ -63,7 +63,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/gtest_install" \
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
-          desktop-file-validate packaging/trophy.desktop
+          desktop-file-validate packaging/io.github.stevenjwheeler.Trophy.desktop
           appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
       - name: Preserve build for tests and AppImage (no rebuild)
         run: |
@@ -167,7 +167,7 @@ jobs:
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
             --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
-            --desktop-file packaging/trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
+            --desktop-file packaging/io.github.stevenjwheeler.Trophy.desktop --icon-file resources/icons/trophy.svg --plugin qt
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \

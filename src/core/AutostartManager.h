@@ -13,7 +13,8 @@
 namespace TrophyBackend {
 
 /**
- * @brief Manages the XDG autostart entry (~/.config/autostart/trophy.desktop).
+ * @brief Manages the XDG autostart entry
+ * (~/.config/autostart/io.github.stevenjwheeler.Trophy.desktop).
  *
  * Only files carrying our marker comment are claimed: isEnabled() ignores
  * foreign entries and setEnabled() never overwrites or deletes them.
@@ -38,6 +39,8 @@ public:
                   const QString &appImagePath = QString());
 
 private:
+  QString autostartDir() const;
+  QString legacyFilePath() const;
   QString m_configHomeOverride;
 };
 

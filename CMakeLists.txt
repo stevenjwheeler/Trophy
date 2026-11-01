@@ -622,7 +622,10 @@ install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(FILES packaging/trophy.desktop
+# Reverse-DNS desktop id: portal backends (notably GNOME's GlobalShortcuts
+# provider) reject a bare app id such as "trophy", so the installed entry
+# must be named for the app id the process advertises.
+install(FILES packaging/io.github.stevenjwheeler.Trophy.desktop
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
 )
 
@@ -682,15 +685,9 @@ install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
 )
-# The native/AppImage desktop file is trophy.desktop; keep the installed
-# metainfo's launchable association truthful.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.stevenjwheeler.Trophy.metainfo.xml"
-    TROPHY_NATIVE_METAINFO)
-string(REPLACE "io.github.stevenjwheeler.Trophy.desktop" "trophy.desktop"
-    TROPHY_NATIVE_METAINFO "${TROPHY_NATIVE_METAINFO}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/io.github.stevenjwheeler.Trophy.metainfo.xml"
-    "${TROPHY_NATIVE_METAINFO}")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/io.github.stevenjwheeler.Trophy.metainfo.xml"
+# The installed desktop file now uses the reverse-DNS app id, matching the
+# metainfo's launchable association.
+install(FILES packaging/io.github.stevenjwheeler.Trophy.metainfo.xml
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo
 )
 

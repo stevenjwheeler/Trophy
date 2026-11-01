@@ -102,8 +102,13 @@ void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
 
 bool RecordingManager::isGenericSourceLabel(const QString &label) {
   const QString lower = label.trimmed().toLower();
-  if (lower.isEmpty() || lower == "unknown game" || lower.contains("kwin") ||
-      lower.contains("wayland")) {
+  // Compositor/shell labels are never a real capture identity: the portal
+  // often reports the compositor itself ("kwin_wayland", "gnome-shell", ...)
+  // instead of the picked window, so treat them as generic and fall back.
+  if (lower.isEmpty() || lower == "unknown game" ||
+      lower.contains("kwin") || lower.contains("wayland") ||
+      lower.contains("gnome") || lower.contains("mutter") ||
+      lower.contains("sway") || lower.contains("hypr")) {
     return true;
   }
   // Bare portal app-id with no title behind it (e.g. steam_app_1422450):
@@ -328,7 +333,11 @@ void RecordingManager::finishPipelineAndStart() {
     // Wayland Fallback: If XDG Portal/PipeWire hides the application name,
     // query the GameDetectionService for the foreground active game.
     if (label.isEmpty() || label.toLower().contains("kwin") ||
-        label.toLower().contains("wayland") || label == "Unknown Game") {
+        label.toLower().contains("wayland") ||
+        label.toLower().contains("gnome") ||
+        label.toLower().contains("mutter") ||
+        label.toLower().contains("sway") ||
+        label.toLower().contains("hypr") || label == "Unknown Game") {
       if (m_gameDetector && m_gameDetector->isGameRunning()) {
         label = m_gameDetector->currentGameName();
         qDebug() << "RecordingManager: Using GameDetectionService name fallback:"

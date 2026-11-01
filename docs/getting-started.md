@@ -31,7 +31,7 @@ The matching downloaded file should report `OK`; entries for packages you did no
 
 An AppImage is not installed into your desktop's application directories, so the portal cannot resolve Trophy's application identity. That matters beyond the file picker: screen-capture approvals are stored per application, so an unregistered Trophy shares the generic entry used by any unregistered program.
 
-To fix this, on first launch Trophy writes its own entry — `$XDG_DATA_HOME/applications/trophy.desktop`, usually `~/.local/share/applications/trophy.desktop`, plus an icon — before it contacts the portal. The AppImage itself is not copied or moved, and the built-in updater replaces it in place, so the entry keeps working across updates. The first run therefore already has a stable identity: no setup step and no restart.
+To fix this, on first launch Trophy writes its own entry — `$XDG_DATA_HOME/applications/io.github.stevenjwheeler.Trophy.desktop`, usually `~/.local/share/applications/io.github.stevenjwheeler.Trophy.desktop`, plus an icon — before it contacts the portal. The AppImage itself is not copied or moved, and the built-in updater replaces it in place, so the entry keeps working across updates. The first run therefore already has a stable identity: no setup step and no restart.
 
 An entry from a distribution package, AppImageLauncher, Gear Lever or your own `.desktop` file counts the same. If another launcher already lists Trophy, Trophy's entry is hidden from menus but still supplies the identity, so you do not get a duplicate.
 
