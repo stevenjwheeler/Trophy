@@ -231,6 +231,17 @@ This is not a full reconstructed runtime: absent graphics/other dependencies
 can still prevent closure checks. Partial stores and metadata alone do not
 establish runtime compatibility or actual Steam provider selection.
 
+### Diagnostic kit
+
+`packaging/make_test_kit.py` stages a diagnostic kit from a build; it is not a
+release download. The kit does not bundle Qt or FFmpeg, so the target machine
+must supply them. It runs a focused subset of unit and native GPU tests, not the
+full CI suite, and needs no running Wayland session or live portal/PipeWire
+services — the interactive preview and detection checks do need the desktop
+services. GPU skips mean incomplete coverage, not successful GPU validation. See
+the [packaging notes](../packaging/README.md#diagnostics-collection) for the
+collector, the kit, and how to read its report.
+
 ## Contributing
 
 Issues, focused pull requests, and documentation improvements are welcome. For fixes, include reproduction steps and a regression test where practical. Describe what you verified, and distinguish automated coverage from live desktop/game testing.

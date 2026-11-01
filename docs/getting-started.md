@@ -47,8 +47,7 @@ version has been verified.
 ### Package compatibility
 
 All distributed binaries target **x86_64 / amd64 Linux**. Qt/FFmpeg development
-packages, a compiler and Python are not needed to run the ordinary application;
-Python is only needed for the diagnostic tooling described below.
+packages, a compiler and Python are not needed to run the ordinary application.
 
 | Download | Build/test baseline | What your system must provide |
 | --- | --- | --- |
@@ -78,16 +77,6 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./Trophy.AppImage
 Fedora's official FFmpeg build may omit libx264. Software H.264 recording and
 H.264 share export require a codec-enabled FFmpeg provider; follow your distro's
 guidance rather than assuming every codec ships with the native package.
-
-The diagnostic kit is staged from a build with
-`packaging/make_test_kit.py`, not downloaded from the release page, and it does
-not bundle Qt/FFmpeg: the target machine must supply them. It runs a focused
-subset of unit and native GPU tests, not the full CI suite, and needs no running
-Wayland session or live portal/PipeWire services (interactive preview and
-detection checks do need the desktop services below). GPU skips mean incomplete
-coverage, not successful GPU validation. See the
-[packaging notes](../packaging/README.md#diagnostics-collection) for the
-collector, the kit and how to read its report.
 
 ### Desktop requirements
 
