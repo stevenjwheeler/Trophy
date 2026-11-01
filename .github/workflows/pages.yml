@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'website/**'
+      - 'docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
   release:
@@ -81,6 +82,11 @@ jobs:
             if (versions !== 1 || notesLinks !== 1) throw new Error('Expected one release version and one release-notes link');
             fs.writeFileSync('website/index.html', rendered);
             core.info(`Resolved ${updated} download links from ${release.tag_name}`);
+      - name: Render documentation pages
+        run: |
+          python3 -m venv "$RUNNER_TEMP/docs-venv"
+          "$RUNNER_TEMP/docs-venv/bin/pip" install --quiet --disable-pip-version-check "markdown==3.11.2" "pygments==2.21.0"
+          "$RUNNER_TEMP/docs-venv/bin/python" website/build_docs.py
       - name: Upload static website
         uses: actions/upload-pages-artifact@v3
         with:

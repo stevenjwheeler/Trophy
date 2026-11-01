@@ -50,6 +50,11 @@ recordings/
 *.mkv
 *.log
 
+# --- Generated website pages ---
+# Rendered from docs/*.md by website/build_docs.py; the Pages workflow rebuilds
+# them on deploy, so they are not committed.
+website/docs/
+
 # --- Python (if using for scripts/tools) ---
 __pycache__/
 *.py[cod]
