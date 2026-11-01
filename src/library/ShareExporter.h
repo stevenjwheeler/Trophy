@@ -34,8 +34,10 @@ public:
   QString error() const { return m_error; }
   QString resultPath() const { return m_result; }
   Q_INVOKABLE bool inspect(const QString &source);
-  Q_INVOKABLE bool start(const QString &directory, int maxHeight, qint64 targetBytes, const QVariantList &audioStreams, bool watermark = true);
-  Q_INVOKABLE bool startBatch(const QString &directory, int maxHeight, qint64 targetBytes, const QVariantList &captures, bool watermark = true);
+  // Share copies are remuxes with one mixed stereo track; there is no
+  // resolution/size/watermark option any more.
+  Q_INVOKABLE bool start(const QString &directory, const QVariantList &audioStreams);
+  Q_INVOKABLE bool startBatch(const QString &directory, const QVariantList &captures);
   Q_INVOKABLE bool copyOriginals(const QStringList &sources, const QString &directory);
   Q_INVOKABLE void cancel();
   Q_INVOKABLE void cancelJob(const QString &id);

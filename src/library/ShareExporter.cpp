@@ -150,7 +150,7 @@ bool ShareExporter::inspect(const QString &source) {
   }
   m_timer.start(); emit changed(); return true;
 }
-bool ShareExporter::start(const QString &directory, int height, qint64 bytes, const QVariantList &tracks, bool watermark) {
+bool ShareExporter::start(const QString &directory, const QVariantList &tracks) {
   if (m_worker.valid() || m_source.isEmpty() || m_info.contains("error")) return false;
   const QString root = QFileInfo(m_storage->storagePath()).canonicalFilePath();
   const QString destination = QFileInfo(directory).canonicalFilePath();
@@ -164,8 +164,7 @@ bool ShareExporter::start(const QString &directory, int height, qint64 bytes, co
   }
   m_pinned = true;
   ShareExportOptions options;
-  options.watermark = watermark;
-  options.maxHeight = height; options.targetBytes = bytes;
+
   for (const auto &track : tracks) {
     bool ok;
     const int index = track.toInt(&ok);
@@ -183,7 +182,7 @@ bool ShareExporter::start(const QString &directory, int height, qint64 bytes, co
   startNext();
   m_timer.start(); emit changed(); return true;
 }
-bool ShareExporter::startBatch(const QString &directory, int height, qint64 bytes, const QVariantList &captures, bool watermark) {
+bool ShareExporter::startBatch(const QString &directory, const QVariantList &captures) {
   if (m_worker.valid() || captures.isEmpty()) return false;
   const QString root = QFileInfo(m_storage->storagePath()).canonicalFilePath();
   const QString destination = QFileInfo(directory).canonicalFilePath();
@@ -203,9 +202,6 @@ bool ShareExporter::startBatch(const QString &directory, int height, qint64 byte
     auto job = std::make_unique<Job>();
     job->source = file.canonicalFilePath();
     job->directory = destination;
-    job->options.maxHeight = height;
-    job->options.targetBytes = bytes;
-    job->options.watermark = watermark;
     bool valid = row.contains("audioStreams") && row.value("audioStreams").canConvert<QVariantList>();
     for (const auto &track : row.value("audioStreams").toList()) {
       bool ok = false;

@@ -22,11 +22,15 @@ TrophyDialog {
     property string preparationError: ""
     readonly property var currentInfo: batch ? (captureInfos[currentCapture] || {}) : exporter.info
     property string destination: ""
-    property bool includeWatermark: true
     property var selectedAudio: []
     property var excludedAudioOrdinals: []
     property bool tracksLoaded: false
     property string folderError: ""
+    // The copy keeps the source codec; warn when that is not H.264.
+    readonly property bool codecWarning: {
+        const info = root.currentInfo;
+        return !!info && info.shareable === false && (info.videoCodec || "") !== "";
+    }
     readonly property bool estimatedNames: currentInfo.tracks
         ? currentInfo.tracks.some(track => track.inferred) : false
     readonly property bool working: preparingBatch || (exporter && exporter.inspecting)
@@ -66,20 +70,19 @@ TrophyDialog {
     }
 
     function exportCaptures() {
-        const height = [0, 1080, 720][resolution.currentIndex];
-        const bytes = [0, 25 * 1048576, 50 * 1048576, 100 * 1048576][sizeTarget.currentIndex];
+        // Video is copied and the selected tracks are mixed into one stereo
+        // track: chat apps cannot switch audio tracks.
         if (!batch)
-            return exporter.start(destination, height, bytes, selectedAudio, includeWatermark);
+            return exporter.start(destination, selectedAudio);
         chooseCapture(currentCapture);
         const captures = sourcePaths.map((path, index) => ({sourcePath: path, audioStreams: captureAudio[index]}));
-        return exporter.startBatch(destination, height, bytes, captures, includeWatermark);
+        return exporter.startBatch(destination, captures);
     }
 
     onAboutToShow: {
         selectedAudio = [];
         tracksLoaded = false;
         audioSection.expanded = false;
-        qualitySection.expanded = false;
         folderError = "";
         preparationError = "";
         captureInfos = [];
@@ -171,8 +174,8 @@ TrophyDialog {
         Label {
             Layout.fillWidth: true
             text: root.batch
-                ? qsTr("Create one MP4 per capture using the same quality and folder. Review audio for each capture below. Originals stay unchanged.")
-                : qsTr("Create an MP4 copy. Your original stays unchanged.")
+                ? qsTr("Create one MP4 per capture in the same folder. Review audio for each capture below. Originals stay unchanged.")
+                : qsTr("Copy this capture to MP4. Your original stays unchanged.")
             color: Theme.textSecondaryColor
             font.pixelSize: Theme.fontSizeSmall
             wrapMode: Text.WordWrap
@@ -192,46 +195,29 @@ TrophyDialog {
             width: formScroll.availableWidth
             spacing: Theme.spacingMedium
             SettingsSectionCard {
-                id: qualitySection
-                objectName: "shareQualitySection"
-                sectionTitle: qsTr("Quality")
+                id: copySection
+                objectName: "shareCopySection"
+                sectionTitle: qsTr("Copy")
                 iconSource: "qrc:/icons/video.svg"
-                description: resolution.currentText + " · " + sizeTarget.currentText
-            RowLayout {
-                Label { text: qsTr("Resolution"); color: Theme.textColor; Layout.fillWidth: true }
-                TrophyComboBox { id: resolution; model: [qsTr("Original"), "1080p", "720p"]; currentIndex: 1 }
-            }
-            RowLayout {
-                Label { text: qsTr("Size target"); color: Theme.textColor; Layout.fillWidth: true }
-                TrophyComboBox { id: sizeTarget; model: [qsTr("High quality"), "25 MiB", "50 MiB", "100 MiB"] }
-            }
-            Label {
-                Layout.fillWidth: true
-                text: qsTr("Size targets are approximate. Smaller sources are never upscaled. H.264 video, up to 60 fps.")
-                color: Theme.textSecondaryColor
-                font.pixelSize: Theme.fontSizeSmall
-                wrapMode: Text.WordWrap
-            }
-            RowLayout {
-                objectName: "shareWatermarkRow"
-                Layout.fillWidth: true
+                description: qsTr("Instant MP4 · original quality")
                 Label {
-                    id: watermarkLabel
                     Layout.fillWidth: true
-                    text: qsTr("Animated Trophy watermark")
-                    color: Theme.textColor
+                    text: qsTr("Video is copied without re-encoding, so this finishes in seconds and loses nothing. The selected tracks are mixed into one stereo track because chat apps cannot switch between tracks.")
+                    color: Theme.textSecondaryColor
+                    font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap
                 }
-                TrophySwitch {
-                    objectName: "shareWatermark"
-                    Accessible.name: watermarkLabel.text
-                    checked: root.includeWatermark
-                    onToggled: root.includeWatermark = checked
-                    ToolTip.text: qsTr("After a half-second delay, a Trophy logo tab slides from the bottom-left edge and retracts five seconds later.")
-                    ToolTip.visible: hovered
+                Label {
+                    objectName: "shareCodecNote"
+                    Layout.fillWidth: true
+                    visible: root.codecWarning
+                    text: qsTr("This recording uses %1 video. The copy keeps that codec, which some sites and players may not accept — record H.264 for the widest compatibility.").arg(currentInfo.videoCodec || "")
+                    color: Theme.warningColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.WordWrap
                 }
             }
-            }
+
             SettingsSectionCard {
                 id: audioSection
                 objectName: "shareAudioSection"
