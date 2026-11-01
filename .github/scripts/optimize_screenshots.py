@@ -10,7 +10,7 @@ from PIL import Image, features
 
 
 ASSETS = Path(__file__).resolve().parents[2] / "website" / "assets"
-NAMES = ("dashboard-grid", "dashboard", "games-list", "theme_charcoal", "theme_original")
+NAMES = ("dashboard-grid", "dashboard", "games-list", "player", "theme_charcoal", "theme_original")
 WIDTHS = (480, 800, 1200)
 
 

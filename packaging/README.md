@@ -67,9 +67,10 @@ distribution are not maintained; do not recreate their removed packaging.
 
 ## Drafting a release
 
-1. Set the next stable `X.Y.Z` in the root `VERSION` file on `dev`.
-2. Open a pull request from `dev` into `main`. Review it and wait for CI to pass
-   before merging. Configure branch protection to require these checks if merges
+1. Set the next stable `X.Y.Z` in the root `VERSION` file on a short-lived
+   branch off `main`.
+2. Open a pull request into `main`. Review it and wait for CI to pass before
+   merging. Configure branch protection to require these checks if merges
    must be technically blocked until green; workflow triggers alone do not enforce it.
 3. Merge the PR through GitHub. The resulting push to `main` runs CI again.
 4. After tests, both reporter jobs and all package/checksum checks pass, CI creates
@@ -78,8 +79,8 @@ distribution are not maintained; do not recreate their removed packaging.
 5. Review the draft and click **Publish release** yourself. CI never publishes.
 
 CI runs only for pull requests targeting `main` and pushes to `main`. Pushing to
-`dev` or another branch without an open PR does not run CI; updates to a branch
-with an open main PR rerun that PR's checks. Manual tag pushes do not run CI.
+any branch without an open PR does not run CI; updates to a branch with an open
+main PR rerun that PR's checks. Manual tag pushes do not run CI.
 Main packages use `VERSION`; PR packages carry a PR number and commit suffix.
 
 The tested commit must match the checkout and be reachable from `origin/main`.

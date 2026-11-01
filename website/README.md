@@ -65,11 +65,23 @@ repository are not published.
 The page includes a canonical URL, Open Graph/social-card metadata, and truthful
 `SoftwareApplication` JSON-LD. No review scores, ratings, or download counts are
 invented; structured data does not guarantee a rich search result. The sitemap
-lists the single public page, not its section anchors or GitHub documentation.
+lists the landing page and the three documentation URLs, not their section anchors.
 
 ## Maintaining the page
 
 - Update copy in `index.html` and styles in `styles.css`.
+- Documentation pages under `website/docs/` are generated from `docs/*.md` by
+  `python3 website/build_docs.py`, which needs the `markdown` and `pygments`
+  packages. The output is gitignored: the Pages workflow renders it before
+  uploading, and also runs for `docs/**` pushes, so editing a guide republishes
+  the site without touching `website/`. Run the script yourself to preview at
+  `http://localhost:8080/docs/getting-started.html`. `/docs/` is a redirect stub
+  to the first guide, because a static host cannot issue a server redirect.
+- Page order, titles and summaries live in `PAGES` in `build_docs.py`. Relative
+  links between guides are rewritten to the generated pages; links that leave
+  `docs/` (`../packaging/`, `../reporters/`, `../README.md`) point at GitHub.
+  Keep the header and footer markup inside `build_docs.py` in step with
+  `index.html` if the shared site chrome changes.
 - Keep the canonical, social URLs, JSON-LD, sitemap, robots sitemap URL, and `CNAME`
   aligned if the production domain changes.
 - `assets/social-preview.png` is the 1200×630 share image. Its editable source is
@@ -96,9 +108,10 @@ lists the single public page, not its section anchors or GitHub documentation.
 - Documentation links point to `main` on GitHub; adjust them if the default branch
   changes.
 - Screenshot assets are copies of `docs/images/dashboard-grid.png`,
-  `docs/images/dashboard.png`, and `docs/images/games-list.png`; the Trophy and
-  bookmark SVGs come from `resources/icons/`. Refresh these copies when the app
-  screenshots or icons change.
+  `docs/images/dashboard.png`, and `docs/images/games-list.png`; the player
+  screenshot (`assets/player.png`) is captured directly from the app. The Trophy
+  and bookmark SVGs come from `resources/icons/`. Refresh these copies when the
+  app screenshots or icons change.
 - After replacing screenshots, run `python3 .github/scripts/optimize_screenshots.py`
   from the repo root with Pillow/WebP support installed. It regenerates the checked-in
   480/800/1200px WebP files; no image tooling is required by Pages or visitors.
@@ -120,10 +133,17 @@ lists the single public page, not its section anchors or GitHub documentation.
   Each opens its full-size image when clicked. Keep matching dashboard layouts and
   image dimensions for easy comparison. The seven accent swatches match
   `qml/styles/Theme.qml`; keep them aligned.
-- The player showcase is a labeled CSS timeline illustration. Replace it with a
-  current player screenshot when one is available; do not present the illustration
-  as a screenshot or interactive player. Keep the two shortcut descriptions free
-  of assumed key assignments, since users choose their own bindings.
+- The features section and the permission section are both `screen-section`
+  bands. Their inner rows use the same open strip: a top hairline, a short pink
+  `small-label`, a heading, and body copy — no cards or illustrations. The
+  features band sits directly under the hero's `.tech-strip`, so that strip has
+  no bottom border of its own; the band's `border-block` closes the hero and
+  opens the band. Keep the two strips in sync if you change either one.
+- The player showcase is a real screenshot of the player in its clip-editor
+  state (a recording with separate Game, Voice, and Mic lanes, a set range, and
+  visible bookmarks), and it opens its full-size image like the other
+  screenshots. Retake it when the player UI changes; keep the caption free of
+  assumed key assignments, since users choose their own shortcut bindings.
 - Check narrow and wide layouts, keyboard navigation, FAQ toggles, local links,
   screenshot loading, and the download/documentation links before publishing.
 

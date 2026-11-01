@@ -7,12 +7,11 @@
 Check the [system requirements and package compatibility](#requirements) before downloading.
 
 1. Download `Trophy-<version>-x86_64.AppImage` from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest).
-2. Make the downloaded file executable, using your file manager's permissions settings or `chmod +x <filename>`.
-3. Open it from your file manager or run `./<filename>` in a terminal.
+2. Move it somewhere permanent — for example `~/Applications/Trophy.AppImage` — rather than leaving it in `~/Downloads`. Launch-at-login and the desktop entry point at this exact path, and updates rewrite the file in place, so the folder has to stay put and be writable.
+3. Make the downloaded file executable, using your file manager's permissions settings or `chmod +x <filename>`.
+4. Open it from your file manager or run `./<filename>` in a terminal.
 
-Keep the AppImage at a stable location if you enable launch-at-login. For a native prefix install, see [building from source](development.md).
-
-An AppImage is not installed into your desktop's application directories, so the system portal does not recognise it as an application. That matters beyond the file picker: the portal stores screen-capture approvals per application, so an unregistered Trophy shares the generic entry used by any unregistered program. The wizard's **Desktop integration** action (also in **Settings → Desktop Integration**) adds a menu entry for the AppImage where you keep it — the file is not copied or moved — after which approvals are stored for Trophy itself. Until then Trophy uses its own file dialog, which does not depend on the portal. Integrating after you have already approved capture asks for approval once more, because the approval moves to Trophy's new identity.
+For a native prefix install, see [building from source](development.md).
 
 CI also generates `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. When included in a release, choose the native package matching your distribution, or unpack the archive. Native packages still require compatible system dependencies; see [packaging notes](../packaging/README.md).
 
@@ -28,6 +27,16 @@ sha256sum -c SHA256SUMS
 
 The matching downloaded file should report `OK`; entries for packages you did not download may report missing files. This checks the file against the published checksum; an unsigned checksum alone does not prove publisher identity or authenticity.
 
+## Desktop integration
+
+An AppImage is not installed into your desktop's application directories, so the portal cannot resolve Trophy's application identity. That matters beyond the file picker: screen-capture approvals are stored per application, so an unregistered Trophy shares the generic entry used by any unregistered program.
+
+To fix this, on first launch Trophy writes its own entry — `$XDG_DATA_HOME/applications/trophy.desktop`, usually `~/.local/share/applications/trophy.desktop`, plus an icon — before it contacts the portal. The AppImage itself is not copied or moved, and the built-in updater replaces it in place, so the entry keeps working across updates. The first run therefore already has a stable identity: no setup step and no restart.
+
+An entry from a distribution package, AppImageLauncher, Gear Lever or your own `.desktop` file counts the same. If another launcher already lists Trophy, Trophy's entry is hidden from menus but still supplies the identity, so you do not get a duplicate.
+
+If the entry is missing — a read-only `XDG_DATA_HOME`, or you removed it earlier — use **Settings → Desktop Integration → Integrate**. The identity and the system file-dialog backend are fixed when Trophy starts, so Trophy offers a restart to apply it. Until then file dialogs use Qt's own rather than the system dialog, and approvals made in the meantime belong to the unregistered identity, so Trophy asks for them again afterwards. **Remove** deletes the entry and stops Trophy recreating it.
+
 ## Requirements
 
 These are the build targets and requirements for the current CI configuration.
@@ -38,8 +47,7 @@ version has been verified.
 ### Package compatibility
 
 All distributed binaries target **x86_64 / amd64 Linux**. Qt/FFmpeg development
-packages, a compiler and Python are not needed to run the ordinary application;
-Python is only needed for the diagnostic tooling described below.
+packages, a compiler and Python are not needed to run the ordinary application.
 
 | Download | Build/test baseline | What your system must provide |
 | --- | --- | --- |
@@ -70,16 +78,6 @@ Fedora's official FFmpeg build may omit libx264. Software H.264 recording and
 H.264 share export require a codec-enabled FFmpeg provider; follow your distro's
 guidance rather than assuming every codec ships with the native package.
 
-The diagnostic kit is staged from a build with
-`packaging/make_test_kit.py`, not downloaded from the release page, and it does
-not bundle Qt/FFmpeg: the target machine must supply them. It runs a focused
-subset of unit and native GPU tests, not the full CI suite, and needs no running
-Wayland session or live portal/PipeWire services (interactive preview and
-detection checks do need the desktop services below). GPU skips mean incomplete
-coverage, not successful GPU validation. See the
-[packaging notes](../packaging/README.md#diagnostics-collection) for the
-collector, the kit and how to read its report.
-
 ### Desktop requirements
 
 - A **Wayland** desktop session. Native Wayland and XWayland games can be captured; an X11 desktop session cannot.
@@ -97,7 +95,7 @@ Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and S
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
-2. With an AppImage, Trophy adds its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — its launcher entry supplies the same identity and no second entry is created.
+2. With an AppImage, Trophy registers its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — Trophy keeps its own entry for the stable identity and hides it from menus so you are not offered a duplicate.
 3. Explicitly install the required window helper when prompted. Ordinary startup does not install or enable compositor integrations.
 4. Choose whether to enable optional game-detection reporters. Read the cautions below first.
 5. Assign recording and clip/bookmark shortcuts, or configure native desktop shortcuts if the portal does not support them.

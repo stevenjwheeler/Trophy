@@ -53,36 +53,34 @@ DMA-BUF capture avoids CPU pixel copies where the compositor, driver, and encode
 
 Recordings use MKV for crash-resilient recording; share exports create separate MP4 files. A clean dark interface, configurable accent colors, and a system tray keep the controls close without getting in the way.
 
-**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Capture, global shortcuts, and game detection depend on your compositor and portal backend. See the [system requirements and package compatibility](docs/getting-started.md#requirements).
+**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Capture, global shortcuts, and game detection depend on your compositor and portal backend. See the [system requirements and package compatibility](https://gettrophy.app/docs/getting-started.html#requirements).
 
 ## Get Trophy
 
-**Before downloading:** check the [requirements table for AppImage, DEB, RPM, tar.xz and the testing kit](docs/getting-started.md#package-compatibility).
+**Before downloading:** check the [requirements table for AppImage, DEB, RPM and tar.xz](https://gettrophy.app/docs/getting-started.html#package-compatibility).
 
-Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest), make it executable, and launch it:
+1. Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest).
+2. Move it somewhere permanent — for example `~/Applications/Trophy.AppImage` — rather than leaving it in `~/Downloads`. Launch-at-login and the desktop entry point at this exact path, and updates rewrite the file in place, so the folder has to stay put and be writable.
+3. Make it executable, using your file manager's permissions settings or `chmod +x Trophy-<version>-x86_64.AppImage`.
+4. Launch it from your file manager, or run `./Trophy-<version>-x86_64.AppImage`.
 
-```bash
-chmod +x Trophy-<version>-x86_64.AppImage
-./Trophy-<version>-x86_64.AppImage
-```
+CI also produces `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
 
-CI also produces `.tar.xz`, `.deb`, and `.rpm` packages. Check the release assets for available downloads and see the [installation guide](docs/getting-started.md) and [packaging notes](packaging/README.md) for details.
+Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and the desktop integration Trophy needs for game detection. Game capture requires your authorization through the system portal.
 
-Replace `<version>` with the downloaded version. The setup wizard walks you through desktop integration, audio, and shortcuts. Game capture requires your authorization through the system portal.
-
-[Getting started](docs/getting-started.md) · [User guide](docs/user-guide.md) · [Build from source](docs/development.md)
+The full documentation is on the website at **[gettrophy.app/docs](https://gettrophy.app/docs/)**: [Getting started](https://gettrophy.app/docs/getting-started.html) · [User guide](https://gettrophy.app/docs/user-guide.html) · [Build from source](https://gettrophy.app/docs/development.html)
 
 ## A few things to know
 
-- Game detection's Vulkan and OpenGL reporters are optional. **Anti-cheat compatibility is not guaranteed.** The OpenGL option uses session-wide preload configuration and requires a fresh login environment; [read the setup guidance](docs/getting-started.md#game-detection) before enabling it.
-- Game audio falls back to the desktop mix when an application-specific source is unavailable. That mix can include other apps; [check your audio setup](docs/user-guide.md#audio).
+- Game detection's Vulkan and OpenGL reporters are optional. **Anti-cheat compatibility is not guaranteed.** The OpenGL option uses session-wide preload configuration and requires a fresh login environment; [read the setup guidance](https://gettrophy.app/docs/getting-started.html#game-detection) before enabling it.
+- Game audio falls back to the desktop mix when an application-specific source is unavailable. That mix can include other apps; [check your audio setup](https://gettrophy.app/docs/user-guide.html#audio).
 - MP4 export is whole-file and uses software encoding. Snip a clip first to share a shorter range. Size targets are approximate, and HDR-to-SDR conversion is not supported.
 
 ## Help and contribute
 
 Found a problem or have an idea? [Open an issue](https://github.com/stevenjwheeler/Trophy/issues). Trophy's bug-report action can prepare version, system, and recent log details for you to review before sharing.
 
-Code and documentation contributions are welcome. See the [development guide](docs/development.md) for build and test instructions, and [packaging notes](packaging/README.md) for AppImage and integration details.
+Code and documentation contributions are welcome. See the [development guide](https://gettrophy.app/docs/development.html) for build, test and packaging instructions.
 
 Trophy is free and open-source software under the [GNU GPL v3](LICENSE), built with [Qt](https://www.qt.io/), [FFmpeg](https://ffmpeg.org/), and [PipeWire](https://pipewire.org/).
 
