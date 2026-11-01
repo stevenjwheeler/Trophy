@@ -64,6 +64,9 @@ public:
   // Inputs accepted by avcodec_send_frame, including delayed output. This
   // is not packet count and excludes rejected/buffered-send failures.
   int64_t acceptedFrames() const { return m_frameCount.load(); }
+  // Frames the encoder refused outright (not EAGAIN backpressure). A stream
+  // with rejections here will be short or empty; they used to be silent.
+  int64_t rejectedFrames() const { return m_sendFailures.load(); }
 
 private:
   friend class FFmpegEncoderTestAccess;
@@ -72,6 +75,7 @@ private:
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
   void logSummary();
+  void reportEncodeRejection(int code);
   bool convertSoftwareFrame(const VideoFrame &frame);
 
   int m_lastInputWidth = 0;
@@ -104,6 +108,8 @@ private:
   std::atomic<int64_t> m_vaapiVppFrames{0};
   std::atomic<int64_t> m_fallbackFrames{0};
   std::atomic<int64_t> m_droppedFrames{0};
+  std::atomic<int64_t> m_sendFailures{0};
+  std::atomic<int64_t> m_backpressureFrames{0};
   bool m_lastMapSucceeded = true; // suppress transition spam; first failure logs
   bool m_lastImportSucceeded = true;
   bool m_summaryLogged = false;

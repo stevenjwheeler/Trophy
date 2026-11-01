@@ -870,6 +870,8 @@ void RecordingSession::encodingLoop() {
   qDebug() << "Encoding thread started";
 
   bool catchup = false;
+  int64_t framesSincePacket = 0;
+  auto lastPacketAt = std::chrono::steady_clock::now();
   while (true) {
     QueuedFrame frame(VideoFrame{});
     bool haveFrame = false;
@@ -899,12 +901,35 @@ void RecordingSession::encodingLoop() {
       m_recentEncodeTimes.record(nowUs(), durationUs);
       ++m_encodeCalls;
     }
+    const auto now = std::chrono::steady_clock::now();
     if (producedPacket) {
       packet.streamIndex = 0;
       if (writeOutputPacket(packet)) {
         m_bytesWritten = m_muxer->bytesWritten();
       }
       m_frameCount++;
+      ++m_videoPacketsWritten;
+      framesSincePacket = 0;
+      lastPacketAt = now;
+    } else if (haveFrame) {
+      // An encoder that keeps eating frames but never emits anything used to
+      // look like "slow": the file ended up nearly empty and the user only saw
+      // a generic finalize failure minutes later. Fail with a reason instead.
+      ++framesSincePacket;
+      if (!m_outputFailed &&
+          framesSincePacket >= m_stallFrameLimit.load() &&
+          now - lastPacketAt >= std::chrono::milliseconds(m_stallTimeoutMs.load())) {
+        const QString name = m_encoder ? m_encoder->name() : QStringLiteral("encoder");
+        const QString reason =
+            QStringLiteral("The video encoder \"%1\" accepted %2 frames but "
+                           "produced no output. The recording would be empty; "
+                           "try a different encoder (for example VA-API H.264 "
+                           "or x264).").arg(name).arg(framesSincePacket);
+        qCritical() << "Recording session:" << reason;
+        setOutputError(reason);
+        m_outputFailed = true;
+        break;
+      }
     }
     catchup = advanceMergedClock(!m_running.load());
     if (!haveFrame && !m_running && !catchup)
@@ -1098,6 +1123,22 @@ bool RecordingSession::drainClockedMergedAudio(int channels, bool finalDrain) {
     }
   }
   return target > m_mergedOffsetFrames + m_mergedSubmittedFrames + (finalDrain ? 0 : 1023);
+}
+
+QString RecordingSession::outputErrorText() const {
+  std::lock_guard<std::mutex> lock(m_outputErrorMutex);
+  return m_outputErrorText;
+}
+
+void RecordingSession::setOutputError(const QString &text) {
+  std::lock_guard<std::mutex> lock(m_outputErrorMutex);
+  if (m_outputErrorText.isEmpty())
+    m_outputErrorText = text;
+}
+
+void RecordingSession::setStallGuardForTesting(int frames, int timeoutMs) {
+  m_stallFrameLimit = std::max(1, frames);
+  m_stallTimeoutMs = std::max(1, timeoutMs);
 }
 
 bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {

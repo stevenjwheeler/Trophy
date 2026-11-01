@@ -642,7 +642,11 @@ void RecordingManager::finishStoppedRecording() {
   if (saved) {
     emit recordingStopped(filePath, durationMs, sizeBytes);
   } else if (!pipelineFailed) {
-    emit recordingError("Failed to finalize recording; the output may be incomplete");
+    // Prefer the concrete reason (e.g. a stalled encoder) over the generic
+    // finalize wording.
+    emit recordingError(m_lastOutputError.isEmpty()
+                            ? QStringLiteral("Failed to finalize recording; the output may be incomplete")
+                            : m_lastOutputError);
   }
   emit currentGameNameChanged();
 
@@ -670,6 +674,8 @@ bool RecordingManager::buildPipeline() {
     qCritical() << "Failed to create video encoder";
     return false;
   }
+  qInfo() << "Video encoder: setting" << requestedEncoder << "resolved to"
+          << m_videoEncoder->name();
 
   // Create muxer
   m_muxer = std::make_unique<FFmpegMuxer>();
@@ -984,6 +990,7 @@ bool RecordingManager::teardownPipeline() {
   bool sessionSucceeded = true;
   if (m_session) {
     m_session->stop();
+    m_lastOutputError = m_session->outputErrorText();
     sessionSucceeded = m_session->outputSucceeded();
     if (sessionSucceeded && !m_currentFilePath.isEmpty() &&
         !RecordingAnnotations::setAudioRouting(m_currentFilePath, m_session->audioHistory()))
@@ -1179,7 +1186,10 @@ void RecordingManager::updateProgress() {
   // muxer/audio/video callback. stop() still drains before inspecting it.
   if (m_state == RecordingState::Recording && m_session &&
       m_session->outputFailed()) {
-    onEncodingError("Failed to write recording; the output may be incomplete");
+    const QString reason = m_session->outputErrorText();
+    onEncodingError(reason.isEmpty()
+                        ? QStringLiteral("Failed to write recording; the output may be incomplete")
+                        : reason);
     return;
   }
   // Poll for window title changes during manual-window recordings

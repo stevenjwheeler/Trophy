@@ -199,6 +199,7 @@ private:
   unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;
   bool m_recordingFailed = false;
+  QString m_lastOutputError;
   bool m_shuttingDown = false;
 
   // Dependencies (not owned)
