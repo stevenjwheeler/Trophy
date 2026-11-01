@@ -88,38 +88,27 @@
       <div class="tech-strip" aria-label="Technology and format support"><span>Made for your setup.</span><strong>PipeWire</strong><strong>NVENC</strong><strong>VA-API</strong><strong>H.264 / HEVC / AV1</strong></div>
     </section>
 
-    <section class="section wrap" id="features" aria-labelledby="features-title">
-      <div class="section-heading"><div><p class="eyebrow">RECORD HOW YOU WANT</p><h2 id="features-title">You play.<br>Trophy will keep the highlights.</h2></div></div>
-      <div class="feature-overview">
-        <article><div class="feature-diagram capture-diagram" aria-hidden="true"><span></span><i></i></div><h3>Record your way.</h3><p>Save recent gameplay from the replay buffer, or keep the whole session.</p></article>
-        <article><div class="feature-diagram mix-diagram" aria-hidden="true"><i></i><i></i><i></i></div><h3>Choose your mix.</h3><p>Capture game, voice chat, and mic separately, or bring them together.</p></article>
-        <article><div class="feature-diagram moments-diagram" aria-hidden="true"><i></i><i></i><i></i><i></i><svg class="moment-marker" viewBox="0 0 24 72" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v55" stroke-opacity=".6"/><path d="M6 3h12v18l-6-4-6 4z"/></svg></div><h3>Find the good bits.</h3><p>Bookmark a moment, jump back to it, and snip a clip worth keeping.</p></article>
-        <article><div class="feature-diagram share-diagram" aria-hidden="true"><span>TROPHY</span><i>→</i><span>MP4</span></div><h3>Share a copy.</h3><p>Export a share-ready MP4 with the audio you want. Your original stays untouched.</p></article>
-      </div>
-      <div class="shortcut-summary" id="shortcuts" role="group" aria-labelledby="shortcuts-title">
-        <div class="shortcut-summary-heading"><h3 id="shortcuts-title">Two shortcuts. Your choice of keys.</h3><a class="text-link" href="https://github.com/stevenjwheeler/Trophy/blob/main/docs/getting-started.md#keyboard-shortcuts">Set up your shortcuts <span aria-hidden="true">↗</span></a></div>
-        <div class="shortcut-summary-actions"><p><strong><span class="shortcut-record-dot" aria-hidden="true"></span>Recording toggle</strong>Start a full recording. Press again to stop and save.</p><p><strong><span class="bookmark-glyph" aria-hidden="true"></span>Clip / Bookmark</strong>Save a replay when the buffer is ready, or bookmark an active recording.</p></div>
-        <p class="shortcut-summary-note">Choose bindings through the Global Shortcuts portal, or use native desktop bindings where it isn’t available.</p>
+    <section class="section screen-section" id="features" aria-labelledby="features-title">
+      <div class="wrap">
+        <div class="section-heading"><div><p class="eyebrow">RECORD HOW YOU WANT</p><h2 id="features-title">You play.<br>Trophy will keep the highlights.</h2></div></div>
+        <div class="feature-overview">
+          <article><span class="small-label">CAPTURE</span><h3>Record your way.</h3><p>Save recent gameplay from the replay buffer, or keep the whole session.</p></article>
+          <article><span class="small-label">AUDIO</span><h3>Choose your mix.</h3><p>Capture game, voice chat, and mic separately, or bring them together.</p></article>
+          <article><span class="small-label">BOOKMARKS</span><h3>Find the good bits.</h3><p>Bookmark a moment, jump back to it, and snip a clip worth keeping.</p></article>
+          <article><span class="small-label">EXPORT</span><h3>Share a copy.</h3><p>Export a share-ready MP4 with the audio you want. Your original stays untouched.</p></article>
+        </div>
+        <div class="shortcut-summary" id="shortcuts" role="group" aria-labelledby="shortcuts-title">
+          <div class="shortcut-summary-heading"><h3 id="shortcuts-title">Two shortcuts. Your choice of keys.</h3><a class="text-link" href="https://github.com/stevenjwheeler/Trophy/blob/main/docs/getting-started.md#keyboard-shortcuts">Set up your shortcuts <span aria-hidden="true">↗</span></a></div>
+          <div class="shortcut-summary-actions"><p><strong><span class="shortcut-record-dot" aria-hidden="true"></span>Recording toggle</strong>Start a full recording. Press again to stop and save.</p><p><strong><span class="bookmark-glyph" aria-hidden="true"></span>Clip / Bookmark</strong>Save a replay when the buffer is ready, or bookmark an active recording.</p></div>
+          <p class="shortcut-summary-note">Choose bindings through the Global Shortcuts portal, or use native desktop bindings where it isn’t available.</p>
+        </div>
       </div>
     </section>
 
-    <section class="section player-section" id="player" aria-labelledby="player-title">
+    <section class="section" id="player" aria-labelledby="player-title">
       <div class="wrap">
         <div class="section-heading"><div><p class="eyebrow">THE BUILT-IN PLAYER</p><h2 id="player-title">Make the cut.</h2></div></div>
-        <figure class="editor-showcase">
-          <div class="editor-illustration" role="img" aria-label="Timeline illustration with a video filmstrip, separate Game, Voice and Mic waveforms, yellow bookmark markers, and a highlighted clip range.">
-            <div class="editor-topline" aria-hidden="true"><span>CLIP EDITOR</span><span>CLIP RANGE / 00:42 — 01:12</span></div>
-            <div class="editor-ruler" aria-hidden="true"><span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span><span>02:00</span></div>
-            <div class="editor-tracks" aria-hidden="true">
-              <div class="editor-lane"><span class="lane-label">Video</span><div class="lane-content filmstrip"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
-              <div class="editor-lane"><span class="lane-label">Game</span><div class="lane-content waveform wave-game"></div></div>
-              <div class="editor-lane"><span class="lane-label">Voice</span><div class="lane-content waveform wave-voice"></div></div>
-              <div class="editor-lane"><span class="lane-label">Mic</span><div class="lane-content waveform wave-mic"></div></div>
-              <div class="editor-overlays"><div class="editor-selection"></div><span class="editor-bookmark bookmark-one"><span class="bookmark-glyph"></span></span><span class="editor-bookmark bookmark-two"><span class="bookmark-glyph"></span></span><span class="editor-playhead"></span></div>
-            </div>
-          </div>
-          <figcaption>Timeline illustration. Audio lanes vary by recording.</figcaption>
-        </figure>
+        <figure class="player-showcase"><a class="screenshot-link" data-screenshot="Player · Clip editor" href="assets/player.png" aria-label="Enlarge the Trophy player with the clip editor open"><picture><source type="image/webp" srcset="assets/player-480.webp 480w, assets/player-800.webp 800w, assets/player-1200.webp 1200w" sizes="(max-width: 650px) calc(100vw - 36px), (max-width: 1224px) calc(100vw - 64px), 1160px"><img src="assets/player.png" width="1200" height="800" alt="Trophy's player showing a Deadlock recording with the clip editor open: a video filmstrip, separate Game, Voice, and Mic waveforms, yellow bookmarks, and a highlighted clip range." loading="lazy" decoding="async"></picture></a><figcaption>A range, bookmarks, and a lane for every audio source.</figcaption></figure>
         <div class="player-capabilities">
           <article><h3>Mark &amp; revisit.</h3><p>Add bookmarks during or after recording, then jump straight to them.</p></article>
           <article><h3>Fine-tune the range.</h3><p>Zoom, pan, and loop before snipping. Cuts align to a nearby video keyframe.</p></article>

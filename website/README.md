@@ -96,9 +96,10 @@ lists the single public page, not its section anchors or GitHub documentation.
 - Documentation links point to `main` on GitHub; adjust them if the default branch
   changes.
 - Screenshot assets are copies of `docs/images/dashboard-grid.png`,
-  `docs/images/dashboard.png`, and `docs/images/games-list.png`; the Trophy and
-  bookmark SVGs come from `resources/icons/`. Refresh these copies when the app
-  screenshots or icons change.
+  `docs/images/dashboard.png`, and `docs/images/games-list.png`; the player
+  screenshot (`assets/player.png`) is captured directly from the app. The Trophy
+  and bookmark SVGs come from `resources/icons/`. Refresh these copies when the
+  app screenshots or icons change.
 - After replacing screenshots, run `python3 .github/scripts/optimize_screenshots.py`
   from the repo root with Pillow/WebP support installed. It regenerates the checked-in
   480/800/1200px WebP files; no image tooling is required by Pages or visitors.
@@ -120,10 +121,17 @@ lists the single public page, not its section anchors or GitHub documentation.
   Each opens its full-size image when clicked. Keep matching dashboard layouts and
   image dimensions for easy comparison. The seven accent swatches match
   `qml/styles/Theme.qml`; keep them aligned.
-- The player showcase is a labeled CSS timeline illustration. Replace it with a
-  current player screenshot when one is available; do not present the illustration
-  as a screenshot or interactive player. Keep the two shortcut descriptions free
-  of assumed key assignments, since users choose their own bindings.
+- The features section and the permission section are both `screen-section`
+  bands. Their inner rows use the same open strip: a top hairline, a short pink
+  `small-label`, a heading, and body copy — no cards or illustrations. The
+  features band sits directly under the hero's `.tech-strip`, so that strip has
+  no bottom border of its own; the band's `border-block` closes the hero and
+  opens the band. Keep the two strips in sync if you change either one.
+- The player showcase is a real screenshot of the player in its clip-editor
+  state (a recording with separate Game, Voice, and Mic lanes, a set range, and
+  visible bookmarks), and it opens its full-size image like the other
+  screenshots. Retake it when the player UI changes; keep the caption free of
+  assumed key assignments, since users choose their own shortcut bindings.
 - Check narrow and wide layouts, keyboard navigation, FAQ toggles, local links,
   screenshot loading, and the download/documentation links before publishing.
 
