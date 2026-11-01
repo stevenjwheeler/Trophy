@@ -119,8 +119,6 @@ class SettingsManager : public QObject {
   // dashboard reopens in the user's last-used mode.
   Q_PROPERTY(QString shareExportFolder READ shareExportFolder WRITE setShareExportFolder
                   NOTIFY shareExportFolderChanged)
-  Q_PROPERTY(bool shareExportWatermark READ shareExportWatermark WRITE setShareExportWatermark
-                  NOTIFY shareExportWatermarkChanged)
   Q_PROPERTY(bool libraryListView READ libraryListView WRITE setLibraryListView
                   NOTIFY libraryListViewChanged)
   Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
@@ -262,8 +260,6 @@ public:
   // Dashboard library layout (false = grid, true = list).
   bool libraryListView() const { return m_libraryListView; }
   QString shareExportFolder() const { return m_shareExportFolder; }
-  bool shareExportWatermark() const { return m_shareExportWatermark; }
-  void setShareExportWatermark(bool enabled);
   void setShareExportFolder(const QString &folder);
   void setLibraryListView(bool enabled);
 
@@ -336,7 +332,6 @@ signals:
   void completionSoundEnabledChanged();
   void libraryListViewChanged();
   void shareExportFolderChanged();
-  void shareExportWatermarkChanged();
   void themeModeChanged();
   void accentColorChanged();
   void replayCachePathChanged();
@@ -414,7 +409,6 @@ private:
   // Dashboard library layout (false = grid, true = list).
   bool m_libraryListView = false;
   QString m_shareExportFolder;
-  bool m_shareExportWatermark = true;
   QString m_themeMode = "amoled";
   QString m_accentColor = "rose";
   

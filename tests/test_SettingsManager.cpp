@@ -104,22 +104,6 @@ TEST_F(SettingsManagerTest, DiscordDefaultsPersistenceNotificationsAndReset) {
   EXPECT_EQ(idle.count(), 2);
 }
 
-TEST_F(SettingsManagerTest, ShareWatermarkDefaultsOnPersistsOffAndResets) {
-  EXPECT_TRUE(mgr->shareExportWatermark());
-  QSignalSpy changed(mgr.get(), &SettingsManager::shareExportWatermarkChanged);
-  mgr->setShareExportWatermark(false);
-  mgr->setShareExportWatermark(false);
-  EXPECT_EQ(changed.count(), 1);
-  SettingsManager restored;
-  restored.load();
-  EXPECT_FALSE(restored.shareExportWatermark());
-  mgr->resetToDefaults();
-  EXPECT_TRUE(mgr->shareExportWatermark());
-  SettingsManager reset;
-  reset.load();
-  EXPECT_TRUE(reset.shareExportWatermark());
-}
-
 TEST_F(SettingsManagerTest, ShareExportFolderPersistsAndResets) {
   EXPECT_TRUE(mgr->shareExportFolder().isEmpty());
   QSignalSpy changed(mgr.get(), &SettingsManager::shareExportFolderChanged);

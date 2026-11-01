@@ -34,8 +34,12 @@ public:
   QString error() const { return m_error; }
   QString resultPath() const { return m_result; }
   Q_INVOKABLE bool inspect(const QString &source);
-  Q_INVOKABLE bool start(const QString &directory, int maxHeight, qint64 targetBytes, const QVariantList &audioStreams, bool watermark = true);
-  Q_INVOKABLE bool startBatch(const QString &directory, int maxHeight, qint64 targetBytes, const QVariantList &captures, bool watermark = true);
+  // Mode 0 = remux (default, instant), 1 = convert to H.264 + AAC.
+  // maxHeight applies to the conversion mode only (0 = keep source size).
+  Q_INVOKABLE bool start(const QString &directory, const QVariantList &audioStreams,
+                         int mode = 0, int maxHeight = 0);
+  Q_INVOKABLE bool startBatch(const QString &directory, const QVariantList &captures,
+                              int mode = 0, int maxHeight = 0);
   Q_INVOKABLE bool copyOriginals(const QStringList &sources, const QString &directory);
   Q_INVOKABLE void cancel();
   Q_INVOKABLE void cancelJob(const QString &id);
