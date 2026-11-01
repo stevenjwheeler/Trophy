@@ -85,7 +85,7 @@ def main():
         command += ["--executable", str(target)]
     command += ["--executable", str(stage / "usr/bin/trophy"),
                 "--desktop-file", str(source / "packaging/io.github.stevenjwheeler.Trophy.desktop"),
-                "--icon-file", str(source / "resources/icons/trophy.svg")]
+                "--icon-file", str(source / "resources/icons/trophy.png")]
     if args.qt_plugin:
         command += ["--plugin", "qt"]
     env = os.environ.copy()
