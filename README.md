@@ -59,14 +59,12 @@ Recordings use MKV for crash-resilient recording; share exports create separate 
 
 **Before downloading:** check the [requirements table for AppImage, DEB, RPM and tar.xz](https://gettrophy.app/docs/getting-started.html#package-compatibility).
 
-Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest), move it somewhere you will keep it — launch-at-login and the desktop entry use that path, and updates rewrite the file in place — then make it executable and launch it:
+1. Download **`Trophy-<version>-x86_64.AppImage`** from the [latest release](https://github.com/stevenjwheeler/Trophy/releases/latest).
+2. Move it somewhere permanent — for example `~/Applications/Trophy.AppImage` — rather than leaving it in `~/Downloads`. Launch-at-login and the desktop entry point at this exact path, and updates rewrite the file in place, so the folder has to stay put and be writable.
+3. Make it executable, using your file manager's permissions settings or `chmod +x Trophy-<version>-x86_64.AppImage`.
+4. Launch it from your file manager, or run `./Trophy-<version>-x86_64.AppImage`.
 
-```bash
-chmod +x Trophy-<version>-x86_64.AppImage
-./Trophy-<version>-x86_64.AppImage
-```
-
-CI also produces `.tar.xz`, `.deb`, and `.rpm` packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
+CI also produces `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
 
 Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and the desktop integration Trophy needs for game detection. Game capture requires your authorization through the system portal.
 
