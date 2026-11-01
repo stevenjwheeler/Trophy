@@ -32,22 +32,28 @@ SITE = "https://gettrophy.app"
 # Order matters: it drives the sidebar and the previous/next pager.
 PAGES = (
     {
-        "source": "getting-started.md",
+        "source": "docs/getting-started.md",
         "slug": "getting-started",
         "title": "Getting started",
         "summary": "Install Trophy, check what your system has to provide, and get a first capture.",
     },
     {
-        "source": "user-guide.md",
+        "source": "docs/user-guide.md",
         "slug": "user-guide",
         "title": "User guide",
         "summary": "Recordings, clips, audio, bookmarks, exports, storage and appearance.",
     },
     {
-        "source": "development.md",
+        "source": "docs/development.md",
         "slug": "development",
         "title": "Building and contributing",
         "summary": "Dependencies, building, running the test suites, and contribution notes.",
+    },
+    {
+        "source": "packaging/README.md",
+        "slug": "packaging",
+        "title": "Packaging and diagnostics",
+        "summary": "Package formats, runtime library selection, diagnostics collection and reporter cautions.",
     },
 )
 
@@ -116,7 +122,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <p class="eyebrow">DOCUMENTATION</p>
       <h1>{title}</h1>
       <p class="doc-summary">{summary}</p>
-      <p class="doc-meta"><a href="{blob}/docs/{source}">Edit this page on GitHub <span aria-hidden="true">↗</span></a></p>
+      <p class="doc-meta"><a href="{blob}/{source}">Edit this page on GitHub <span aria-hidden="true">↗</span></a></p>
     </header>
     {content}
     {pager}
@@ -152,27 +158,33 @@ REDIRECT_TEMPLATE = """<!DOCTYPE html>
 
 
 
-def slug_target(target: str) -> str:
-    """Map a Markdown link target onto its published location."""
-    if target.startswith(("http://", "https://", "mailto:", "#")):
+def slug_target(target: str, source: str) -> str:
+    """Map a Markdown link onto its published page, or onto GitHub."""
+    if target.startswith(("http://", "https://", "mailto:", "#", "data:")):
         return target
     path, _, fragment = target.partition("#")
     suffix = f"#{fragment}" if fragment else ""
     if not path:
         return target
-    if path.startswith("../"):
-        return f"{REPO_BLOB}/{path[3:]}{suffix}"
-    name = Path(path).name
+    parts: list[str] = []
+    for part in (Path(source).parent / path).parts:
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        if part != ".":
+            parts.append(part)
+    key = "/".join(parts)
     for page in PAGES:
-        if page["source"] == name:
+        if page["source"] == key:
             return f"{page['slug']}.html{suffix}"
-    raise SystemExit(f"Unresolved documentation link: {target}")
+    return f"{REPO_BLOB}/{key}{suffix}"
 
 
-def rewrite_links(rendered: str) -> str:
+def rewrite_links(rendered: str, source: str) -> str:
     def replace(match: re.Match[str]) -> str:
         prefix, target, suffix = match.groups()
-        return f"{prefix}{slug_target(target)}{suffix}"
+        return f"{prefix}{slug_target(target, source)}{suffix}"
 
     rendered = re.sub(r'(<a\b[^>]*?\bhref=")([^"]+)(")', replace, rendered)
     rendered = re.sub(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', replace, rendered)
@@ -241,7 +253,7 @@ def render_page(page: dict, source_text: str) -> tuple[str, list[dict]]:
     body = re.sub(r"^# .*\n", "", body, count=1).lstrip()
     body = re.sub(r"^\[Back to README\][^\n]*\n", "", body, count=1).lstrip()
     converter = markdown.Markdown(extensions=list(MARKDOWN_EXTENSIONS), extension_configs=MARKDOWN_CONFIG)
-    content = rewrite_links(converter.convert(body))
+    content = rewrite_links(converter.convert(body), page["source"])
     return content, converter.toc_tokens
 
 
@@ -251,7 +263,7 @@ def main() -> int:
 
     rendered = {}
     for page in PAGES:
-        source = DOCS / page["source"]
+        source = ROOT / page["source"]
         if not source.is_file():
             raise SystemExit(f"Missing documentation source: {source}")
         rendered[page["slug"]] = render_page(page, source.read_text(encoding="utf-8"))
