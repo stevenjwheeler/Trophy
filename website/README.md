@@ -65,11 +65,23 @@ repository are not published.
 The page includes a canonical URL, Open Graph/social-card metadata, and truthful
 `SoftwareApplication` JSON-LD. No review scores, ratings, or download counts are
 invented; structured data does not guarantee a rich search result. The sitemap
-lists the single public page, not its section anchors or GitHub documentation.
+lists the landing page and the three documentation URLs, not their section anchors.
 
 ## Maintaining the page
 
 - Update copy in `index.html` and styles in `styles.css`.
+- Documentation pages under `website/docs/` are generated from `docs/*.md` by
+  `python3 website/build_docs.py`, which needs the `markdown` and `pygments`
+  packages. The output is gitignored: the Pages workflow renders it before
+  uploading, and also runs for `docs/**` pushes, so editing a guide republishes
+  the site without touching `website/`. Run the script yourself to preview at
+  `http://localhost:8080/docs/getting-started.html`. `/docs/` is a redirect stub
+  to the first guide, because a static host cannot issue a server redirect.
+- Page order, titles and summaries live in `PAGES` in `build_docs.py`. Relative
+  links between guides are rewritten to the generated pages; links that leave
+  `docs/` (`../packaging/`, `../reporters/`, `../README.md`) point at GitHub.
+  Keep the header and footer markup inside `build_docs.py` in step with
+  `index.html` if the shared site chrome changes.
 - Keep the canonical, social URLs, JSON-LD, sitemap, robots sitemap URL, and `CNAME`
   aligned if the production domain changes.
 - `assets/social-preview.png` is the 1200×630 share image. Its editable source is
