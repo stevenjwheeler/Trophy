@@ -64,7 +64,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
           desktop-file-validate packaging/io.github.stevenjwheeler.Trophy.desktop
-          appstreamcli validate --no-net build/io.github.stevenjwheeler.Trophy.metainfo.xml
+          appstreamcli validate --no-net packaging/io.github.stevenjwheeler.Trophy.metainfo.xml
       - name: Preserve build for tests and AppImage (no rebuild)
         run: |
           # Tar preserves modes, symlinks and generated paths. All consumers
