@@ -111,4 +111,24 @@ Trophy can check GitHub Releases for a newer version. The check runs automatical
 
 Settings offers Original (formerly Default), Charcoal, and AMOLED themes, accent colors, and launch/tray preferences. New settings default to AMOLED with the Rose accent.
 
-The window close action and **Ctrl+Q** follow Trophy's close policy, including close-to-tray behavior and active-recording confirmation. Hiding the window is not quitting the app. Use the tray's Quit action when you intend to exit completely.
+### Closing and the tray
+
+The window close action and **Ctrl+Q** follow Trophy's close policy, including
+**Minimize to tray on close**, **Start minimized** and active-recording
+confirmation. Hiding the window is not quitting the app, and a recording keeps
+running.
+
+- **KDE Plasma** has a system tray, so closing with the option enabled leaves a
+  Trophy icon with Show/Hide, Start/Stop, Save Clip and Quit.
+- **GNOME** does not ship a system tray by default. A tray icon needs the
+  **AppIndicator and KStatusNotifierItem Support** extension. Without it,
+  closing Trophy still keeps it running in the background, but there is no tray
+  icon: **launch Trophy again from the app grid to bring the window back** (the
+  second launch raises the existing instance instead of starting a second copy).
+  GNOME's **Background Apps** list only covers Flatpak applications, so a
+  native or AppImage Trophy does not appear there.
+- On **Hyprland/Sway**, enable **Start minimized** only if you can restore the
+  window through a native shortcut or by launching Trophy again.
+
+Use the tray's **Quit** action (or **Ctrl+Q**) when you intend to exit
+completely.

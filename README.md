@@ -53,7 +53,7 @@ DMA-BUF capture avoids CPU pixel copies where the compositor, driver, and encode
 
 Recordings use MKV for crash-resilient recording; share exports create separate MP4 files. A clean dark interface, configurable accent colors, and a system tray keep the controls close without getting in the way.
 
-**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Capture, global shortcuts, and game detection depend on your compositor and portal backend. See the [system requirements and package compatibility](https://gettrophy.app/docs/getting-started.html#requirements).
+**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. **KDE Plasma (KWin) and GNOME (Mutter) are supported**, and both are verified for capture, global shortcuts, and game detection. Hyprland and Sway have window-monitor integrations but less live verification. All of this depends on **xdg-desktop-portal** plus your compositor's portal backend; see the [system requirements and package compatibility](https://gettrophy.app/docs/getting-started.html#requirements).
 
 ## Get Trophy
 
