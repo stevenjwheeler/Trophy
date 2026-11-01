@@ -179,11 +179,18 @@ def rewrite_links(rendered: str) -> str:
     return rendered.replace("<table>", '<div class="doc-table"><table>').replace("</table>", "</table></div>")
 
 
-def nav_section(tokens: list[dict], slug: str) -> str:
-    entries = []
+def flatten_tokens(tokens: list[dict]):
+    """Python-Markdown nests h3s under their h2, so walk the tree."""
     for token in tokens:
         if token["level"] > 3:
             continue
+        yield token
+        yield from flatten_tokens(token.get("children", []))
+
+
+def nav_section(tokens: list[dict], slug: str) -> str:
+    entries = []
+    for token in flatten_tokens(tokens):
         cls = "doc-nav-sub" if token["level"] == 3 else "doc-nav-h2"
         entries.append(f'<li class="{cls}"><a href="{slug}.html#{token["id"]}">{token["name"]}</a></li>')
     if not entries:
