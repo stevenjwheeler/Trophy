@@ -168,6 +168,12 @@ jobs:
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
             --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
             --desktop-file packaging/io.github.stevenjwheeler.Trophy.desktop --icon-file resources/icons/trophy.png --plugin qt
+          # Newer appimagetool (continuous build 340+) needs .DirIcon or a
+          # top-level PNG named after Icon=. With both the scalable SVG (from
+          # cmake --install) and the PNG present, linuxdeploy links the SVG at
+          # the AppDir root, which appimagetool rejects, so place the PNG
+          # explicitly.
+          cp resources/icons/trophy.png AppDir/trophy.png
           rm AppDir/AppRun
           install -m755 packaging/AppRun AppDir/AppRun
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \

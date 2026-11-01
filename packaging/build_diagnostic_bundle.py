@@ -91,6 +91,10 @@ def main():
     env = os.environ.copy()
     env.update(APPIMAGE_EXTRACT_AND_RUN="1", LINUXDEPLOY_OUTPUT_VERSION=args.version)
     subprocess.run(command, env=env, cwd=output, check=True)
+    # Newer appimagetool (continuous build 340+) needs .DirIcon or a top-level
+    # PNG named after Icon=. linuxdeploy links the scalable SVG at the AppDir
+    # root when both formats exist, which appimagetool rejects.
+    shutil.copyfile(source / "resources/icons/trophy.png", stage / "trophy.png")
     # True vendor GPU drivers must never be bundled: they are tied to the host
     # kernel/driver and cannot be relocated. libva/libvdpau/libvulkan/libOpenCL/
     # libvpl are intentionally left bundled as a fallback for hosts without them;
