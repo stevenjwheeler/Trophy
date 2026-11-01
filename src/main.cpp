@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
   parser.setApplicationDescription("Trophy - Game recording and clipping");
   parser.addHelpOption();
   parser.addOptions({
-      {{"m", "minimized"}, "Start minimized to the system tray."},
+      {{"m", "minimized"}, "Start minimized (system tray, or the background on environments without a tray)."},
       {"toggle-record",
        "Toggle recording on the running instance, then exit."},
       {"save-clip",

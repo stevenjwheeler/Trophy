@@ -17,6 +17,7 @@
 // Forward declarations
 namespace TrophyBackend {
 class ApplicationAudioProbeTest;
+class ApplicationStartupVisibilityTest;
 class UpdateChecker;
 class UpdateInstaller;
 class RecordingManager;
@@ -329,6 +330,12 @@ private:
   static constexpr int kUpdateCheckDelayMs = 10000;
   QObject *qmlRootWindow() const;
   void setMainWindowVisible(bool visible);
+  // Hides the freshly loaded window when the user asked to start minimized
+  // (setting or --minimized) and this desktop has a way back. Returns true
+  // when the window was hidden. GNOME has no legacy tray, but relaunching
+  // Trophy restores the window, so hiding still works there.
+  bool applyStartupVisibility();
+  friend class ApplicationStartupVisibilityTest;
   void syncAutostartFile();
   // Shared pw-play helper behind both chimes (resource -> cache file).
   void playChime(const QString &resource, const QString &fileName,

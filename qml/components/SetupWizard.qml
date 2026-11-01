@@ -946,7 +946,7 @@ Rectangle {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spacingMedium
-                                        enabled: app ? app.trayAvailable : true
+                                        enabled: app ? (app.trayAvailable || app.runWithoutTraySupported) : true
                                         opacity: enabled ? 1.0 : 0.5
                                         TrophySwitch {
                                             checked: settingsManager ? settingsManager.startOnLogin : false
@@ -957,7 +957,9 @@ Rectangle {
                                             Layout.fillWidth: true
                                             Label { text: qsTr("Start on login"); font.weight: Font.Bold; color: Theme.textColor }
                                             Label {
-                                                text: qsTr("Launch automatically when you log in (starts minimized to the tray).");
+                                                text: (app && app.trayAvailable)
+                                                      ? qsTr("Launch automatically when you log in (starts minimized to the tray).")
+                                                      : qsTr("Launch automatically when you log in (starts in the background; launch Trophy again to show it).");
                                                 font.pixelSize: Theme.fontSizeSmall;
                                                 color: Theme.textSecondaryColor;
                                                 wrapMode: Text.WordWrap;

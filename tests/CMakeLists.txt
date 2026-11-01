@@ -224,6 +224,12 @@ target_link_libraries(test_ApplicationAuthorizePrompt PRIVATE
     ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_ApplicationAuthorizePrompt)
 
+add_executable(test_ApplicationStartupVisibility test_ApplicationStartupVisibility.cpp)
+target_include_directories(test_ApplicationStartupVisibility PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ApplicationStartupVisibility PRIVATE
+    ${PROJECT_NAME} GTest::GTest Qt6::Widgets Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ApplicationStartupVisibility)
+
 add_executable(test_StorageManager test_StorageManager.cpp ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
 target_include_directories(test_StorageManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_StorageManager PRIVATE ${TEST_LINK_LIBS})

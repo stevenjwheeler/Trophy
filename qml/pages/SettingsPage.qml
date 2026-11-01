@@ -1366,7 +1366,9 @@ Page {
 
                     SettingRow {
                         label: qsTr("Start minimized")
-                        help: qsTr("Launch Trophy directly into the system tray without showing the window.")
+                        help: (app && app.trayAvailable)
+                              ? qsTr("Launch Trophy directly into the system tray without showing the window.")
+                              : qsTr("Launch Trophy in the background without showing the window. Launch Trophy again to show it.")
                         rowEnabled: app ? (app.trayAvailable || app.runWithoutTraySupported) : false
 
                         TrophySwitch {

@@ -125,8 +125,10 @@ running.
   closing Trophy still keeps it running in the background, but there is no tray
   icon: **launch Trophy again from the app grid to bring the window back** (the
   second launch raises the existing instance instead of starting a second copy).
-  GNOME's **Background Apps** list only covers Flatpak applications, so a
-  native or AppImage Trophy does not appear there.
+  **Start minimized** and start-on-login behave the same way there: Trophy opens
+  hidden in the background and shows a short notification saying so; launch
+  Trophy again to open the window. GNOME's **Background Apps** list only covers
+  Flatpak applications, so a native or AppImage Trophy does not appear there.
 - On **Hyprland/Sway**, enable **Start minimized** only if you can restore the
   window through a native shortcut or by launching Trophy again.
 

@@ -94,7 +94,9 @@ guidance rather than assuming every codec ships with the native package.
 - Compatible GPU drivers for hardware encoding: NVIDIA NVENC or AMD/Intel VA-API where supported. Hardware encoding is optional; software H.264 is also supported when the FFmpeg build includes it. Available codecs depend on the GPU, driver and FFmpeg build. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver. Set `TROPHY_PREFER_BUNDLED_LIBVA=1` to force the bundled copy, or `TROPHY_LIBVA_DIRS=/path[:/path]` to point the launcher at libva installed somewhere unusual.
 - A system tray host is optional. KDE Plasma provides one; on GNOME, install the
   **AppIndicator and KStatusNotifierItem Support** extension if you want a tray
-  icon. Trophy runs without one — see [Closing and the tray](user-guide.md#closing-and-the-tray).
+  icon. On GNOME, Trophy also runs without one, including **Start minimized** and
+  start-on-login (the window stays hidden and launching Trophy again shows it) — see
+  [Closing and the tray](user-guide.md#closing-and-the-tray).
 
 ### Supported desktops
 
@@ -221,7 +223,7 @@ Commands contact an already-running Trophy through its user-private control sock
 - **Capture unavailable or no picker:** check that you are in Wayland and that PipeWire, `xdg-desktop-portal` and the correct portal backend are running. On KDE Plasma that is `xdg-desktop-portal-kde`; on GNOME, `xdg-desktop-portal-gnome`.
 - **Window helper unavailable:** use the explicit Install/Repair action. On GNOME, check Extensions and try a fresh login.
 - **Shortcut does nothing or Configure does nothing:** make sure the reverse-DNS desktop entry is present (**Settings → Desktop Integration**) and restart Trophy after installing or removing it. Then retry **Settings → Keyboard Shortcuts → Configure**; if the desktop's portal backend still rejects it, use the native shortcut commands above. Avoid double-binding the same key through both paths.
-- **Closing Trophy leaves no tray icon (GNOME):** install the AppIndicator/KStatusNotifierItem extension for a tray, or launch Trophy again to raise the hidden window. See [Closing and the tray](user-guide.md#closing-and-the-tray).
+- **Closing Trophy leaves no tray icon (GNOME):** install the AppIndicator/KStatusNotifierItem extension for a tray, or launch Trophy again to raise the hidden window. **Start minimized** and start-on-login use the same hidden background mode. See [Closing and the tray](user-guide.md#closing-and-the-tray).
 - **Capture asks for approval again after an update:** portal approvals are stored per app id. Upgrading from a build that used the old `trophy` id requires one new approval.
 - **Unexpected desktop audio:** game-specific audio may not have bound yet. See the [audio guide](user-guide.md#audio).
 - **Hardware encoder unavailable:** check your driver and encoder support, or try software H.264.
