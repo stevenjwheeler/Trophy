@@ -232,6 +232,56 @@ QString shellQuote(const QString &s) {
 }
 } // namespace
 
+QString UpdateInstaller::buildHelperScript(const QString &newFile,
+                                           const QString &targetPath,
+                                           qint64 parentPid,
+                                           const QString &fromVersion) {
+  QString script;
+  script += QStringLiteral("#!/bin/sh\n");
+  script += QStringLiteral("PARENT=") + QString::number(parentPid) + QLatin1Char('\n');
+  script += QStringLiteral("NEW=") + shellQuote(newFile) + QLatin1Char('\n');
+  script += QStringLiteral("TARGET=") + shellQuote(targetPath) + QLatin1Char('\n');
+  script += QStringLiteral(
+      "while kill -0 \"$PARENT\" 2>/dev/null; do sleep 0.2; done\n"
+      "if [ ! -w \"$(dirname \"$TARGET\")\" ]; then\n"
+      "  echo 'Trophy update: target directory not writable; run from a user-writable location.' >&2\n"
+      "  rm -f \"$0\"\n"
+      "  exit 1\n"
+      "fi\n"
+      "cp -f \"$TARGET\" \"$TARGET.old\" 2>/dev/null\n"
+      "if mv -f \"$NEW\" \"$TARGET\"; then\n"
+      "  chmod +x \"$TARGET\"\n"
+      "  if [ -x \"$TARGET\" ]; then\n"
+      "    rm -f \"$TARGET.old\"\n"
+      "  else\n"
+      "    mv -f \"$TARGET.old\" \"$TARGET\"\n"
+      "  fi\n"
+      "else\n"
+      "  mv -f \"$TARGET.old\" \"$TARGET\" 2>/dev/null\n"
+      "fi\n");
+  // The relaunched instance reports the update. Without this it is
+  // indistinguishable from a normal start, and with "start minimized" the
+  // user sees nothing at all.
+  script += QStringLiteral("\"$TARGET\"");
+  if (!fromVersion.isEmpty())
+    script += QStringLiteral(" --updated-from ") + shellQuote(fromVersion);
+  script += QStringLiteral(" &\nrm -f \"$0\"\n");
+  return script;
+}
+
+QString UpdateInstaller::updateNoticeBody(const QString &fromVersion,
+                                          const QString &toVersion) {
+  if (fromVersion.isEmpty())
+    return QObject::tr("Trophy is now version %1.").arg(toVersion);
+  return QObject::tr("Trophy was updated from %1 to %2.")
+      .arg(fromVersion, toVersion);
+}
+
+bool UpdateInstaller::shouldAnnounceUpdate(const QString &fromVersion,
+                                           const QString &toVersion) {
+  return !fromVersion.isEmpty() && fromVersion != toVersion;
+}
+
 void UpdateInstaller::spawnHelperAndQuit(const QString &newFile,
                                         const QString &targetPath) {
   // Write a helper script that waits for this process to exit, then
@@ -244,36 +294,10 @@ void UpdateInstaller::spawnHelperAndQuit(const QString &newFile,
     fail(QStringLiteral("Failed to create update helper."));
     return;
   }
-  const QByteArray script = QByteArray(
-      "#!/bin/sh\n"
-      "PARENT=") +
-      QByteArray::number(QCoreApplication::applicationPid()) +
-      QByteArray("\nNEW=") +
-      shellQuote(newFile).toUtf8() +
-      QByteArray("\nTARGET=") +
-      shellQuote(targetPath).toUtf8() +
-      QByteArray(
-          "\n"
-          "while kill -0 \"$PARENT\" 2>/dev/null; do sleep 0.2; done\n"
-          "if [ ! -w \"$(dirname \"$TARGET\")\" ]; then\n"
-          "  echo 'Trophy update: target directory not writable; run from a user-writable location.' >&2\n"
-          "  rm -f \"$0\"\n"
-          "  exit 1\n"
-          "fi\n"
-          "cp -f \"$TARGET\" \"$TARGET.old\" 2>/dev/null\n"
-          "if mv -f \"$NEW\" \"$TARGET\"; then\n"
-          "  chmod +x \"$TARGET\"\n"
-          "  if [ -x \"$TARGET\" ]; then\n"
-          "    rm -f \"$TARGET.old\"\n"
-          "  else\n"
-          "    mv -f \"$TARGET.old\" \"$TARGET\"\n"
-          "  fi\n"
-          "else\n"
-          "  mv -f \"$TARGET.old\" \"$TARGET\" 2>/dev/null\n"
-          "fi\n"
-          "\"$TARGET\" &\n"
-          "rm -f \"$0\"\n");
-  helper.write(script);
+  const QString script = buildHelperScript(
+      newFile, targetPath, QCoreApplication::applicationPid(),
+      QCoreApplication::applicationVersion());
+  helper.write(script.toUtf8());
   helper.close();
   QFile::setPermissions(helperPath, QFileDevice::ReadOwner |
                                         QFileDevice::WriteOwner |

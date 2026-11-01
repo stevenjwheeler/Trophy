@@ -171,6 +171,12 @@ public:
   Q_INVOKABLE void reportBug();
   // --minimized CLI flag: behave like startMinimized for this launch.
   void setForceMinimized(bool minimized) { m_forceMinimized = minimized; }
+  // --updated-from: the updater relaunched us, so say so once. The relaunch
+  // is otherwise indistinguishable from a normal start, and a user with
+  // "start minimized" enabled would see no evidence of the restart at all.
+  void setPostUpdateFromVersion(const QString &version) {
+    m_postUpdateFromVersion = version;
+  }
 
 signals:
   void captureAvailabilityChanged();
@@ -307,6 +313,7 @@ private:
   bool m_vulkanLayerRegistered = false;
   bool m_minimizeNotifyShown = false;
   bool m_forceMinimized = false;
+  QString m_postUpdateFromVersion;
   // Update check: the releases-page URL of the latest release
   // seen, so the "View Release" notice action can open it.
   QString m_latestReleaseUrl;

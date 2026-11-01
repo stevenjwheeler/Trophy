@@ -116,10 +116,17 @@ int main(int argc, char *argv[]) {
        "Save a DVR clip, or bookmark the current full recording, then exit."},
       {"add-bookmark", "Bookmark the current full recording on the running instance, then exit."},
       {"show-window", "Show the running instance's window, then exit."},
+      {"updated-from",
+       "Internal: version this launch replaced, used by the AppImage updater "
+       "to announce the update.",
+       "version"},
   });
   parser.process(app);
   if (parser.isSet("minimized")) {
     app.setForceMinimized(true);
+  }
+  if (parser.isSet("updated-from")) {
+    app.setPostUpdateFromVersion(parser.value("updated-from"));
   }
 
   // Single-shot remote commands for native compositor keybinds: if an

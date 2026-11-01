@@ -43,6 +43,21 @@ public:
   // touching the network or the filesystem. Never quits the app.
   Q_INVOKABLE void simulate();
 
+  // Helper script that waits for this process, swaps in the new AppImage and
+  // relaunches it, telling the new instance which version it replaced so it
+  // can say so (the relaunch otherwise looks identical to a normal start, and
+  // with "start minimized" enabled there is no window to notice).
+  static QString buildHelperScript(const QString &newFile,
+                                   const QString &targetPath, qint64 parentPid,
+                                   const QString &fromVersion);
+  // Body of the one-time post-update notice.
+  static QString updateNoticeBody(const QString &fromVersion,
+                                  const QString &toVersion);
+  // Only a real version change deserves a notice (a same-version reinstall
+  // would otherwise claim "updated from 0.9.8 to 0.9.8").
+  static bool shouldAnnounceUpdate(const QString &fromVersion,
+                                   const QString &toVersion);
+
 signals:
   void busyChanged();
   void progressChanged();
