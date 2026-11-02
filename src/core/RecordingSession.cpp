@@ -25,6 +25,14 @@ extern "C" {
 
 namespace TrophyBackend {
 
+namespace {
+// FFmpegEncoder hands timestamps to the muxer in whole milliseconds (it
+// divides the microsecond capture clock by 1000), so a frame retimed behind a
+// filler must clear it by at least 1 ms. A +1 us bump still truncates to the
+// same muxer millisecond, which FFmpeg rejects as a duplicate DTS.
+constexpr int64_t kStillRetimeStepUs = 1000;
+} // namespace
+
 RecordingSession::RecordingSession(const QString &outputPath,
                                    IVideoCaptureSource *capture,
                                    IEncoder *encoder, IMuxer *muxer,
@@ -977,7 +985,7 @@ void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
     std::lock_guard<std::mutex> lock(m_stillFrameMutex);
     timestamp = frame.timestamp;
     if (m_lastIssuedTimestampUs >= timestamp)
-      timestamp = m_lastIssuedTimestampUs + 1;
+      timestamp = m_lastIssuedTimestampUs + kStillRetimeStepUs;
     last->timestamp = timestamp;
     m_lastFramePixels = std::move(pixels);
     m_lastFrame = std::move(last);
@@ -1039,33 +1047,38 @@ void RecordingSession::emitStillFrames() {
   if (!m_running || !m_videoFrameDurationUs)
     return;
   const int64_t interval = m_videoFrameDurationUs;
-  std::vector<VideoFrame> pending;
-  // Hold a reference to the pixels: the capture thread may replace them as soon
-  // as the lock is released, and the repeats below still point into them.
-  std::shared_ptr<std::vector<uint8_t>> pixels;
-  {
-    std::lock_guard<std::mutex> lock(m_stillFrameMutex);
-    if (!m_lastFrame)
-      return;
-    pixels = m_lastFramePixels;
-    // Stay a frame and a half behind the capture clock so a real frame that is
-    // already on its way never lands behind a filler.
-    const int64_t captureNow = nowUs() + m_frameClockOffsetUs;
-    // Catch up if the owner thread was busy, but never flood the queue.
-    while (pending.size() < 8 &&
-           captureNow >= m_lastIssuedTimestampUs + interval * 3 / 2) {
-      VideoFrame still = *m_lastFrame;
-      if (pixels)
-        still.data = pixels->data();
-      m_lastIssuedTimestampUs += interval;
-      still.timestamp = m_lastIssuedTimestampUs;
-      pending.push_back(still);
-    }
-  }
-  // A repeated frame does not move the capture clock forward: the real frames
-  // keep their own timestamps and this only fills the space between them.
-  for (auto &still : pending)
+  // Reserve filler timestamps and hand them to the encoder under one lock
+  // hold. Publishing the reserved timestamps first and pushing afterwards let
+  // a real capture frame (retimed past them) reach the encoder ahead of the
+  // batch, after which the fillers arrived with older timestamps and FFmpeg
+  // refused the packet ("non monotonically increasing dts"), aborting the
+  // whole recording.
+  std::lock_guard<std::mutex> lock(m_stillFrameMutex);
+  if (!m_lastFrame)
+    return;
+  // Hold a reference to the pixels: the capture thread may replace them as
+  // soon as the lock is released, and the repeats below still point into them.
+  const std::shared_ptr<std::vector<uint8_t>> pixels = m_lastFramePixels;
+  // Stay a frame and a half behind the capture clock so a real frame that is
+  // already on its way never lands behind a filler.
+  const int64_t captureNow = nowUs() + m_frameClockOffsetUs;
+  // Catch up if the owner thread was busy, but never flood the queue.
+  int emitted = 0;
+  while (emitted < 8 &&
+         captureNow >= m_lastIssuedTimestampUs + interval * 3 / 2) {
+    VideoFrame still = *m_lastFrame;
+    if (pixels)
+      still.data = pixels->data();
+    m_lastIssuedTimestampUs += interval;
+    still.timestamp = m_lastIssuedTimestampUs;
+    if (emitted == 0 && m_stillFrameHandoverHook)
+      m_stillFrameHandoverHook();
+    // A repeated frame does not move the capture clock forward: the real
+    // frames keep their own timestamps and this only fills the space between
+    // them.
     handFrameToEncoding(still);
+    ++emitted;
+  }
 }
 
 bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
@@ -1268,13 +1281,26 @@ void RecordingSession::setStallGuardForTesting(int frames, int timeoutMs) {
   m_stallTimeoutMs = std::max(1, timeoutMs);
 }
 
+void RecordingSession::setStillFrameHandoverHookForTesting(
+    std::function<void()> hook) {
+  std::lock_guard<std::mutex> lock(m_stillFrameMutex);
+  m_stillFrameHandoverHook = std::move(hook);
+}
+
 bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
-  if (!m_muxer || !m_muxer->writePacket(packet)) {
-    m_outputFailed = true;
-    return false;
+  if (m_muxer && m_muxer->writePacket(packet)) {
+    m_outputPayloadBytes += qint64(packet.data.size());
+    return true;
   }
-  m_outputPayloadBytes += qint64(packet.data.size());
-  return true;
+  if (m_muxer) {
+    // Keep the muxer's own reason (e.g. a real I/O failure) instead of the
+    // generic "output may be incomplete" fallback shown by the manager.
+    const QString reason = m_muxer->lastError();
+    if (!reason.isEmpty())
+      setOutputError(reason);
+  }
+  m_outputFailed = true;
+  return false;
 }
 
 void RecordingSession::drainMergedAudio(int channels, bool flushTail) {

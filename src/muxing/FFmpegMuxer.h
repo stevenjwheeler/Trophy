@@ -39,6 +39,7 @@ public:
   QString outputPath() const override { return m_outputPath; }
   int64_t bytesWritten() const override;
   QString formatName() const override;
+  QString lastError() const override;
 
 private:
   friend class ::MuxerTest;
@@ -48,6 +49,13 @@ private:
   QString m_outputPath;
   AVFormatContext *m_formatCtx = nullptr;
   std::vector<AVStream *> m_streams;
+  // Reason for the last failed write/header/finalize (empty on success).
+  QString m_lastError;
+  // Last accepted dts per stream, in that stream's time base. FFmpeg refuses
+  // a packet that steps backwards and fails the whole mux, so a stray
+  // out-of-order stamp is clamped forward instead of ending the recording.
+  std::vector<int64_t> m_lastDts;
+  int64_t m_clampedTimestamps = 0;
   
   bool m_headerWritten = false;
   bool m_finalized = false;

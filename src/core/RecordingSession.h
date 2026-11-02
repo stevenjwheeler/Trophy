@@ -25,6 +25,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -73,6 +74,10 @@ public:
   // Test hook: fire the stall guard after `frames` input frames without an
   // output packet, once `timeoutMs` has elapsed.
   void setStallGuardForTesting(int frames, int timeoutMs);
+  // Test hook: called once per filler batch, after its timestamps are reserved
+  // and before it is handed to the encoder. A regression can use it to deliver
+  // a real capture frame inside that handover window.
+  void setStillFrameHandoverHookForTesting(std::function<void()> hook);
   QString outputErrorTextForTesting() const { return outputErrorText(); }
 
   bool isRunning() const { return m_running; }
@@ -338,6 +343,9 @@ private:
   // The capture callback runs on the PipeWire thread while the timer runs on
   // the session's thread, so the retained frame is published under a lock.
   mutable std::mutex m_stillFrameMutex;
+  // Seam for the filler/real-frame handover ordering regression; read and
+  // written under m_stillFrameMutex.
+  std::function<void()> m_stillFrameHandoverHook;
   int64_t m_lastFrameWallUs = -1;
   int64_t m_lastIssuedTimestampUs = -1;
   // Capture timestamps lag their arrival by the pipeline's own latency; this
