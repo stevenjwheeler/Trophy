@@ -70,7 +70,7 @@ After recording, seek to a moment in the player and use **Add bookmark at curren
 
 Choose **Share** in the player, or select library captures and choose **Export → Share-ready MP4**.
 
-1. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are mixed into **one stereo AAC track** (no selected audio produces a silent video), because chat apps and social sites cannot switch between tracks.
+1. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are mixed into **one stereo track** — MP3, which is widely supported and encodes quickly (AAC is used when MP3 is unavailable) — because chat apps and social sites cannot switch between tracks. When exactly one stereo AAC track is selected, it is copied unchanged instead of re-encoded.
 2. Choose a destination **outside the managed recording library**.
 3. Start the export. Progress and cancellation appear in background toasts.
 

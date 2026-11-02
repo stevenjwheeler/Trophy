@@ -213,6 +213,50 @@ protected:
     avformat_close_input(&ctx);
     return {bytes, hash};
   }
+  // Payload-only digest of one stream (0-based per media type), so a copy and
+  // a re-encode cannot be confused.
+  QPair<qint64, quint64> digest(const QString &path, AVMediaType type, int ordinal) {
+    AVFormatContext *ctx = nullptr;
+    if (avformat_open_input(&ctx, QFile::encodeName(path).constData(), nullptr, nullptr) < 0)
+      return {-1, 0};
+    avformat_find_stream_info(ctx, nullptr);
+    int streamIndex = -1, seen = 0;
+    for (unsigned i = 0; i < ctx->nb_streams; ++i)
+      if (ctx->streams[i]->codecpar->codec_type == type && seen++ == ordinal)
+        streamIndex = int(i);
+    AVPacket *p = av_packet_alloc();
+    qint64 bytes = 0;
+    quint64 hash = 1469598103934665603ULL;
+    while (av_read_frame(ctx, p) >= 0) {
+      if (p->stream_index == streamIndex) {
+        bytes += p->size;
+        for (int i = 0; i < p->size; ++i) {
+          hash ^= p->data[i];
+          hash *= 1099511628211ULL;
+        }
+      }
+      av_packet_unref(p);
+    }
+    av_packet_free(&p);
+    avformat_close_input(&ctx);
+    return {bytes, hash};
+  }
+  // Quietest 10 ms window in [start, start+span]: a gap at a segment join
+  // shows up as a near-silent window.
+  double minWindowRms(const std::vector<float> &samples, double start, double span) {
+    const int window = 480;
+    const int begin = int(start * 48000), end = int((start + span) * 48000);
+    double quietest = 1.0;
+    for (int at = begin; at + window <= end && (at + window) * 2 <= int(samples.size()); at += window / 2) {
+      double sum = 0;
+      for (int i = 0; i < window; ++i) {
+        const double value = samples[size_t(at + i) * 2];
+        sum += value * value;
+      }
+      quietest = std::min(quietest, std::sqrt(sum / window));
+    }
+    return quietest;
+  }
   double tone(const std::vector<float> &samples, double frequency, double start = 0.6, double span = 0.4) {
     double sine = 0, cosine = 0;
     const int begin = int(start * 48000), count = int(span * 48000);
@@ -283,7 +327,10 @@ TEST_F(ShareExportTest, InspectAndMixProducesFastStartCompatibleMp4) {
   EXPECT_EQ(ctx->streams[0]->codecpar->width, 320);
   EXPECT_EQ(ctx->streams[0]->codecpar->height, 180);
   EXPECT_EQ(ctx->streams[0]->nb_frames, 60); // 2s at 30fps, copied 1:1.
-  EXPECT_EQ(ctx->streams[1]->codecpar->codec_id, AV_CODEC_ID_AAC);
+  // The mix is MP3-in-MP4 when libmp3lame is available (it encodes ~3x
+  // faster than native AAC), otherwise AAC.
+  EXPECT_EQ(ctx->streams[1]->codecpar->codec_id,
+            avcodec_find_encoder_by_name("libmp3lame") ? AV_CODEC_ID_MP3 : AV_CODEC_ID_AAC);
   EXPECT_EQ(ctx->streams[1]->codecpar->ch_layout.nb_channels, 2);
   avformat_close_input(&ctx);
   QFile file(output.path); ASSERT_TRUE(file.open(QIODevice::ReadOnly)); const auto bytes = file.readAll();
@@ -322,6 +369,26 @@ TEST_F(ShareExportTest, CopiesVideoPacketsVerbatim) {
   EXPECT_EQ(videoDigest(result.path), expected);
   EXPECT_NE(result.path, source);
   EXPECT_TRUE(QFile::exists(source));
+}
+
+TEST_F(ShareExportTest, SingleStereoTrackIsCopiedWithoutReencoding) {
+  // Real recordings carry AAC; selecting exactly one stereo AAC track must
+  // copy its packets verbatim instead of decoding, mixing and re-encoding.
+  const QString aacSource = directory.filePath("AacCopy.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=320x180:rate=30:duration=1", "-f", "lavfi", "-i",
+      "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a",
+      "-c:v", "mpeg4", "-c:a", "aac", "-ac", "2", aacSource});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+
+  const auto expected = digest(aacSource, AVMEDIA_TYPE_AUDIO, 0);
+  ASSERT_GT(expected.first, 0);
+  const auto result =
+      ShareExportEngine::run(aacSource, directory.path(), {{1}}, cancel, progress);
+  ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+  EXPECT_EQ(digest(result.path, AVMEDIA_TYPE_AUDIO, 0), expected);
 }
 
 TEST_F(ShareExportTest, TrackSelectionExcludesVoiceAndPreservesLateOffset) {
