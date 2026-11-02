@@ -301,10 +301,28 @@ target_link_libraries(test_ControlServer PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_ControlServer)
 
 # --- UpdateChecker (pure statics; no network needed) ---
-add_executable(test_UpdateChecker test_UpdateChecker.cpp ${CMAKE_SOURCE_DIR}/src/core/UpdateChecker.cpp)
+add_executable(test_UpdateChecker test_UpdateChecker.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/UpdateChecker.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/ReleaseNotes.cpp)
 target_include_directories(test_UpdateChecker PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
+target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network Qt6::Gui)
 gtest_discover_tests(test_UpdateChecker)
+
+# --- ReleaseNotes (Markdown -> themed rich text, no GUI needed) ---
+add_executable(test_ReleaseNotes test_ReleaseNotes.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/ReleaseNotes.cpp)
+target_include_directories(test_ReleaseNotes PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_ReleaseNotes PRIVATE GTest::GTest GTest::gtest_main
+    Qt6::Core Qt6::Gui)
+gtest_discover_tests(test_ReleaseNotes)
+
+# --- ReleaseNotesView (real QML engine load; scrolling/link handoff) ---
+add_executable(test_ReleaseNotesView test_ReleaseNotesView.cpp)
+target_compile_definitions(test_ReleaseNotesView PRIVATE
+    RELEASE_NOTES_QML_FILE="${CMAKE_SOURCE_DIR}/qml/controls/ReleaseNotesView.qml")
+target_link_libraries(test_ReleaseNotesView PRIVATE GTest::GTest
+    Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_ReleaseNotesView)
 
 # --- CrashHandler (fatal signals must reach the log) ---
 add_executable(test_CrashHandler test_CrashHandler.cpp

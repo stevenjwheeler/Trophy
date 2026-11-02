@@ -35,6 +35,17 @@ Page {
     property string updateDigest: ""
     property string updateLatestVersion: ""
     property bool showUpdateDialog: false
+    // GitHub publishes release bodies as Markdown. Render them with the
+    // app theme before handing them to the dialog; re-evaluates when the
+    // body or the theme colours change.
+    readonly property string updateNotesHtml: {
+        if (!root.updates || root.updateLatestVersion === "" ||
+                typeof root.updates.formatReleaseNotes !== "function")
+            return ""
+        return root.updates.formatReleaseNotes(root.updates.latestReleaseNotes,
+                                               Theme.accentColor,
+                                               Theme.cardColor)
+    }
     readonly property Flickable scrollContent: infoScroll.contentItem as Flickable
 
     Connections {
@@ -813,7 +824,10 @@ Page {
         title: root.updateLatestVersion !== ""
             ? qsTr("Version %1").arg(root.updateLatestVersion)
             : qsTr("Update available")
-        message: root.updates ? root.updates.latestReleaseNotes : ""
+        message: root.updateNotesHtml === ""
+            ? qsTr("No release notes were provided for this release.")
+            : ""
+        notesHtml: root.updateNotesHtml
         warningMessage: (recordingManager && recordingManager.isRecording)
             ? qsTr("Recording in progress. Stop recording to update.")
             : ""

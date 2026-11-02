@@ -9,6 +9,9 @@ T.Dialog {
 
     property string message: ""
     property string warningMessage: ""
+    // Optional Markdown release notes rendered as themed rich text.
+    property string notesHtml: ""
+    property int notesMaximumHeight: 320
     property bool showDontAsk: false
     property alias dontAskChecked: dontAskCheckbox.checked
     property string confirmText: qsTr("Confirm")
@@ -93,6 +96,9 @@ T.Dialog {
         // Message
         Label {
             Layout.fillWidth: true
+            // An empty message must not leave its layout margins behind:
+            // an invisible item is skipped by Qt Quick Layouts.
+            visible: control.message.length > 0
             Layout.margins: Theme.spacingLarge
             Layout.topMargin: Theme.spacingMedium
             text: control.message
@@ -100,6 +106,21 @@ T.Dialog {
             color: control._textMuted
             lineHeight: 1.2
             font.pixelSize: Theme.fontSizeNormal
+        }
+
+        // Rich release notes (Markdown rendered by ReleaseNotesView).
+        ReleaseNotesView {
+            objectName: "dialogNotes"
+            visible: control.notesHtml.length > 0
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spacingLarge
+            Layout.rightMargin: Theme.spacingLarge
+            Layout.topMargin: control.message.length > 0
+                ? Theme.spacingMedium
+                : Theme.spacingLarge
+            maximumHeight: control.notesMaximumHeight
+            html: control.notesHtml
+            onLinkActivated: (link) => Qt.openUrlExternally(link)
         }
 
         Rectangle {

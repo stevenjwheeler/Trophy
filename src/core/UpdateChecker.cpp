@@ -8,6 +8,7 @@
 #include "UpdateChecker.h"
 
 #include "InstallInfo.h"
+#include "ReleaseNotes.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -76,6 +77,12 @@ int UpdateChecker::compareVersions(int aMajor, int aMinor,
       return -1;
   }
   return 0;
+}
+
+QString UpdateChecker::formatReleaseNotes(const QString &markdown,
+                                          const QColor &accentColor,
+                                          const QColor &cardColor) const {
+  return TrophyBackend::releaseNotesHtml(markdown, accentColor, cardColor);
 }
 
 QString UpdateChecker::selectAssetUrl(const QJsonObject &root,

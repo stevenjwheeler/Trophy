@@ -4,6 +4,7 @@
  * (pure statics; no network involved).
  */
 
+#include <QColor>
 #include <QCoreApplication>
 #include <QSignalSpy>
 #include <gtest/gtest.h>
@@ -58,6 +59,16 @@ TEST(UpdateCheckerTest, RejectsNonReleaseShapes) {
   // Prerelease suffixes are not plain release tags.
   EXPECT_FALSE(UpdateChecker::parseVersion("v0.10.0-rc1", &major, &minor,
                                             &patch));
+}
+
+TEST(UpdateCheckerTest, FormatsReleaseNotesForTheDialog) {
+  UpdateChecker checker;
+  const QString html = checker.formatReleaseNotes(
+      QStringLiteral("## What's Changed\n\n- **Fixed** the thing"),
+      QColor(QStringLiteral("#e94560")),
+      QColor(QStringLiteral("#090909")));
+  EXPECT_TRUE(html.contains(QStringLiteral("<h2")));
+  EXPECT_TRUE(html.contains(QStringLiteral("<b>Fixed</b>")));
 }
 
 TEST(UpdateCheckerTest, CompareVersions) {
