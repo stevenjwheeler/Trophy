@@ -23,6 +23,15 @@
 #include <tuple>
 #include <gtest/gtest.h>
 
+namespace {
+std::mutex g_qtMessageMutex;
+QStringList g_qtMessages;
+void captureQtMessage(QtMsgType, const QMessageLogContext &, const QString &message) {
+  std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+  g_qtMessages << message;
+}
+} // namespace
+
 #include "audio/AudioMixer.h"
 #include "audio/IAudioSource.h"
 #include "audio/AudioRoutingInfo.h"
@@ -2137,4 +2146,47 @@ TEST(RecordingSessionTest, StillFillersNeverOvertakeALateRealFrame) {
   for (size_t i = 1; i < encoder.timestamps.size(); ++i)
     EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
         << "timeline went backwards at frame " << i;
+}
+
+// Stopping asynchronously drains native work on a worker thread. The pacing
+// timer belongs to the session's own thread, so the worker must not touch it:
+// Qt refuses a cross-thread stop, warns, and leaves the timer armed.
+TEST(RecordingSessionTest, AsyncStopDoesNotStopThePacingTimerFromTheWorker) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused-timers.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 128, 0);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  {
+    std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+    g_qtMessages.clear();
+  }
+  const auto previous = qInstallMessageHandler(captureQtMessage);
+  session.requestStop();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (session.stopPending() && std::chrono::steady_clock::now() < deadline) {
+    QCoreApplication::processEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  qInstallMessageHandler(previous);
+  EXPECT_FALSE(session.stopPending());
+
+  std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+  for (const auto &message : g_qtMessages)
+    EXPECT_FALSE(message.contains("Timers cannot be stopped from another thread"))
+        << message.toStdString();
 }

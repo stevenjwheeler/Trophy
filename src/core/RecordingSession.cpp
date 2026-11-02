@@ -764,6 +764,11 @@ bool RecordingSession::retireStopRouting(bool keepCaptureSource, bool handoffRou
   }
 
   m_running = false;
+  // The pacing timer belongs to this thread. Native draining runs on a worker
+  // (requestStop), so leaving the stop there makes Qt refuse it from the wrong
+  // thread and leaves the timer armed.
+  if (m_stillFrameTimer)
+    m_stillFrameTimer->stop();
   if (m_audioMixer) {
     if (!handoffRouting)
       m_audioMixer->setTrackAudioCallback(nullptr);
@@ -780,8 +785,8 @@ bool RecordingSession::retireStopRouting(bool keepCaptureSource, bool handoffRou
 }
 
 void RecordingSession::finishStopNative() {
-  if (m_stillFrameTimer)
-    m_stillFrameTimer->stop();
+  // The timer was stopped on its own thread during retirement; release the
+  // retained frame here, where the worker may own the teardown.
   {
     std::lock_guard<std::mutex> lock(m_stillFrameMutex);
     m_lastFrame.reset();
