@@ -746,3 +746,64 @@ TEST_F(ShareExportTest, CopiedHevcIsTaggedHvc1ForApplePlayers) {
   EXPECT_GT(bytes.indexOf(QByteArrayLiteral("hvc1")), 0);
   EXPECT_EQ(bytes.indexOf(QByteArrayLiteral("hev1")), -1);
 }
+
+// A still stretch in the recording (a loading screen produces no frames) is
+// copied as one long sample rather than filled: repeating a keyframe over a
+// gap breaks every prediction that follows it, which corrupts playback.
+TEST_F(ShareExportTest, StillStretchIsCopiedThroughUnchanged) {
+  const QString gapped = directory.filePath("gapped.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-i", source, "-map", "0",
+      "-vf", "select='not(between(t,0.5,1.5))'", "-fps_mode", "passthrough",
+      "-c:v", "libx264", "-g", "12", "-c:a", "copy", gapped});
+  ASSERT_TRUE(ffmpeg.waitForFinished(60000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+
+  const auto output = ShareExportEngine::run(gapped, directory.path(), {{1}}, cancel, progress);
+  ASSERT_TRUE(output.error.isEmpty()) << output.error.toStdString();
+
+  QProcess probe;
+  probe.start("ffprobe", {"-v", "error", "-select_streams", "v:0",
+      "-show_entries", "packet=duration_time", "-of", "csv=p=0", output.path});
+  ASSERT_TRUE(probe.waitForFinished(60000));
+  const auto rows = QString::fromUtf8(probe.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+  ASSERT_FALSE(rows.isEmpty());
+  double longest = 0;
+  for (const auto &row : rows)
+    longest = std::max(longest, row.trimmed().toDouble());
+  // The hole is still there, and nothing was inserted to fill it.
+  EXPECT_GT(longest, 0.5);
+  EXPECT_LT(rows.size(), 45); // roughly the source's own frames
+}
+
+// Conversion re-encodes, so it can fill a still stretch honestly: the repeated
+// frames are near-empty P-frames, no sample spans the hole, and nothing
+// downstream is corrupted (unlike repeating a keyframe in a remux).
+TEST_F(ShareExportTest, ConversionFillsAStretchLeftByAStillScreen) {
+  const QString gapped = directory.filePath("gapped-convert.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-i", source, "-map", "0",
+      "-vf", "select='not(between(t,0.5,1.5))'", "-fps_mode", "passthrough",
+      "-c:v", "libx264", "-g", "12", "-c:a", "copy", gapped});
+  ASSERT_TRUE(ffmpeg.waitForFinished(60000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+
+  ShareExportOptions options;
+  options.audioStreams = {1};
+  options.mode = ShareExportOptions::Mode::Convert;
+  const auto output = ShareExportEngine::run(gapped, directory.path(), options, cancel, progress);
+  ASSERT_TRUE(output.error.isEmpty()) << output.error.toStdString();
+
+  QProcess probe;
+  probe.start("ffprobe", {"-v", "error", "-select_streams", "v:0",
+      "-show_entries", "packet=duration_time", "-of", "csv=p=0", output.path});
+  ASSERT_TRUE(probe.waitForFinished(60000));
+  const auto rows = QString::fromUtf8(probe.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+  ASSERT_FALSE(rows.isEmpty());
+  double longest = 0;
+  for (const auto &row : rows)
+    longest = std::max(longest, row.trimmed().toDouble());
+  EXPECT_LT(longest, 0.2) << "a sample still covers the still stretch";
+  // ~2 s at 30 fps, so the hole is filled rather than skipped.
+  EXPECT_GE(rows.size(), 50);
+}

@@ -371,6 +371,7 @@ ShareExportResult convertExport(const QString &source, const QString &directory,
   const AVRational rate = av_guess_frame_rate(input.get(), inVideo, nullptr);
   if (rate.num > 0 && rate.den > 0)
     fps = std::clamp<int64_t>(std::llround(av_q2d(rate)), 1, 240);
+  const int64_t frameStepUs = std::max<int64_t>(1, 1000000 / fps);
 
   // Encoder preference: NVENC (accepts system frames directly), then VA-API
   // (needs NV12 surfaces uploaded per frame), then software x264.
@@ -527,6 +528,7 @@ ShareExportResult convertExport(const QString &source, const QString &directory,
   Frame hardware;
   int64_t lastVideoUs = 0;
   int64_t lastEndUs = 0;
+  bool haveScaled = false;
   bool hdrChecked = false;
 
   auto encodeDecoded = [&](AVFrame *decoded) {
@@ -544,12 +546,49 @@ ShareExportResult convertExport(const QString &source, const QString &directory,
         ? lastEndUs
         : av_rescale_q(decoded->best_effort_timestamp, inVideo->time_base, kUs) - originUs;
     writeAudioUntil(ptsUs - kAudioLeadUs);
+    // Capture is damage-driven, so a still screen leaves the previous frame
+    // covering a stretch of time. Re-encoding can fill that honestly: send the
+    // frame we already scaled again, at the frame rate, so the output is
+    // constant-rate and no sample spans the still. Each repeat costs a
+    // near-empty P-frame rather than a keyframe.
+    if (haveScaled && ptsUs - lastEndUs > frameStepUs * 3 / 2) {
+      for (int64_t at = lastEndUs + frameStepUs; at + frameStepUs / 2 < ptsUs;
+           at += frameStepUs) {
+        const int64_t repeatMs = av_rescale_q(at, kUs, videoEncoder->time_base);
+        AVFrame *repeat = scaled.get();
+        scaled->pts = repeatMs;
+        if (useVaapi) {
+          if (!hardware)
+            hardware = frame();
+          av_frame_unref(hardware.get());
+          ffcheck(av_hwframe_get_buffer(videoEncoder->hw_frames_ctx, hardware.get(), 0),
+                  "Cannot allocate export surface.");
+          ffcheck(av_hwframe_transfer_data(hardware.get(), scaled.get(), 0),
+                  "Cannot upload export frame.");
+          hardware->pts = repeatMs;
+          repeat = hardware.get();
+        }
+        ffcheck(avcodec_send_frame(videoEncoder.get(), repeat),
+                "Cannot encode export frame");
+        auto drained = packet();
+        while (true) {
+          const int result = avcodec_receive_packet(videoEncoder.get(), drained.get());
+          if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+          ffcheck(result, "Cannot receive encoded export packet");
+          av_packet_rescale_ts(drained.get(), videoEncoder->time_base, outVideo->time_base);
+          drained->stream_index = outVideo->index;
+          ffcheck(av_interleaved_write_frame(out.ctx, drained.get()),
+                  "Cannot write export (check free disk space)");
+        }
+      }
+    }
     if (!scalerReady) {
       scalerReady = true;
       check(scaler.initialize(), "Cannot configure export scaling.");
     }
     ffcheck(av_frame_make_writable(scaled.get()), "Cannot write export frame.");
     check(scaler.scale(decoded, scaled.get()), "Cannot scale export frame");
+    haveScaled = true;
     const int64_t ptsMs = av_rescale_q(ptsUs, kUs, videoEncoder->time_base);
     AVFrame *feed = scaled.get();
     scaled->pts = ptsMs;

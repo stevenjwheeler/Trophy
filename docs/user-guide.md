@@ -12,6 +12,8 @@ Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 **Settings → Frame Rate** limits full recordings and DVR without limiting the game's FPS. Choose **∞ (Uncapped)** to keep every delivered frame instead. Uncapped capture can increase processing load; the actual rate depends on the game, compositor and encoder. Fixed limits skip excess frames without speeding up playback or changing audio timing. Capture Info can therefore show capture FPS above the selected limit while encode FPS stays near it; intentional rate limiting is not a queue-overflow drop.
 
+The compositor sends no frames at all while the screen is still — a loading screen, a menu, or a paused game. Trophy repeats the last frame at the target rate in that case, so recordings stay constant-rate and players never wait on a frame that covers many seconds. A repeated frame compresses to almost nothing. Recordings made before this change can still contain those long frames.
+
 The Dashboard shows source connection/mute status, audio levels, approximate replay-buffer fill, and warnings for sustained video-queue drops. Connected does not necessarily mean audible; check the meters and play back a short test recording after changing your setup.
 
 While recording or DVR is active, click **ⓘ** beside the recording control for live **Capture Info**:
@@ -81,6 +83,8 @@ Because the video is copied, the MP4 keeps the recording's codec — so the copy
 HEVC and AV1 recordings cannot be copied into something a phone will reliably play, so the dialog **defaults to Convert to H.264 (compatibility)** for them and still offers the copy for cases where it does not matter. Converting re-encodes the video to H.264 (hardware encoder when available, x264 otherwise) and mixes the selected tracks into one stereo AAC track, producing the same H.264 + AAC shape as an H.264 copy. It decodes and re-encodes the whole file, so it takes minutes rather than seconds — the dialog quotes an estimate, and a machine without a hardware encoder is much slower. The optional resolution choice (original, 1080p, 720p) never upscales.
 
 Record with VA-API H.264, NVENC H.264 or x264 if you mostly share your recordings: that keeps every export on the copy path. Copied HEVC is tagged `hvc1` so Apple's players accept it, but browsers and older players still may not.
+
+A copy also preserves the recording's timing exactly. An older recording with a long still stretch keeps that stretch as one long frame, which some players treat as a freeze; **Convert** re-encodes and fills those stretches with repeated frames. That is the only way to remove them — repeating a frame in a copy would break the encoded predictions that follow it.
 
 For batches, the destination applies to all captures while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
 

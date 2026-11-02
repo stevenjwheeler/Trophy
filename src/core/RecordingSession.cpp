@@ -432,15 +432,7 @@ bool RecordingSession::start() {
       if (!admitVideoFrame(frame.timestamp))
         return;
 
-      std::lock_guard<std::mutex> lock(m_queueMutex);
-      if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
-        m_videoQueue.emplace(frame);
-        noteQueueDepth();
-        m_queueCv.notify_one();
-      } else {
-        qWarning() << "Video queue full, dropping frame";
-        ++m_queueDrops;
-      }
+      queueCapturedFrame(frame);
     });
   } else {
     m_capture->setFrameCallback([this](const VideoFrame &frame) {
@@ -455,34 +447,7 @@ bool RecordingSession::start() {
       if (!admitVideoFrame(frame.timestamp))
         return;
 
-      // Build a FrameDescriptor and dispatch (non-blocking)
-      FrameDescriptor fd;
-      if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
-        fd.fd = ::dup(frame.dmaBufFd);
-        if (fd.fd == -1) {
-          return; // cannot dup, drop
-        }
-        fd.width = frame.width;
-        fd.height = frame.height;
-        fd.format = frame.drmFormat;
-        fd.pixelFormat = frame.pixelFormat;
-        fd.drmModifier = frame.drmModifier;
-        fd.dmaBufStride = frame.dmaBufStride;
-        fd.dmaBufOffset = frame.dmaBufOffset;
-        fd.bufferLease = frame.bufferLease;
-        fd.requestCpuFallback = frame.requestCpuFallback;
-        fd.pts = frame.timestamp;
-        m_frameDispatcher->dispatch(fd);
-      } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
-        // Latch the video wall clock (see above).
-        // Software frame path: build a QueuedFrame and enqueue directly
-        QueuedFrame qf(frame);
-        if (qf.data) {
-          pushQueuedFrame(std::move(qf));
-        }
-      } else {
-        return;
-      }
+      queueCapturedFrame(frame);
     });
   }
 
@@ -494,6 +459,18 @@ bool RecordingSession::start() {
     emit errorOccurred("Failed to start video capture");
     return false;
   }
+
+  if (!m_stillFrameTimer) {
+    m_stillFrameTimer = new QTimer(this);
+    m_stillFrameTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_stillFrameTimer, &QTimer::timeout, this,
+            &RecordingSession::emitStillFrames);
+  }
+  // At very high encode rates the timer would wake more often than useful; the
+  // catch-up loop below emits several frames per tick instead.
+  if (m_videoFrameDurationUs > 0)
+    m_stillFrameTimer->start(
+        int(std::clamp<int64_t>(m_videoFrameDurationUs / 1000, 4, 1000)));
 
   if (m_audioMixer) {
     // Start streams that are not already running. DVR switches keep the
@@ -803,6 +780,13 @@ bool RecordingSession::retireStopRouting(bool keepCaptureSource, bool handoffRou
 }
 
 void RecordingSession::finishStopNative() {
+  if (m_stillFrameTimer)
+    m_stillFrameTimer->stop();
+  {
+    std::lock_guard<std::mutex> lock(m_stillFrameMutex);
+    m_lastFrame.reset();
+    m_lastFramePixels.reset();
+  }
   if (m_finishCaptureStop && m_capture) {
     m_capture->finishStopCapture();
     m_capture->setFrameCallback(nullptr);
@@ -945,6 +929,118 @@ void RecordingSession::encodingLoop() {
   }
 
   qDebug() << "Encoding thread stopped";
+}
+
+// Routes a real captured frame on, keeping one copy so a still screen can be
+// repeated at the encode rate. A frame is retimed by a single tick if the
+// filler has already published a timestamp at or past it: producer timestamps
+// can lag their arrival by more than the filler's margin.
+void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
+  // Shared-memory frames borrow the producer's mapping, which goes straight
+  // back to PipeWire, so the pixels are copied; DMA-BUF frames are kept alive
+  // by their lease instead.
+  std::shared_ptr<std::vector<uint8_t>> pixels;
+  if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
+    const size_t bytes = size_t(frame.stride) * size_t(frame.height);
+    pixels = std::make_shared<std::vector<uint8_t>>(bytes);
+    std::memcpy(pixels->data(), frame.data, bytes);
+  }
+  const int64_t wall = nowUs();
+  auto last = std::make_shared<VideoFrame>(frame);
+  int64_t timestamp;
+  {
+    std::lock_guard<std::mutex> lock(m_stillFrameMutex);
+    timestamp = frame.timestamp;
+    if (m_lastIssuedTimestampUs >= timestamp)
+      timestamp = m_lastIssuedTimestampUs + 1;
+    last->timestamp = timestamp;
+    m_lastFramePixels = std::move(pixels);
+    m_lastFrame = std::move(last);
+    m_lastFrameWallUs = wall;
+    m_lastIssuedTimestampUs = timestamp;
+    // Capture timestamps trail their arrival by the pipeline's own latency.
+    // This turns the wall clock back into the capture clock.
+    m_frameClockOffsetUs = timestamp - wall;
+  }
+  if (timestamp == frame.timestamp) {
+    handFrameToEncoding(frame);
+  } else {
+    VideoFrame retimed = frame;
+    retimed.timestamp = timestamp;
+    handFrameToEncoding(retimed);
+  }
+}
+
+void RecordingSession::handFrameToEncoding(const VideoFrame &frame) {
+  if (!m_frameDispatcher) {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+      m_videoQueue.emplace(frame);
+      noteQueueDepth();
+      m_queueCv.notify_one();
+    } else {
+      qWarning() << "Video queue full, dropping frame";
+      ++m_queueDrops;
+    }
+    return;
+  }
+  if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
+    FrameDescriptor fd;
+    fd.fd = ::dup(frame.dmaBufFd);
+    if (fd.fd == -1)
+      return; // cannot dup, drop
+    fd.width = frame.width;
+    fd.height = frame.height;
+    fd.format = frame.drmFormat;
+    fd.pixelFormat = frame.pixelFormat;
+    fd.drmModifier = frame.drmModifier;
+    fd.dmaBufStride = frame.dmaBufStride;
+    fd.dmaBufOffset = frame.dmaBufOffset;
+    fd.bufferLease = frame.bufferLease;
+    fd.requestCpuFallback = frame.requestCpuFallback;
+    fd.pts = frame.timestamp;
+    m_frameDispatcher->dispatch(fd);
+  } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
+    QueuedFrame qf(frame);
+    if (qf.data)
+      pushQueuedFrame(std::move(qf));
+  }
+}
+
+// A damage-driven capture delivers nothing while the screen is still, so the
+// last frame is repeated at the encode rate: the recording stays constant-rate
+// and no sample ends up covering a loading screen.
+void RecordingSession::emitStillFrames() {
+  if (!m_running || !m_videoFrameDurationUs)
+    return;
+  const int64_t interval = m_videoFrameDurationUs;
+  std::vector<VideoFrame> pending;
+  // Hold a reference to the pixels: the capture thread may replace them as soon
+  // as the lock is released, and the repeats below still point into them.
+  std::shared_ptr<std::vector<uint8_t>> pixels;
+  {
+    std::lock_guard<std::mutex> lock(m_stillFrameMutex);
+    if (!m_lastFrame)
+      return;
+    pixels = m_lastFramePixels;
+    // Stay a frame and a half behind the capture clock so a real frame that is
+    // already on its way never lands behind a filler.
+    const int64_t captureNow = nowUs() + m_frameClockOffsetUs;
+    // Catch up if the owner thread was busy, but never flood the queue.
+    while (pending.size() < 8 &&
+           captureNow >= m_lastIssuedTimestampUs + interval * 3 / 2) {
+      VideoFrame still = *m_lastFrame;
+      if (pixels)
+        still.data = pixels->data();
+      m_lastIssuedTimestampUs += interval;
+      still.timestamp = m_lastIssuedTimestampUs;
+      pending.push_back(still);
+    }
+  }
+  // A repeated frame does not move the capture clock forward: the real frames
+  // keep their own timestamps and this only fills the space between them.
+  for (auto &still : pending)
+    handFrameToEncoding(still);
 }
 
 bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
