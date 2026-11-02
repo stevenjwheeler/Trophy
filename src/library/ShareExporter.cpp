@@ -150,7 +150,8 @@ bool ShareExporter::inspect(const QString &source) {
   }
   m_timer.start(); emit changed(); return true;
 }
-bool ShareExporter::start(const QString &directory, const QVariantList &tracks) {
+bool ShareExporter::start(const QString &directory, const QVariantList &tracks,
+                          int mode, int maxHeight) {
   if (m_worker.valid() || m_source.isEmpty() || m_info.contains("error")) return false;
   const QString root = QFileInfo(m_storage->storagePath()).canonicalFilePath();
   const QString destination = QFileInfo(directory).canonicalFilePath();
@@ -164,6 +165,8 @@ bool ShareExporter::start(const QString &directory, const QVariantList &tracks) 
   }
   m_pinned = true;
   ShareExportOptions options;
+  options.mode = mode == 1 ? ShareExportOptions::Mode::Convert : ShareExportOptions::Mode::Copy;
+  options.maxHeight = (mode == 1 && (maxHeight == 720 || maxHeight == 1080)) ? maxHeight : 0;
 
   for (const auto &track : tracks) {
     bool ok;
@@ -182,7 +185,8 @@ bool ShareExporter::start(const QString &directory, const QVariantList &tracks) 
   startNext();
   m_timer.start(); emit changed(); return true;
 }
-bool ShareExporter::startBatch(const QString &directory, const QVariantList &captures) {
+bool ShareExporter::startBatch(const QString &directory, const QVariantList &captures,
+                               int mode, int maxHeight) {
   if (m_worker.valid() || captures.isEmpty()) return false;
   const QString root = QFileInfo(m_storage->storagePath()).canonicalFilePath();
   const QString destination = QFileInfo(directory).canonicalFilePath();
@@ -202,6 +206,9 @@ bool ShareExporter::startBatch(const QString &directory, const QVariantList &cap
     auto job = std::make_unique<Job>();
     job->source = file.canonicalFilePath();
     job->directory = destination;
+    job->options.mode = mode == 1 ? ShareExportOptions::Mode::Convert : ShareExportOptions::Mode::Copy;
+    job->options.maxHeight =
+        (mode == 1 && (maxHeight == 720 || maxHeight == 1080)) ? maxHeight : 0;
     bool valid = row.contains("audioStreams") && row.value("audioStreams").canConvert<QVariantList>();
     for (const auto &track : row.value("audioStreams").toList()) {
       bool ok = false;

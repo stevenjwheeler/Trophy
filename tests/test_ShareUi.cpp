@@ -30,7 +30,7 @@ public:
   bool active = false;
   bool scanning = false;
   QString result;
-  int inspections = 0, exports = 0, releases = 0;
+  int inspections = 0, exports = 0, releases = 0, lastMode = -1, lastHeight = -1;
   QString source, destination;
   QVariantMap data;
   QVariantList selected;
@@ -52,11 +52,15 @@ public:
     if (captureData.contains(path)) data = captureData.value(path);
     emit changed(); return true;
   }
-  Q_INVOKABLE bool start(const QString &folder, const QVariantList &tracks) {
-    ++exports; destination = folder; selected = tracks; active = true; emit changed(); return true;
+  Q_INVOKABLE bool start(const QString &folder, const QVariantList &tracks,
+                        int mode = 0, int height = 0) {
+    ++exports; destination = folder; selected = tracks; lastMode = mode; lastHeight = height;
+    active = true; emit changed(); return true;
   }
-  Q_INVOKABLE bool startBatch(const QString &folder, const QVariantList &captures) {
-    ++exports; destination = folder; batchCaptures = captures; active = true; emit changed(); return true;
+  Q_INVOKABLE bool startBatch(const QString &folder, const QVariantList &captures,
+                             int mode = 0, int height = 0) {
+    ++exports; destination = folder; batchCaptures = captures; lastMode = mode;
+    lastHeight = height; active = true; emit changed(); return true;
   }
   Q_INVOKABLE void cancel() { active = false; emit changed(); }
   Q_INVOKABLE void release() { ++releases; }
@@ -791,6 +795,37 @@ TEST_F(SharingUiTest, BatchReviewsIndependentAudioLayoutsAndQueuesAllWithSharedS
   EXPECT_EQ(exporter.destination, "/fake/output");
   EXPECT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
 }
+TEST_F(SharingUiTest, ConvertModePassesModeAndHeightToTheExporter) {
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  // The controls exist; the height row only applies to conversion.
+  ASSERT_NE(object->findChild<QObject *>("shareModeBox"), nullptr);
+  ASSERT_NE(object->findChild<QObject *>("shareHeightRow"), nullptr);
+  auto *start = object->findChild<QObject *>("startShareExport");
+  ASSERT_NE(start, nullptr);
+
+  // Default export is the remux (mode 0, no height).
+  QMetaObject::invokeMethod(start, "clicked");
+  EXPECT_EQ(exporter.exports, 1);
+  EXPECT_EQ(exporter.lastMode, 0);
+  EXPECT_EQ(exporter.lastHeight, 0);
+
+  // Conversion passes the requested mode and height through to the exporter.
+  exporter.active = false;
+  emit exporter.changed();
+  object->setProperty("destination", "/fake/output");
+  object->setProperty("exportMode", 1);
+  object->setProperty("exportHeight", 1080);
+  QMetaObject::invokeMethod(start, "clicked");
+  EXPECT_EQ(exporter.exports, 2);
+  EXPECT_EQ(exporter.lastMode, 1);
+  EXPECT_EQ(exporter.lastHeight, 1080);
+}
+
 TEST_F(SharingUiTest, CopySectionExplainsMergedAudioAndWarnsAboutNonH264Codecs) {
   exporter.captureData["/fake/Game.mkv"] = QVariantMap{{"tracks", QVariantList{}},
       {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"}, {"shareable", false}};

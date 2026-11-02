@@ -360,6 +360,59 @@ TEST_F(ShareExportTest, FriendlyCodecLabelsAndShareability) {
   EXPECT_TRUE(h.value("copyable").toBool());
 }
 
+TEST_F(ShareExportTest, ConvertModeProducesH264AndAac) {
+  ShareExportOptions options;
+  options.audioStreams = {1, 2};
+  options.mode = ShareExportOptions::Mode::Convert;
+  options.maxHeight = 0;
+  const auto result = ShareExportEngine::run(source, directory.path(), options, cancel, progress);
+  ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+
+  AVFormatContext *ctx = nullptr;
+  ASSERT_GE(avformat_open_input(&ctx, QFile::encodeName(result.path).constData(), nullptr, nullptr), 0);
+  ASSERT_GE(avformat_find_stream_info(ctx, nullptr), 0);
+  ASSERT_EQ(ctx->nb_streams, 2u);
+  EXPECT_EQ(ctx->streams[0]->codecpar->codec_id, AV_CODEC_ID_H264);
+  EXPECT_EQ(ctx->streams[0]->codecpar->width, 320);
+  EXPECT_EQ(ctx->streams[0]->codecpar->height, 180);
+  EXPECT_EQ(ctx->streams[1]->codecpar->codec_id, AV_CODEC_ID_AAC);
+  EXPECT_EQ(ctx->streams[1]->codecpar->ch_layout.nb_channels, 2);
+  avformat_close_input(&ctx);
+
+  QFile file(result.path);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto bytes = file.readAll();
+  EXPECT_GT(bytes.indexOf("mdat"), bytes.indexOf("moov")); // fast start
+  const auto pcm = audio(result.path);
+  EXPECT_GT(tone(pcm, 440), 0.02);
+  EXPECT_GT(tone(pcm, 880), 0.02);
+  EXPECT_TRUE(QFile::exists(source));
+}
+
+TEST_F(ShareExportTest, ConvertModeScalesToRequestedHeight) {
+  const QString big = directory.filePath("BigSource.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=1440x900:rate=30:duration=1", "-f", "lavfi", "-i",
+      "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a",
+      "-c:v", "mpeg4", "-c:a", "aac", "-ac", "2", big});
+  ASSERT_TRUE(ffmpeg.waitForFinished(60000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+
+  ShareExportOptions options;
+  options.audioStreams = {1};
+  options.mode = ShareExportOptions::Mode::Convert;
+  options.maxHeight = 720;
+  const auto result = ShareExportEngine::run(big, directory.path(), options, cancel, progress);
+  ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+  AVFormatContext *ctx = nullptr;
+  ASSERT_GE(avformat_open_input(&ctx, QFile::encodeName(result.path).constData(), nullptr, nullptr), 0);
+  ASSERT_GE(avformat_find_stream_info(ctx, nullptr), 0);
+  EXPECT_EQ(ctx->streams[0]->codecpar->height, 720);
+  EXPECT_EQ(ctx->streams[0]->codecpar->width, 1152); // 1440 * 720/900, even
+  avformat_close_input(&ctx);
+}
+
 TEST_F(ShareExportTest, CopiesVideoPacketsVerbatim) {
   const auto expected = videoDigest(source);
   ASSERT_GT(expected.first, 0);

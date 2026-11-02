@@ -14,6 +14,12 @@ namespace TrophyBackend {
 // watermark), so exports are limited by disk I/O rather than encoding.
 struct ShareExportOptions {
   QList<int> audioStreams; // absolute stream indices to mix; empty = silent
+  enum class Mode {
+    Copy,    // remux: video bitstream copied, audio mixed/encoded (fast, lossless)
+    Convert  // re-encode to H.264 + AAC for sources MP4 sharing cannot use as-is
+  };
+  Mode mode = Mode::Copy;
+  int maxHeight = 0; // Convert only: 0 keeps the source size, otherwise 720/1080
 };
 
 struct ShareExportResult { QString path; QString error; };

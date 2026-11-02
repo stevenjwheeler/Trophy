@@ -23,6 +23,9 @@ TrophyDialog {
     readonly property var currentInfo: batch ? (captureInfos[currentCapture] || {}) : exporter.info
     property string destination: ""
     property var selectedAudio: []
+    property int exportMode: 0      // 0 = copy (remux), 1 = convert to H.264
+    property int exportHeight: 0    // convert only: 0/720/1080
+    readonly property bool converting: exportMode === 1
     property var excludedAudioOrdinals: []
     property bool tracksLoaded: false
     property string folderError: ""
@@ -73,11 +76,12 @@ TrophyDialog {
     function exportCaptures() {
         // Video is copied and the selected tracks are mixed into one stereo
         // track: chat apps cannot switch audio tracks.
+        const height = exportMode === 1 ? exportHeight : 0;
         if (!batch)
-            return exporter.start(destination, selectedAudio);
+            return exporter.start(destination, selectedAudio, exportMode, height);
         chooseCapture(currentCapture);
         const captures = sourcePaths.map((path, index) => ({sourcePath: path, audioStreams: captureAudio[index]}));
-        return exporter.startBatch(destination, captures);
+        return exporter.startBatch(destination, captures, exportMode, height);
     }
 
     onAboutToShow: {
@@ -92,6 +96,8 @@ TrophyDialog {
         scanIndex = 0;
         ++scanTicket;
         preparingBatch = batch;
+        exportMode = 0;
+        exportHeight = 0;
         if (batch)
             inspectNext(scanTicket);
         else
@@ -198,15 +204,47 @@ TrophyDialog {
             SettingsSectionCard {
                 id: copySection
                 objectName: "shareCopySection"
-                sectionTitle: qsTr("Copy")
+                sectionTitle: qsTr("Output")
                 iconSource: "qrc:/icons/video.svg"
-                description: root.codecWarning
-                    ? qsTr("Instant MP4 · %1 may not upload everywhere").arg(root.codecLabel)
-                    : qsTr("Instant MP4 · original quality")
-                descriptionColor: root.codecWarning ? Theme.warningColor : Theme.textSecondaryColor
+                description: root.exportMode === 1
+                    ? qsTr("Convert to H.264 · %1").arg(root.exportHeight > 0 ? root.exportHeight + "p" : qsTr("original size"))
+                    : (root.codecWarning
+                        ? qsTr("Instant MP4 · %1 may not upload everywhere").arg(root.codecLabel)
+                        : qsTr("Instant MP4 · original quality"))
+                descriptionColor: (root.exportMode === 0 && root.codecWarning)
+                    ? Theme.warningColor : Theme.textSecondaryColor
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: qsTr("Mode"); color: Theme.textColor; Layout.fillWidth: true }
+                    TrophyComboBox {
+                        id: modeBox
+                        objectName: "shareModeBox"
+                        Layout.preferredWidth: 300
+                        model: [qsTr("Copy to MP4 (instant)"), qsTr("Convert to H.264 (compatibility)")]
+                        currentIndex: root.exportMode
+                        onActivated: root.exportMode = currentIndex
+                    }
+                }
+                RowLayout {
+                    objectName: "shareHeightRow"
+                    Layout.fillWidth: true
+                    visible: root.converting
+                    Label { text: qsTr("Resolution"); color: Theme.textColor; Layout.fillWidth: true }
+                    TrophyComboBox {
+                        id: heightBox
+                        objectName: "shareHeightBox"
+                        Layout.preferredWidth: 200
+                        model: [qsTr("Original"), "1080p", "720p"]
+                        currentIndex: [0, 1080, 720].indexOf(root.exportHeight) >= 0
+                            ? [0, 1080, 720].indexOf(root.exportHeight) : 0
+                        onActivated: root.exportHeight = [0, 1080, 720][currentIndex]
+                    }
+                }
                 Label {
                     Layout.fillWidth: true
-                    text: qsTr("Video is copied without re-encoding, so this finishes in seconds and loses nothing. The selected tracks are mixed into one stereo track because chat apps cannot switch between tracks.")
+                    text: root.exportMode === 1
+                        ? qsTr("Re-encodes the video to H.264 with AAC audio for the widest compatibility. Uses the GPU encoder when available; expect a few minutes per hour of footage.")
+                        : qsTr("Video is copied without re-encoding, so this finishes in seconds and loses nothing. Selected tracks are mixed into one stereo track because chat apps cannot switch between tracks.")
                     color: Theme.textSecondaryColor
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap
@@ -214,8 +252,8 @@ TrophyDialog {
                 Label {
                     objectName: "shareCodecNote"
                     Layout.fillWidth: true
-                    visible: root.codecWarning
-                    text: qsTr("This recording is %1. The copy keeps that codec, which some sites and players may not accept — record H.264 for the widest compatibility.").arg(root.codecLabel)
+                    visible: root.exportMode === 0 && root.codecWarning
+                    text: qsTr("This recording is %1. The copy keeps that codec, which some sites and players may not accept — choose Convert to H.264, or record H.264, for the widest compatibility.").arg(root.codecLabel)
                     color: Theme.warningColor
                     font.pixelSize: Theme.fontSizeSmall
                     wrapMode: Text.WordWrap
