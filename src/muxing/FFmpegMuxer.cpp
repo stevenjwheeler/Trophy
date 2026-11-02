@@ -22,6 +22,14 @@ extern "C" {
 
 namespace TrophyBackend {
 
+namespace {
+QString ffmpegErrorText(int err) {
+    char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(err, buffer, sizeof(buffer));
+    return QString::fromUtf8(buffer);
+}
+} // namespace
+
 FFmpegMuxer::FFmpegMuxer(QObject *parent) 
     : IMuxer(parent), 
       m_formatCtx(nullptr), 
@@ -35,6 +43,7 @@ bool FFmpegMuxer::initialize(const QString &outputPath) {
     // already held, so cleanup() would deadlock).
     cleanup_internal();
     m_outputPath = outputPath;
+    m_lastError.clear();
 
     QString ext = QFileInfo(outputPath).suffix().toLower();
     const char *formatNameStr = (ext == "mp4") ? "mp4" : "matroska";
@@ -133,6 +142,7 @@ int FFmpegMuxer::addStream(const StreamInfo &info) {
     }
 
     m_streams.push_back(stream);
+    m_lastDts.push_back(AV_NOPTS_VALUE);
     return stream->id;
 }
 
@@ -152,12 +162,20 @@ bool FFmpegMuxer::setMetadata(const QMap<QString, QString> &metadata) {
 
 bool FFmpegMuxer::writeHeader() {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (!m_formatCtx || m_headerWritten || m_finalized || m_formatCtx->pb)
+    if (!m_formatCtx || m_headerWritten || m_finalized || m_formatCtx->pb) {
+        m_lastError = QStringLiteral("The recording header cannot be written now "
+                                     "(uninitialized, already written or finalized)");
         return false;
+    }
+    m_lastError.clear();
 
     if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open(&m_formatCtx->pb, m_outputPath.toUtf8().constData(), AVIO_FLAG_WRITE) < 0)
+        const int openRet = avio_open(&m_formatCtx->pb, m_outputPath.toUtf8().constData(), AVIO_FLAG_WRITE);
+        if (openRet < 0) {
+            m_lastError = QStringLiteral("The recording file could not be opened: %1")
+                              .arg(ffmpegErrorText(openRet));
             return false;
+        }
     }
 
     AVDictionary *opts = nullptr;
@@ -188,7 +206,12 @@ bool FFmpegMuxer::writeHeader() {
         m_bytesWritten.store(std::max<int64_t>(0, avio_tell(m_formatCtx->pb)),
                              std::memory_order_relaxed);
 
-    if (ret < 0 || (m_formatCtx->pb && m_formatCtx->pb->error < 0)) return false;
+    if (ret < 0 || (m_formatCtx->pb && m_formatCtx->pb->error < 0)) {
+        const int code = ret < 0 ? ret : m_formatCtx->pb->error;
+        m_lastError = QStringLiteral("The recording header could not be written: %1")
+                          .arg(ffmpegErrorText(code));
+        return false;
+    }
 
     m_headerWritten = true;
     return true;
@@ -226,17 +249,28 @@ bool FFmpegMuxer::updateStreamExtraData(int streamIndex, const std::vector<uint8
 
 bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
-    if (!m_formatCtx || !m_headerWritten || m_finalized) return false;
+    if (!m_formatCtx || !m_headerWritten || m_finalized) {
+        m_lastError = QStringLiteral("The recording file is not ready for packets");
+        return false;
+    }
     if (packet.streamIndex < 0 ||
         packet.streamIndex >= static_cast<int>(m_streams.size()) ||
-        packet.data.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        packet.data.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        m_lastError = QStringLiteral("Invalid packet for stream %1")
+                          .arg(packet.streamIndex);
         return false;
+    }
+    m_lastError.clear();
 
     AVPacket *avPacket = av_packet_alloc();
-    if (!avPacket) return false;
+    if (!avPacket) {
+        m_lastError = QStringLiteral("Out of memory allocating a packet");
+        return false;
+    }
 
     if (av_new_packet(avPacket, packet.data.size()) < 0) {
         av_packet_free(&avPacket);
+        m_lastError = QStringLiteral("Out of memory allocating packet data");
         return false;
     }
     memcpy(avPacket->data, packet.data.data(), packet.data.size());
@@ -256,31 +290,81 @@ bool FFmpegMuxer::writePacket(const EncodedPacket &packet) {
 
     AVStream *stream = m_streams[packet.streamIndex];
     av_packet_rescale_ts(avPacket, {1, 1000}, stream->time_base);
-    
+
+    // FFmpeg refuses any packet whose dts does not advance and aborts the
+    // whole mux ("non monotonically increasing dts"). One jittery capture
+    // timestamp must not end a long recording, so clamp a backwards step to
+    // the next representable tick and keep pts consistent with it.
+    if (avPacket->dts == AV_NOPTS_VALUE)
+        avPacket->dts = avPacket->pts;
+    int64_t &lastDts = m_lastDts[packet.streamIndex];
+    if (avPacket->dts != AV_NOPTS_VALUE && lastDts != AV_NOPTS_VALUE &&
+        avPacket->dts <= lastDts) {
+        const int64_t step =
+            std::max<int64_t>(1, av_rescale_q(1, {1, 1000}, stream->time_base));
+        const int64_t clamped = lastDts + step;
+        if (m_clampedTimestamps++ % 100 == 0) {
+            qWarning() << "FFmpegMuxer: stream" << packet.streamIndex
+                       << "timestamp went backwards (" << avPacket->dts << "after"
+                       << lastDts << ") - clamping to" << clamped
+                       << "(total clamped:" << m_clampedTimestamps << ")";
+        }
+        avPacket->dts = clamped;
+        if (avPacket->pts != AV_NOPTS_VALUE && avPacket->pts < avPacket->dts)
+            avPacket->pts = avPacket->dts;
+    }
+
+    const int64_t acceptedDts = avPacket->dts;
+    // av_interleaved_write_frame takes ownership and blanks the packet, so
+    // the dts must be captured before the call (reading it afterwards yields
+    // AV_NOPTS_VALUE and disables the monotonicity guard).
     int ret = av_interleaved_write_frame(m_formatCtx, avPacket);
     if (m_formatCtx->pb)
         m_bytesWritten.store(std::max<int64_t>(0, avio_tell(m_formatCtx->pb)),
                              std::memory_order_relaxed);
     av_packet_free(&avPacket);
 
-    return ret >= 0 && (!m_formatCtx->pb || m_formatCtx->pb->error >= 0);
+    if (ret < 0 || (m_formatCtx->pb && m_formatCtx->pb->error < 0)) {
+        const int code = ret < 0 ? ret : m_formatCtx->pb->error;
+        m_lastError = QStringLiteral("The recording file could not be written: %1")
+                          .arg(ffmpegErrorText(code));
+        return false;
+    }
+    lastDts = acceptedDts;
+    return true;
 }
 
 bool FFmpegMuxer::finalize() {
     std::lock_guard<std::mutex> lock(m_muxerMutex);
     if (m_finalized) return m_finalizeSuccess;
-    if (!m_formatCtx) return false;
-    
-    bool success = false;
+    if (!m_formatCtx) {
+        m_lastError = QStringLiteral("The recording output was never initialized");
+        return false;
+    }
+
+    m_lastError.clear();
+    bool success = true;
+    QString failure;
     if (m_headerWritten) {
         // Write the trailer (this updates the file size on disk)
-        success = (av_write_trailer(m_formatCtx) >= 0);
-        
+        const int trailer = av_write_trailer(m_formatCtx);
+        if (trailer < 0) {
+            success = false;
+            failure = ffmpegErrorText(trailer);
+        }
+
         // Force a flush to the IO context so avio_tell is accurate
         if (m_formatCtx->pb) {
             avio_flush(m_formatCtx->pb);
-            success = success && m_formatCtx->pb->error >= 0;
+            if (m_formatCtx->pb->error < 0) {
+                success = false;
+                if (failure.isEmpty())
+                    failure = ffmpegErrorText(m_formatCtx->pb->error);
+            }
         }
+    } else {
+        success = false;
+        failure = QStringLiteral("the header was never written");
     }
 
     if (m_formatCtx->pb) {
@@ -290,8 +374,19 @@ bool FFmpegMuxer::finalize() {
             // A close-only error must be reported before callers announce
             // success, not lost later in the destructor.
             const int closed = m_closeOutput(&m_formatCtx->pb);
-            success = success && closed >= 0;
+            if (closed < 0) {
+                success = false;
+                if (failure.isEmpty())
+                    failure = ffmpegErrorText(closed);
+            }
         }
+    }
+
+    if (!success) {
+        m_lastError = QStringLiteral("The recording file could not be finalized%1")
+                          .arg(failure.isEmpty()
+                                   ? QString()
+                                   : QStringLiteral(": ") + failure);
     }
 
     m_finalized = true;
@@ -317,6 +412,11 @@ QString FFmpegMuxer::formatName() const {
     return QStringLiteral("unknown");
 }
 
+QString FFmpegMuxer::lastError() const {
+    std::lock_guard<std::mutex> lock(m_muxerMutex);
+    return m_lastError;
+}
+
 void FFmpegMuxer::cleanup_internal() {
     if (m_formatCtx) {
         if (!(m_formatCtx->oformat->flags & AVFMT_NOFILE) && m_formatCtx->pb) {
@@ -326,6 +426,8 @@ void FFmpegMuxer::cleanup_internal() {
         m_formatCtx = nullptr;
     }
     m_streams.clear();
+    m_lastDts.clear();
+    m_clampedTimestamps = 0;
     m_headerWritten = false;
     m_finalized = false;
     m_finalizeSuccess = false;

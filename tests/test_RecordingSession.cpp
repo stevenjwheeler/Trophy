@@ -149,6 +149,9 @@ public:
     session.m_videoStartWallUs.store(nowUs - 500000);
     session.m_firstMergedInputWallUs = nowUs - 450000;
   }
+  static void emitStills(RecordingSession &session) {
+    session.emitStillFrames();
+  }
 };
 } // namespace TrophyBackend
 
@@ -2150,6 +2153,119 @@ TEST(RecordingSessionTest, StillFillersNeverOvertakeALateRealFrame) {
   for (size_t i = 1; i < encoder.timestamps.size(); ++i)
     EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
         << "timeline went backwards at frame " << i;
+}
+
+// Regression (2026-11-02, 47-minute Deadlock recording): the filler batch was
+// timestamped under the lock and handed to the encoder after releasing it, so
+// a real capture frame (retimed past the reserved batch) could reach the
+// encoder first. The fillers then followed with older timestamps, FFmpeg
+// refused the packet ("non monotonically increasing dts to muxer in stream 0")
+// and the session aborted the whole recording. Reserving and handing the batch
+// over must be one step.
+TEST(RecordingSessionTest, PendingStillFrameBatchCannotBeOvertakenByARealFrame) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true,
+                           48000, 0);
+  auto clock = std::make_shared<std::atomic<int64_t>>(1000000);
+  RecordingSessionTestPeer::clock(session, clock);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  // Three fillers are reserved for this gap (25 ms behind the capture clock).
+  clock->store(1060000);
+
+  std::atomic<int> hookCalls{0};
+  std::atomic<bool> delivered{false};
+  std::thread lateFrame;
+  session.setStillFrameHandoverHookForTesting([&] {
+    if (hookCalls.fetch_add(1) != 0)
+      return;
+    // Deliver a real frame from the capture thread exactly while the filler
+    // batch is being handed over. Its slot is far enough ahead for the FPS cap
+    // to admit it, but its raw producer stamp is stale (behind the fillers),
+    // so it is retimed onto the reserved batch. Before the fix it jumped the
+    // queue; now it waits for the batch, which is the ordering the muxer
+    // requires.
+    lateFrame = std::thread([&] {
+      frame.timestamp = 1016000;
+      capture.fire(frame);
+      delivered.store(true);
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (!delivered.load() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+
+  RecordingSessionTestPeer::emitStills(session);
+  if (lateFrame.joinable())
+    lateFrame.join();
+  session.stop();
+
+  ASSERT_TRUE(delivered.load()) << "the interleaved real frame never arrived";
+  ASSERT_EQ(encoder.timestamps.size(), 5u) << "the late frame was not encoded";
+  for (size_t i = 1; i < encoder.timestamps.size(); ++i)
+    EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
+        << "the filler batch overtook a real frame at index " << i;
+}
+
+// The encoder converts the capture clock to whole milliseconds before the
+// muxer, so a frame retimed behind a filler must clear it by a full
+// millisecond. A 1 us bump still truncated to the filler's millisecond and the
+// muxer rejected the duplicate DTS — the same fatal path as the out-of-order
+// batch above.
+TEST(RecordingSessionTest, RetimedFrameClearsTheFillerInMuxerMilliseconds) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused-milliseconds.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 48000, 0);
+  auto clock = std::make_shared<std::atomic<int64_t>>(1000000);
+  RecordingSessionTestPeer::clock(session, clock);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  // A still screen: the session fills the gap at the encode rate.
+  clock->store(1060000);
+  RecordingSessionTestPeer::emitStills(session);
+
+  // Now a real frame whose producer stamp is stale (behind every filler) but
+  // whose slot still passes the FPS cap.
+  frame.timestamp = 1016000;
+  capture.fire(frame);
+  session.stop();
+
+  ASSERT_GE(encoder.timestamps.size(), 3u);
+  for (size_t i = 1; i < encoder.timestamps.size(); ++i) {
+    EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
+        << "timeline went backwards at frame " << i;
+    EXPECT_GT(encoder.timestamps[i] / 1000, encoder.timestamps[i - 1] / 1000)
+        << "frames share one muxer millisecond at index " << i;
+  }
 }
 
 // Stopping asynchronously drains native work on a worker thread. The pacing

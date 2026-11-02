@@ -124,6 +124,14 @@ public:
    */
   virtual QString formatName() const = 0;
 
+  /**
+   * @brief Human-readable reason for the last write/header/finalize failure
+   *
+   * Empty when the last operation succeeded. Optional: mocks keep the
+   * default so existing fakes stay valid.
+   */
+  virtual QString lastError() const { return {}; }
+
 signals:
   void muxingError(const QString &error);
 };

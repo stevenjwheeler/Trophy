@@ -526,6 +526,69 @@ TEST_F(MuxerTest, BytesWrittenTracksHeaderAndPackets) {
   EXPECT_TRUE(muxer.finalize());
 }
 
+// Regression (2026-11-02, 47-minute Deadlock recording): a still-frame filler
+// reached the muxer behind the frame already written, FFmpeg refused it with
+// "Application provided invalid, non monotonically increasing dts to muxer in
+// stream 0" and the session treated that as a fatal output failure — aborting
+// the entire recording over one packet. A stray backwards stamp must be
+// clamped forward instead; genuine I/O failures stay fatal.
+TEST_F(MuxerTest, BackwardsTimestampIsClampedInsteadOfAbortingTheFile) {
+  FFmpegMuxer muxer;
+  const QString out = tempDir.path() + "/clamped.mkv";
+  ASSERT_TRUE(muxer.initialize(out));
+  StreamInfo audio;
+  audio.type = StreamInfo::Type::Audio;
+  audio.codecId = AV_CODEC_ID_PCM_S16LE;
+  audio.sampleRate = 48000;
+  audio.channels = 2;
+  ASSERT_EQ(muxer.addStream(audio), 0);
+  ASSERT_TRUE(muxer.writeHeader()) << muxer.lastError().toStdString();
+
+  EncodedPacket pkt;
+  pkt.streamIndex = 0;
+  pkt.data.assign(4096, 0x11);
+  pkt.duration = 20;
+  int64_t now = 0;
+  for (int i = 0; i < 20; ++i) {
+    pkt.pts = pkt.dts = now;
+    ASSERT_TRUE(muxer.writePacket(pkt));
+    now += 20;
+  }
+
+  // The filler that lost the race: timestamped before the frame that was
+  // already handed over.
+  pkt.pts = pkt.dts = now - 60;
+  EXPECT_TRUE(muxer.writePacket(pkt)) << muxer.lastError().toStdString();
+  EXPECT_TRUE(muxer.lastError().isEmpty());
+
+  // The timeline keeps moving forward afterwards.
+  pkt.pts = pkt.dts = now;
+  EXPECT_TRUE(muxer.writePacket(pkt));
+  ASSERT_TRUE(muxer.finalize()) << muxer.lastError().toStdString();
+
+  // Re-open the file: the container is valid and its dts never go backwards.
+  AVFormatContext *in = nullptr;
+  ASSERT_GE(avformat_open_input(&in, out.toUtf8().constData(), nullptr, nullptr), 0);
+  ASSERT_GE(avformat_find_stream_info(in, nullptr), 0);
+  int64_t last = AV_NOPTS_VALUE;
+  int packets = 0;
+  AVPacket *read = av_packet_alloc();
+  while (av_read_frame(in, read) >= 0) {
+    if (read->stream_index == 0) {
+      ++packets;
+      if (read->dts != AV_NOPTS_VALUE) {
+        EXPECT_TRUE(last == AV_NOPTS_VALUE || read->dts > last)
+            << "dts went backwards in the written file";
+        last = read->dts;
+      }
+    }
+    av_packet_unref(read);
+  }
+  av_packet_free(&read);
+  avformat_close_input(&in);
+  EXPECT_EQ(packets, 22);
+}
+
 TEST_F(MuxerTest, NativeEnospcRemainsFailureAndReinitializeRecovers) {
   // /dev/full is a character device whose writes return real ENOSPC.
   // No custom AVIO or injected FFmpeg result is involved, and no file is
@@ -552,6 +615,9 @@ TEST_F(MuxerTest, NativeEnospcRemainsFailureAndReinitializeRecovers) {
     muxer.writePacket(packet);
   EXPECT_FALSE(muxer.finalize());
   EXPECT_FALSE(muxer.finalize()) << "an earlier I/O failure must stay failed";
+  // The reason must reach the user instead of the generic "output may be
+  // incomplete" fallback in RecordingManager.
+  EXPECT_FALSE(muxer.lastError().isEmpty());
   EXPECT_FALSE(muxer.writePacket(packet));
   EXPECT_FALSE(muxer.writeHeader());
 
