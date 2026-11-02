@@ -8,6 +8,7 @@
 #include <QSet>
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -54,135 +55,120 @@ Input open(const QString &path, std::atomic_bool &cancel) {
   return input;
 }
 
-// Decoder wrapper used only for audio here: the video is copied, never decoded.
-class Reader {
+// One selected track, decoded from packets taken from the single demux pass
+// (no per-track file reopening), resampled to 48 kHz stereo float and buffered
+// on the video timeline until the mixer consumes it.
+class AudioTrack {
 public:
-  Input input;
-  Codec codec;
-  Frame decoded = frame();
-  Packet encoded = packet();
-  AVStream *stream;
-  bool draining = false;
-  std::atomic_bool &cancel;
-  Reader(const QString &path, int index, std::atomic_bool &stop) : input(open(path, stop)), cancel(stop) {
-    if (index < 0) index = av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    check(index >= 0 && unsigned(index) < input->nb_streams, "Selected stream is unavailable.");
-    stream = input->streams[index];
-    check(stream->time_base.num > 0 && stream->time_base.den > 0, "Invalid stream clock.");
+  AudioTrack(AVStream *stream, int64_t originSamples)
+      : m_stream(stream), m_origin(originSamples) {
     const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
     check(decoder, "A decoder for this recording is unavailable.");
-    codec.reset(avcodec_alloc_context3(decoder));
-    check(bool(codec), "Cannot allocate decoder.");
-    ffcheck(avcodec_parameters_to_context(codec.get(), stream->codecpar), "Cannot configure decoder");
-    codec->thread_count = 2;
-    codec->max_pixels = INT64_C(8192) * 4320;
-    ffcheck(avcodec_open2(codec.get(), decoder, nullptr), "Cannot start decoder");
+    m_codec.reset(avcodec_alloc_context3(decoder));
+    check(bool(m_codec), "Cannot allocate decoder.");
+    ffcheck(avcodec_parameters_to_context(m_codec.get(), stream->codecpar), "Cannot configure decoder");
+    m_codec->max_pixels = INT64_C(8192) * 4320;
+    ffcheck(avcodec_open2(m_codec.get(), decoder, nullptr), "Cannot start decoder");
   }
-  bool next() {
-    av_frame_unref(decoded.get());
-    while (true) {
-      cancelled(cancel);
-      const int result = avcodec_receive_frame(codec.get(), decoded.get());
-      if (result == 0) return true;
-      if (result == AVERROR_EOF) return false;
-      ffcheck(result == AVERROR(EAGAIN) ? 0 : result, "Cannot decode recording");
-      check(!draining, "Decoder stalled while draining.");
-      int read;
-      do {
-        av_packet_unref(encoded.get());
-        read = av_read_frame(input.get(), encoded.get());
-        cancelled(cancel);
-      } while (read >= 0 && encoded->stream_index != stream->index);
-      if (read == AVERROR_EOF) {
-        draining = true;
-        ffcheck(avcodec_send_packet(codec.get(), nullptr), "Cannot drain decoder");
-      } else {
-        ffcheck(read, "Cannot read recording");
-        ffcheck(avcodec_send_packet(codec.get(), encoded.get()), "Cannot submit recording packet");
-      }
-    }
+  ~AudioTrack() {
+    if (m_swr) swr_free(&m_swr);
+    av_channel_layout_uninit(&m_layout);
   }
-};
-
-// One selected track, resampled to 48 kHz stereo float and placed on the same
-// timeline as the copied video, ready to be summed into the single mix track.
-class AudioReader {
-  Reader reader;
-  SwrContext *swr = nullptr;
-  std::vector<float> samples;
-  int rate = 0, channels = 0, format = -1;
-  AVChannelLayout layout{};
-  int64_t start = 0, nextSample = 0, origin;
-  bool eof = false, done = false;
-  bool haveOutput = false;
-  bool chunk() {
-    while (!done) {
-      const bool have = !eof && reader.next();
-      eof |= !have;
-      if (!have && !swr) { done = true; return false; }
-      if (have) {
-        auto *f = reader.decoded.get();
-        check(f->nb_samples > 0 && f->nb_samples <= (1 << 20) &&
-            f->sample_rate >= 8000 && f->sample_rate <= 384000 &&
-            f->ch_layout.nb_channels > 0 && f->ch_layout.nb_channels <= 32,
-            "Invalid decoded audio layout.");
-        if (!swr) {
-          rate = f->sample_rate; channels = f->ch_layout.nb_channels; format = f->format;
-          ffcheck(av_channel_layout_copy(&layout, &f->ch_layout), "Cannot retain source audio layout");
-          AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-          ffcheck(swr_alloc_set_opts2(&swr, &stereo, AV_SAMPLE_FMT_FLT, kRate,
-              &f->ch_layout, AVSampleFormat(format), rate, 0, nullptr), "Cannot configure audio conversion");
-          ffcheck(swr_init(swr), "Cannot start audio conversion");
-        }
-        check(rate == f->sample_rate && channels == f->ch_layout.nb_channels && format == f->format &&
-              av_channel_layout_compare(&layout, &f->ch_layout) == 0,
-              "Audio layout changes within this recording are unsupported.");
-        if (f->best_effort_timestamp == AV_NOPTS_VALUE) start = nextSample;
-        else {
-          const int64_t absolute = av_rescale_q(f->best_effort_timestamp, reader.stream->time_base, kSamples);
-          check(absolute >= -int64_t(kRate) * 172800 && absolute <= int64_t(kRate) * 172800, "Invalid audio timestamps.");
-          start = absolute - origin - av_rescale_rnd(swr_get_delay(swr, rate), kRate, rate, AV_ROUND_NEAR_INF);
-          const auto tolerance = std::clamp<int64_t>(av_rescale_q(2, reader.stream->time_base, kSamples), 2, 96);
-          // MKV's millisecond packet timestamps are coarser than a sample.
-          // Keep continuous PCM sample-locked; preserve genuine larger gaps.
-          if (haveOutput && std::abs(start - nextSample) <= tolerance) start = nextSample;
-        }
-      } else start = nextSample;
-      check(start >= -int64_t(kRate) * 86400 && start <= int64_t(kRate) * 86400,
-            "Audio timestamps exceed the supported 24-hour timeline.");
-      const int count = swr_get_out_samples(swr, have ? reader.decoded->nb_samples : 0);
-      check(count >= 0 && count <= (1 << 20), "Audio conversion exceeds its memory budget.");
-      samples.resize(size_t(std::max(4096, count)) * 2);
-      auto *out = reinterpret_cast<uint8_t *>(samples.data());
-      const int produced = swr_convert(swr, &out, int(samples.size() / 2),
-          have ? const_cast<const uint8_t **>(reader.decoded->extended_data) : nullptr,
-          have ? reader.decoded->nb_samples : 0);
-      ffcheck(produced, "Cannot convert audio");
-      samples.resize(size_t(produced) * 2);
-      nextSample = start + produced;
-      if (produced > 0) { haveOutput = true; return true; }
-      if (eof) done = true;
-    }
-    return false;
+  bool hasOutput() const { return m_haveOutput; }
+  int64_t endSample() const { return m_end; }
+  void push(AVPacket *packet) {
+    ffcheck(avcodec_send_packet(m_codec.get(), packet), "Cannot submit recording packet");
+    drain();
   }
-public:
-  AudioReader(const QString &path, int index, int64_t originUs, std::atomic_bool &stop)
-      : reader(path, index, stop), origin(av_rescale_q(originUs, kUs, kSamples)) {
-    check(reader.stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO, "Selected stream is not audio.");
+  void flush() {
+    ffcheck(avcodec_send_packet(m_codec.get(), nullptr), "Cannot drain decoder");
+    drain();
   }
-  ~AudioReader() { swr_free(&swr); av_channel_layout_uninit(&layout); }
   void add(float *mix, int64_t at, int count, float gain) {
-    while (!done) {
-      if (samples.empty() || nextSample <= at) { if (!chunk()) break; }
-      if (start >= at + count) break; // Real gap/late audio: leave silence.
-      const auto begin = std::max(start, at), end = std::min(nextSample, at + count);
+    while (!m_chunks.empty()) {
+      const Chunk &first = m_chunks.front();
+      if (first.start + int64_t(first.samples.size() / 2) <= at) m_chunks.pop_front();
+      else break;
+    }
+    for (const Chunk &chunk : m_chunks) {
+      const int64_t chunkEnd = chunk.start + int64_t(chunk.samples.size() / 2);
+      const int64_t begin = std::max<int64_t>(chunk.start, at);
+      const int64_t end = std::min<int64_t>(chunkEnd, at + count);
+      if (begin >= end) continue;
       for (int64_t i = begin; i < end; ++i)
         for (int ch = 0; ch < 2; ++ch)
-          mix[(i - at) * 2 + ch] += samples[size_t(i - start) * 2 + ch] * gain;
-      if (nextSample >= at + count) break;
-      samples.clear();
+          mix[(i - at) * 2 + ch] += chunk.samples[size_t((i - chunk.start) * 2 + ch)] * gain;
     }
   }
+private:
+  struct Chunk { int64_t start; std::vector<float> samples; };
+  void drain() {
+    while (true) {
+      const int result = avcodec_receive_frame(m_codec.get(), m_frame.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+      ffcheck(result, "Cannot decode recording");
+      convert(m_frame.get());
+      av_frame_unref(m_frame.get());
+    }
+  }
+  void convert(AVFrame *f) {
+    check(f->nb_samples > 0 && f->nb_samples <= (1 << 20) &&
+              f->sample_rate >= 8000 && f->sample_rate <= 384000 &&
+              f->ch_layout.nb_channels > 0 && f->ch_layout.nb_channels <= 32,
+          "Invalid decoded audio layout.");
+    if (!m_swr) {
+      m_rate = f->sample_rate;
+      m_channels = f->ch_layout.nb_channels;
+      m_format = f->format;
+      ffcheck(av_channel_layout_copy(&m_layout, &f->ch_layout), "Cannot retain source audio layout");
+      AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+      ffcheck(swr_alloc_set_opts2(&m_swr, &stereo, AV_SAMPLE_FMT_FLT, kRate,
+                  &f->ch_layout, AVSampleFormat(m_format), m_rate, 0, nullptr),
+              "Cannot configure audio conversion");
+      ffcheck(swr_init(m_swr), "Cannot start audio conversion");
+    }
+    check(m_rate == f->sample_rate && m_channels == f->ch_layout.nb_channels &&
+              m_format == f->format && av_channel_layout_compare(&m_layout, &f->ch_layout) == 0,
+          "Audio layout changes within this recording are unsupported.");
+    int64_t startSample;
+    if (f->best_effort_timestamp == AV_NOPTS_VALUE) startSample = m_end;
+    else {
+      const int64_t absolute = av_rescale_q(f->best_effort_timestamp, m_stream->time_base, kSamples);
+      check(absolute >= -int64_t(kRate) * 172800 && absolute <= int64_t(kRate) * 172800,
+            "Invalid audio timestamps.");
+      startSample = absolute - m_origin -
+          av_rescale_rnd(swr_get_delay(m_swr, m_rate), kRate, m_rate, AV_ROUND_NEAR_INF);
+      const auto tolerance = std::clamp<int64_t>(av_rescale_q(2, m_stream->time_base, kSamples), 2, 96);
+      // MKV's millisecond packet timestamps are coarser than a sample. Keep
+      // continuous PCM sample-locked; preserve genuine larger gaps.
+      if (m_haveOutput && std::abs(startSample - m_end) <= tolerance) startSample = m_end;
+    }
+    check(startSample >= -int64_t(kRate) * 86400 && startSample <= int64_t(kRate) * 86400,
+          "Audio timestamps exceed the supported 24-hour timeline.");
+    const int count = swr_get_out_samples(m_swr, f->nb_samples);
+    check(count >= 0 && count <= (1 << 20), "Audio conversion exceeds its memory budget.");
+    std::vector<float> samples(size_t(std::max(4096, count)) * 2);
+    auto *out = reinterpret_cast<uint8_t *>(samples.data());
+    const int produced = swr_convert(m_swr, &out, int(samples.size() / 2),
+        const_cast<const uint8_t **>(f->extended_data), f->nb_samples);
+    ffcheck(produced, "Cannot convert audio");
+    samples.resize(size_t(produced) * 2);
+    m_end = startSample + produced;
+    if (produced > 0) {
+      m_haveOutput = true;
+      m_chunks.push_back({startSample, std::move(samples)});
+    }
+  }
+  AVStream *m_stream;
+  Codec m_codec;
+  Frame m_frame = frame();
+  SwrContext *m_swr = nullptr;
+  int m_rate = 0, m_channels = 0, m_format = -1;
+  AVChannelLayout m_layout{};
+  int64_t m_origin;
+  int64_t m_end = 0;
+  bool m_haveOutput = false;
+  std::deque<Chunk> m_chunks;
 };
 
 struct Output {
@@ -206,7 +192,7 @@ struct Output {
 };
 Codec encoder(const char *name) {
   const AVCodec *codec = avcodec_find_encoder_by_name(name);
-  check(codec, "The required AAC audio encoder is unavailable.");
+  check(codec, "The required audio encoder is unavailable.");
   Codec ctx(avcodec_alloc_context3(codec));
   check(bool(ctx), "Cannot allocate export encoder.");
   return ctx;
@@ -338,17 +324,31 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     check(copyableVideo(inVideo->codecpar->codec_id),
           "This recording's video codec cannot be placed in an MP4 container.");
     check(inVideo->codecpar->width >= 2 && inVideo->codecpar->height >= 2 &&
-          inVideo->codecpar->width <= 16384 && inVideo->codecpar->height <= 16384,
+              inVideo->codecpar->width <= 16384 && inVideo->codecpar->height <= 16384,
           "Unsupported video dimensions.");
 
-    // The exported timeline starts at zero: the first video presentation time
-    // defines the origin for both the copied video and the mixed audio.
+    int singleAudioIndex = -1;
+    for (int index : options.audioStreams) {
+      check(index < int(input->nb_streams) &&
+                input->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO,
+            "Invalid audio selection.");
+      if (options.audioStreams.size() == 1)
+        singleAudioIndex = index;
+    }
+    // A single already-stereo AAC track needs no mixing and is copied as-is.
+    // Anything else is mixed into one stereo AAC track, because chat apps
+    // cannot switch between tracks.
+    const bool copySingleAudio = singleAudioIndex >= 0 &&
+        input->streams[singleAudioIndex]->codecpar->codec_id == AV_CODEC_ID_AAC &&
+        input->streams[singleAudioIndex]->codecpar->ch_layout.nb_channels == 2;
+
     int64_t originUs = 0;
     if (inVideo->start_time != AV_NOPTS_VALUE)
       originUs = av_rescale_q(inVideo->start_time, inVideo->time_base, kUs);
     else if (input->start_time != AV_NOPTS_VALUE)
-      originUs = av_rescale_q(input->start_time, kUs, kUs);
-    check(originUs >= -(INT64_C(1) << 40) && originUs <= (INT64_C(1) << 40), "Invalid recording timestamp origin.");
+      originUs = input->start_time;
+    check(originUs >= -(INT64_C(1) << 40) && originUs <= (INT64_C(1) << 40),
+          "Invalid recording timestamp origin.");
 
     QTemporaryFile temporary(QDir(directory).filePath(".trophy-export-XXXXXX.part"));
     check(temporary.open(), "Cannot create export file.");
@@ -360,7 +360,6 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     ffcheck(avformat_alloc_output_context2(&out.ctx, nullptr, "mp4",
                                            QFile::encodeName(tmp).constData()),
             "Cannot create MP4 output");
-    check(out.ctx != nullptr, "Cannot create MP4 output");
     for (const AVDictionaryEntry *tag = nullptr;
          (tag = av_dict_get(input->metadata, "", tag, AV_DICT_IGNORE_SUFFIX)) != nullptr;) {
       if (qstrcmp(tag->key, "title") == 0 || qstrcmp(tag->key, "trophy-kind") == 0)
@@ -375,40 +374,59 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     outVideo->avg_frame_rate = inVideo->avg_frame_rate;
     outVideo->sample_aspect_ratio = inVideo->sample_aspect_ratio;
 
-    // Share copies always carry exactly one merged stereo track: chat apps
-    // cannot switch tracks, so separate game/voice/mic streams would be
-    // silently unlistenable. Mixing re-encodes audio only; video is copied.
     Codec audioCodec;
     AVStream *outAudio = nullptr;
+    AVStream *copiedAudio = nullptr;
+    AVStream *inCopiedAudio = nullptr;
     Frame audioFrame;
-    std::vector<std::unique_ptr<AudioReader>> readers;
-    if (!unique.isEmpty()) {
-      audioCodec = encoder("aac");
+    std::vector<std::unique_ptr<AudioTrack>> tracks;
+    QHash<int, AudioTrack *> trackByStream;
+    if (copySingleAudio) {
+      inCopiedAudio = input->streams[singleAudioIndex];
+      copiedAudio = avformat_new_stream(out.ctx, nullptr);
+      check(copiedAudio != nullptr, "Cannot allocate export stream.");
+      ffcheck(avcodec_parameters_copy(copiedAudio->codecpar, inCopiedAudio->codecpar),
+              "Cannot copy audio parameters");
+      copiedAudio->codecpar->codec_tag = 0;
+      copiedAudio->time_base = inCopiedAudio->time_base;
+    } else if (!unique.isEmpty()) {
+      // MP3 encodes ~3x faster than the native AAC encoder, and MP4 carries
+      // it as mp4a everywhere that matters. Fall back to AAC when the build
+      // has no libmp3lame.
+      const char *mixEncoder =
+          avcodec_find_encoder_by_name("libmp3lame") ? "libmp3lame" : "aac";
+      audioCodec = encoder(mixEncoder);
       audioCodec->sample_rate = kRate;
       audioCodec->sample_fmt = AV_SAMPLE_FMT_FLTP;
       av_channel_layout_default(&audioCodec->ch_layout, 2);
       audioCodec->time_base = kSamples;
       audioCodec->bit_rate = 192000;
       if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER) audioCodec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-      ffcheck(avcodec_open2(audioCodec.get(), audioCodec->codec, nullptr), "Cannot start AAC export");
+      ffcheck(avcodec_open2(audioCodec.get(), audioCodec->codec, nullptr),
+              "Cannot start the export audio encoder");
       outAudio = addStream(out, audioCodec.get());
       av_dict_set(&outAudio->metadata, "title", "Stereo mix", 0);
       audioFrame = frame();
       audioFrame->format = audioCodec->sample_fmt;
       audioFrame->sample_rate = kRate;
-      ffcheck(av_channel_layout_copy(&audioFrame->ch_layout, &audioCodec->ch_layout), "Cannot configure audio frame");
+      ffcheck(av_channel_layout_copy(&audioFrame->ch_layout, &audioCodec->ch_layout),
+              "Cannot configure audio frame");
       audioFrame->nb_samples = audioCodec->frame_size;
-      check(audioFrame->nb_samples > 0 && audioFrame->nb_samples <= 8192, "Unsupported AAC frame size.");
+      check(audioFrame->nb_samples > 0 && audioFrame->nb_samples <= 8192,
+            "Unsupported export audio frame size.");
       ffcheck(av_frame_get_buffer(audioFrame.get(), 0), "Cannot allocate audio frame");
-      for (int index : options.audioStreams)
-        readers.push_back(std::make_unique<AudioReader>(source, index, originUs, cancel));
+      const int64_t originSamples = av_rescale_q(originUs, kUs, kSamples);
+      for (int index : options.audioStreams) {
+        auto track = std::make_unique<AudioTrack>(input->streams[index], originSamples);
+        trackByStream.insert(index, track.get());
+        tracks.push_back(std::move(track));
+      }
     }
 
     ffcheck(avio_open2(&out.ctx->pb, QFile::encodeName(tmp).constData(), AVIO_FLAG_WRITE,
         &out.ctx->interrupt_callback, nullptr), "Cannot open export output");
     AVDictionary *muxOptions = nullptr;
-    const int optionResult =
-        av_dict_set(&muxOptions, "movflags", "+faststart+use_metadata_tags", 0);
+    const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart+use_metadata_tags", 0);
     if (optionResult < 0) { av_dict_free(&muxOptions); ffcheck(optionResult, "Cannot configure MP4 fast start"); }
     const int header = avformat_write_header(out.ctx, &muxOptions);
     av_dict_free(&muxOptions);
@@ -416,14 +434,17 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
 
     int64_t audioAt = 0;
     const int64_t audioFrameSamples = audioFrame ? audioFrame->nb_samples : 0;
+    // Reused across frames: one small allocation per export instead of ~300k
+    // for a two-hour mix.
+    std::vector<float> mix(size_t(audioFrameSamples) * 2, 0.0f);
     auto writeAudioUntil = [&](int64_t untilUs) {
       if (!audioCodec) return;
       const int64_t target = av_rescale_q(untilUs, kUs, kSamples);
       while (audioAt < target) {
         cancelled(cancel);
         const int n = int(audioFrameSamples);
-        std::vector<float> mix(size_t(n) * 2, 0.0f);
-        for (auto &reader : readers) reader->add(mix.data(), audioAt, n, 1.0f / float(readers.size()));
+        std::fill(mix.begin(), mix.end(), 0.0f);
+        for (auto &track : tracks) track->add(mix.data(), audioAt, n, 1.0f / float(tracks.size()));
         ffcheck(av_frame_make_writable(audioFrame.get()), "Cannot write audio frame");
         for (int ch = 0; ch < 2; ++ch) {
           auto *plane = reinterpret_cast<float *>(audioFrame->data[ch]);
@@ -441,6 +462,11 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     const qint64 totalBytes = std::max<qint64>(1, guard.info.size());
     qint64 readBytes = 0;
     const int64_t originTicks = av_rescale_q(originUs, kUs, outVideo->time_base);
+    // Emit mixed audio slightly behind the video clock: audio packets for a
+    // timestamp can arrive just after the video packet that precedes them, and
+    // treating "not read yet" as silence would punch holes in the mix.
+    constexpr int64_t kAudioLeadUs = 1000000;
+    int64_t lastVideoUs = 0;
     int64_t lastEndUs = 0;
     auto pkt = packet();
     while (true) {
@@ -449,31 +475,49 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
       if (read == AVERROR_EOF) break;
       ffcheck(read, "Cannot read recording");
       readBytes += pkt->size + 32;
-      if (pkt->stream_index != vIndex) {
-        av_packet_unref(pkt.get());
-        progress.store(std::min(0.99, double(readBytes) / double(totalBytes)));
-        continue;
+      if (pkt->stream_index == vIndex) {
+        const int64_t ptsUs = pkt->pts == AV_NOPTS_VALUE
+            ? lastEndUs
+            : av_rescale_q(pkt->pts, inVideo->time_base, kUs) - originUs;
+        if (audioCodec)
+          writeAudioUntil(std::max<int64_t>(0, ptsUs - kAudioLeadUs));
+        av_packet_rescale_ts(pkt.get(), inVideo->time_base, outVideo->time_base);
+        if (pkt->pts != AV_NOPTS_VALUE) pkt->pts = std::max<int64_t>(0, pkt->pts - originTicks);
+        if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= originTicks;
+        pkt->stream_index = outVideo->index;
+        pkt->pos = -1;
+        ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
+                "Cannot write export (check free disk space)");
+        lastVideoUs = ptsUs;
+        lastEndUs = ptsUs + (pkt->duration > 0
+            ? av_rescale_q(pkt->duration, inVideo->time_base, kUs) : 0);
+      } else if (copiedAudio != nullptr && pkt->stream_index == singleAudioIndex) {
+        av_packet_rescale_ts(pkt.get(), inCopiedAudio->time_base, copiedAudio->time_base);
+        const int64_t shift = av_rescale_q(originUs, kUs, copiedAudio->time_base);
+        if (pkt->pts != AV_NOPTS_VALUE) pkt->pts -= shift;
+        if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= shift;
+        pkt->stream_index = copiedAudio->index;
+        pkt->pos = -1;
+        ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
+                "Cannot write export (check free disk space)");
+      } else if (AudioTrack *track = trackByStream.value(pkt->stream_index, nullptr)) {
+        track->push(pkt.get());
+        if (audioCodec)
+          writeAudioUntil(std::max<int64_t>(0, lastVideoUs - kAudioLeadUs));
       }
-      const int64_t ptsUs = pkt->pts == AV_NOPTS_VALUE
-          ? lastEndUs
-          : av_rescale_q(pkt->pts, inVideo->time_base, kUs) - originUs;
-      if (audioCodec)
-        writeAudioUntil(std::max<int64_t>(0, ptsUs));
-      av_packet_rescale_ts(pkt.get(), inVideo->time_base, outVideo->time_base);
-      if (pkt->pts != AV_NOPTS_VALUE) pkt->pts = std::max<int64_t>(0, pkt->pts - originTicks);
-      if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= originTicks;
-      pkt->stream_index = outVideo->index;
-      pkt->pos = -1;
-      ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
-              "Cannot write export (check free disk space)");
-      lastEndUs = ptsUs + (pkt->duration > 0
-          ? av_rescale_q(pkt->duration, inVideo->time_base, kUs) : 0);
+      av_packet_unref(pkt.get());
       progress.store(std::min(0.99, double(readBytes) / double(totalBytes)));
     }
 
     if (audioCodec) {
-      // Finish the mix over any tail the last video packet did not reach.
-      writeAudioUntil(std::max<int64_t>(0, lastEndUs));
+      int64_t endUs = lastEndUs;
+      for (auto &track : tracks) {
+        track->flush();
+        if (track->hasOutput())
+          endUs = std::max(endUs, av_rescale_q(track->endSample(), kSamples, kUs));
+      }
+      // Drain the tail the video timeline did not reach.
+      writeAudioUntil(std::max<int64_t>(0, endUs));
       out.writeAudio(audioCodec.get(), outAudio, nullptr);
     }
     ffcheck(av_write_trailer(out.ctx), "Cannot finalize export");
