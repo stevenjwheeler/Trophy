@@ -61,6 +61,10 @@ public:
   int64_t vaapiVppFrames() const { return m_vaapiVppFrames.load(); }
   int64_t fallbackFrames() const { return m_fallbackFrames.load(); }
   int64_t droppedFrames() const { return m_droppedFrames.load(); }
+  // DMA-BUF registration cache: hits reuse an existing EGL/CUDA registration
+  // for a producer buffer instead of rebuilding it per frame.
+  int64_t importCacheHits() const;
+  int64_t importCacheMisses() const;
   // Inputs accepted by avcodec_send_frame, including delayed output. This
   // is not packet count and excludes rejected/buffered-send failures.
   int64_t acceptedFrames() const { return m_frameCount.load(); }

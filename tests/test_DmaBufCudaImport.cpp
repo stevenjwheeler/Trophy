@@ -21,6 +21,7 @@ extern "C" {
 #include <libdrm/drm_fourcc.h>
 }
 
+#include <array>
 #include <cmath>
 #include <algorithm>
 #include <mutex>
@@ -274,6 +275,31 @@ static std::unique_ptr<TestDmaBuf> makeXrgbDmaBuf(int w, int h, bool quadrants =
   if (!buf->mappedFill)
     buf->mappedFill = fillGpuGradient(*buf, w, h, quadrants);
   return buf;
+}
+
+// Rewrite an existing allocation. Used to prove a cached import registration
+// reads the buffer's current pixels rather than a snapshot from registration.
+static bool refillPixels(TestDmaBuf &buf, int w, int h, bool quadrants) {
+  uint32_t stride = 0;
+  void *mapData = nullptr;
+  void *ptr = gbm_bo_map(buf.bo, 0, 0, w, h, GBM_BO_TRANSFER_WRITE, &stride,
+                         &mapData);
+  if (ptr) {
+    for (int y = 0; y < h; ++y) {
+      uint8_t *row = static_cast<uint8_t *>(ptr) + y * stride;
+      for (int x = 0; x < w; ++x) {
+        const uint8_t v = static_cast<uint8_t>((x * 255) / (w - 1));
+        const bool right = x >= w / 2, bottom = y >= h / 2;
+        row[x * 4 + 0] = quadrants ? (bottom ? 255 : 0) : v;
+        row[x * 4 + 1] = quadrants ? (right ? 255 : 0) : v;
+        row[x * 4 + 2] = quadrants ? (right == bottom ? 255 : 0) : v;
+        row[x * 4 + 3] = 0xFF;
+      }
+    }
+    gbm_bo_unmap(buf.bo, mapData);
+    return true;
+  }
+  return fillGpuGradient(buf, w, h, quadrants);
 }
 
 TEST(DmaBufCudaImportTest, NvencEglImportEncodesDmaBuf) {
@@ -676,4 +702,179 @@ TEST(DmaBufCudaImportTest, ConcurrentModifierQueriesKeepImportingWithoutFallback
   EXPECT_EQ(encoder.eglImportFrames(), 31);
   EXPECT_EQ(requests, 0);
   EXPECT_EQ(encoder.droppedFrames(), 0);
+}
+
+// Re-registering the EGL image and CUDA resource for every frame was 99% of
+// the DMA-BUF import cost (0.41 ms/frame at 1440p). PipeWire recycles a small
+// buffer pool, so the registration is kept per buffer instead.
+namespace {
+VideoFrame borrowFrame(TestDmaBuf &dma, int w, int h, int64_t timestamp) {
+  VideoFrame frame{};
+  frame.width = w;
+  frame.height = h;
+  frame.timestamp = timestamp;
+  frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
+  frame.isDmaBuf = true;
+  frame.dmaBufFd = dma.fd;
+  frame.drmFormat = DRM_FORMAT_XRGB8888;
+  frame.drmModifier = dma.modifier;
+  frame.dmaBufStride = dma.stride;
+  frame.dmaBufOffset = 0;
+  return frame;
+}
+} // namespace
+
+TEST(DmaBufCudaImportTest, EglImportRegistrationIsReusedPerProducerBuffer) {
+  if (avcodec_find_encoder_by_name("h264_nvenc") == nullptr)
+    GTEST_SKIP() << "h264_nvenc unavailable";
+  if (!eglImportUsable())
+    GTEST_SKIP() << "no EGL device with dma-buf import";
+  const int W = 320, H = 180;
+  std::vector<std::unique_ptr<TestDmaBuf>> pool;
+  for (int i = 0; i < 4; ++i) {
+    auto dma = makeXrgbDmaBuf(W, H);
+    if (!dma || dma->fd < 0) GTEST_SKIP() << "no GBM XRGB DMA-BUF";
+    pool.push_back(std::move(dma));
+  }
+  FFmpegEncoder encoder(IEncoder::EncoderType::NVENC_H264, "h264_nvenc");
+  EncoderConfig config;
+  config.width = W; config.height = H; config.fps = 30; config.bitrate = 2000;
+  if (!encoder.initialize(config)) GTEST_SKIP() << "NVENC unavailable";
+
+  const int frames = 24;
+  for (int i = 0; i < frames; ++i) {
+    auto frame = borrowFrame(*pool[size_t(i) % pool.size()], W, H, int64_t(i) * 33333);
+    EncodedPacket pkt;
+    encoder.encodeFrame(frame, pkt);
+  }
+  if (encoder.eglImportFrames() == 0)
+    GTEST_SKIP() << "generic DMA-BUF mapping handled these frames";
+  EXPECT_EQ(encoder.eglImportFrames(), frames);
+  EXPECT_EQ(encoder.importCacheMisses(), 4);          // one registration each
+  EXPECT_EQ(encoder.importCacheHits(), frames - 4);   // the rest are lookups
+  EXPECT_EQ(encoder.fallbackFrames(), 0);
+  EXPECT_EQ(encoder.droppedFrames(), 0);
+}
+
+TEST(DmaBufCudaImportTest, ImportCacheEvictsAndStillEncodesEveryFrame) {
+  if (avcodec_find_encoder_by_name("h264_nvenc") == nullptr)
+    GTEST_SKIP() << "h264_nvenc unavailable";
+  if (!eglImportUsable())
+    GTEST_SKIP() << "no EGL device with dma-buf import";
+  const int W = 320, H = 180;
+  const int buffers = 12; // more than the cache holds, to force evictions
+  std::vector<std::unique_ptr<TestDmaBuf>> pool;
+  for (int i = 0; i < buffers; ++i) {
+    auto dma = makeXrgbDmaBuf(W, H);
+    if (!dma || dma->fd < 0) GTEST_SKIP() << "no GBM XRGB DMA-BUF";
+    pool.push_back(std::move(dma));
+  }
+  FFmpegEncoder encoder(IEncoder::EncoderType::NVENC_H264, "h264_nvenc");
+  EncoderConfig config;
+  config.width = W; config.height = H; config.fps = 30; config.bitrate = 1000;
+  if (!encoder.initialize(config)) GTEST_SKIP() << "NVENC unavailable";
+
+  const int frames = buffers * 2;
+  int encoded = 0;
+  for (int i = 0; i < frames; ++i) {
+    auto frame = borrowFrame(*pool[size_t(i) % pool.size()], W, H, int64_t(i) * 33333);
+    EncodedPacket pkt;
+    if (encoder.encodeFrame(frame, pkt)) ++encoded;
+  }
+  if (encoder.eglImportFrames() == 0)
+    GTEST_SKIP() << "generic DMA-BUF mapping handled these frames";
+  EXPECT_GT(encoded, 0);
+  EXPECT_EQ(encoder.eglImportFrames(), frames);
+  EXPECT_EQ(encoder.importCacheHits() + encoder.importCacheMisses(), int64_t(frames));
+  EXPECT_GE(encoder.importCacheMisses(), int64_t(buffers)); // evicted and re-imported
+  EXPECT_EQ(encoder.fallbackFrames(), 0);
+  EXPECT_EQ(encoder.droppedFrames(), 0);
+}
+
+TEST(DmaBufCudaImportTest, ReusedRegistrationReadsFreshPixels) {
+  if (avcodec_find_encoder_by_name("h264_nvenc") == nullptr)
+    GTEST_SKIP() << "h264_nvenc unavailable";
+  if (!eglImportUsable())
+    GTEST_SKIP() << "no EGL device with dma-buf import";
+  const int W = 320, H = 180;
+  auto dma = makeXrgbDmaBuf(W, H); // gradient fill
+  if (!dma || dma->fd < 0) GTEST_SKIP() << "no GBM XRGB DMA-BUF";
+  FFmpegEncoder encoder(IEncoder::EncoderType::NVENC_H264, "h264_nvenc");
+  EncoderConfig config;
+  config.width = W; config.height = H; config.fps = 30; config.bitrate = 2000;
+  if (!encoder.initialize(config)) GTEST_SKIP() << "NVENC unavailable";
+
+  std::vector<EncodedPacket> packets;
+  int64_t ts = 0;
+  for (int i = 0; i < 6; ++i) {
+    auto frame = borrowFrame(*dma, W, H, ts);
+    ts += 33333;
+    EncodedPacket pkt;
+    if (encoder.encodeFrame(frame, pkt)) packets.push_back(pkt);
+  }
+  if (encoder.eglImportFrames() == 0)
+    GTEST_SKIP() << "generic DMA-BUF mapping handled these frames";
+  // Rewrite the very same allocation: the cached registration must observe
+  // the new pixels, not a snapshot taken when the buffer was registered.
+  if (!refillPixels(*dma, W, H, /*quadrants=*/true))
+    GTEST_SKIP() << "cannot rewrite the DMA-BUF contents";
+  const size_t gradientFrames = packets.size();
+  for (int i = 0; i < 6; ++i) {
+    auto frame = borrowFrame(*dma, W, H, ts);
+    ts += 33333;
+    EncodedPacket pkt;
+    if (encoder.encodeFrame(frame, pkt)) packets.push_back(pkt);
+  }
+  ASSERT_EQ(encoder.importCacheMisses(), 1); // still one allocation
+  ASSERT_GT(encoder.importCacheHits(), 0);
+  ASSERT_GT(packets.size(), gradientFrames);
+
+  struct Decoder {
+    AVCodecContext *ctx = nullptr;
+    AVFrame *frame = av_frame_alloc();
+    ~Decoder() {
+      av_frame_free(&frame);
+      avcodec_free_context(&ctx);
+    }
+  } decoder;
+  const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+  ASSERT_NE(codec, nullptr);
+  decoder.ctx = avcodec_alloc_context3(codec);
+  ASSERT_NE(decoder.ctx, nullptr);
+  const auto extra = encoder.extraData();
+  decoder.ctx->extradata = static_cast<uint8_t *>(
+      av_mallocz(extra.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+  ASSERT_NE(decoder.ctx->extradata, nullptr);
+  memcpy(decoder.ctx->extradata, extra.data(), extra.size());
+  decoder.ctx->extradata_size = int(extra.size());
+  ASSERT_EQ(avcodec_open2(decoder.ctx, codec, nullptr), 0);
+
+  std::vector<std::array<uint8_t, 4>> quadrants;
+  auto drain = [&] {
+    while (avcodec_receive_frame(decoder.ctx, decoder.frame) == 0) {
+      const auto &f = *decoder.frame;
+      auto luma = [&](int x, int y) {
+        return f.data[0][y * f.linesize[0] + x];
+      };
+      quadrants.push_back({luma(W / 4, H / 4), luma(W * 3 / 4, H / 4),
+                           luma(W / 4, H * 3 / 4), luma(W * 3 / 4, H * 3 / 4)});
+      av_frame_unref(decoder.frame);
+    }
+  };
+  for (const auto &pkt : packets) {
+    AVPacket av{};
+    av.data = const_cast<uint8_t *>(pkt.data.data());
+    av.size = int(pkt.data.size());
+    if (avcodec_send_packet(decoder.ctx, &av) == 0) drain();
+  }
+  avcodec_send_packet(decoder.ctx, nullptr);
+  drain();
+  ASSERT_EQ(quadrants.size(), packets.size());
+  // Stale pixels would leave the gradient in place; the quadrants only appear
+  // if the reused registration re-reads the rewritten allocation.
+  const auto &last = quadrants.back();
+  EXPECT_NEAR(last[0], 81, 18);   // red
+  EXPECT_NEAR(last[1], 145, 18);  // green
+  EXPECT_NEAR(last[2], 41, 18);   // blue
+  EXPECT_NEAR(last[3], 235, 18);  // white
 }
