@@ -248,6 +248,14 @@ struct SourceGuard {
   }
 };
 
+// Wall-clock length of the video stream, which is what an export's cost scales
+// with. Falls back to the container duration.
+double sourceSeconds(const AVStream *video) {
+  if (video && video->duration > 0 && video->time_base.num > 0)
+    return double(video->duration) * av_q2d(video->time_base);
+  return 0.0;
+}
+
 QString publish(const QString &temporary, const QString &directory, const QString &source) {
   const QString stem = QFileInfo(source).completeBaseName() + "_Share";
   for (int n = 0; n < 10000; ++n) {
@@ -634,7 +642,8 @@ ShareExportResult convertExport(const QString &source, const QString &directory,
   cancelled(cancel);
   guard.verifyUnchanged(source);
   progress.store(1);
-  return {publish(tmp, directory, source), {}};
+  return {publish(tmp, directory, source), {}, sourceSeconds(inVideo),
+            inVideo->codecpar->codec_id == AV_CODEC_ID_AV1};
 }
 
 } // namespace
@@ -928,7 +937,8 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
     cancelled(cancel);
     guard.verifyUnchanged(source);
     progress.store(1);
-    return {publish(tmp, directory, source), {}};
+    return {publish(tmp, directory, source), {}, sourceSeconds(inVideo),
+            inVideo->codecpar->codec_id == AV_CODEC_ID_AV1};
   } catch (const std::exception &e) {
     return {{}, QString::fromUtf8(e.what())};
   }

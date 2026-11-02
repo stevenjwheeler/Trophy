@@ -844,3 +844,54 @@ TEST_F(SettingsManagerTest, LoadEmitsSignal) {
   mgr->load();
   EXPECT_EQ(spy.count(), 1);
 }
+
+// The share-export estimate is a cost model measured on the machine that runs
+// it, so hardware differences do not silently make it wrong.
+TEST_F(SettingsManagerTest, ExportRatesStartAtDefaultsAndLearnPerMode) {
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.0017);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyTrackRate(), 0.0100);
+  EXPECT_DOUBLE_EQ(mgr->exportConvertRate(), 0.100);
+  EXPECT_DOUBLE_EQ(mgr->exportConvertAv1Rate(), 0.165);
+  QSignalSpy changed(mgr.get(), &SettingsManager::exportRatesChanged);
+
+  // Too short to mean anything: startup and the faststart rewrite dominate.
+  mgr->recordExportSample(0.5, 10.0, 0, 1, false);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.0017);
+  EXPECT_EQ(changed.count(), 0);
+  // Nonsense is ignored rather than poisoning the estimate.
+  mgr->recordExportSample(-1.0, 600.0, 0, 1, false);
+  mgr->recordExportSample(1e9, 600.0, 0, 1, false);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.0017);
+
+  // First real measurement replaces the guess outright: this is a slow machine
+  // copying a 10-minute recording in 12 s, 4x slower than the built-in value.
+  mgr->recordExportSample(12.0, 600.0, 0, 1, false);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.02);
+  EXPECT_EQ(changed.count(), 1);
+  // A second sample averages rather than replacing.
+  mgr->recordExportSample(6.0, 600.0, 0, 1, false);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.015);
+
+  // Conversion learns on its own; a copy sample must not touch it.
+  EXPECT_DOUBLE_EQ(mgr->exportConvertRate(), 0.100);
+  mgr->recordExportSample(300.0, 600.0, 1, 1, false);
+  EXPECT_DOUBLE_EQ(mgr->exportConvertRate(), 0.5);
+  // AV1 is tracked separately because its decoder is the slow part.
+  EXPECT_DOUBLE_EQ(mgr->exportConvertAv1Rate(), 0.165);
+  mgr->recordExportSample(900.0, 600.0, 1, 1, true);
+  EXPECT_DOUBLE_EQ(mgr->exportConvertAv1Rate(), 1.5);
+
+  // A three-track copy derives the per-track cost from the measured base.
+  // base 0.015, observed 0.075 over two extra tracks -> 0.03 each.
+  mgr->recordExportSample(45.0, 600.0, 0, 3, false);
+  EXPECT_DOUBLE_EQ(mgr->exportCopyTrackRate(), 0.03);
+
+  // Learned rates survive a reload and are cleared by a settings reset.
+  SettingsManager restored;
+  restored.load();
+  EXPECT_DOUBLE_EQ(restored.exportCopyRate(), 0.015);
+  EXPECT_DOUBLE_EQ(restored.exportConvertAv1Rate(), 1.5);
+  mgr->resetToDefaults();
+  EXPECT_DOUBLE_EQ(mgr->exportCopyRate(), 0.0017);
+  EXPECT_DOUBLE_EQ(mgr->exportConvertAv1Rate(), 0.165);
+}

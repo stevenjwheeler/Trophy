@@ -13,6 +13,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <cmath>
 #include <QStandardPaths>
 
 namespace TrophyBackend {
@@ -130,6 +131,15 @@ void SettingsManager::load() {
   m_wizardStep = qBound(0, general["wizardStep"].toInt(0), 6);
   m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
+  // Absent keys keep the built-in defaults, so an older settings file still
+  // gets a usable estimate before this machine has exported anything.
+  m_exportCopyRate = general["exportCopyRate"].toDouble(m_exportCopyRate);
+  m_exportCopyTrackRate =
+      general["exportCopyTrackRate"].toDouble(m_exportCopyTrackRate);
+  m_exportConvertRate = general["exportConvertRate"].toDouble(m_exportConvertRate);
+  m_exportConvertAv1Rate =
+      general["exportConvertAv1Rate"].toDouble(m_exportConvertAv1Rate);
+  m_exportRatesLearned = general["exportRatesLearned"].toInt(m_exportRatesLearned);
   m_libraryListView = general["libraryListView"].toBool(false);
   m_shareExportFolder = general["shareExportFolder"].toString();
 
@@ -284,6 +294,11 @@ void SettingsManager::save() {
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;
   general["shareExportFolder"] = m_shareExportFolder;
+  general["exportCopyRate"] = m_exportCopyRate;
+  general["exportCopyTrackRate"] = m_exportCopyTrackRate;
+  general["exportConvertRate"] = m_exportConvertRate;
+  general["exportConvertAv1Rate"] = m_exportConvertAv1Rate;
+  general["exportRatesLearned"] = m_exportRatesLearned;
   root["general"] = general;
 
   QJsonObject customization;
@@ -419,6 +434,11 @@ void SettingsManager::loadDefaults() {
   // DVR segment dir: empty means the /tmp default. Reset like every other
   // persisted value.
   m_replayCachePath.clear();
+  m_exportCopyRate = 0.0017;
+  m_exportCopyTrackRate = 0.0100;
+  m_exportConvertRate = 0.100;
+  m_exportConvertAv1Rate = 0.165;
+  m_exportRatesLearned = 0;
   // NOTE: m_waylandRestoreTokens deliberately untouched — per-game portal
   // authorizations survive a settings reset.
 
@@ -743,6 +763,44 @@ void SettingsManager::setAccentColor(const QString &color) {
     save();
     emit accentColorChanged();
   }
+}
+
+void SettingsManager::recordExportSample(double exportSeconds,
+                                         double videoSeconds, int mode,
+                                         int tracks, bool av1Source) {
+  if (!std::isfinite(exportSeconds) || !std::isfinite(videoSeconds))
+    return;
+  // Short exports are dominated by opening, the faststart rewrite and thread
+  // startup, so their rate says nothing about sustained throughput.
+  if (videoSeconds < 60.0 || exportSeconds <= 0.0)
+    return;
+  const double observed = exportSeconds / videoSeconds;
+  if (!(observed > 1e-5 && observed < 60.0))
+    return;
+  // The first real measurement of a given rate replaces the built-in guess
+  // outright; after that a gentle average keeps one odd export from moving the
+  // estimate far, while still tracking a machine that is slower or faster.
+  // Each rate learns separately: a copy export says nothing about conversion.
+  auto learn = [this](double &current, double measured, int bit) {
+    current = (m_exportRatesLearned & bit) ? current * 0.5 + measured * 0.5 : measured;
+    m_exportRatesLearned |= bit;
+  };
+  if (mode == 1) {
+    if (av1Source)
+      learn(m_exportConvertAv1Rate, observed, ConvertAv1Learned);
+    else
+      learn(m_exportConvertRate, observed, ConvertLearned);
+  } else if (tracks <= 1) {
+    learn(m_exportCopyRate, observed, CopyLearned);
+  } else {
+    // copy(total) = base + (tracks - 1) * perTrack
+    const double perTrack = (observed - m_exportCopyRate) / double(tracks - 1);
+    if (perTrack <= 0.0)
+      return; // mixing measured no slower than copying: nothing to learn
+    learn(m_exportCopyTrackRate, perTrack, CopyTrackLearned);
+  }
+  save();
+  emit exportRatesChanged();
 }
 
 void SettingsManager::setReplayCachePath(const QString &path) {

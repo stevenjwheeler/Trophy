@@ -65,6 +65,16 @@ class SettingsManager : public QObject {
   // of the C++ member — the whole field was dead.
   Q_PROPERTY(QString replayCachePath READ replayCachePath WRITE
                  setReplayCachePath NOTIFY replayCachePathChanged)
+  // Measured share-export cost, in seconds of export per second of footage.
+  // Learned from this machine's own exports; the constants here are only the
+  // starting point (see recordExportSample).
+  Q_PROPERTY(double exportCopyRate READ exportCopyRate NOTIFY exportRatesChanged)
+  Q_PROPERTY(double exportCopyTrackRate READ exportCopyTrackRate NOTIFY
+                 exportRatesChanged)
+  Q_PROPERTY(double exportConvertRate READ exportConvertRate NOTIFY
+                 exportRatesChanged)
+  Q_PROPERTY(double exportConvertAv1Rate READ exportConvertAv1Rate NOTIFY
+                 exportRatesChanged)
   Q_PROPERTY(qint64 maxStorageSize READ maxStorageSize WRITE setMaxStorageSize
                  NOTIFY maxStorageSizeChanged)
   Q_PROPERTY(bool autoDeleteOldest READ autoDeleteOldest WRITE
@@ -273,6 +283,16 @@ public:
   QString replayCachePath() const { return m_replayCachePath; }
   void setReplayCachePath(const QString &path);
 
+  double exportCopyRate() const { return m_exportCopyRate; }
+  double exportCopyTrackRate() const { return m_exportCopyTrackRate; }
+  double exportConvertRate() const { return m_exportConvertRate; }
+  double exportConvertAv1Rate() const { return m_exportConvertAv1Rate; }
+  // Fold one finished export into the learned rates. Ignored when the sample
+  // is too short to be meaningful (startup and faststart dominate) or
+  // nonsensical, so a cancelled or corrupted job cannot poison the estimate.
+  Q_INVOKABLE void recordExportSample(double exportSeconds, double videoSeconds,
+                                      int mode, int tracks, bool av1Source);
+
   QVariantMap waylandRestoreTokens() const { return m_waylandRestoreTokens; }
   Q_INVOKABLE QString getRestoreToken(const QString &key) const;
   QString getRestoreTokenForIdentity(const QString &key, const QString &legacyName) const;
@@ -335,6 +355,7 @@ signals:
   void themeModeChanged();
   void accentColorChanged();
   void replayCachePathChanged();
+  void exportRatesChanged();
   void waylandRestoreTokensChanged();
 
   // General
@@ -400,6 +421,22 @@ private:
   // check always runs).
   bool m_updateCheckEnabled = true;
   QString m_replayCachePath;
+  // Share-export cost model, in seconds per second of footage. Defaults are
+  // what a hardware-encoder machine typically measures; the first real export
+  // replaces them.
+  double m_exportCopyRate = 0.0017;
+  double m_exportCopyTrackRate = 0.0100;
+  double m_exportConvertRate = 0.100;
+  double m_exportConvertAv1Rate = 0.165;
+  // Which of those have been measured on this machine. Each learns on its own:
+  // a copy export says nothing about conversion speed.
+  enum ExportRateLearned {
+    CopyLearned = 1,
+    CopyTrackLearned = 2,
+    ConvertLearned = 4,
+    ConvertAv1Learned = 8,
+  };
+  int m_exportRatesLearned = 0;
   // Ambient-notice toggles (all default on; errors, the DVR authorize
   // prompt and direct keypress feedback always show regardless).
   bool m_notifyRecordings = true;

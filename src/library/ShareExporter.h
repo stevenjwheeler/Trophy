@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QStringList>
+#include <chrono>
 #include <future>
 #include <memory>
 #include <deque>
@@ -55,6 +56,9 @@ signals:
   void jobSettled(const QString &id, const QString &sourcePath,
                   const QString &resultPath, const QString &error, bool cancelled,
                   bool copyOriginal = false);
+  // One finished, uncancelled share export, for the measured cost model.
+  void exportSample(double exportSeconds, double videoSeconds, int mode,
+                    int tracks, bool av1Source);
 private:
   struct Result { QVariantMap info; };
   void poll();
@@ -68,6 +72,7 @@ private:
     std::shared_ptr<std::atomic_bool> cancel = std::make_shared<std::atomic_bool>(false);
     std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
     std::future<ShareExportResult> worker;
+    std::chrono::steady_clock::time_point startedAt;
     bool started = false;
     bool copyOriginal = false;
   };

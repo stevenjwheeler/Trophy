@@ -271,6 +271,7 @@ void ShareExporter::startNext() {
   if (m_jobs.empty() || m_jobs.front()->started) return;
   auto &job = *m_jobs.front();
   job.started = true;
+  job.startedAt = std::chrono::steady_clock::now();
   const auto path = job.source;
   const auto directory = job.directory;
   const auto options = job.options;
@@ -342,6 +343,14 @@ void ShareExporter::poll() {
       cancelled = job.cancel->load();
       copyOriginal = job.copyOriginal;
       if (!job.cancel->load()) failedReason = result.error;
+      // Report sustained throughput for the estimate. Short or failed exports
+      // are excluded: their timing is dominated by startup, not the codec.
+      if (failedReason.isEmpty() && !cancelled && !copyOriginal)
+        emit exportSample(
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          job.startedAt).count(),
+            result.sourceSeconds, job.options.mode == ShareExportOptions::Mode::Convert ? 1 : 0,
+            job.options.audioStreams.size(), result.av1Source);
       m_result = result.path;
       if (m_source == job.source && !m_inspecting && !m_pinned) m_error = result.error;
       unpinSource(job.source);

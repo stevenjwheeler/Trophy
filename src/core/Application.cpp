@@ -989,6 +989,14 @@ void Application::connectSignals() {
     m_notificationService->showQueuedNotification(
         "Export saved", QFileInfo(path).fileName(), "video-x-generic", 5000, 1);
   });
+  // Feed each finished export back into the measured cost model, so the
+  // dialog's estimate matches this machine instead of a guessed constant.
+  connect(m_shareExporter.get(), &ShareExporter::exportSample, this,
+          [this](double exportSeconds, double videoSeconds, int mode, int tracks,
+                 bool av1Source) {
+            m_settingsManager->recordExportSample(exportSeconds, videoSeconds, mode,
+                                                  tracks, av1Source);
+          });
   connect(m_shareExporter.get(), &ShareExporter::failed, this, [this](const QString &reason) {
     m_notificationService->showQueuedNotification("Export failed", reason, "dialog-error", 5000, 2);
   });

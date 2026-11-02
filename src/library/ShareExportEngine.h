@@ -22,7 +22,14 @@ struct ShareExportOptions {
   int maxHeight = 0; // Convert only: 0 keeps the source size, otherwise 720/1080
 };
 
-struct ShareExportResult { QString path; QString error; };
+struct ShareExportResult {
+  QString path;
+  QString error;
+  // Source duration in seconds, when known. Reported so the caller can turn a
+  // finished export into a measured throughput sample.
+  double sourceSeconds = 0.0;
+  bool av1Source = false;
+};
 
 // Worker-only native FFmpeg operations. No ffmpeg executable dependency,
 // hardware encoder discovery, or changes to the source recording.
