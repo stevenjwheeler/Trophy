@@ -488,7 +488,8 @@ ShareExportResult convertExport(const QString &source, const QString &directory,
   ffcheck(avio_open2(&out.ctx->pb, QFile::encodeName(tmp).constData(), AVIO_FLAG_WRITE,
       &out.ctx->interrupt_callback, nullptr), "Cannot open export output");
   AVDictionary *muxOptions = nullptr;
-  const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart+use_metadata_tags", 0);
+  // Standard tags only: see the note in the copy path.
+  const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart", 0);
   if (optionResult < 0) { av_dict_free(&muxOptions); ffcheck(optionResult, "Cannot configure MP4 fast start"); }
   const int header = avformat_write_header(out.ctx, &muxOptions);
   av_dict_free(&muxOptions);
@@ -835,8 +836,11 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
 
     ffcheck(avio_open2(&out.ctx->pb, QFile::encodeName(tmp).constData(), AVIO_FLAG_WRITE,
         &out.ctx->interrupt_callback, nullptr), "Cannot open export output");
+    // Plain faststart: use_metadata_tags writes a keys/mdta box that ffmpeg
+    // itself warns about ("UDTA parsing failed retrying raw"), and stricter
+    // players refuse it. The title lands in the standard ©nam entry instead.
     AVDictionary *muxOptions = nullptr;
-    const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart+use_metadata_tags", 0);
+    const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart", 0);
     if (optionResult < 0) { av_dict_free(&muxOptions); ffcheck(optionResult, "Cannot configure MP4 fast start"); }
     const int header = avformat_write_header(out.ctx, &muxOptions);
     av_dict_free(&muxOptions);
@@ -894,13 +898,34 @@ ShareExportResult ShareExportEngine::run(const QString &source, const QString &d
         av_packet_rescale_ts(pkt.get(), inVideo->time_base, outVideo->time_base);
         if (pkt->pts != AV_NOPTS_VALUE) pkt->pts = std::max<int64_t>(0, pkt->pts - originTicks);
         if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= originTicks;
+        // A recording can open with a packet that carries no timestamp at all
+        // (MKV keeps DTS-less heads). Forwarding that made the MP4 muxer warn
+        // and invent one; give it the frame's own timeline position instead.
+        // Only the both-missing case is filled in: when a stream has B-frames,
+        // deriving DTS from PTS for one packet can put it ahead of the next
+        // packet's real DTS, which the muxer rejects.
+        if (pkt->pts == AV_NOPTS_VALUE) {
+          pkt->pts = pkt->dts != AV_NOPTS_VALUE
+              ? pkt->dts
+              : av_rescale_q(std::max<int64_t>(0, ptsUs), kUs, outVideo->time_base);
+          if (pkt->dts == AV_NOPTS_VALUE)
+            pkt->dts = pkt->pts;
+        }
         pkt->stream_index = outVideo->index;
         pkt->pos = -1;
         ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
                 "Cannot write export (check free disk space)");
         lastVideoUs = ptsUs;
-        lastEndUs = ptsUs + (pkt->duration > 0
-            ? av_rescale_q(pkt->duration, inVideo->time_base, kUs) : 0);
+        // Advance the fallback clock even for packets that carry no duration,
+        // so a source with no timestamps at all still gets a monotonic
+        // sequence instead of a run of identical ones.
+        const int64_t stepUs = pkt->duration > 0
+            ? av_rescale_q(pkt->duration, inVideo->time_base, kUs)
+            : (inVideo->avg_frame_rate.num > 0 && inVideo->avg_frame_rate.den > 0
+                   ? int64_t(1000000) * inVideo->avg_frame_rate.den /
+                         inVideo->avg_frame_rate.num
+                   : int64_t(16667));
+        lastEndUs = ptsUs + std::max<int64_t>(1, stepUs);
       } else if (copiedAudio != nullptr && pkt->stream_index == singleAudioIndex) {
         av_packet_rescale_ts(pkt.get(), inCopiedAudio->time_base, copiedAudio->time_base);
         const int64_t shift = av_rescale_q(originUs, kUs, copiedAudio->time_base);

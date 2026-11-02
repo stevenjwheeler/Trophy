@@ -172,7 +172,8 @@ protected:
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
         "-itsoffset", "0.4", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=1.6",
         "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "mpeg4", "-g", "12", "-c:a", "pcm_s16le",
-        "-metadata:s:a:0", "title=Game", "-metadata:s:a:1", "title=Voice", source});
+        "-metadata", "title=Game", "-metadata:s:a:0", "title=Game",
+        "-metadata:s:a:1", "title=Voice", source});
     ASSERT_TRUE(ffmpeg.waitForFinished(30000));
     ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
   }
@@ -334,6 +335,11 @@ TEST_F(ShareExportTest, InspectAndMixProducesFastStartCompatibleMp4) {
   avformat_close_input(&ctx);
   QFile file(output.path); ASSERT_TRUE(file.open(QIODevice::ReadOnly)); const auto bytes = file.readAll();
   EXPECT_GT(bytes.indexOf("mdat"), bytes.indexOf("moov"));
+  // Standard iTunes-style tags. The keys/mdta form (movflags=use_metadata_tags)
+  // makes ffmpeg itself warn "UDTA parsing failed retrying raw", and stricter
+  // players refuse the file.
+  EXPECT_GT(bytes.indexOf(QByteArrayLiteral("\xA9nam")), -1);
+  EXPECT_EQ(bytes.indexOf(QByteArrayLiteral("mdta")), -1);
   const auto pcm = audio(output.path);
   EXPECT_GT(tone(pcm, 440), 0.02); EXPECT_GT(tone(pcm, 880), 0.02);
   EXPECT_DOUBLE_EQ(progress.load(), 1.0);
