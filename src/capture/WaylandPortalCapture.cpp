@@ -1469,6 +1469,12 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     frame.data        = static_cast<const uint8_t *>(d.data);
     frame.stride      = d.chunk->stride;
     frame.pixelFormat = AV_PIX_FMT_BGRA;
+    // Copy-on-enqueue, deliberately. The PipeWire buffer pool (KWin: three
+    // buffers) is the only thing decoupling capture from encoding; holding a
+    // shared-memory frame by lease makes the compositor wait for the encoder
+    // to release it. Measured 2026-11-02 with x264 at 1080p: delivery fell
+    // from a steady 60 fps to 46 fps with 150 ms holes (visible judder) even
+    // though nothing was dropped. Copying costs 0.18 ms at 1080p.
 
     {
       std::lock_guard<std::mutex> lock(self->m_callbackMutex);

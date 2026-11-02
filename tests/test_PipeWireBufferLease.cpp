@@ -2,6 +2,9 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <thread>
+extern "C" {
+#include <libavutil/pixfmt.h>
+}
 #include "capture/PipeWireBufferLease.h"
 #include "capture/IVideoCaptureSource.h"
 #include "core/FrameDispatcher.h"
@@ -133,6 +136,25 @@ TEST_F(PipeWireBufferLeaseTest, QueuedFrameMovesKeepProducerPinned) {
   moved.reset();
   pw_loop_iterate(loop, 0);
   EXPECT_EQ(returnedCount, 1);
+}
+
+TEST_F(PipeWireBufferLeaseTest, SharedMemoryFrameIsCopiedSoTheProducerIsNeverPaced) {
+  pw_buffer buffer{};
+  std::vector<uint8_t> pixels(64 * 64 * 4, 7);
+  VideoFrame source{};
+  source.data = pixels.data();
+  source.width = source.height = 64;
+  source.stride = 64 * 4;
+  source.pixelFormat = AV_PIX_FMT_BGRA;
+
+  QueuedFrame queued(source);
+  // Delivery must never wait on the encoder: the producer's buffer is handed
+  // back immediately and the queue owns its own copy. Leasing here instead
+  // throttled capture to encode speed (measured 60 -> 46 fps with x264).
+  ASSERT_EQ(queued.ownedData.size(), pixels.size());
+  EXPECT_NE(queued.data, pixels.data());
+  EXPECT_EQ(queued.ownedData[0], 7);
+  EXPECT_FALSE(queued.bufferLease);
 }
 
 TEST_F(PipeWireBufferLeaseTest, RemovedBufferIsNotReturnedDuringRenegotiation) {
