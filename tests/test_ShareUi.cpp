@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <QGuiApplication>
+#include <QQmlContext>
 #include <QQmlEngine>
 #include <QQmlComponent>
 #include <QQmlExpression>
@@ -30,8 +31,7 @@ public:
   bool active = false;
   bool scanning = false;
   QString result;
-  int inspections = 0, exports = 0, releases = 0, height = 0;
-  qint64 bytes = -1;
+  int inspections = 0, exports = 0, releases = 0, lastMode = -1, lastHeight = -1;
   QString source, destination;
   QVariantMap data;
   QVariantList selected;
@@ -42,7 +42,6 @@ public:
   QString cancelledJob;
   QStringList copiedSources;
   bool copyAccepted = true;
-  bool watermark = false;
   bool inspecting() const { return scanning; }
   QString error() const { return {}; }
   QString resultPath() const { return result; }
@@ -50,17 +49,23 @@ public:
   Q_INVOKABLE bool inspect(const QString &path) {
     ++inspections; source = path; result.clear();
     scanning = path == heldProbe;
-    data = {{"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}, QVariantMap{{"index", 2}, {"label", "Voice"}}}}};
+    data = {{"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}, QVariantMap{{"index", 2}, {"label", "Voice"}}}},
+            {"durationSeconds", 7200.0}, {"videoCodecLabel", "H.264"},
+            {"copyable", true}, {"shareable", true},
+            {"estimateCopyBase", 0.0017}, {"estimateCopyPerTrack", 0.0100},
+            {"estimateConvert", 0.100}};
     if (captureData.contains(path)) data = captureData.value(path);
     emit changed(); return true;
   }
-  Q_INVOKABLE bool start(const QString &folder, int h, qint64 b, const QVariantList &tracks, bool mark) {
-    watermark = mark;
-    ++exports; destination = folder; height = h; bytes = b; selected = tracks; active = true; emit changed(); return true;
+  Q_INVOKABLE bool start(const QString &folder, const QVariantList &tracks,
+                        int mode = 0, int height = 0) {
+    ++exports; destination = folder; selected = tracks; lastMode = mode; lastHeight = height;
+    active = true; emit changed(); return true;
   }
-  Q_INVOKABLE bool startBatch(const QString &folder, int h, qint64 b, const QVariantList &captures, bool mark) {
-    watermark = mark;
-    ++exports; destination = folder; height = h; bytes = b; batchCaptures = captures; active = true; emit changed(); return true;
+  Q_INVOKABLE bool startBatch(const QString &folder, const QVariantList &captures,
+                             int mode = 0, int height = 0) {
+    ++exports; destination = folder; batchCaptures = captures; lastMode = mode;
+    lastHeight = height; active = true; emit changed(); return true;
   }
   Q_INVOKABLE void cancel() { active = false; emit changed(); }
   Q_INVOKABLE void release() { ++releases; }
@@ -95,6 +100,18 @@ public:
 signals:
   void pendingChanged();
 };
+// Minimal stand-in for RecordingLibrary: the dialog resolves the recording it
+// is exporting (name, date, length, thumbnail) from the library by path.
+class FakeRecordingLibrary : public QObject {
+  Q_OBJECT
+  Q_PROPERTY(QVariantList allRecordings MEMBER records CONSTANT)
+public:
+  QVariantList records;
+  Q_INVOKABLE QUrl localFileUrl(const QString &path) const {
+    return QUrl::fromLocalFile(path);
+  }
+};
+
 class SharingUiTest : public testing::Test {
 protected:
   ExportUiFake exporter;
@@ -716,15 +733,16 @@ TEST_F(SharingUiTest, ShareDialogHasVisibleControlsAndPassesAudioSelection) {
   const auto tracks = selection.canConvert<QJSValue>() ? selection.value<QJSValue>().toVariant().toList() : selection.toList();
   EXPECT_EQ(tracks, QVariantList{1}); // Muted Voice lane starts excluded.
   ASSERT_TRUE(wait([&] { return object->property("implicitHeight").toDouble() > 300; }));
-  EXPECT_LE(object->property("implicitHeight").toDouble(), 760);
+  // Capped to the window, never taller.
+  EXPECT_LE(object->property("implicitHeight").toDouble(), 784);
   object->setProperty("destination", output.path());
   object->setProperty("selectedAudio", QVariantList{1});
   auto *button = object->findChild<QObject *>("startShareExport");
   ASSERT_NE(button, nullptr);
   EXPECT_TRUE(button->property("enabled").toBool());
   ASSERT_TRUE(QMetaObject::invokeMethod(button, "clicked"));
-  EXPECT_EQ(exporter.exports, 1); EXPECT_EQ(exporter.height, 1080);
-  EXPECT_EQ(exporter.bytes, 0); EXPECT_EQ(exporter.selected, QVariantList{1});
+  EXPECT_EQ(exporter.exports, 1);
+  EXPECT_EQ(exporter.selected, QVariantList{1});
   EXPECT_EQ(exporter.destination, output.path());
   ASSERT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
   EXPECT_EQ(exporter.releases, 1); // Release the form, not the queued job.
@@ -750,7 +768,6 @@ TEST_F(SharingUiTest, ExportRunsInBackgroundWithoutDialogProgress) {
   QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
       start->mapToScene(QPointF(start->width() / 2, start->height() / 2)).toPoint());
   ASSERT_TRUE(wait([&] { return exporter.active && !object->property("visible").toBool(); }));
-  EXPECT_TRUE(exporter.watermark);
   EXPECT_EQ(exporter.releases, 1);
   exporter.active = false; exporter.result = "/fake/Game_share.mp4"; emit exporter.changed();
   EXPECT_FALSE(object->property("visible").toBool());
@@ -775,7 +792,6 @@ TEST_F(SharingUiTest, BatchReviewsIndependentAudioLayoutsAndQueuesAllWithSharedS
   QMetaObject::invokeMethod(object.get(), "open");
   ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
   EXPECT_EQ(exporter.inspections, 2);
-  object->setProperty("includeWatermark", false);
   object->setProperty("selectedAudio", QVariantList{2});
   auto *picker = object->findChild<QObject *>("shareCapturePicker");
   ASSERT_NE(picker, nullptr);
@@ -791,49 +807,224 @@ TEST_F(SharingUiTest, BatchReviewsIndependentAudioLayoutsAndQueuesAllWithSharedS
   EXPECT_TRUE(start->property("enabled").toBool());
   QMetaObject::invokeMethod(start, "clicked");
   ASSERT_EQ(exporter.batchCaptures.size(), 2);
-  EXPECT_FALSE(exporter.watermark);
   EXPECT_EQ(exporter.batchCaptures[0].toMap()["sourcePath"].toString(), "/fake/First.mkv");
   EXPECT_EQ(exporter.batchCaptures[0].toMap()["audioStreams"].toList(), QVariantList{2});
   EXPECT_EQ(exporter.batchCaptures[1].toMap()["audioStreams"].toList(), QVariantList{7});
-  EXPECT_EQ(exporter.height, 1080);
   EXPECT_EQ(exporter.destination, "/fake/output");
   EXPECT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
 }
-TEST_F(SharingUiTest, WatermarkSwitchInsideQualityRetainsExplicitOffAcrossReopenAndExportsOff) {
+// The panel offers two square, described choices rather than a dropdown, shows
+// them only when there is a real choice, and always exposes what the export
+// will contain plus how long it will take.
+TEST_F(SharingUiTest, OutputOffersDescribedChoicesAndAlwaysShowsTheResult) {
+  exporter.captureData["/fake/Game.mkv"] = QVariantMap{
+      {"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}}},
+      {"durationSeconds", 7200.0},
+      {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"},
+      {"copyable", true}, {"shareable", false},
+      {"estimateCopyBase", 0.0017}, {"estimateCopyPerTrack", 0.0100},
+      {"estimateConvert", 0.100}};
   create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
       {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
   ASSERT_TRUE(object);
   QMetaObject::invokeMethod(object.get(), "open");
   ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-  auto *choice = object->findChild<QQuickItem *>("shareWatermark");
-  ASSERT_NE(choice, nullptr);
-  auto *quality = object->findChild<QQuickItem *>("shareQualitySection");
-  auto *row = object->findChild<QQuickItem *>("shareWatermarkRow");
-  auto *audio = object->findChild<QQuickItem *>("shareAudioSection");
-  ASSERT_NE(quality, nullptr); ASSERT_NE(row, nullptr); ASSERT_NE(audio, nullptr);
-  EXPECT_FALSE(choice->isVisible());
-  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-      quality->mapToScene(QPointF(quality->width() / 2, quality->height() / 2)).toPoint());
-  ASSERT_TRUE(wait([&] { return quality->property("expansionProgress").toDouble() >= 0.999; }));
-  EXPECT_TRUE(choice->isVisible());
-  EXPECT_GT(row->mapToScene(QPointF()).y(), quality->mapToScene(QPointF()).y());
-  EXPECT_LE(row->mapToScene(QPointF(0, row->height())).y(), quality->mapToScene(QPointF(0, quality->height())).y());
-  EXPECT_GE(audio->mapToScene(QPointF()).y(), quality->mapToScene(QPointF(0, quality->height())).y());
-  EXPECT_EQ(choice->property("implicitWidth").toInt(), 44);
-  EXPECT_TRUE(choice->property("checked").toBool());
-  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-      choice->mapToScene(QPointF(choice->width() / 2, choice->height() / 2)).toPoint());
-  EXPECT_FALSE(object->property("includeWatermark").toBool());
-  QMetaObject::invokeMethod(object.get(), "close");
-  ASSERT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+
+  // Two described square choices, not a combo box.
+  EXPECT_EQ(object->findChild<QObject *>("shareModeBox"), nullptr);
+  auto *copy = object->findChild<QQuickItem *>("shareCopyMode");
+  auto *convert = object->findChild<QQuickItem *>("shareConvertMode");
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(convert, nullptr);
+  EXPECT_EQ(copy->property("title").toString(), "Copy");
+  EXPECT_EQ(convert->property("title").toString(), "Convert");
+  EXPECT_FALSE(copy->property("subtitle").toString().isEmpty());
+  EXPECT_FALSE(convert->property("subtitle").toString().isEmpty());
+  // Same corner radius as the app's normal buttons, accent-outlined when chosen.
+  EXPECT_GT(copy->property("radius").toDouble(), 0.0);
+  EXPECT_EQ(convert->property("selected").toBool(), true);
+  EXPECT_EQ(copy->property("selected").toBool(), false);
+
+  // What it will produce is always on screen, in the flat layout.
+  auto *produces = object->findChild<QObject *>("shareProduces");
+  ASSERT_NE(produces, nullptr);
+  EXPECT_TRUE(produces->property("text").toString().contains("H.264"));
+  EXPECT_TRUE(produces->property("text").toString().contains("AAC"));
+  auto *estimate = object->findChild<QObject *>("shareEstimate");
+  ASSERT_NE(estimate, nullptr);
+  EXPECT_TRUE(estimate->property("text").toString().contains("12 minutes"));
+
+  // Choosing copy switches the described output to the source codec.
+  QMetaObject::invokeMethod(copy, "clicked");
+  ASSERT_TRUE(wait([&] { return copy->property("selected").toBool(); }));
+  EXPECT_TRUE(produces->property("text").toString().contains("HEVC (H.265)"));
+  EXPECT_FALSE(convert->property("selected").toBool());
+  QMetaObject::invokeMethod(convert, "clicked");
+  ASSERT_TRUE(wait([&] { return convert->property("selected").toBool(); }));
+  EXPECT_TRUE(produces->property("text").toString().contains("H.264"));
+}
+
+// An H.264 recording defaults to the copy, which is lossless and already
+// produces H.264 + AAC. Conversion is still offered - it is the only way to
+// resize - and says as much.
+TEST_F(SharingUiTest, AlreadyShareableSourceDefaultsToCopyButStillAllowsResizing) {
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
   QMetaObject::invokeMethod(object.get(), "open");
   ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-  EXPECT_FALSE(choice->property("checked").toBool());
-  EXPECT_FALSE(choice->isVisible());
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  EXPECT_TRUE(object->property("allShareable").toBool());
+  // Default is the copy.
+  EXPECT_FALSE(object->property("converting").toBool());
+
+  auto *copy = object->findChild<QQuickItem *>("shareCopyMode");
+  auto *convert = object->findChild<QQuickItem *>("shareConvertMode");
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(convert, nullptr);
+  EXPECT_TRUE(copy->property("selected").toBool());
+  // Conversion stays usable, and explains why it usually is not needed.
+  EXPECT_FALSE(convert->property("disabled").toBool());
+  EXPECT_TRUE(convert->property("enabled").toBool());
+  const QString subtitle = convert->property("subtitle").toString();
+  EXPECT_TRUE(subtitle.contains("conversion is not needed")) << subtitle.toStdString();
+  EXPECT_TRUE(subtitle.contains("resize")) << subtitle.toStdString();
+
+  // Selecting it switches the export to conversion and reveals the resolution.
+  QMetaObject::invokeMethod(convert, "clicked");
+  ASSERT_TRUE(wait([&] { return object->property("converting").toBool(); }));
+  auto *start = object->findChild<QObject *>("startShareExport");
+  ASSERT_NE(start, nullptr);
+  object->setProperty("exportHeight", 720);
+  QMetaObject::invokeMethod(start, "clicked");
+  EXPECT_EQ(exporter.exports, 1);
+  EXPECT_EQ(exporter.lastMode, 1);
+  EXPECT_EQ(exporter.lastHeight, 720);
+}
+
+// HEVC/AV1 cannot be copied into something a phone will play, so conversion is
+// preselected; the plain copy stays available for people who want it.
+TEST_F(SharingUiTest, NonShareableSourceDefaultsToConvertAndStillOffersCopy) {
+  exporter.captureData["/fake/Game.mkv"] = {
+      {"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}}},
+      {"durationSeconds", 7200.0},
+      {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"},
+      {"copyable", true}, {"shareable", false},
+      {"estimateCopyBase", 0.0017}, {"estimateCopyPerTrack", 0.0100},
+      {"estimateConvert", 0.100}};
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  // The row lives inside a collapsed section card, so its effective
+  // visibility is always false here; assert the property that drives it.
+  auto *copyCard = object->findChild<QQuickItem *>("shareCopyMode");
+  auto *convertCard = object->findChild<QQuickItem *>("shareConvertMode");
+  ASSERT_NE(copyCard, nullptr);
+  ASSERT_NE(convertCard, nullptr);
+  EXPECT_FALSE(convertCard->property("disabled").toBool());
+  EXPECT_FALSE(copyCard->property("disabled").toBool());
+  // Default is conversion, and the resolution choice appears with it.
+  ASSERT_TRUE(wait([&] { return object->property("exportMode").toInt() == 1; }));
+  EXPECT_TRUE(object->property("converting").toBool());
+  auto *start = object->findChild<QObject *>("startShareExport");
+  ASSERT_NE(start, nullptr);
+  object->setProperty("exportHeight", 1080);
+  QMetaObject::invokeMethod(start, "clicked");
+  EXPECT_EQ(exporter.exports, 1);
+  EXPECT_EQ(exporter.lastMode, 1);
+  EXPECT_EQ(exporter.lastHeight, 1080);
+
+  // The plain copy is still selectable for this file.
+  exporter.active = false;
+  emit exporter.changed();
+  object->setProperty("destination", "/fake/output");
+  object->setProperty("exportMode", 0);
+  QMetaObject::invokeMethod(start, "clicked");
+  EXPECT_EQ(exporter.exports, 2);
+  EXPECT_EQ(exporter.lastMode, 0);
+  EXPECT_EQ(exporter.lastHeight, 0);
+}
+
+// Choosing three tracks and/or a conversion used to be blind: the dialog said
+// "a few minutes" at best. It now shows an estimate for the current selection
+// so nobody starts a ten-minute job expecting seconds.
+TEST_F(SharingUiTest, EstimateFollowsModeAndSelectedTrackCount) {
+  // HEVC source, so both modes are selectable and the conversion estimate is
+  // reachable (an H.264 source is copy-only by design).
+  exporter.captureData["/fake/Game.mkv"] = {
+      {"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}}},
+      {"durationSeconds", 7200.0},
+      {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"},
+      {"copyable", true}, {"shareable", false},
+      {"estimateCopyBase", 0.0017}, {"estimateCopyPerTrack", 0.0100},
+      {"estimateConvert", 0.100}};
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  auto *estimate = object->findChild<QObject *>("shareEstimate");
+  ASSERT_NE(estimate, nullptr);
+
+  // One copied track of a two-hour recording: seconds.
+  object->setProperty("exportMode", 0);
+  object->setProperty("selectedAudio", QVariantList{1});
+  ASSERT_TRUE(wait([&] { return !estimate->property("text").toString().isEmpty(); }));
+  EXPECT_EQ(estimate->property("text").toString(), "Estimated time to complete export: about 10 seconds");
+
+  // Three tracks means mixing, which needs an audio encode.
+  object->setProperty("selectedAudio", QVariantList{1, 2, 3});
+  ASSERT_TRUE(wait([&] { return estimate->property("text").toString().contains("min"); }));
+  EXPECT_EQ(estimate->property("text").toString(), "Estimated time to complete export: about 3 minutes");
+
+  // Conversion re-encodes the video: minutes, and it says so.
+  object->setProperty("exportMode", 1);
+  ASSERT_TRUE(wait([&] { return estimate->property("text").toString().contains("12 minutes"); }));
+  EXPECT_TRUE(estimate->property("text").toString().contains("hardware encoder"));
+}
+
+TEST_F(SharingUiTest, CopySectionExplainsMergedAudioAndWarnsAboutNonH264Codecs) {
+  exporter.captureData["/fake/Game.mkv"] = QVariantMap{{"tracks", QVariantList{}},
+      {"videoCodec", "hevc"}, {"videoCodecLabel", "HEVC (H.265)"},
+      {"copyable", true}, {"shareable", false}};
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  auto *produces = object->findChild<QObject *>("shareProduces");
+  auto *note = object->findChild<QQuickItem *>("shareCodecNote");
+  ASSERT_NE(produces, nullptr);
+  ASSERT_NE(note, nullptr);
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+
+  // HEVC defaults to conversion, so the summary describes H.264 output and the
+  // codec warning does not apply.
+  EXPECT_TRUE(object->property("converting").toBool());
+  EXPECT_TRUE(produces->property("text").toString().contains("H.264"));
+  EXPECT_FALSE(note->isVisible());
+
+  // Choosing the copy brings the warning back.
+  object->setProperty("exportMode", 0);
+  ASSERT_TRUE(wait([&] { return !object->property("converting").toBool(); }));
+  EXPECT_TRUE(object->property("codecWarning").toBool());
+  ASSERT_TRUE(wait([&] { return note->isVisible(); }));
+  // Friendly labels, not raw FFmpeg names.
+  EXPECT_TRUE(note->property("text").toString().contains("HEVC (H.265)"));
+  EXPECT_FALSE(note->property("text").toString().contains("hevc"));
+  // A copy keeps the source codec, which is what the warning is about.
+  EXPECT_TRUE(produces->property("text").toString().contains("HEVC (H.265)"));
+  EXPECT_TRUE(note->property("text").toString().contains("HEVC (H.265)"));
   QMetaObject::invokeMethod(object->findChild<QObject *>("startShareExport"), "clicked");
   EXPECT_EQ(exporter.exports, 1);
-  EXPECT_FALSE(exporter.watermark);
+  EXPECT_EQ(exporter.lastMode, 0);
 }
+
 TEST_F(SharingUiTest, BatchProbeFailureDoesNotQueuePartialSelection) {
   exporter.captureData["/fake/Broken.mkv"] = {{"error", "Unreadable capture"}};
   create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
@@ -1053,14 +1244,12 @@ TEST_F(SharingUiTest, NamedTracksPreserveOriginalIndicesAndEstimatedLabels) {
   ASSERT_TRUE(bool(object));
   ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
   ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-  auto *audioSection = object->findChild<QObject *>("shareAudioSection");
-  ASSERT_NE(audioSection, nullptr);
-  audioSection->setProperty("expanded", true);
   exporter.data = {{"tracks", QVariantList{
     QVariantMap{{"index", 1}, {"label", "System"}},
     QVariantMap{{"index", 2}, {"label", "Voice"}, {"defaultExcluded", true}},
     QVariantMap{{"index", 3}, {"label", "Microphone"}, {"inferred", true}}}}};
   emit exporter.changed();
+  object->setProperty("audioExpanded", true);
   auto *content = object->property("contentItem").value<QQuickItem *>();
   ASSERT_NE(content, nullptr);
   ASSERT_TRUE(wait([&] { return findItem(content, "shareAudioTrack3") != nullptr; }));
@@ -1070,37 +1259,91 @@ TEST_F(SharingUiTest, NamedTracksPreserveOriginalIndicesAndEstimatedLabels) {
   EXPECT_EQ(findItem(content, "shareAudioTrack1")->property("text").toString(), "System");
   EXPECT_FALSE(findItem(content, "shareAudioTrack2")->isVisible());
   object->setProperty("selectedAudio", QVariantList{1});
-  mic->setProperty("checked", true);
-  ASSERT_TRUE(QMetaObject::invokeMethod(mic, "toggled"));
+  // Each source is a label plus a switch now.
+  auto *micSwitch = findItem(content, "shareAudioSwitch3");
+  ASSERT_NE(micSwitch, nullptr);
+  micSwitch->setProperty("checked", true);
+  ASSERT_TRUE(QMetaObject::invokeMethod(micSwitch, "toggled"));
   const auto selection = object->property("selectedAudio");
   const auto tracks = selection.canConvert<QJSValue>() ? selection.value<QJSValue>().toVariant().toList() : selection.toList();
   EXPECT_EQ(tracks, (QVariantList{1, 3}));
   EXPECT_EQ(object->property("audioSummary").toString(), "System + Microphone*");
 }
-TEST_F(SharingUiTest, DefaultViewUsesCollapsedSummariesAndRevealsOptionsOnClick) {
-  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)}, {"sourcePath", "/fake/Game.mkv"}});
+// Two choices, a compact resolution row, one line of audio summary, a details
+// box and the destination - nothing dominating the panel.
+TEST_F(SharingUiTest, PanelStaysCompactUntilAudioIsOpened) {
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
   ASSERT_TRUE(bool(object));
   ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
   ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-  auto *audio = object->findChild<QQuickItem *>("shareAudioSection");
-  auto *quality = object->findChild<QQuickItem *>("shareQualitySection");
-  ASSERT_NE(audio, nullptr);
-  ASSERT_NE(quality, nullptr);
-  EXPECT_FALSE(audio->property("expanded").toBool());
-  EXPECT_FALSE(quality->property("expanded").toBool());
-  EXPECT_EQ(audio->property("description").toString(), "Game + Voice");
-  EXPECT_EQ(quality->property("description").toString(), QString::fromUtf8("1080p · High quality"));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
   auto *content = object->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  for (const char *name : {"shareCopyMode", "shareConvertMode", "shareAudioToggle",
+                           "shareProduces", "shareEstimate", "shareDestinationPath"})
+    EXPECT_TRUE(findItem(content, name) != nullptr) << name;
+  // Audio is one summary row until asked for.
+  EXPECT_FALSE(object->property("audioExpanded").toBool());
   auto *game = findItem(content, "shareAudioTrack1");
   ASSERT_NE(game, nullptr);
   EXPECT_FALSE(game->isVisible());
-  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, audio->mapToScene(QPointF(30, 25)).toPoint());
-  ASSERT_TRUE(wait([&] { return audio->property("expanded").toBool() && game->isVisible(); }));
-  QTest::qWait(250);
-  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, audio->mapToScene(QPointF(30, 25)).toPoint());
-  ASSERT_TRUE(wait([&] { return !audio->property("expanded").toBool() && !game->isVisible(); }));
-  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, quality->mapToScene(QPointF(30, 25)).toPoint());
-  EXPECT_TRUE(quality->property("expanded").toBool());
+  auto *toggle = findItem(content, "shareAudioToggle");
+  ASSERT_NE(toggle, nullptr);
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      toggle->mapToScene(QPointF(toggle->width() / 2, toggle->height() / 2)).toPoint());
+  ASSERT_TRUE(wait([&] { return object->property("audioExpanded").toBool(); }));
+  ASSERT_TRUE(wait([&] { return game->isVisible(); }));
+  // Save to is a card of its own, and the produced/estimate box sits under it.
+  auto *saveTo = findItem(content, "shareSaveToCard");
+  auto *details = findItem(content, "shareExportDetails");
+  auto *audioCard = findItem(content, "shareAudioCard");
+  ASSERT_NE(saveTo, nullptr);
+  ASSERT_NE(details, nullptr);
+  ASSERT_NE(audioCard, nullptr);
+  // Both are one-row cards: thin, and close enough in height to read as a pair.
+  EXPECT_LT(audioCard->height(), 52.0);
+  EXPECT_LT(saveTo->height(), 52.0);
+  EXPECT_NEAR(audioCard->height(), saveTo->height(), 0.5);
+  // Same width and same left edge as the result box below them.
+  EXPECT_NEAR(audioCard->width(), saveTo->width(), 0.5);
+  EXPECT_NEAR(details->width(), saveTo->width(), 0.5);
+  EXPECT_NEAR(audioCard->mapToItem(content, QPointF()).x(),
+              saveTo->mapToItem(content, QPointF()).x(), 0.5);
+  EXPECT_GT(details->mapToItem(content, QPointF()).y(),
+            saveTo->mapToItem(content, QPointF()).y());
+  // Converting reveals a resolution card shaped like the other two.
+  object->setProperty("exportMode", 1);
+  ASSERT_TRUE(wait([&] { return object->property("converting").toBool(); }));
+  auto *resolutionCard = findItem(content, "shareResolutionCard");
+  ASSERT_NE(resolutionCard, nullptr);
+  ASSERT_TRUE(wait([&] { return resolutionCard->width() > 0; }));
+  EXPECT_NEAR(resolutionCard->width(), saveTo->width(), 0.5);
+  EXPECT_NEAR(resolutionCard->height(), saveTo->height(), 0.5);
+  // The picker is plain text in the card; only the folder action is a segment.
+  auto *heightBox = findItem(content, "shareHeightBox");
+  auto *folderSegment = findItem(content, "shareChangeFolder");
+  ASSERT_NE(heightBox, nullptr);
+  ASSERT_NE(folderSegment, nullptr);
+  EXPECT_NEAR(folderSegment->height(), saveTo->height(), 2.0);
+  EXPECT_EQ(findItem(content, "shareResolutionSegment"), nullptr);
+  // The picker is only as wide as its value, so the popup carries its own
+  // width - otherwise every item is elided to "Origi...".
+  auto *popup = heightBox->property("popup").value<QObject *>();
+  ASSERT_NE(popup, nullptr);
+  EXPECT_GE(popup->property("width").toDouble(), 150.0);
+  // The rule sits between the two choices and the cards, so resolution and
+  // audio are adjacent.
+  auto *divider = findItem(content, "shareDivider");
+  auto *convertCard = findItem(content, "shareConvertMode");
+  ASSERT_NE(divider, nullptr);
+  ASSERT_NE(convertCard, nullptr);
+  const double dividerY = divider->mapToItem(content, QPointF()).y();
+  EXPECT_GT(dividerY, convertCard->mapToItem(content, QPointF()).y());
+  EXPECT_LT(dividerY, resolutionCard->mapToItem(content, QPointF()).y());
+  // No section cards remain.
+  EXPECT_EQ(object->findChild<QObject *>("shareCopySection"), nullptr);
+  EXPECT_EQ(object->findChild<QObject *>("shareAudioSection"), nullptr);
 }
 TEST_F(SharingUiTest, UndoProgressKeepsTheSameButtonAndRoutesUndo) {
   create("ToastStack.qml", {{"exporter", QVariant::fromValue(&exporter)}, {"queue", QVariant::fromValue(&queue)}, {"width", 400}, {"z", 100}});
@@ -1145,3 +1388,65 @@ int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv); return RUN_ALL_TESTS();
 }
 #include "test_ShareUi.moc"
+
+// Two differently sized boxes look like a mistake; the pair takes the height
+// of the taller one whatever its text happens to wrap to.
+TEST_F(SharingUiTest, ModeChoicesShareOneHeight) {
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  auto *copy = object->findChild<QQuickItem *>("shareCopyMode");
+  auto *convert = object->findChild<QQuickItem *>("shareConvertMode");
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(convert, nullptr);
+  EXPECT_GT(copy->height(), 0.0);
+  EXPECT_NEAR(copy->height(), convert->height(), 0.5)
+      << "the two choices must read as a pair: " << copy->height()
+      << " vs " << convert->height();
+}
+
+// The header names what is being exported rather than echoing a file name.
+TEST_F(SharingUiTest, HeaderNamesTheRecordingWithDateAndLength) {
+  FakeRecordingLibrary library;
+  QTemporaryDir art;
+  ASSERT_TRUE(art.isValid());
+  const QString thumb = art.filePath("thumb.png");
+  QImage frame(32, 18, QImage::Format_RGB32);
+  frame.fill(Qt::darkCyan);
+  ASSERT_TRUE(frame.save(thumb));
+  const QString path = "/fake/Lethal Company_2026-11-02_16-21-50.mkv";
+  library.records = {QVariantMap{
+      {"filePath", path},
+      {"gameName", "Lethal Company"},
+      {"date", QDateTime(QDate(2026, 11, 2), QTime(16, 21))},
+      {"duration", qint64(754)},
+      {"thumbnailPath", thumb}}};
+  engine.rootContext()->setContextProperty("recordingLibrary", &library);
+
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", path}, {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  EXPECT_EQ(object->property("title").toString(), "Exporting Lethal Company");
+  const QString detail = object->property("recordingDetail").toString();
+  EXPECT_TRUE(detail.contains("2026")) << detail.toStdString();
+  EXPECT_TRUE(detail.contains("16:21")) << detail.toStdString();
+  EXPECT_TRUE(detail.contains("12:34")) << detail.toStdString(); // 754 s
+  engine.rootContext()->setContextProperty("recordingLibrary", QVariant());
+}
+
+// An untracked file still gets a readable title and the file name as detail.
+TEST_F(SharingUiTest, HeaderFallsBackToTheFileNameWhenUntracked) {
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Manual_Recording_2026-11-02_16-21-50.mkv"},
+      {"destination", "/fake/output"}});
+  ASSERT_TRUE(object);
+  QMetaObject::invokeMethod(object.get(), "open");
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  EXPECT_EQ(object->property("title").toString(), "Exporting Manual Recording");
+  EXPECT_TRUE(object->property("recordingDetail").toString().endsWith(".mkv"));
+}

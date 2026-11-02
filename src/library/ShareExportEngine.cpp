@@ -5,23 +5,22 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryFile>
+#include <QDebug>
 #include <QSet>
-#include <QDateTime>
-#include <QImage>
-#include <QPainter>
-#include <QFontMetrics>
-#include <QImageReader>
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #include <sys/stat.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
-#include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -30,7 +29,6 @@ extern "C" {
 namespace TrophyBackend {
 namespace {
 constexpr int kRate = 48000;
-constexpr int64_t kMaxUs = INT64_C(86400) * AV_TIME_BASE;
 constexpr AVRational kUs{1, AV_TIME_BASE};
 constexpr AVRational kSamples{1, kRate};
 void check(bool ok, const char *message) { if (!ok) throw std::runtime_error(message); }
@@ -62,147 +60,137 @@ Input open(const QString &path, std::atomic_bool &cancel) {
   cancelled(cancel);
   return input;
 }
-class Reader {
+
+// One selected track, decoded from packets taken from the single demux pass
+// (no per-track file reopening), resampled to 48 kHz stereo float and buffered
+// on the video timeline until the mixer consumes it.
+class AudioTrack {
 public:
-  Input input;
-  Codec codec;
-  Frame decoded = frame();
-  Packet encoded = packet();
-  AVStream *stream;
-  bool draining = false;
-  std::atomic_bool &cancel;
-  Reader(const QString &path, int index, std::atomic_bool &stop) : input(open(path, stop)), cancel(stop) {
-    if (index < 0) index = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    check(index >= 0 && unsigned(index) < input->nb_streams, "Selected stream is unavailable.");
-    stream = input->streams[index];
-    check(stream->time_base.num > 0 && stream->time_base.den > 0, "Invalid stream clock.");
+  AudioTrack(AVStream *stream, int64_t originSamples)
+      : m_stream(stream), m_origin(originSamples) {
     const AVCodec *decoder = avcodec_find_decoder(stream->codecpar->codec_id);
     check(decoder, "A decoder for this recording is unavailable.");
-    codec.reset(avcodec_alloc_context3(decoder));
-    check(bool(codec), "Cannot allocate decoder.");
-    ffcheck(avcodec_parameters_to_context(codec.get(), stream->codecpar), "Cannot configure decoder");
-    codec->thread_count = 2;
-    codec->max_pixels = INT64_C(8192) * 4320;
-    ffcheck(avcodec_open2(codec.get(), decoder, nullptr), "Cannot start decoder");
+    m_codec.reset(avcodec_alloc_context3(decoder));
+    check(bool(m_codec), "Cannot allocate decoder.");
+    ffcheck(avcodec_parameters_to_context(m_codec.get(), stream->codecpar), "Cannot configure decoder");
+    m_codec->max_pixels = INT64_C(8192) * 4320;
+    m_codec->thread_count = 0; // auto; the context default is a single thread
+    ffcheck(avcodec_open2(m_codec.get(), decoder, nullptr), "Cannot start decoder");
   }
-  bool next() {
-    av_frame_unref(decoded.get());
-    while (true) {
-      cancelled(cancel);
-      const int result = avcodec_receive_frame(codec.get(), decoded.get());
-      if (result == 0) return true;
-      if (result == AVERROR_EOF) return false;
-      ffcheck(result == AVERROR(EAGAIN) ? 0 : result, "Cannot decode recording");
-      check(!draining, "Decoder stalled while draining.");
-      int read;
-      do {
-        av_packet_unref(encoded.get());
-        read = av_read_frame(input.get(), encoded.get());
-        cancelled(cancel);
-      } while (read >= 0 && encoded->stream_index != stream->index);
-      if (read == AVERROR_EOF) {
-        draining = true;
-        ffcheck(avcodec_send_packet(codec.get(), nullptr), "Cannot drain decoder");
-      } else {
-        ffcheck(read, "Cannot read recording");
-        ffcheck(avcodec_send_packet(codec.get(), encoded.get()), "Cannot submit recording packet");
-      }
-    }
+  ~AudioTrack() {
+    if (m_swr) swr_free(&m_swr);
+    av_channel_layout_uninit(&m_layout);
   }
-};
-class AudioReader {
-  Reader reader;
-  SwrContext *swr = nullptr;
-  std::vector<float> samples;
-  int rate = 0, channels = 0, format = -1;
-  AVChannelLayout layout{};
-  int64_t start = 0, nextSample = 0, origin;
-  bool eof = false, done = false;
-  bool haveOutput = false;
-  bool chunk() {
-    while (!done) {
-      const bool have = !eof && reader.next();
-      eof |= !have;
-      if (!have && !swr) { done = true; return false; }
-      if (have) {
-        auto *f = reader.decoded.get();
-        check(f->nb_samples > 0 && f->nb_samples <= (1 << 20) &&
-            f->sample_rate >= 8000 && f->sample_rate <= 384000 &&
-            f->ch_layout.nb_channels > 0 && f->ch_layout.nb_channels <= 32,
-            "Invalid decoded audio layout.");
-        if (!swr) {
-          rate = f->sample_rate; channels = f->ch_layout.nb_channels; format = f->format;
-          ffcheck(av_channel_layout_copy(&layout, &f->ch_layout), "Cannot retain source audio layout");
-          AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-          ffcheck(swr_alloc_set_opts2(&swr, &stereo, AV_SAMPLE_FMT_FLT, kRate,
-              &f->ch_layout, AVSampleFormat(format), rate, 0, nullptr), "Cannot configure audio conversion");
-          ffcheck(swr_init(swr), "Cannot start audio conversion");
-        }
-        check(rate == f->sample_rate && channels == f->ch_layout.nb_channels && format == f->format &&
-              av_channel_layout_compare(&layout, &f->ch_layout) == 0,
-              "Audio layout changes within this recording are unsupported.");
-        if (f->best_effort_timestamp == AV_NOPTS_VALUE) start = nextSample;
-        else {
-          const int64_t absolute = av_rescale_q(f->best_effort_timestamp, reader.stream->time_base, kSamples);
-          check(absolute >= -int64_t(kRate) * 172800 && absolute <= int64_t(kRate) * 172800, "Invalid audio timestamps.");
-          start = absolute - origin - av_rescale_rnd(swr_get_delay(swr, rate), kRate, rate, AV_ROUND_NEAR_INF);
-          const auto tolerance = std::clamp<int64_t>(av_rescale_q(2, reader.stream->time_base, kSamples), 2, 96);
-          // MKV's millisecond packet timestamps are coarser than a sample.
-          // Keep continuous PCM sample-locked; preserve genuine larger gaps.
-          if (haveOutput && std::abs(start - nextSample) <= tolerance) start = nextSample;
-        }
-      } else start = nextSample;
-      check(start >= -int64_t(kRate) * 86400 && start <= int64_t(kRate) * 86400,
-            "Audio timestamps exceed the supported 24-hour timeline.");
-      const int count = swr_get_out_samples(swr, have ? reader.decoded->nb_samples : 0);
-      check(count >= 0 && count <= (1 << 20), "Audio conversion exceeds its memory budget.");
-      samples.resize(size_t(std::max(4096, count)) * 2);
-      auto *out = reinterpret_cast<uint8_t *>(samples.data());
-      const int produced = swr_convert(swr, &out, int(samples.size() / 2),
-          have ? const_cast<const uint8_t **>(reader.decoded->extended_data) : nullptr,
-          have ? reader.decoded->nb_samples : 0);
-      ffcheck(produced, "Cannot convert audio");
-      samples.resize(size_t(produced) * 2);
-      nextSample = start + produced;
-      if (produced > 0) { haveOutput = true; return true; }
-      if (eof) done = true;
-    }
-    return false;
+  bool hasOutput() const { return m_haveOutput; }
+  int64_t endSample() const { return m_end; }
+  void push(AVPacket *packet) {
+    ffcheck(avcodec_send_packet(m_codec.get(), packet), "Cannot submit recording packet");
+    drain();
   }
-public:
-  AudioReader(const QString &path, int index, int64_t originUs, std::atomic_bool &stop)
-      : reader(path, index, stop), origin(av_rescale_q(originUs, kUs, kSamples)) {
-    check(reader.stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO, "Selected stream is not audio.");
+  void flush() {
+    ffcheck(avcodec_send_packet(m_codec.get(), nullptr), "Cannot drain decoder");
+    drain();
   }
-  ~AudioReader() { swr_free(&swr); av_channel_layout_uninit(&layout); }
   void add(float *mix, int64_t at, int count, float gain) {
-    while (!done) {
-      if (samples.empty() || nextSample <= at) { if (!chunk()) break; }
-      if (start >= at + count) break; // Real gap/late audio: leave silence.
-      const auto begin = std::max(start, at), end = std::min(nextSample, at + count);
+    while (!m_chunks.empty()) {
+      const Chunk &first = m_chunks.front();
+      if (first.start + int64_t(first.samples.size() / 2) <= at) m_chunks.pop_front();
+      else break;
+    }
+    for (const Chunk &chunk : m_chunks) {
+      const int64_t chunkEnd = chunk.start + int64_t(chunk.samples.size() / 2);
+      const int64_t begin = std::max<int64_t>(chunk.start, at);
+      const int64_t end = std::min<int64_t>(chunkEnd, at + count);
+      if (begin >= end) continue;
       for (int64_t i = begin; i < end; ++i)
         for (int ch = 0; ch < 2; ++ch)
-          mix[(i - at) * 2 + ch] += samples[size_t(i - start) * 2 + ch] * gain;
-      if (nextSample >= at + count) break;
-      samples.clear();
+          mix[(i - at) * 2 + ch] += chunk.samples[size_t((i - chunk.start) * 2 + ch)] * gain;
     }
   }
+private:
+  struct Chunk { int64_t start; std::vector<float> samples; };
+  void drain() {
+    while (true) {
+      const int result = avcodec_receive_frame(m_codec.get(), m_frame.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+      ffcheck(result, "Cannot decode recording");
+      convert(m_frame.get());
+      av_frame_unref(m_frame.get());
+    }
+  }
+  void convert(AVFrame *f) {
+    check(f->nb_samples > 0 && f->nb_samples <= (1 << 20) &&
+              f->sample_rate >= 8000 && f->sample_rate <= 384000 &&
+              f->ch_layout.nb_channels > 0 && f->ch_layout.nb_channels <= 32,
+          "Invalid decoded audio layout.");
+    if (!m_swr) {
+      m_rate = f->sample_rate;
+      m_channels = f->ch_layout.nb_channels;
+      m_format = f->format;
+      ffcheck(av_channel_layout_copy(&m_layout, &f->ch_layout), "Cannot retain source audio layout");
+      AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+      ffcheck(swr_alloc_set_opts2(&m_swr, &stereo, AV_SAMPLE_FMT_FLT, kRate,
+                  &f->ch_layout, AVSampleFormat(m_format), m_rate, 0, nullptr),
+              "Cannot configure audio conversion");
+      ffcheck(swr_init(m_swr), "Cannot start audio conversion");
+    }
+    check(m_rate == f->sample_rate && m_channels == f->ch_layout.nb_channels &&
+              m_format == f->format && av_channel_layout_compare(&m_layout, &f->ch_layout) == 0,
+          "Audio layout changes within this recording are unsupported.");
+    int64_t startSample;
+    if (f->best_effort_timestamp == AV_NOPTS_VALUE) startSample = m_end;
+    else {
+      const int64_t absolute = av_rescale_q(f->best_effort_timestamp, m_stream->time_base, kSamples);
+      check(absolute >= -int64_t(kRate) * 172800 && absolute <= int64_t(kRate) * 172800,
+            "Invalid audio timestamps.");
+      startSample = absolute - m_origin -
+          av_rescale_rnd(swr_get_delay(m_swr, m_rate), kRate, m_rate, AV_ROUND_NEAR_INF);
+      const auto tolerance = std::clamp<int64_t>(av_rescale_q(2, m_stream->time_base, kSamples), 2, 96);
+      // MKV's millisecond packet timestamps are coarser than a sample. Keep
+      // continuous PCM sample-locked; preserve genuine larger gaps.
+      if (m_haveOutput && std::abs(startSample - m_end) <= tolerance) startSample = m_end;
+    }
+    check(startSample >= -int64_t(kRate) * 86400 && startSample <= int64_t(kRate) * 86400,
+          "Audio timestamps exceed the supported 24-hour timeline.");
+    const int count = swr_get_out_samples(m_swr, f->nb_samples);
+    check(count >= 0 && count <= (1 << 20), "Audio conversion exceeds its memory budget.");
+    std::vector<float> samples(size_t(std::max(4096, count)) * 2);
+    auto *out = reinterpret_cast<uint8_t *>(samples.data());
+    const int produced = swr_convert(m_swr, &out, int(samples.size() / 2),
+        const_cast<const uint8_t **>(f->extended_data), f->nb_samples);
+    ffcheck(produced, "Cannot convert audio");
+    samples.resize(size_t(produced) * 2);
+    m_end = startSample + produced;
+    if (produced > 0) {
+      m_haveOutput = true;
+      m_chunks.push_back({startSample, std::move(samples)});
+    }
+  }
+  AVStream *m_stream;
+  Codec m_codec;
+  Frame m_frame = frame();
+  SwrContext *m_swr = nullptr;
+  int m_rate = 0, m_channels = 0, m_format = -1;
+  AVChannelLayout m_layout{};
+  int64_t m_origin;
+  int64_t m_end = 0;
+  bool m_haveOutput = false;
+  std::deque<Chunk> m_chunks;
 };
+
 struct Output {
   AVFormatContext *ctx = nullptr;
   ~Output() { if (ctx) { if (ctx->pb) avio_closep(&ctx->pb); avformat_free_context(ctx); } }
-  void write(AVCodecContext *codec, AVStream *stream, AVFrame *f, int64_t packetDuration = 0) {
-    ffcheck(avcodec_send_frame(codec, f), "Cannot encode export");
+  // Only the mixed audio track is encoded; video packets are copied separately.
+  void writeAudio(AVCodecContext *codec, AVStream *stream, AVFrame *f) {
+    ffcheck(avcodec_send_frame(codec, f), "Cannot encode export audio");
     auto p = packet();
     while (true) {
       const int result = avcodec_receive_packet(codec, p.get());
       if (result == AVERROR_EOF || result == AVERROR(EAGAIN)) break;
-      ffcheck(result, "Cannot receive encoded export packet");
+      ffcheck(result, "Cannot receive encoded export audio");
       check(stream && stream->index >= 0 && unsigned(stream->index) < ctx->nb_streams &&
             p->size > 0 && p->data, "Encoder produced an invalid export packet.");
-      // libx264 can omit frame duration. CFR packets, including delayed flush
-      // output, need an explicit final duration or MP4 may trim the last frame.
-      if (p->duration <= 0 && packetDuration > 0) p->duration = packetDuration;
       av_packet_rescale_ts(p.get(), codec->time_base, stream->time_base);
       p->stream_index = stream->index;
       ffcheck(av_interleaved_write_frame(ctx, p.get()), "Cannot write export (check free disk space)");
@@ -211,7 +199,7 @@ struct Output {
 };
 Codec encoder(const char *name) {
   const AVCodec *codec = avcodec_find_encoder_by_name(name);
-  check(codec, "Required H.264/AAC software encoder is unavailable.");
+  check(codec, "The required audio encoder is unavailable.");
   Codec ctx(avcodec_alloc_context3(codec));
   check(bool(ctx), "Cannot allocate export encoder.");
   return ctx;
@@ -224,150 +212,542 @@ AVStream *addStream(Output &out, AVCodecContext *codec) {
   return stream;
 }
 
-// Prepare the branded layers once per job. Animation uses the video timeline,
-// not wall time, and composites into the final limited-range BT.709 frame.
-class Watermark {
-  struct Pixel { float alpha = 0, luma = 0, u = 0, v = 0; };
-  std::vector<Pixel> pixels;
-  int width = 0, height = 0, bleed = 0;
-  int y = 0;
-  static double smooth(double t) {
-    t = std::clamp(t, 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
+QString shareVideoCodecLabel(AVCodecID id) {
+  switch (id) {
+  case AV_CODEC_ID_H264: return QStringLiteral("H.264");
+  case AV_CODEC_ID_HEVC: return QStringLiteral("HEVC (H.265)");
+  case AV_CODEC_ID_AV1: return QStringLiteral("AV1");
+  case AV_CODEC_ID_MPEG4: return QStringLiteral("MPEG-4 Part 2");
+  case AV_CODEC_ID_VP9: return QStringLiteral("VP9");
+  default: return QString::fromUtf8(avcodec_get_name(id));
   }
-  static double spring(double t) {
-    t = std::clamp(t, 0.0, 1.0);
-    const double x = t - 1;
-    return 1 + 2.1 * x * x * x + 1.1 * x * x;
+}
+
+bool copyableVideo(AVCodecID id) {
+  // Containers we write are MP4; these are the video codecs MP4 can carry.
+  return id == AV_CODEC_ID_H264 || id == AV_CODEC_ID_HEVC || id == AV_CODEC_ID_AV1 ||
+         id == AV_CODEC_ID_MPEG4;
+}
+
+struct SourceGuard {
+  QFileInfo info;
+  struct stat original{};
+  explicit SourceGuard(const QString &source) : info(source) {
+    check(info.isFile() && !info.isSymLink(), "Recording is unavailable.");
+    check(::lstat(QFile::encodeName(source).constData(), &original) == 0 && S_ISREG(original.st_mode),
+          "Recording is unavailable.");
   }
-  void composite(AVFrame *frame, double left) const {
-    // Filter premultiplied colors/coverage at fractional positions. Chroma is
-    // averaged on the destination's 2x2 grid, so motion need not snap to it.
-    const int begin = std::max(0, int(std::floor(left)) & ~1);
-    const int end = std::min(frame->width, (int(std::ceil(left + width)) + 1) & ~1);
-    const int origin = int(std::ceil(left));
-    const float fraction = float(origin - left);
-    auto sample = [&](int col, int row) {
-      const int index = col - origin;
-      const Pixel a = index >= 0 && index < width ? pixels[size_t(row) * width + index] : Pixel{};
-      const Pixel b = index + 1 >= 0 && index + 1 < width ? pixels[size_t(row) * width + index + 1] : Pixel{};
-      return Pixel{a.alpha + (b.alpha - a.alpha) * fraction,
-                   a.luma + (b.luma - a.luma) * fraction,
-                   a.u + (b.u - a.u) * fraction, a.v + (b.v - a.v) * fraction};
-    };
-    auto blend = [](uint8_t &pixel, float premultiplied, float alpha) {
-      pixel = uint8_t(std::clamp(std::lround(pixel * (1 - alpha) + premultiplied), 0L, 255L));
-    };
-    for (int row = 0; row < height; row += 2) {
-      for (int col = begin; col < end; col += 2) {
-        float alpha = 0, u = 0, v = 0;
-        for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-          const auto p = sample(col + dx, row + dy);
-          blend(frame->data[0][(y + row + dy) * frame->linesize[0] + col + dx], p.luma, p.alpha);
-          alpha += p.alpha * 0.25f;
-          u += p.u * 0.25f;
-          v += p.v * 0.25f;
-        }
-        blend(frame->data[1][((y + row) / 2) * frame->linesize[1] + col / 2], u, alpha);
-        blend(frame->data[2][((y + row) / 2) * frame->linesize[2] + col / 2], v, alpha);
-      }
-    }
-  }
-public:
-  Watermark(int width, int height, bool enabled) {
-    if (!enabled) return;
-    QFont font(QStringLiteral("sans-serif"));
-    font.setPixelSize(std::clamp(height / 54, 12, 80));
-    font.setWeight(QFont::Normal);
-    const QFontMetrics metrics(font);
-    QFont brandFont = font;
-    brandFont.setPixelSize(font.pixelSize() * 5 / 4);
-    brandFont.setWeight(QFont::DemiBold);
-    const QFontMetrics brandMetrics(brandFont);
-    const int padding = std::max(6, font.pixelSize() / 2);
-    const int gap = std::max(3, font.pixelSize() / 5);
-    const int textHeight = metrics.height() + gap + brandMetrics.height();
-    const int badgeSize = (textHeight + padding * 2 + 1) & ~1;
-    const int panelWidth = (std::max(metrics.horizontalAdvance(QStringLiteral("Captured with")),
-                                   brandMetrics.horizontalAdvance(QStringLiteral("Trophy"))) + 3 * padding + 1) & ~1;
-    const int margin = std::min(height / 30, height / 8) & ~1;
-    const double scale = std::min({1.0, double(std::max(4, width * 2 / 5)) / (badgeSize + panelWidth),
-                                   double(height - margin) / badgeSize});
-    const int badge = std::clamp(int(badgeSize * scale) & ~1, 2, width);
-    const int panelSize = std::clamp(int(panelWidth * scale) & ~1, 2, width);
-    const int layerHeight = std::clamp(int(badgeSize * scale) & ~1, 2, height);
-    y = (height - margin - layerHeight) & ~1;
-    QImageReader reader(QStringLiteral(":/icons/trophy.svg"));
-    reader.setScaledSize(QSize(badgeSize, badgeSize));
-    const QImage logo = reader.read();
-    check(!logo.isNull(), "Cannot load the Trophy watermark logo.");
-    QImage panel(panelWidth, badgeSize, QImage::Format_ARGB32);
-    check(!panel.isNull(), "Cannot allocate export watermark.");
-    panel.fill(Qt::transparent);
-    {
-      QPainter painter(&panel);
-      painter.setRenderHint(QPainter::Antialiasing);
-      painter.setRenderHint(QPainter::TextAntialiasing);
-      painter.setPen(Qt::NoPen);
-      painter.setBrush(QColor(20, 22, 28));
-      painter.drawRoundedRect(panel.rect(), padding * 2, padding * 2);
-      painter.drawRect(0, 0, padding * 2, badgeSize); // flush attachment, rounded outer end
-      painter.setFont(font);
-      painter.setPen(QColor(220, 222, 228));
-      const int textTop = (badgeSize - textHeight) / 2;
-      painter.drawText(padding, textTop + metrics.ascent(), QStringLiteral("Captured with"));
-      painter.setFont(brandFont);
-      painter.setPen(Qt::white);
-      painter.drawText(padding, textTop + metrics.height() + gap + brandMetrics.ascent(), QStringLiteral("Trophy"));
-    }
-    panel = panel.scaled(panelSize, layerHeight, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_ARGB32);
-    check(!panel.isNull(), "Cannot resize export watermark.");
-    // An offscreen background extension keeps the tab attached to the edge
-    // during its small overshoot. Logo, lettering and panel move as one image.
-    bleed = std::max(4, (badge + panelSize) / 8);
-    this->width = bleed + badge + panelSize;
-    this->height = layerHeight;
-    QImage artwork(this->width, layerHeight, QImage::Format_ARGB32);
-    check(!artwork.isNull(), "Cannot allocate watermark artwork.");
-    artwork.fill(Qt::transparent);
-    {
-      QPainter painter(&artwork);
-      painter.setRenderHint(QPainter::SmoothPixmapTransform);
-      painter.fillRect(0, 0, bleed + badge, layerHeight, QColor(20, 22, 28));
-      painter.drawImage(bleed + badge, 0, panel);
-      const double size = std::min(badge, layerHeight) * 0.72;
-      painter.drawImage(QRectF(bleed + (badge - size) / 2, (layerHeight - size) / 2, size, size), logo);
-    }
-    pixels.reserve(size_t(this->width) * layerHeight);
-    for (int row = 0; row < layerHeight; ++row) {
-      const auto *line = reinterpret_cast<const QRgb *>(artwork.constScanLine(row));
-      for (int col = 0; col < this->width; ++col) {
-        const auto p = line[col];
-        const float alpha = qAlpha(p) / 255.0f;
-        pixels.push_back({alpha,
-            alpha * (16 + (47 * qRed(p) + 157 * qGreen(p) + 16 * qBlue(p)) / 256.0f),
-            alpha * (128 + (-26 * qRed(p) - 87 * qGreen(p) + 112 * qBlue(p)) / 256.0f),
-            alpha * (128 + (112 * qRed(p) - 102 * qGreen(p) - 10 * qBlue(p)) / 256.0f)});
-      }
-    }
-  }
-  void apply(AVFrame *frame, int64_t timestampUs) const {
-    timestampUs -= AV_TIME_BASE / 2; // Let the video play cleanly for 500ms first.
-    if (pixels.empty() || timestampUs <= 0 || timestampUs >= 5000000) return;
-    const double seconds = double(timestampUs) / AV_TIME_BASE;
-    const double entry = spring(seconds / 0.55);
-    const double exit = smooth((seconds - 4.65) / 0.35);
-    const double left = -width + (width - bleed) * entry * (1 - exit);
-    composite(frame, left);
+  void verifyUnchanged(const QString &source) const {
+    const QFileInfo current(source);
+    struct stat latest{};
+    check(current.isFile() && ::lstat(QFile::encodeName(source).constData(), &latest) == 0 &&
+          S_ISREG(latest.st_mode) && latest.st_dev == original.st_dev && latest.st_ino == original.st_ino &&
+          latest.st_size == original.st_size && latest.st_mtim.tv_sec == original.st_mtim.tv_sec &&
+          latest.st_mtim.tv_nsec == original.st_mtim.tv_nsec,
+          "Source recording changed during export; output was discarded.");
   }
 };
+
+// Wall-clock length of the video stream, which is what an export's cost scales
+// with. Falls back to the container duration.
+double sourceSeconds(const AVStream *video) {
+  if (video && video->duration > 0 && video->time_base.num > 0)
+    return double(video->duration) * av_q2d(video->time_base);
+  return 0.0;
 }
+
+QString publish(const QString &temporary, const QString &directory, const QString &source) {
+  const QString stem = QFileInfo(source).completeBaseName() + "_Share";
+  for (int n = 0; n < 10000; ++n) {
+    const QString destination =
+        QDir(directory).filePath(stem + (n ? "_" + QString::number(n) : QString()) + ".mp4");
+    if (QFile::rename(temporary, destination)) return destination;
+    check(QFile::exists(destination), "Cannot publish export file.");
+  }
+  throw std::runtime_error("Too many export filename collisions.");
+}
+
+// Target size for the conversion mode: never upscale, keep even dimensions.
+struct ConversionSize { int width, height; };
+ConversionSize conversionTarget(int width, int height, int maxHeight) {
+  if (maxHeight <= 0 || height <= maxHeight)
+    return {std::max(2, width & ~1), std::max(2, height & ~1)};
+  const double scale = double(maxHeight) / double(height);
+  return {std::max(2, int(std::lround(width * scale)) & ~1),
+          std::max(2, maxHeight & ~1)};
+}
+
+int conversionBitrateKbps(int width, int height) {
+  const double factor = double(width) * double(height) / (1920.0 * 1080.0);
+  return std::clamp(int(std::lround(12000.0 * std::max(0.25, factor))), 3000, 40000);
+}
+
+// swscale is single-threaded on the legacy path and dominated this conversion:
+// 11.9 s of a 14.2 s two-minute export. That is exactly the gap to ffmpeg's
+// scale filter, which threads the same library (-filter_threads 1: 17.0 s,
+// auto: 9.4 s on the same file).
+//
+// SwsContext::threads is honoured only by the new sws_scale_frame() entry
+// point, which takes its geometry from the frames; the legacy sws_scale()
+// ignores it. Measured at 1440p -> 1080p: 2.90 ms/frame with one thread,
+// 0.78 ms with eight, on identical output.
+//
+// libswscale 7 (FFmpeg 6, Ubuntu 24.04 and the AppImage baseline) does NOT
+// configure a fresh context from the frames: sws_scale_frame() on an
+// allocated-but-uninitialised context reads through null internals and
+// segfaults. Explicit geometry plus sws_init_context() works on every version
+// still in use, and the threads option still applies (2.22 ms -> 0.65 ms at
+// 1440p on 6.1). Later versions accept the same explicit setup, so one path
+// serves both.
+class ThreadedScaler {
+public:
+  ~ThreadedScaler() { if (m_ctx) sws_freeContext(m_ctx); }
+
+  bool initialize() {
+    if (!buildContext())
+      return false;
+    m_configured = false;
+    return true;
+  }
+
+  bool scale(const AVFrame *src, AVFrame *dst) {
+    if (!src || !dst)
+      return false;
+    if (!m_ctx || !m_configured || m_srcWidth != src->width ||
+        m_srcHeight != src->height || m_srcFormat != src->format ||
+        m_dstWidth != dst->width || m_dstHeight != dst->height ||
+        m_dstFormat != dst->format) {
+      if (!configure(src, dst))
+        return false;
+    }
+    return sws_scale_frame(m_ctx, dst, src) >= 0;
+  }
+
+private:
+  bool buildContext() {
+    if (m_ctx)
+      sws_freeContext(m_ctx);
+    m_ctx = sws_alloc_context();
+    if (!m_ctx)
+      return false;
+    const int threads = int(std::clamp<unsigned>(
+        std::thread::hardware_concurrency(), 1u, 8u));
+    av_opt_set_int(m_ctx, "threads", threads, 0);
+    av_opt_set_int(m_ctx, "sws_flags", SWS_BILINEAR, 0);
+    return true;
+  }
+
+  // Geometry has to be set explicitly, and the context initialised, before the
+  // first sws_scale_frame() on libswscale 7.
+  bool configure(const AVFrame *src, AVFrame *dst) {
+    m_configured = false;
+    if (!buildContext())
+      return false;
+    av_opt_set_int(m_ctx, "srcw", src->width, 0);
+    av_opt_set_int(m_ctx, "srch", src->height, 0);
+    av_opt_set_int(m_ctx, "src_format", src->format, 0);
+    av_opt_set_int(m_ctx, "dstw", dst->width, 0);
+    av_opt_set_int(m_ctx, "dsth", dst->height, 0);
+    av_opt_set_int(m_ctx, "dst_format", dst->format, 0);
+    if (sws_init_context(m_ctx, nullptr, nullptr) < 0) {
+      sws_freeContext(m_ctx);
+      m_ctx = nullptr;
+      return false;
+    }
+    m_srcWidth = src->width;
+    m_srcHeight = src->height;
+    m_srcFormat = src->format;
+    m_dstWidth = dst->width;
+    m_dstHeight = dst->height;
+    m_dstFormat = dst->format;
+    m_configured = true;
+    return true;
+  }
+
+  SwsContext *m_ctx = nullptr;
+  bool m_configured = false;
+  int m_srcWidth = 0, m_srcHeight = 0, m_srcFormat = AV_PIX_FMT_NONE;
+  int m_dstWidth = 0, m_dstHeight = 0, m_dstFormat = AV_PIX_FMT_NONE;
+};
+
+// Re-encode a recording to H.264 + one stereo AAC track. This is the
+// compatibility path for sources whose codec MP4 sharing cannot use as-is
+// (HEVC/AV1) or when a smaller output is requested; it is orders of magnitude
+// slower than the remux path, so it is never chosen implicitly.
+ShareExportResult convertExport(const QString &source, const QString &directory,
+                                const ShareExportOptions &options,
+                                std::atomic_bool &cancel, std::atomic<double> &progress) {
+  const SourceGuard guard(source);
+  check(options.audioStreams.size() <= 8, "Invalid export options (up to eight audio tracks).");
+  check(options.maxHeight == 0 || options.maxHeight == 720 || options.maxHeight == 1080,
+        "Unsupported export resolution.");
+  QSet<int> unique;
+  for (int index : options.audioStreams) {
+    check(index >= 0 && !unique.contains(index), "Invalid audio selection.");
+  }
+  check(QDir(directory).exists(), "Choose an existing export folder.");
+
+  auto input = open(source, cancel);
+  const int vIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  check(vIndex >= 0, "No video stream found.");
+  AVStream *inVideo = input->streams[vIndex];
+  check(inVideo->codecpar->width >= 2 && inVideo->codecpar->height >= 2 &&
+            inVideo->codecpar->width <= 16384 && inVideo->codecpar->height <= 16384,
+        "Unsupported video dimensions.");
+  for (int index : options.audioStreams) {
+    check(index < int(input->nb_streams) &&
+              input->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO,
+          "Invalid audio selection.");
+    unique.insert(index);
+  }
+
+  const ConversionSize target =
+      conversionTarget(inVideo->codecpar->width, inVideo->codecpar->height, options.maxHeight);
+
+  Codec decoder(avcodec_alloc_context3(avcodec_find_decoder(inVideo->codecpar->codec_id)));
+  check(bool(decoder), "A decoder for this recording is unavailable.");
+  ffcheck(avcodec_parameters_to_context(decoder.get(), inVideo->codecpar), "Cannot configure decoder");
+  // avcodec_alloc_context3() leaves thread_count at 1, i.e. single-threaded;
+  // 0 asks for one thread per core. Frame-threaded decoding is most of this
+  // path's throughput: measured on a two-minute 1440p HEVC excerpt, 41.8 s
+  // serialised against 10 s threaded, for identical output.
+  decoder->thread_count = 0;
+  ffcheck(avcodec_open2(decoder.get(), decoder->codec, nullptr), "Cannot start decoder");
+
+  int64_t originUs = 0;
+  if (inVideo->start_time != AV_NOPTS_VALUE)
+    originUs = av_rescale_q(inVideo->start_time, inVideo->time_base, kUs);
+  else if (input->start_time != AV_NOPTS_VALUE)
+    originUs = input->start_time;
+
+  int64_t fps = 60;
+  const AVRational rate = av_guess_frame_rate(input.get(), inVideo, nullptr);
+  if (rate.num > 0 && rate.den > 0)
+    fps = std::clamp<int64_t>(std::llround(av_q2d(rate)), 1, 240);
+  const int64_t frameStepUs = std::max<int64_t>(1, 1000000 / fps);
+
+  // Encoder preference: NVENC (accepts system frames directly), then VA-API
+  // (needs NV12 surfaces uploaded per frame), then software x264.
+  struct Candidate { const char *name; bool vaapi; const char *preset; };
+  const Candidate candidates[] = {
+      {"h264_nvenc", false, "p3"}, {"h264_vaapi", true, nullptr}, {"libx264", false, "veryfast"}};
+  Codec videoEncoder;
+  bool useVaapi = false;
+  QString encoderName;
+  for (const Candidate &candidate : candidates) {
+    const AVCodec *codec = avcodec_find_encoder_by_name(candidate.name);
+    if (!codec)
+      continue;
+    Codec attempt(avcodec_alloc_context3(codec));
+    if (!attempt)
+      continue;
+    attempt->width = target.width;
+    attempt->height = target.height;
+    attempt->time_base = AVRational{1, 1000};
+    attempt->framerate = AVRational{int(fps), 1};
+    attempt->gop_size = int(fps) * 2;
+    attempt->max_b_frames = 0;
+    attempt->pix_fmt = candidate.vaapi ? AV_PIX_FMT_VAAPI : AV_PIX_FMT_YUV420P;
+    attempt->bit_rate = int64_t(conversionBitrateKbps(target.width, target.height)) * 1000;
+    if (candidate.preset)
+      av_opt_set(attempt->priv_data, "preset", candidate.preset, 0);
+    if (candidate.vaapi) {
+      AVBufferRef *device = nullptr;
+      if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0) < 0)
+        continue;
+      attempt->hw_device_ctx = av_buffer_ref(device);
+      AVBufferRef *frames = av_hwframe_ctx_alloc(device);
+      av_buffer_unref(&device);
+      if (!frames)
+        continue;
+      auto *context = reinterpret_cast<AVHWFramesContext *>(frames->data);
+      context->format = AV_PIX_FMT_VAAPI;
+      context->sw_format = AV_PIX_FMT_NV12;
+      context->width = target.width;
+      context->height = target.height;
+      context->initial_pool_size = 20;
+      if (av_hwframe_ctx_init(frames) < 0) { av_buffer_unref(&frames); continue; }
+      attempt->hw_frames_ctx = av_buffer_ref(frames);
+      av_buffer_unref(&frames);
+    }
+    if (avcodec_open2(attempt.get(), codec, nullptr) < 0)
+      continue;
+    videoEncoder = std::move(attempt);
+    useVaapi = candidate.vaapi;
+    encoderName = QString::fromUtf8(candidate.name);
+    break;
+  }
+  check(videoEncoder != nullptr, "No H.264 encoder is available for conversion.");
+  qInfo() << "Share export: converting to H.264 with" << encoderName << target.width << "x" << target.height;
+
+  QTemporaryFile temporary(QDir(directory).filePath(".trophy-export-XXXXXX.part"));
+  check(temporary.open(), "Cannot create export file.");
+  const QString tmp = temporary.fileName();
+  temporary.close();
+
+  Output out;
+  ffcheck(avformat_alloc_output_context2(&out.ctx, nullptr, "mp4",
+                                         QFile::encodeName(tmp).constData()),
+          "Cannot create MP4 output");
+  for (const AVDictionaryEntry *tag = nullptr;
+       (tag = av_dict_get(input->metadata, "", tag, AV_DICT_IGNORE_SUFFIX)) != nullptr;) {
+    if (qstrcmp(tag->key, "title") == 0 || qstrcmp(tag->key, "trophy-kind") == 0)
+      av_dict_set(&out.ctx->metadata, tag->key, tag->value, 0);
+  }
+
+  if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER)
+    videoEncoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+  AVStream *outVideo = avformat_new_stream(out.ctx, nullptr);
+  check(outVideo != nullptr, "Cannot allocate export stream.");
+  ffcheck(avcodec_parameters_from_context(outVideo->codecpar, videoEncoder.get()),
+          "Cannot configure export stream");
+  outVideo->codecpar->codec_tag = 0;
+  outVideo->time_base = videoEncoder->time_base;
+
+  // Share copies always carry exactly one merged stereo track.
+  Codec audioCodec;
+  AVStream *outAudio = nullptr;
+  Frame audioFrame;
+  std::vector<std::unique_ptr<AudioTrack>> tracks;
+  QHash<int, AudioTrack *> trackByStream;
+  if (!unique.isEmpty()) {
+    audioCodec = encoder("aac");
+    audioCodec->sample_rate = kRate;
+    audioCodec->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    av_channel_layout_default(&audioCodec->ch_layout, 2);
+    audioCodec->time_base = kSamples;
+    audioCodec->bit_rate = 192000;
+    if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER) audioCodec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    ffcheck(avcodec_open2(audioCodec.get(), audioCodec->codec, nullptr), "Cannot start AAC export");
+    outAudio = addStream(out, audioCodec.get());
+    av_dict_set(&outAudio->metadata, "title", "Stereo mix", 0);
+    audioFrame = frame();
+    audioFrame->format = audioCodec->sample_fmt;
+    audioFrame->sample_rate = kRate;
+    ffcheck(av_channel_layout_copy(&audioFrame->ch_layout, &audioCodec->ch_layout),
+            "Cannot configure audio frame");
+    audioFrame->nb_samples = audioCodec->frame_size;
+    check(audioFrame->nb_samples > 0 && audioFrame->nb_samples <= 8192,
+          "Unsupported export audio frame size.");
+    ffcheck(av_frame_get_buffer(audioFrame.get(), 0), "Cannot allocate audio frame");
+    const int64_t originSamples = av_rescale_q(originUs, kUs, kSamples);
+    for (int index : options.audioStreams) {
+      auto track = std::make_unique<AudioTrack>(input->streams[index], originSamples);
+      trackByStream.insert(index, track.get());
+      tracks.push_back(std::move(track));
+    }
+  }
+
+  ffcheck(avio_open2(&out.ctx->pb, QFile::encodeName(tmp).constData(), AVIO_FLAG_WRITE,
+      &out.ctx->interrupt_callback, nullptr), "Cannot open export output");
+  AVDictionary *muxOptions = nullptr;
+  // Standard tags only: see the note in the copy path.
+  const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart", 0);
+  if (optionResult < 0) { av_dict_free(&muxOptions); ffcheck(optionResult, "Cannot configure MP4 fast start"); }
+  const int header = avformat_write_header(out.ctx, &muxOptions);
+  av_dict_free(&muxOptions);
+  ffcheck(header, "Cannot write export header");
+
+  int64_t audioAt = 0;
+  const int64_t audioFrameSamples = audioFrame ? audioFrame->nb_samples : 0;
+  std::vector<float> mix(size_t(audioFrameSamples) * 2, 0.0f);
+  auto writeAudioUntil = [&](int64_t untilUs) {
+    if (!audioCodec) return;
+    const int64_t wanted = av_rescale_q(std::max<int64_t>(0, untilUs), kUs, kSamples);
+    while (audioAt < wanted) {
+      cancelled(cancel);
+      const int n = int(audioFrameSamples);
+      std::fill(mix.begin(), mix.end(), 0.0f);
+      for (auto &track : tracks) track->add(mix.data(), audioAt, n, 1.0f / float(tracks.size()));
+      ffcheck(av_frame_make_writable(audioFrame.get()), "Cannot write audio frame");
+      for (int ch = 0; ch < 2; ++ch) {
+        auto *plane = reinterpret_cast<float *>(audioFrame->data[ch]);
+        for (int i = 0; i < n; ++i)
+          plane[i] = std::isfinite(mix[size_t(i) * 2 + ch])
+                         ? std::clamp(mix[size_t(i) * 2 + ch], -1.0f, 1.0f)
+                         : 0.0f;
+      }
+      audioFrame->pts = audioAt;
+      out.writeAudio(audioCodec.get(), outAudio, audioFrame.get());
+      audioAt += n;
+    }
+  };
+
+  constexpr int64_t kAudioLeadUs = 1000000;
+  ThreadedScaler scaler;
+  bool scalerReady = false;
+  Frame scaled = frame();
+  Frame hardware;
+  int64_t lastVideoUs = 0;
+  int64_t lastEndUs = 0;
+  bool haveScaled = false;
+  bool hdrChecked = false;
+
+  auto encodeDecoded = [&](AVFrame *decoded) {
+    if (!hdrChecked) {
+      hdrChecked = true;
+      check(decoded->color_trc != AVCOL_TRC_SMPTE2084 &&
+                decoded->color_trc != AVCOL_TRC_ARIB_STD_B67,
+            "HDR-to-SDR share export is not supported yet.");
+      scaled->format = useVaapi ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+      scaled->width = target.width;
+      scaled->height = target.height;
+      ffcheck(av_frame_get_buffer(scaled.get(), 32), "Cannot allocate export frame.");
+    }
+    const int64_t ptsUs = decoded->best_effort_timestamp == AV_NOPTS_VALUE
+        ? lastEndUs
+        : av_rescale_q(decoded->best_effort_timestamp, inVideo->time_base, kUs) - originUs;
+    writeAudioUntil(ptsUs - kAudioLeadUs);
+    // Capture is damage-driven, so a still screen leaves the previous frame
+    // covering a stretch of time. Re-encoding can fill that honestly: send the
+    // frame we already scaled again, at the frame rate, so the output is
+    // constant-rate and no sample spans the still. Each repeat costs a
+    // near-empty P-frame rather than a keyframe.
+    if (haveScaled && ptsUs - lastEndUs > frameStepUs * 3 / 2) {
+      for (int64_t at = lastEndUs + frameStepUs; at + frameStepUs / 2 < ptsUs;
+           at += frameStepUs) {
+        const int64_t repeatMs = av_rescale_q(at, kUs, videoEncoder->time_base);
+        AVFrame *repeat = scaled.get();
+        scaled->pts = repeatMs;
+        if (useVaapi) {
+          if (!hardware)
+            hardware = frame();
+          av_frame_unref(hardware.get());
+          ffcheck(av_hwframe_get_buffer(videoEncoder->hw_frames_ctx, hardware.get(), 0),
+                  "Cannot allocate export surface.");
+          ffcheck(av_hwframe_transfer_data(hardware.get(), scaled.get(), 0),
+                  "Cannot upload export frame.");
+          hardware->pts = repeatMs;
+          repeat = hardware.get();
+        }
+        ffcheck(avcodec_send_frame(videoEncoder.get(), repeat),
+                "Cannot encode export frame");
+        auto drained = packet();
+        while (true) {
+          const int result = avcodec_receive_packet(videoEncoder.get(), drained.get());
+          if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+          ffcheck(result, "Cannot receive encoded export packet");
+          av_packet_rescale_ts(drained.get(), videoEncoder->time_base, outVideo->time_base);
+          drained->stream_index = outVideo->index;
+          ffcheck(av_interleaved_write_frame(out.ctx, drained.get()),
+                  "Cannot write export (check free disk space)");
+        }
+      }
+    }
+    if (!scalerReady) {
+      scalerReady = true;
+      check(scaler.initialize(), "Cannot configure export scaling.");
+    }
+    ffcheck(av_frame_make_writable(scaled.get()), "Cannot write export frame.");
+    check(scaler.scale(decoded, scaled.get()), "Cannot scale export frame");
+    haveScaled = true;
+    const int64_t ptsMs = av_rescale_q(ptsUs, kUs, videoEncoder->time_base);
+    AVFrame *feed = scaled.get();
+    scaled->pts = ptsMs;
+    if (useVaapi) {
+      if (!hardware)
+        hardware = frame();
+      av_frame_unref(hardware.get());
+      ffcheck(av_hwframe_get_buffer(videoEncoder->hw_frames_ctx, hardware.get(), 0),
+              "Cannot allocate export surface.");
+      ffcheck(av_hwframe_transfer_data(hardware.get(), scaled.get(), 0),
+              "Cannot upload export frame.");
+      hardware->pts = ptsMs;
+      feed = hardware.get();
+    }
+    ffcheck(avcodec_send_frame(videoEncoder.get(), feed), "Cannot encode export frame");
+    auto encoded = packet();
+    while (true) {
+      const int result = avcodec_receive_packet(videoEncoder.get(), encoded.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+      ffcheck(result, "Cannot receive encoded export packet");
+      av_packet_rescale_ts(encoded.get(), videoEncoder->time_base, outVideo->time_base);
+      encoded->stream_index = outVideo->index;
+      ffcheck(av_interleaved_write_frame(out.ctx, encoded.get()),
+              "Cannot write export (check free disk space)");
+    }
+    lastVideoUs = ptsUs;
+    lastEndUs = ptsUs + (decoded->duration > 0
+        ? av_rescale_q(decoded->duration, inVideo->time_base, kUs)
+        : int64_t(1000000 / std::max<int64_t>(1, fps)));
+  };
+
+  const qint64 totalBytes = std::max<qint64>(1, guard.info.size());
+  qint64 readBytes = 0;
+  Frame decoded = frame();
+  auto pkt = packet();
+  auto drainDecoder = [&](bool flushing) {
+    while (true) {
+      const int result = avcodec_receive_frame(decoder.get(), decoded.get());
+      if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+      ffcheck(result, "Cannot decode recording");
+      encodeDecoded(decoded.get());
+      av_frame_unref(decoded.get());
+    }
+    (void)flushing;
+  };
+  while (true) {
+    cancelled(cancel);
+    const int read = av_read_frame(input.get(), pkt.get());
+    if (read == AVERROR_EOF) break;
+    ffcheck(read, "Cannot read recording");
+    readBytes += pkt->size + 32;
+    if (pkt->stream_index == vIndex) {
+      ffcheck(avcodec_send_packet(decoder.get(), pkt.get()), "Cannot decode recording");
+      drainDecoder(false);
+    } else if (AudioTrack *track = trackByStream.value(pkt->stream_index, nullptr)) {
+      track->push(pkt.get());
+      writeAudioUntil(lastVideoUs - kAudioLeadUs);
+    }
+    av_packet_unref(pkt.get());
+    progress.store(std::min(0.99, double(readBytes) / double(totalBytes)));
+  }
+  ffcheck(avcodec_send_packet(decoder.get(), nullptr), "Cannot drain decoder");
+  drainDecoder(true);
+  ffcheck(avcodec_send_frame(videoEncoder.get(), nullptr), "Cannot drain export encoder");
+  {
+    auto encoded = packet();
+    while (true) {
+      const int result = avcodec_receive_packet(videoEncoder.get(), encoded.get());
+      if (result == AVERROR_EOF || result == AVERROR(EAGAIN)) break;
+      ffcheck(result, "Cannot receive encoded export packet");
+      av_packet_rescale_ts(encoded.get(), videoEncoder->time_base, outVideo->time_base);
+      encoded->stream_index = outVideo->index;
+      ffcheck(av_interleaved_write_frame(out.ctx, encoded.get()),
+              "Cannot write export (check free disk space)");
+    }
+  }
+  if (audioCodec) {
+    int64_t endUs = lastEndUs;
+    for (auto &track : tracks) {
+      track->flush();
+      if (track->hasOutput())
+        endUs = std::max(endUs, av_rescale_q(track->endSample(), kSamples, kUs));
+    }
+    writeAudioUntil(endUs);
+    out.writeAudio(audioCodec.get(), outAudio, nullptr);
+  }
+  ffcheck(av_write_trailer(out.ctx), "Cannot finalize export");
+  avio_flush(out.ctx->pb);
+  ffcheck(out.ctx->pb->error, "Cannot flush export");
+  ffcheck(avio_closep(&out.ctx->pb), "Cannot close export output");
+  cancelled(cancel);
+  guard.verifyUnchanged(source);
+  progress.store(1);
+  return {publish(tmp, directory, source), {}, sourceSeconds(inVideo),
+            inVideo->codecpar->codec_id == AV_CODEC_ID_AV1};
+}
+
+} // namespace
 
 QVariantMap ShareExportEngine::inspect(const QString &source, std::atomic_bool &cancel) {
   try {
     auto input = open(source, cancel);
     const int index = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     check(index >= 0, "No video stream found.");
+    const AVCodecID videoCodecId = input->streams[index]->codecpar->codec_id;
+    const QString videoCodec = QString::fromUtf8(avcodec_get_name(videoCodecId));
     const auto routing = AudioRoutingInfo::fromJson(RecordingAnnotations::audioRouting(source));
     int audioCount = 0;
     for (unsigned i = 0; i < input->nb_streams; ++i)
@@ -401,238 +781,283 @@ QVariantMap ShareExportEngine::inspect(const QString &source, std::atomic_bool &
         routing.primary >= 0 && routing.primary < tracks.size() && routing.voiceTrack >= 0 && routing.voiceTrack < tracks.size()) {
       auto row = tracks[routing.voiceTrack].toMap(); row["defaultExcluded"] = true; tracks[routing.voiceTrack] = row;
     }
-    return {{"tracks", tracks}, {"durationSeconds", input->duration > 0 ? double(input->duration) / AV_TIME_BASE : 0.0}};
+    return {{"tracks", tracks},
+            {"durationSeconds", input->duration > 0 ? double(input->duration) / AV_TIME_BASE : 0.0},
+            {"videoCodec", videoCodec},
+            {"videoCodecLabel", shareVideoCodecLabel(videoCodecId)},
+            // Copy needs a video codec MP4 can carry; it keeps the original
+            // codec, so H.264 is the one every sharing service accepts.
+            {"copyable", copyableVideo(videoCodecId)},
+            {"shareable", videoCodecId == AV_CODEC_ID_H264},
+            // Cost model, in seconds of export per second of source, from
+            // measured runs on the dev host (NVENC, SSD). A two-minute 1440p
+            // excerpt copies in 0.2 s, mixes three tracks in 2.6 s, and
+            // converts to 1080p in 12 s (H.264/HEVC) or 20 s (AV1, whose
+            // software decoder is the expensive part). Guidance for the
+            // dialog, not a promise: a host without a hardware encoder
+            // converts far slower.
+            {"estimateCopyBase", 0.0017},
+            {"estimateCopyPerTrack", 0.0100},   // each extra mixed track
+            {"estimateConvert", videoCodecId == AV_CODEC_ID_AV1 ? 0.165 : 0.100}};
   } catch (const std::exception &e) { return {{"error", QString::fromUtf8(e.what())}}; }
 }
 
 ShareExportResult ShareExportEngine::run(const QString &source, const QString &directory,
     const ShareExportOptions &options, std::atomic_bool &cancel, std::atomic<double> &progress) {
   try {
-    const QFileInfo fingerprint(source);
-    check(fingerprint.isFile() && !fingerprint.isSymLink(), "Recording is unavailable.");
-    struct stat original {};
-    check(::lstat(QFile::encodeName(source).constData(), &original) == 0 && S_ISREG(original.st_mode), "Recording is unavailable.");
-    check(options.maxHeight == 0 || options.maxHeight == 720 || options.maxHeight == 1080,
-          "Unsupported export resolution.");
-    check(options.targetBytes >= 0 && options.audioStreams.size() <= 8, "Invalid export options (up to eight audio tracks).");
+    if (options.mode == ShareExportOptions::Mode::Convert)
+      return convertExport(source, directory, options, cancel, progress);
+    const SourceGuard guard(source);
+    check(options.audioStreams.size() <= 8, "Invalid export options (up to eight audio tracks).");
     QSet<int> unique;
-    for (int index : options.audioStreams) { check(index >= 0 && !unique.contains(index), "Invalid audio selection."); unique.insert(index); }
+    for (int index : options.audioStreams) {
+      check(index >= 0 && !unique.contains(index), "Invalid audio selection.");
+      unique.insert(index);
+    }
     check(QDir(directory).exists(), "Choose an existing export folder.");
+
+    auto input = open(source, cancel);
+    const int vIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    check(vIndex >= 0, "No video stream found.");
+    AVStream *inVideo = input->streams[vIndex];
+    check(copyableVideo(inVideo->codecpar->codec_id),
+          "This recording's video codec cannot be placed in an MP4 container.");
+    check(inVideo->codecpar->width >= 2 && inVideo->codecpar->height >= 2 &&
+              inVideo->codecpar->width <= 16384 && inVideo->codecpar->height <= 16384,
+          "Unsupported video dimensions.");
+
+    int singleAudioIndex = -1;
+    for (int index : options.audioStreams) {
+      check(index < int(input->nb_streams) &&
+                input->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO,
+            "Invalid audio selection.");
+      if (options.audioStreams.size() == 1)
+        singleAudioIndex = index;
+    }
+    // A single already-stereo AAC track needs no mixing and is copied as-is.
+    // Anything else is mixed into one stereo AAC track, because chat apps
+    // cannot switch between tracks.
+    const bool copySingleAudio = singleAudioIndex >= 0 &&
+        input->streams[singleAudioIndex]->codecpar->codec_id == AV_CODEC_ID_AAC &&
+        input->streams[singleAudioIndex]->codecpar->ch_layout.nb_channels == 2;
+
+    int64_t originUs = 0;
+    if (inVideo->start_time != AV_NOPTS_VALUE)
+      originUs = av_rescale_q(inVideo->start_time, inVideo->time_base, kUs);
+    else if (input->start_time != AV_NOPTS_VALUE)
+      originUs = input->start_time;
+    check(originUs >= -(INT64_C(1) << 40) && originUs <= (INT64_C(1) << 40),
+          "Invalid recording timestamp origin.");
+
     QTemporaryFile temporary(QDir(directory).filePath(".trophy-export-XXXXXX.part"));
     check(temporary.open(), "Cannot create export file.");
     const QString tmp = temporary.fileName();
     temporary.close();
-    Reader video(source, -1, cancel);
-    check(video.next(), "Recording has no decodable video frames.");
-    auto *first = video.decoded.get();
-    check(first->width >= 2 && first->height >= 2 && first->width <= 16384 && first->height <= 16384,
-          "Unsupported video dimensions.");
-    check(first->color_trc != AVCOL_TRC_SMPTE2084 && first->color_trc != AVCOL_TRC_ARIB_STD_B67,
-          "HDR-to-SDR share export is not supported yet.");
-    const int64_t origin = first->best_effort_timestamp == AV_NOPTS_VALUE ? 0 :
-        av_rescale_q(first->best_effort_timestamp, video.stream->time_base, kUs);
-    check(origin >= -kMaxUs && origin <= kMaxUs, "Invalid recording timestamp origin.");
-    AVRational rate = av_guess_frame_rate(video.input.get(), video.stream, first);
-    const bool knownRate = rate.num > 0 && rate.den > 0 && av_q2d(rate) >= 1;
-    const int64_t inputFrameUs = knownRate ? std::max<int64_t>(1, av_rescale_q(1, av_inv_q(rate), kUs)) : 16667;
-    const bool capRate = !knownRate || av_q2d(rate) > 60;
-    const bool steadyWatermark = options.watermark;
-    if (steadyWatermark || capRate) rate = {60, 1};
-    const int inputWidth = first->width, inputHeight = first->height;
-    const int inputFormat = first->format;
-    const double scale = options.maxHeight > 0 ? std::min(1.0, double(options.maxHeight) / inputHeight) : 1.0;
+
     Output out;
-    ffcheck(avformat_alloc_output_context2(&out.ctx, nullptr, "mp4", QFile::encodeName(tmp).constData()), "Cannot create MP4");
-    check(out.ctx, "Cannot allocate MP4 writer.");
-    out.ctx->interrupt_callback = video.input->interrupt_callback;
-    out.ctx->max_interleave_delta = AV_TIME_BASE;
-    auto v = encoder("libx264");
-    v->width = std::max(2, int(inputWidth * scale) & ~1);
-    v->height = std::max(2, int(inputHeight * scale) & ~1);
-    v->pix_fmt = AV_PIX_FMT_YUV420P; v->time_base = {1, 90000}; v->framerate = rate;
-    v->gop_size = std::max(1, int(av_q2d(rate) * 2)); v->max_b_frames = 0; v->thread_count = 2;
-    v->sample_aspect_ratio = first->sample_aspect_ratio.num > 0 ? first->sample_aspect_ratio : AVRational{1, 1};
-    v->color_range = AVCOL_RANGE_MPEG; v->colorspace = AVCOL_SPC_BT709;
-    v->color_primaries = AVCOL_PRI_BT709; v->color_trc = AVCOL_TRC_BT709;
-    if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER) v->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    ffcheck(av_opt_set(v->priv_data, "preset", "veryfast", 0), "Cannot set export preset");
-    if (options.targetBytes > 0) {
-      check(video.input->duration > 0, "A size target requires a known recording duration.");
-      const double seconds = double(video.input->duration) / AV_TIME_BASE;
-      const double bitrate = double(options.targetBytes) * 8 * 0.94 / seconds - (unique.isEmpty() ? 0 : 192000);
-      check(bitrate >= 100000, "Size target is too small for this recording. Choose a larger target.");
-      v->bit_rate = int64_t(std::min(bitrate, 100000000.0));
-    } else ffcheck(av_opt_set(v->priv_data, "crf", "20", 0), "Cannot set export quality");
-    ffcheck(avcodec_open2(v.get(), v->codec, nullptr), "Cannot start H.264 export");
-    AVStream *vs = addStream(out, v.get());
-    if (const auto *title = av_dict_get(video.input->metadata, "title", nullptr, 0))
-      ffcheck(av_dict_set(&out.ctx->metadata, "title", title->value, 0), "Cannot copy export title");
-    if (const auto *kind = av_dict_get(video.input->metadata, "trophy-kind", nullptr, 0))
-      ffcheck(av_dict_set(&out.ctx->metadata, "trophy-kind", kind->value, 0), "Cannot copy export kind");
-    Codec a;
-    AVStream *as = nullptr;
-    Frame audio;
-    std::vector<std::unique_ptr<AudioReader>> readers;
-    if (!unique.isEmpty()) {
-      a = encoder("aac"); a->sample_rate = kRate; a->sample_fmt = AV_SAMPLE_FMT_FLTP;
-      av_channel_layout_default(&a->ch_layout, 2); a->time_base = kSamples; a->bit_rate = 192000;
-      if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER) a->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-      ffcheck(avcodec_open2(a.get(), a->codec, nullptr), "Cannot start AAC export");
-      as = addStream(out, a.get());
-      av_dict_set(&as->metadata, "title", "Stereo mix", 0);
-      audio = frame(); audio->format = a->sample_fmt; audio->sample_rate = kRate;
-      ffcheck(av_channel_layout_copy(&audio->ch_layout, &a->ch_layout), "Cannot configure audio frame");
-      audio->nb_samples = a->frame_size;
-      check(audio->nb_samples > 0 && audio->nb_samples <= 8192, "Unsupported AAC frame size.");
-      ffcheck(av_frame_get_buffer(audio.get(), 0), "Cannot allocate audio frame");
-      for (int index : options.audioStreams) readers.push_back(std::make_unique<AudioReader>(source, index, origin, cancel));
+    // The filename is required: the MP4 fast-start second pass uses ctx->url.
+    ffcheck(avformat_alloc_output_context2(&out.ctx, nullptr, "mp4",
+                                           QFile::encodeName(tmp).constData()),
+            "Cannot create MP4 output");
+    for (const AVDictionaryEntry *tag = nullptr;
+         (tag = av_dict_get(input->metadata, "", tag, AV_DICT_IGNORE_SUFFIX)) != nullptr;) {
+      if (qstrcmp(tag->key, "title") == 0 || qstrcmp(tag->key, "trophy-kind") == 0)
+        av_dict_set(&out.ctx->metadata, tag->key, tag->value, 0);
     }
+
+    AVStream *outVideo = avformat_new_stream(out.ctx, nullptr);
+    check(outVideo != nullptr, "Cannot allocate export stream.");
+    ffcheck(avcodec_parameters_copy(outVideo->codecpar, inVideo->codecpar), "Cannot copy video parameters");
+    // Let the muxer pick the tag, except for HEVC: MP4 defaults to 'hev1',
+    // which Apple's players (Safari, QuickTime, iOS) refuse. 'hvc1' carries
+    // the same bitstream with parameter sets in hvcC and plays everywhere.
+    outVideo->codecpar->codec_tag =
+        inVideo->codecpar->codec_id == AV_CODEC_ID_HEVC ? MKTAG('h', 'v', 'c', '1') : 0;
+    outVideo->time_base = inVideo->time_base;
+    outVideo->avg_frame_rate = inVideo->avg_frame_rate;
+    outVideo->sample_aspect_ratio = inVideo->sample_aspect_ratio;
+
+    Codec audioCodec;
+    AVStream *outAudio = nullptr;
+    AVStream *copiedAudio = nullptr;
+    AVStream *inCopiedAudio = nullptr;
+    Frame audioFrame;
+    std::vector<std::unique_ptr<AudioTrack>> tracks;
+    QHash<int, AudioTrack *> trackByStream;
+    if (copySingleAudio) {
+      inCopiedAudio = input->streams[singleAudioIndex];
+      copiedAudio = avformat_new_stream(out.ctx, nullptr);
+      check(copiedAudio != nullptr, "Cannot allocate export stream.");
+      ffcheck(avcodec_parameters_copy(copiedAudio->codecpar, inCopiedAudio->codecpar),
+              "Cannot copy audio parameters");
+      copiedAudio->codecpar->codec_tag = 0;
+      copiedAudio->time_base = inCopiedAudio->time_base;
+    } else if (!unique.isEmpty()) {
+      // Mixed audio is AAC, not MP3. MP3 carried in MP4 is legal but Apple's
+      // players do not reliably handle mp4a/MPEG-1, which defeats the point of
+      // a compatibility export. Native AAC costs ~35 s more on a two-hour
+      // three-track export (85 s -> ~119 s) and makes every share copy
+      // H.264 + AAC regardless of which mode produced it.
+      audioCodec = encoder("aac");
+      audioCodec->sample_rate = kRate;
+      audioCodec->sample_fmt = AV_SAMPLE_FMT_FLTP;
+      av_channel_layout_default(&audioCodec->ch_layout, 2);
+      audioCodec->time_base = kSamples;
+      audioCodec->bit_rate = 192000;
+      if (out.ctx->oformat->flags & AVFMT_GLOBALHEADER) audioCodec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+      ffcheck(avcodec_open2(audioCodec.get(), audioCodec->codec, nullptr),
+              "Cannot start the export audio encoder");
+      outAudio = addStream(out, audioCodec.get());
+      av_dict_set(&outAudio->metadata, "title", "Stereo mix", 0);
+      audioFrame = frame();
+      audioFrame->format = audioCodec->sample_fmt;
+      audioFrame->sample_rate = kRate;
+      ffcheck(av_channel_layout_copy(&audioFrame->ch_layout, &audioCodec->ch_layout),
+              "Cannot configure audio frame");
+      audioFrame->nb_samples = audioCodec->frame_size;
+      check(audioFrame->nb_samples > 0 && audioFrame->nb_samples <= 8192,
+            "Unsupported export audio frame size.");
+      ffcheck(av_frame_get_buffer(audioFrame.get(), 0), "Cannot allocate audio frame");
+      const int64_t originSamples = av_rescale_q(originUs, kUs, kSamples);
+      for (int index : options.audioStreams) {
+        auto track = std::make_unique<AudioTrack>(input->streams[index], originSamples);
+        trackByStream.insert(index, track.get());
+        tracks.push_back(std::move(track));
+      }
+    }
+
     ffcheck(avio_open2(&out.ctx->pb, QFile::encodeName(tmp).constData(), AVIO_FLAG_WRITE,
         &out.ctx->interrupt_callback, nullptr), "Cannot open export output");
+    // Plain faststart: use_metadata_tags writes a keys/mdta box that ffmpeg
+    // itself warns about ("UDTA parsing failed retrying raw"), and stricter
+    // players refuse it. The title lands in the standard ©nam entry instead.
     AVDictionary *muxOptions = nullptr;
-    const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart+use_metadata_tags", 0);
+    const int optionResult = av_dict_set(&muxOptions, "movflags", "+faststart", 0);
     if (optionResult < 0) { av_dict_free(&muxOptions); ffcheck(optionResult, "Cannot configure MP4 fast start"); }
     const int header = avformat_write_header(out.ctx, &muxOptions);
     av_dict_free(&muxOptions);
     ffcheck(header, "Cannot write export header");
-    auto converted = frame(); converted->format = v->pix_fmt; converted->width = v->width; converted->height = v->height;
-    converted->color_range = v->color_range; converted->colorspace = v->colorspace;
-    converted->color_primaries = v->color_primaries; converted->color_trc = v->color_trc;
-    converted->sample_aspect_ratio = v->sample_aspect_ratio;
-    ffcheck(av_frame_get_buffer(converted.get(), 32), "Cannot allocate video conversion frame");
-    Frame rendered;
-    if (steadyWatermark) {
-      rendered = frame();
-      rendered->format = converted->format; rendered->width = converted->width; rendered->height = converted->height;
-      ffcheck(av_frame_copy_props(rendered.get(), converted.get()), "Cannot configure watermark output frame");
-      ffcheck(av_frame_get_buffer(rendered.get(), 32), "Cannot allocate watermark output frame");
-    }
-    const Watermark watermark(v->width, v->height, options.watermark);
-    std::unique_ptr<SwsContext, decltype(&sws_freeContext)> sws(nullptr, sws_freeContext);
-    int64_t audioAt = 0, lastVideo = -1, lastSlot = -1, endUs = 0, seenFrames = 0;
-    int64_t nextOutputSlot = 0;
+
+    int64_t audioAt = 0;
+    const int64_t audioFrameSamples = audioFrame ? audioFrame->nb_samples : 0;
+    // Reused across frames: one small allocation per export instead of ~300k
+    // for a two-hour mix.
+    std::vector<float> mix(size_t(audioFrameSamples) * 2, 0.0f);
     auto writeAudioUntil = [&](int64_t untilUs) {
-      if (!a) return;
+      if (!audioCodec) return;
       const int64_t target = av_rescale_q(untilUs, kUs, kSamples);
       while (audioAt < target) {
         cancelled(cancel);
-        const int n = audio->nb_samples;
-        std::vector<float> mix(size_t(n) * 2, 0.0f);
-        for (auto &reader : readers) reader->add(mix.data(), audioAt, n, 1.0f / readers.size());
-        ffcheck(av_frame_make_writable(audio.get()), "Cannot write audio frame");
+        const int n = int(audioFrameSamples);
+        std::fill(mix.begin(), mix.end(), 0.0f);
+        for (auto &track : tracks) track->add(mix.data(), audioAt, n, 1.0f / float(tracks.size()));
+        ffcheck(av_frame_make_writable(audioFrame.get()), "Cannot write audio frame");
         for (int ch = 0; ch < 2; ++ch) {
-          auto *plane = reinterpret_cast<float *>(audio->data[ch]);
-          for (int i = 0; i < n; ++i) plane[i] = std::isfinite(mix[size_t(i) * 2 + ch]) ?
-              std::clamp(mix[size_t(i) * 2 + ch], -1.0f, 1.0f) : 0.0f;
+          auto *plane = reinterpret_cast<float *>(audioFrame->data[ch]);
+          for (int i = 0; i < n; ++i)
+            plane[i] = std::isfinite(mix[size_t(i) * 2 + ch])
+                           ? std::clamp(mix[size_t(i) * 2 + ch], -1.0f, 1.0f)
+                           : 0.0f;
         }
-        audio->pts = audioAt;
-        out.write(a.get(), as, audio.get());
+        audioFrame->pts = audioAt;
+        out.writeAudio(audioCodec.get(), outAudio, audioFrame.get());
         audioAt += n;
       }
     };
-    auto writeVideo = [&](int64_t at) {
+
+    const qint64 totalBytes = std::max<qint64>(1, guard.info.size());
+    qint64 readBytes = 0;
+    const int64_t originTicks = av_rescale_q(originUs, kUs, outVideo->time_base);
+    // Emit mixed audio slightly behind the video clock: audio packets for a
+    // timestamp can arrive just after the video packet that precedes them, and
+    // treating "not read yet" as silence would punch holes in the mix.
+    constexpr int64_t kAudioLeadUs = 1000000;
+    int64_t lastVideoUs = 0;
+    int64_t lastEndUs = 0;
+    auto pkt = packet();
+    while (true) {
       cancelled(cancel);
-      writeAudioUntil(at);
-      AVFrame *output = converted.get();
-      if (steadyWatermark) {
-        // Always draw onto a fresh copy of the clean held picture. Otherwise
-        // repeated frames would accumulate trails from earlier logo positions.
-        ffcheck(av_frame_make_writable(rendered.get()), "Cannot write watermark output frame");
-        ffcheck(av_frame_copy(rendered.get(), converted.get()), "Cannot copy held video frame");
-        output = rendered.get();
-        output->duration = av_rescale_q(1, av_inv_q(rate), v->time_base);
+      const int read = av_read_frame(input.get(), pkt.get());
+      if (read == AVERROR_EOF) break;
+      ffcheck(read, "Cannot read recording");
+      readBytes += pkt->size + 32;
+      if (pkt->stream_index == vIndex) {
+        const int64_t ptsUs = pkt->pts == AV_NOPTS_VALUE
+            ? lastEndUs
+            : av_rescale_q(pkt->pts, inVideo->time_base, kUs) - originUs;
+        if (audioCodec)
+          writeAudioUntil(std::max<int64_t>(0, ptsUs - kAudioLeadUs));
+        av_packet_rescale_ts(pkt.get(), inVideo->time_base, outVideo->time_base);
+        if (pkt->pts != AV_NOPTS_VALUE) pkt->pts = std::max<int64_t>(0, pkt->pts - originTicks);
+        if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= originTicks;
+        // A recording can open with a packet that carries no timestamp at all
+        // (MKV keeps DTS-less heads). Forwarding that made the MP4 muxer warn
+        // and invent one; give it the frame's own timeline position instead.
+        // Only the both-missing case is filled in: when a stream has B-frames,
+        // deriving DTS from PTS for one packet can put it ahead of the next
+        // packet's real DTS, which the muxer rejects.
+        if (pkt->pts == AV_NOPTS_VALUE) {
+          pkt->pts = pkt->dts != AV_NOPTS_VALUE
+              ? pkt->dts
+              : av_rescale_q(std::max<int64_t>(0, ptsUs), kUs, outVideo->time_base);
+          if (pkt->dts == AV_NOPTS_VALUE)
+            pkt->dts = pkt->pts;
+        }
+        pkt->stream_index = outVideo->index;
+        pkt->pos = -1;
+        ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
+                "Cannot write export (check free disk space)");
+        lastVideoUs = ptsUs;
+        // Advance the fallback clock even for packets that carry no duration,
+        // so a source with no timestamps at all still gets a monotonic
+        // sequence instead of a run of identical ones.
+        const int64_t stepUs = pkt->duration > 0
+            ? av_rescale_q(pkt->duration, inVideo->time_base, kUs)
+            : (inVideo->avg_frame_rate.num > 0 && inVideo->avg_frame_rate.den > 0
+                   ? int64_t(1000000) * inVideo->avg_frame_rate.den /
+                         inVideo->avg_frame_rate.num
+                   : int64_t(16667));
+        lastEndUs = ptsUs + std::max<int64_t>(1, stepUs);
+      } else if (copiedAudio != nullptr && pkt->stream_index == singleAudioIndex) {
+        av_packet_rescale_ts(pkt.get(), inCopiedAudio->time_base, copiedAudio->time_base);
+        const int64_t shift = av_rescale_q(originUs, kUs, copiedAudio->time_base);
+        if (pkt->pts != AV_NOPTS_VALUE) pkt->pts -= shift;
+        if (pkt->dts != AV_NOPTS_VALUE) pkt->dts -= shift;
+        pkt->stream_index = copiedAudio->index;
+        pkt->pos = -1;
+        ffcheck(av_interleaved_write_frame(out.ctx, pkt.get()),
+                "Cannot write export (check free disk space)");
+      } else if (AudioTrack *track = trackByStream.value(pkt->stream_index, nullptr)) {
+        track->push(pkt.get());
+        if (audioCodec)
+          writeAudioUntil(std::max<int64_t>(0, lastVideoUs - kAudioLeadUs));
       }
-      output->pts = av_rescale_q(at, kUs, v->time_base);
-      watermark.apply(output, at);
-      out.write(v.get(), vs, output, steadyWatermark ? output->duration : 0);
-      if (video.input->duration > 0) progress.store(std::clamp(double(at) / video.input->duration, 0.0, 0.99));
-    };
-    auto writeHeldUntil = [&](int64_t slot) {
-      while (nextOutputSlot < slot) {
-        writeVideo(av_rescale_q(nextOutputSlot, av_inv_q(rate), kUs));
-        ++nextOutputSlot;
+      av_packet_unref(pkt.get());
+      progress.store(std::min(0.99, double(readBytes) / double(totalBytes)));
+    }
+
+    if (audioCodec) {
+      int64_t endUs = lastEndUs;
+      for (auto &track : tracks) {
+        track->flush();
+        if (track->hasOutput())
+          endUs = std::max(endUs, av_rescale_q(track->endSample(), kSamples, kUs));
       }
-    };
-    do {
-      cancelled(cancel);
-      auto *decoded = video.decoded.get();
-      check(decoded->width == inputWidth && decoded->height == inputHeight && decoded->data[0],
-            "Video layout changed or frame data is invalid.");
-      check(decoded->color_trc != AVCOL_TRC_SMPTE2084 && decoded->color_trc != AVCOL_TRC_ARIB_STD_B67,
-            "HDR-to-SDR share export is not supported yet.");
-      int64_t at = seenFrames * inputFrameUs;
-      if (decoded->best_effort_timestamp != AV_NOPTS_VALUE) {
-        const auto absolute = av_rescale_q(decoded->best_effort_timestamp, video.stream->time_base, kUs);
-        check(absolute >= -kMaxUs * 2 && absolute <= kMaxUs * 2, "Invalid video timestamps.");
-        at = absolute - origin;
-      }
-      ++seenFrames;
-      check(at >= 0 && at <= kMaxUs, "Video timestamps exceed the supported 24-hour timeline.");
-      int64_t durationUs = inputFrameUs;
-      if (steadyWatermark && decoded->duration > 0) {
-        durationUs = av_rescale_q(decoded->duration, video.stream->time_base, kUs);
-        check(durationUs > 0 && durationUs <= kMaxUs - at, "Invalid decoded video duration.");
-      }
-      endUs = std::max(endUs, at + durationUs);
-      if (lastVideo >= 0 && at <= lastVideo) continue;
-      // Do not drop ordinary 30/60fps MKV frames just because their 1ms
-      // timestamps alternate 33/34 or 16/17ms. Only cap genuinely high rates.
-      if (steadyWatermark || capRate) {
-        const int64_t slot = av_rescale_q(at, kUs, av_inv_q(rate));
-        if (slot <= lastSlot) continue;
-        // Quantize incoming timestamps to the nearest output slot (at most
-        // half a frame), avoiding 16/17ms MKV rounding dropping 60fps pictures.
-        // Fill gaps from the previous clean picture before replacing it.
-        if (steadyWatermark && lastVideo >= 0) writeHeldUntil(slot);
-        lastSlot = slot;
-      }
-      ffcheck(av_frame_make_writable(converted.get()), "Cannot write video frame");
-      const auto *descriptor = av_pix_fmt_desc_get(AVPixelFormat(decoded->format));
-      check(descriptor && !(descriptor->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_PAL)), "Unsupported decoded pixel format.");
-      int minimumStride[4]{};
-      ffcheck(av_image_fill_linesizes(minimumStride, AVPixelFormat(decoded->format), inputWidth), "Invalid decoded strides");
-      const int planes = av_pix_fmt_count_planes(AVPixelFormat(decoded->format));
-      check(planes > 0 && planes <= 4, "Invalid decoded video planes.");
-      for (int plane = 0; plane < planes; ++plane)
-        check(decoded->data[plane] && std::abs(int64_t(decoded->linesize[plane])) >= minimumStride[plane], "Invalid decoded video plane.");
-      if (!sws) {
-        sws.reset(sws_getContext(inputWidth, inputHeight, AVPixelFormat(decoded->format),
-            v->width, v->height, v->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr));
-        check(bool(sws), "Cannot convert video for export.");
-        const int sourceSpace = decoded->colorspace == AVCOL_SPC_BT470BG || decoded->colorspace == AVCOL_SPC_SMPTE170M ? SWS_CS_ITU601 : SWS_CS_ITU709;
-        ffcheck(sws_setColorspaceDetails(sws.get(), sws_getCoefficients(sourceSpace), decoded->color_range == AVCOL_RANGE_JPEG,
-            sws_getCoefficients(SWS_CS_ITU709), 0, 0, 1 << 16, 1 << 16), "Cannot configure export colors");
-      }
-      check(decoded->format == inputFormat && !(decoded->flags & AV_FRAME_FLAG_CORRUPT), "Video pixel format changed or a frame is corrupt.");
-      check(sws_scale(sws.get(), decoded->data, decoded->linesize, 0, inputHeight,
-          converted->data, converted->linesize) == v->height, "Video conversion was incomplete.");
-      if (!steadyWatermark) writeVideo(at);
-      lastVideo = at;
-    } while (video.next());
-    if (steadyWatermark)
-      writeHeldUntil(std::max(lastSlot + 1, av_rescale_q(endUs, kUs, av_inv_q(rate))));
-    writeAudioUntil(endUs);
-    out.write(v.get(), vs, nullptr, steadyWatermark ? av_rescale_q(1, av_inv_q(rate), v->time_base) : 0);
-    if (a) out.write(a.get(), as, nullptr);
+      // Drain the tail the video timeline did not reach.
+      writeAudioUntil(std::max<int64_t>(0, endUs));
+      out.writeAudio(audioCodec.get(), outAudio, nullptr);
+    }
     ffcheck(av_write_trailer(out.ctx), "Cannot finalize export");
     avio_flush(out.ctx->pb);
     ffcheck(out.ctx->pb->error, "Cannot flush export");
     ffcheck(avio_closep(&out.ctx->pb), "Cannot close export output");
     cancelled(cancel);
-    const QFileInfo current(source);
-    struct stat latest {};
-    check(current.isFile() && ::lstat(QFile::encodeName(source).constData(), &latest) == 0 &&
-          S_ISREG(latest.st_mode) && latest.st_dev == original.st_dev && latest.st_ino == original.st_ino &&
-          latest.st_size == original.st_size && latest.st_mtim.tv_sec == original.st_mtim.tv_sec &&
-          latest.st_mtim.tv_nsec == original.st_mtim.tv_nsec,
-          "Source recording changed during export; output was discarded.");
-    const QString stem = fingerprint.completeBaseName() + "_Share";
-    for (int n = 0; n < 10000; ++n) {
-      const QString destination = QDir(directory).filePath(stem + (n ? "_" + QString::number(n) : QString()) + ".mp4");
-      if (QFile::rename(tmp, destination)) { progress.store(1); return {destination, {}}; }
-      check(QFile::exists(destination), "Cannot publish export file.");
-    }
-    throw std::runtime_error("Too many export filename collisions.");
-  } catch (const std::exception &e) { return {{}, QString::fromUtf8(e.what())}; }
+    guard.verifyUnchanged(source);
+    progress.store(1);
+    return {publish(tmp, directory, source), {}, sourceSeconds(inVideo),
+            inVideo->codecpar->codec_id == AV_CODEC_ID_AV1};
+  } catch (const std::exception &e) {
+    return {{}, QString::fromUtf8(e.what())};
+  }
 }
-}
+} // namespace TrophyBackend

@@ -23,6 +23,15 @@
 #include <tuple>
 #include <gtest/gtest.h>
 
+namespace {
+std::mutex g_qtMessageMutex;
+QStringList g_qtMessages;
+void captureQtMessage(QtMsgType, const QMessageLogContext &, const QString &message) {
+  std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+  g_qtMessages << message;
+}
+} // namespace
+
 #include "audio/AudioMixer.h"
 #include "audio/IAudioSource.h"
 #include "audio/AudioRoutingInfo.h"
@@ -430,6 +439,7 @@ TEST(RecordingSessionTest, DmaBufRateLimitPrecedesDispatchAndReleasesProducerLea
     ASSERT_TRUE(session.start());
     QTemporaryFile file; // Descriptor ownership only, not native GPU import.
     ASSERT_TRUE(file.open());
+    std::vector<std::weak_ptr<int>> leases;
     for (int i = 0; i < 1000; ++i) {
       VideoFrame frame{};
       frame.isDmaBuf = true;
@@ -442,9 +452,21 @@ TEST(RecordingSessionTest, DmaBufRateLimitPrecedesDispatchAndReleasesProducerLea
       capture.fire(frame);
       frame.bufferLease.reset();
       lease.reset();
-      EXPECT_TRUE(weak.expired());
+      leases.push_back(weak);
     }
+    // The session keeps the newest frame so it can repeat it over a still, so
+    // a couple of leases are held - but never the whole run: pinning the
+    // compositor's pool would starve it.
+    auto alive = [&] {
+      int count = 0;
+      for (const auto &lease : leases)
+        if (!lease.expired())
+          ++count;
+      return count;
+    };
+    EXPECT_LE(alive(), 4) << "producer leases are accumulating";
     session.stop();
+    EXPECT_EQ(alive(), 0) << "leases must be released when the session stops";
     ASSERT_EQ(sink->timestamps.size(), fps == 0 ? 1000u : 600u);
     EXPECT_EQ(sink->timestamps.front(), 1000000u);
     for (size_t i = 1; i < sink->timestamps.size(); ++i) {
@@ -2045,4 +2067,130 @@ TEST(RecordingSessionStallTest, EmittingEncoderDoesNotTripTheGuard) {
 
   EXPECT_FALSE(session.outputFailed());
   EXPECT_TRUE(session.outputErrorText().isEmpty());
+}
+
+// A still screen delivers no frames at all (capture is damage-driven), which
+// used to leave the last frame covering many seconds of the recording. The
+// session repeats it at the encode rate so the file stays constant-rate.
+TEST(RecordingSessionTest, StillScreenRepeatsTheLastFrameAtTheEncodeRate) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true,
+                           48000, 0);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  // Nothing else arrives: the session has to keep the stream alive.
+  QElapsedTimer wait;
+  wait.start();
+  while (wait.elapsed() < 220)
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  session.stop();
+
+  ASSERT_GE(encoder.timestamps.size(), 6u)
+      << "the still frame was not repeated";
+  // Strictly increasing, and spaced by about one frame at 60 fps.
+  for (size_t i = 1; i < encoder.timestamps.size(); ++i)
+    EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1]);
+  EXPECT_GT(encoder.timestamps.back() - encoder.timestamps.front(), 50000);
+  EXPECT_LT(encoder.timestamps.back() - encoder.timestamps.front(), 250000);
+}
+
+// A real frame can arrive after the filler has already published timestamps
+// past its own (producer timestamps lag their delivery by more than a frame on
+// a jittery callback). The session must keep the timeline strictly increasing
+// rather than hand the encoder a frame that goes backwards.
+TEST(RecordingSessionTest, StillFillersNeverOvertakeALateRealFrame) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true,
+                           48000, 0);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  // Long still: the session fills it.
+  QElapsedTimer wait;
+  wait.start();
+  while (wait.elapsed() < 150)
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+
+  // The next real frame carries a timestamp only one frame after the previous
+  // real one, well behind the fillers already emitted.
+  frame.timestamp = 1016667;
+  capture.fire(frame);
+  wait.restart();
+  while (wait.elapsed() < 60) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+  session.stop();
+
+  ASSERT_GE(encoder.timestamps.size(), 5u);
+  for (size_t i = 1; i < encoder.timestamps.size(); ++i)
+    EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
+        << "timeline went backwards at frame " << i;
+}
+
+// Stopping asynchronously drains native work on a worker thread. The pacing
+// timer belongs to the session's own thread, so the worker must not touch it:
+// Qt refuses a cross-thread stop, warns, and leaves the timer armed.
+TEST(RecordingSessionTest, AsyncStopDoesNotStopThePacingTimerFromTheWorker) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused-timers.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 128, 0);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  {
+    std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+    g_qtMessages.clear();
+  }
+  const auto previous = qInstallMessageHandler(captureQtMessage);
+  session.requestStop();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (session.stopPending() && std::chrono::steady_clock::now() < deadline) {
+    QCoreApplication::processEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  qInstallMessageHandler(previous);
+  EXPECT_FALSE(session.stopPending());
+
+  std::lock_guard<std::mutex> lock(g_qtMessageMutex);
+  for (const auto &message : g_qtMessages)
+    EXPECT_FALSE(message.contains("Timers cannot be stopped from another thread"))
+        << message.toStdString();
 }

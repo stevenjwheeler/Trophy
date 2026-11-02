@@ -409,7 +409,7 @@ struct FormatChecks {
   bool videoStages = false, audioStages = false;
   unsigned expectedStages = 0x1f;
   bool resumedTimeline = false;
-  bool videoStall = false;
+  bool videoStall = false; // Delivery stalls on video; the timeline must be filled.
 };
 QDBusMessage control(const QString &method, const QVariantList &args = {}) {
   auto call = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop",
@@ -555,7 +555,12 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
     double tailAmplitude = 0;
     for (size_t i = pcm.size() - 9600; i < pcm.size(); ++i) tailAmplitude += std::abs(pcm[i]);
     EXPECT_GT(tailAmplitude / 9600, 0.02) << "decoded audio must resume, not just end in generated silence";
-    if (checks.videoStall) EXPECT_GT(largestVideoGap, 0.5);
+    // Capture is damage-driven, so a stalled screen used to leave the last
+    // frame covering the whole outage; the session now repeats it at the
+    // encode rate, so the timeline stays constant-rate through the stall.
+    if (checks.videoStall)
+      EXPECT_LT(largestVideoGap, 0.25)
+          << "a still screen must be repeated, not left as one long sample";
   }
   if (checks.videoStages) {
     for (size_t stage = 0; stage < stages.size(); ++stage)

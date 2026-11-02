@@ -12,6 +12,8 @@ Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 **Settings → Frame Rate** limits full recordings and DVR without limiting the game's FPS. Choose **∞ (Uncapped)** to keep every delivered frame instead. Uncapped capture can increase processing load; the actual rate depends on the game, compositor and encoder. Fixed limits skip excess frames without speeding up playback or changing audio timing. Capture Info can therefore show capture FPS above the selected limit while encode FPS stays near it; intentional rate limiting is not a queue-overflow drop.
 
+The compositor sends no frames at all while the screen is still — a loading screen, a menu, or a paused game. Trophy repeats the last frame at the target rate in that case, so recordings stay constant-rate and players never wait on a frame that covers many seconds. A repeated frame compresses to almost nothing. Recordings made before this change can still contain those long frames.
+
 The Dashboard shows source connection/mute status, audio levels, approximate replay-buffer fill, and warnings for sustained video-queue drops. Connected does not necessarily mean audible; check the meters and play back a short test recording after changing your setup.
 
 While recording or DVR is active, click **ⓘ** beside the recording control for live **Capture Info**:
@@ -70,16 +72,23 @@ After recording, seek to a moment in the player and use **Add bookmark at curren
 
 Choose **Share** in the player, or select library captures and choose **Export → Share-ready MP4**.
 
-1. Choose original, 1080p, or 720p resolution and a quality or approximate size preset.
-2. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are averaged into one stereo AAC track; no selected audio produces a silent video.
-3. Choose a destination **outside the managed recording library**.
-4. Start the export. Progress and cancellation appear in background toasts.
+1. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are mixed into **one stereo AAC track**, because chat apps and social sites cannot switch between tracks and AAC-LC is the audio format every player accepts. When exactly one stereo AAC track is selected, it is copied unchanged instead of re-encoded. Mixing costs an audio encode, so three tracks take noticeably longer than one; the dialog shows an estimate for the current selection before you start.
+2. Choose a destination **outside the managed recording library**.
+3. Start the export. Progress and cancellation appear in background toasts.
 
-For batches, quality and destination apply to all captures, while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
+The copy is a **remux**: the video bitstream is copied unchanged into an MP4 container with fast-start layout, so it finishes in seconds, loses no quality, and never modifies the original. Only the audio is re-encoded, to produce the single mixed track. Exports are **whole-file**: snip first to share only a range.
 
-**Animated Trophy watermark** is on by default in share options, and your choice is remembered. It is burned into re-encoded MP4 share copies only; recordings and original-file copies keep their original pixels.
+Because the video is copied, the MP4 keeps the recording's codec — so the copy is only universally shareable when the recording is H.264. A recording that is already H.264 therefore defaults to the copy, which is lossless and already produces the H.264 + AAC file every site accepts. Convert stays available in that case for one reason: it is the only way to shrink the picture.
 
-Exports use software H.264/YUV420P with fast-start MP4 and optional AAC audio, at up to 60fps. They never upscale or modify the original. Export is **whole-file**: snip first to share only a range. Size targets are approximate, not guaranteed upload limits. HDR-to-SDR conversion is unsupported; known HDR input is rejected.
+HEVC and AV1 recordings cannot be copied into something a phone will reliably play, so the dialog **defaults to Convert to H.264 (compatibility)** for them and still offers the copy for cases where it does not matter. Converting re-encodes the video to H.264 (hardware encoder when available, x264 otherwise) and mixes the selected tracks into one stereo AAC track, producing the same H.264 + AAC shape as an H.264 copy. It decodes and re-encodes the whole file, so it takes minutes rather than seconds — the dialog quotes an estimate, and a machine without a hardware encoder is much slower. The optional resolution choice (original, 1080p, 720p) never upscales.
+
+Record with VA-API H.264, NVENC H.264 or x264 if you mostly share your recordings: that keeps every export on the copy path. Copied HEVC is tagged `hvc1` so Apple's players accept it, but browsers and older players still may not.
+
+A copy also preserves the recording's timing exactly. An older recording with a long still stretch keeps that stretch as one long frame, which some players treat as a freeze; **Convert** re-encodes and fills those stretches with repeated frames. That is the only way to remove them — repeating a frame in a copy would break the encoded predictions that follow it.
+
+For batches, the destination applies to all captures while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
+
+Copying keeps the original dimensions and frame rate; there are no resolution or size presets. If a capture needs downscaling, a size limit or a different codec, transcode it with another tool — sharing here deliberately avoids re-encoding video.
 
 A track containing desktop audio may already include voice chat or microphone monitoring. Adding those tracks again can potentially double their sound. Check on the video player before exporting.
 

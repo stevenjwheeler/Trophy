@@ -1129,3 +1129,66 @@ TEST_F(RecordingManagerTest, SettingsChangeDuringStartupCoalescesLatestAudioConf
 TEST_F(RecordingManagerTest, DisablingLateAdoptedVoiceUsesActualSlotNotOriginalLayout) {
   disableLateAdoptedVoice();
 }
+
+// Launchers and boot screens expose a transient window that the portal happily
+// restores and then loses as the real game window appears. Nothing has been
+// recorded at that point, so it must not surface as a capture error — but a
+// source that keeps dying still has to.
+TEST_F(RecordingManagerTest, LauncherWindowLossBeforeStartIsRetriedSilently) {
+  QProcess game;
+  game.start("sleep", {"30"});
+  ASSERT_TRUE(game.waitForStarted());
+
+  SettingsManager settings;
+  settings.setRecordingsPath(tempDir.path());
+  StorageManager storage(tempDir.path());
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor);
+  detector.addToWhitelist("steam_app_42424242", "Exit fixture");
+  WindowInfo window;
+  window.pid = game.processId();
+  window.appId = "steam_app_42424242";
+  window.focused = window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGameKey(), "steam_app_42424242");
+
+  RecordingManager recorder;
+  recorder.setSettingsManager(&settings);
+  recorder.setStorageManager(&storage);
+  recorder.setGameDetectionService(&detector);
+  QPointer<PendingCapture> capture;
+  installPendingCapture(recorder, capture);
+  QSignalSpy lost(&recorder, &RecordingManager::captureStartLost);
+  QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+
+  for (int attempt = 1; attempt <= 3; ++attempt) {
+    recorder.startRecording("Exit fixture");
+    ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
+    ASSERT_FALSE(capture.isNull());
+    capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
+    emit capture->captureError("launch window closed");
+    ASSERT_TRUE(waitForIdle(recorder));
+    ASSERT_EQ(lost.count(), attempt);
+    EXPECT_EQ(lost.at(attempt - 1).at(0).toString(), "Exit fixture");
+    EXPECT_EQ(lost.at(attempt - 1).at(1).toString(), "steam_app_42424242");
+    EXPECT_EQ(errors.count(), 0) << "a transient launch window is not an error";
+    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
+  }
+
+  // Past the retry budget the capture is genuinely broken: report it.
+  recorder.startRecording("Exit fixture");
+  ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
+  ASSERT_FALSE(capture.isNull());
+  capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
+  emit capture->captureError("still gone");
+  ASSERT_TRUE(waitForIdle(recorder));
+  EXPECT_EQ(lost.count(), 3);
+  ASSERT_EQ(errors.count(), 1);
+  EXPECT_EQ(errors.at(0).at(0).toString(), "still gone");
+
+  if (game.state() != QProcess::NotRunning) {
+    game.terminate();
+    ASSERT_TRUE(game.waitForFinished());
+  }
+}

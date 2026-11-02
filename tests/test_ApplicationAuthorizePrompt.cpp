@@ -11,6 +11,7 @@
 #include "settings/SettingsManager.h"
 #include <QDir>
 #include <QFile>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <gtest/gtest.h>
@@ -103,6 +104,25 @@ protected:
   }
   bool dvrPendingEmpty() const { return app.m_pendingDvrGame.isEmpty(); }
   bool windowPendingEmpty() const { return app.m_pendingWindowGame.isEmpty(); }
+  void captureStartLost(const QString &game, const QString &identity) {
+    app.onCaptureStartLost(game, identity);
+  }
+  void clearWindowPending() {
+    app.m_pendingWindowGame.clear();
+    app.m_windowWaitTimer->stop();
+  }
+  // The retry is deferred so the compositor can publish the replacement
+  // window; pump events until the window wait is armed again.
+  bool waitForWindowRetry(const QString &game, int timeoutMs = 2000) {
+    QElapsedTimer wait;
+    wait.start();
+    while (wait.elapsed() < timeoutMs) {
+      if (app.m_pendingWindowGame == game)
+        return true;
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    return app.m_pendingWindowGame == game;
+  }
   bool whitelisted(const QString &key) const {
     return app.gameDetector()->whitelist().contains(key);
   }
@@ -284,4 +304,36 @@ int main(int argc, char **argv) {
   Application app(argc, argv);
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// A launcher's window can be captured and then vanish before anything is
+// recorded. The app must wait for the window that replaces it and try again
+// instead of leaving the game uncaptured.
+TEST_F(ApplicationAuthorizePromptTest, CaptureStartLossReArmsTheWindowWait) {
+  setCurrentIdentity("Launcher Game", "steam_app_777");
+  setToken("steam_app_777", "token-bytes");
+
+  captureStartLost("Launcher Game", "steam_app_777");
+  EXPECT_TRUE(waitForWindowRetry("Launcher Game"));
+  EXPECT_TRUE(windowTimerActive());
+  EXPECT_TRUE(windowIsRecord());
+  clearWindowPending();
+
+  // A different identity for the same display name is a different game.
+  captureStartLost("Launcher Game", "steam_app_other");
+  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
+  clearWindowPending();
+
+  // Without approval there is nothing to retry silently.
+  clearToken("steam_app_777");
+  captureStartLost("Launcher Game", "steam_app_777");
+  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
+  clearWindowPending();
+
+  // A blocked game is never silently restarted.
+  setToken("steam_app_777", "token-bytes");
+  block("Launcher Game");
+  captureStartLost("Launcher Game", "steam_app_777");
+  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
+  clearWindowPending();
 }

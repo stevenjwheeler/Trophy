@@ -131,6 +131,13 @@ signals:
    * re-authorizes through the New Game prompt — never a bare picker.
    */
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
+  /**
+   * The captured source vanished before anything was recorded — typically a
+   * launcher, boot or splash window that closed as the real game window
+   * appeared. The app waits for the next window and retries instead of
+   * showing an error for a recording that never started.
+   */
+  void captureStartLost(const QString &gameName, const QString &identity = {});
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
   void detectedEncoderNameChanged();
@@ -172,6 +179,13 @@ private:
   QString m_pendingCaptureError;
   QElapsedTimer m_captureEndGrace;
   int m_captureEndGraceMs = 5000;
+  // Silent retries for a source that died before the first frame. Bounded per
+  // identity and window so a genuinely broken capture still reports an error.
+  bool m_startupLossRetry = false;
+  QString m_startupRetryKey;
+  int m_startupRetryCount = 0;
+  qint64 m_startupRetrySinceMs = 0;
+  bool takeStartupRetry(const QString &identity);
   bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;

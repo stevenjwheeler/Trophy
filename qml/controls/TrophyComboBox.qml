@@ -130,7 +130,9 @@ ComboBox {
         id: itemDelegate
         required property var modelData
 
-        width: control.width - 4
+        // Follow the popup, not the closed control: a combo whose control is
+        // only as wide as its value would otherwise truncate every item.
+        width: control.popup.width - 4
         height: 32
         hoverEnabled: true
 

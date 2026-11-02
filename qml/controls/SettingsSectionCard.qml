@@ -8,6 +8,7 @@ Rectangle {
     property string sectionTitle: ""
     property url iconSource
     property string description: ""
+    property color descriptionColor: Theme.textSecondaryColor
     property bool expanded: false
     signal expansionFinished()
     default property alias content: body.data
@@ -76,7 +77,7 @@ Rectangle {
                     Layout.fillWidth: true
                     text: sectionCard.description
                     font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.textSecondaryColor
+                    color: sectionCard.descriptionColor
                     wrapMode: Text.WordWrap
                     visible: text.length > 0
                 }

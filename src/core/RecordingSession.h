@@ -173,6 +173,8 @@ private:
   void drainMergedAudio(int channels, bool flushTail = false);
   void noteCapturedVideo(const VideoFrame &frame);
   bool admitVideoFrame(int64_t timestampUs); // Capture callback only.
+  void queueCapturedFrame(const VideoFrame &frame);
+  void handFrameToEncoding(const VideoFrame &frame);
   void noteQueueDepth(); // caller holds m_queueMutex
   void sampleCaptureRates(QVariantMap &result, int64_t now) const;
   bool advanceMergedClock(bool finalDrain = false);
@@ -324,6 +326,25 @@ private:
 
   // Audio node reconnection tracking
   QTimer *m_audioNodeCheckTimer = nullptr;
+  // Capture is damage-driven: a still screen delivers no frames at all, which
+  // used to leave the last frame covering many seconds. This timer repeats the
+  // last frame at the encode rate so the recording stays constant-rate.
+  QTimer *m_stillFrameTimer = nullptr;
+  std::shared_ptr<VideoFrame> m_lastFrame;
+  // Shared-memory frames borrow the producer's mapping, which goes straight
+  // back to PipeWire, so the pixels are copied here; DMA-BUF frames are kept
+  // alive by their lease instead.
+  std::shared_ptr<std::vector<uint8_t>> m_lastFramePixels;
+  // The capture callback runs on the PipeWire thread while the timer runs on
+  // the session's thread, so the retained frame is published under a lock.
+  mutable std::mutex m_stillFrameMutex;
+  int64_t m_lastFrameWallUs = -1;
+  int64_t m_lastIssuedTimestampUs = -1;
+  // Capture timestamps lag their arrival by the pipeline's own latency; this
+  // offset turns the wall clock back into the capture clock so a filler never
+  // runs past where the producer's own next frame will be.
+  int64_t m_frameClockOffsetUs = 0;
+  void emitStillFrames();
   uint32_t m_gamePid = 0;       // Game audio PID to watch for (0 = unknown)
   QStringList m_gameHints;      // Game name hints (exe, app-id, display name)
   QString m_voiceChatApp;       // Voice chat app name to watch for
