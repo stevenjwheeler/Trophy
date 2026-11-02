@@ -110,6 +110,7 @@ bool RecordingSession::start() {
   m_frameCount = 0;
   m_deliveredFrames = 0;
   m_dmaBufDelivered = 0;
+  m_rateSkipped = 0;
   m_inputWidth = 0;
   m_inputHeight = 0;
   m_encodeCalls = 0;
@@ -554,6 +555,9 @@ QVariantMap RecordingSession::captureHealth() const {
                      {"desktopAudio", m_desktopAudio}};
   result["deliveredFrames"] = m_deliveredFrames.load();
   result["dmaBufFrames"] = m_dmaBufDelivered.load();
+  // Deliberate FPS-cap filtering, not transport loss. Capture Info can now
+  // say why deliveredFrames exceeds the frames in the file.
+  result["rateLimitedFrames"] = m_rateSkipped.load();
   result["inputWidth"] = m_inputWidth.load();
   result["inputHeight"] = m_inputHeight.load();
   result["videoPackets"] = m_frameCount.load();
@@ -864,6 +868,16 @@ void RecordingSession::finishStopNative() {
 
   qDebug() << "Recording session stopped. Frames:" << m_frameCount
           << "Size:" << m_bytesWritten << "bytes";
+  // Account for every frame the capture callback handed us: encoded + capped
+  // by the FPS limiter + dropped because the encoder fell behind. Without
+  // this, a delivered-vs-written gap looks identical to silent frame loss.
+  const auto delivered = m_deliveredFrames.load();
+  const auto capped = m_rateSkipped.load();
+  const auto queueDropped = m_queueDrops.load();
+  qDebug() << "Recording session frame accounting: delivered" << delivered
+           << "encoded" << m_frameCount << "skipped by FPS cap" << capped
+           << "dropped (queue full)" << queueDropped << "buffered at stop"
+           << std::max<int64_t>(0, delivered - m_frameCount - capped - queueDropped);
 }
 
 void RecordingSession::encodingLoop() {
@@ -938,9 +952,15 @@ void RecordingSession::encodingLoop() {
 
   std::vector<EncodedPacket> flushedPackets;
   if (m_encoder && m_encoder->flush(flushedPackets) > 0) {
+    // Delayed encoders (x264 lookahead) emit their last frames here, not in
+    // the loop. Not counting them made a stopped session report 181 frames
+    // for a 243-packet file.
     for (auto &pkt : flushedPackets) {
       pkt.streamIndex = 0;
-      writeOutputPacket(pkt);
+      if (writeOutputPacket(pkt))
+        m_bytesWritten = m_muxer->bytesWritten();
+      ++m_frameCount;
+      ++m_videoPacketsWritten;
     }
   }
 
@@ -950,12 +970,16 @@ void RecordingSession::encodingLoop() {
 bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
   if (m_videoTargetFps == 0)
     return true; // Explicit uncapped mode retains the original pass-through behaviour.
-  if (timestampUs < 0)
+  if (timestampUs < 0) {
+    ++m_rateSkipped;
     return false;
+  }
   if (m_videoRateOriginUs < 0)
     m_videoRateOriginUs = timestampUs;
-  if (timestampUs < m_videoRateOriginUs)
+  if (timestampUs < m_videoRateOriginUs) {
+    ++m_rateSkipped;
     return false;
+  }
 
   // One input per target-FPS time slot, rounded to the nearest slot so
   // microsecond truncation/jitter at native 60/144 Hz doesn't halve the rate.
@@ -964,8 +988,10 @@ bool RecordingSession::admitVideoFrame(int64_t timestampUs) {
   // av_rescale_rnd avoids overflow and accumulated integer-period drift.
   const int64_t slot = av_rescale_rnd(timestampUs - m_videoRateOriginUs,
                                      m_videoTargetFps, 1000000, AV_ROUND_NEAR_INF);
-  if (slot <= m_videoRateSlot)
+  if (slot <= m_videoRateSlot) {
+    ++m_rateSkipped;
     return false;
+  }
   m_videoRateSlot = slot;
   // Never rewrite timestamps: audio and retained video share the original clock.
   return true;

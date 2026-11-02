@@ -958,6 +958,7 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
     EXPECT_GT(infoDialog->property("height").toDouble(), 300);
     // Live values are rebound, including a segment/session replacement.
     status["deliveredFrames"] = 123;
+    status["rateLimitedFrames"] = 42;
     status["actualCaptureFps"] = 59.3;
     status["bitrateKbps"] = 12000;
     status["actualOutputKbps"] = 13000;
@@ -1023,6 +1024,11 @@ TEST_F(RecordingCardBindingTest, CaptureHealthBelongsToStatusCard) {
     auto *transport = findVisual(content, "Delivered transport");
     ASSERT_NE(transport, nullptr);
     EXPECT_EQ(transport->property("rowValue").toString(), "Shared memory (SHM)");
+    // Frames the FPS cap filtered must be visible, so a delivered-vs-written
+    // gap reads as intentional limiting rather than silent loss.
+    auto *fpsCap = findVisual(content, "Skipped by FPS cap");
+    ASSERT_NE(fpsCap, nullptr);
+    EXPECT_EQ(fpsCap->property("rowValue").toString(), "42");
     for (int tabIndex : {1, 2, 0}) {
       auto *tab = findVisual(header, QStringLiteral("captureInfoTab%1").arg(tabIndex));
       ASSERT_NE(tab, nullptr);

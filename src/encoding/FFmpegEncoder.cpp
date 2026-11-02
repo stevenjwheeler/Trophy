@@ -14,6 +14,7 @@
 #include <QRect>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 #include <algorithm>
 #include <type_traits>
 #include <new>
@@ -115,6 +116,34 @@ struct CudaMemcpy2D {
 
 struct CudaImportState {
 #ifdef HAVE_EGL
+  // One registration per producer buffer, reused for every frame that arrives
+  // on it. PipeWire cycles a small, fixed set of buffers (kWin hands back the
+  // same pw_buffer for the whole stream), so creating an EGLImage and a CUDA
+  // registration per frame was pure overhead: measured 0.41 ms/frame at
+  // 1440p, 99% of it create/register/unregister churn, with occasional 4-7 ms
+  // teardown stalls inside cuGraphicsUnregisterResource. Reusing a
+  // registration costs ~3 us.
+  struct CacheEntry {
+    unsigned long long identity = 0; // PipeWire buffer (lease payload)
+    int fd = -1;                     // our dup; pins the allocation
+    unsigned long long dev = 0;
+    unsigned long long ino = 0;      // dmabuf identity, disambiguates fd reuse
+    int width = 0, height = 0, stride = 0, offset = 0;
+    unsigned long long modifier = 0;
+    unsigned int format = 0;
+    EGLImage image = EGL_NO_IMAGE;
+    CudaGraphicsResource resource = nullptr;
+    unsigned long long lastUse = 0;
+  };
+  static constexpr int kCacheSlots = 8;
+  CacheEntry cache[kCacheSlots];
+  int cacheSize = 0;
+  unsigned long long cacheClock = 0;
+  // Context the registrations were created on (needed to unregister).
+  CudaContext importContext = nullptr;
+  // Health of the cache: a live recording should show mostly hits. Read from
+  // the GUI thread while the encode thread updates them.
+  std::atomic<unsigned long long> cacheHits{0}, cacheMisses{0};
   void *cudaLib = nullptr;
   int (*registerImage)(CudaGraphicsResource *, void *, unsigned int) = nullptr;
   int (*unregisterResource)(CudaGraphicsResource) = nullptr;
@@ -143,6 +172,21 @@ struct CudaImportState {
   EglDisplayLease displayLease;
   EGLDisplay display = EGL_NO_DISPLAY;
   ~CudaImportState() {
+    // Registrations belong to the context that created them. Release them
+    // before the display lease goes away (EGLImages reference it).
+    if (importContext && ctxPush) {
+      CudaContext previous = nullptr;
+      if (ctxPush(importContext) == 0) {
+        for (int i = 0; i < cacheSize; ++i) {
+          if (cache[i].resource) unregisterResource(cache[i].resource);
+          if (cache[i].image != EGL_NO_IMAGE) eglDestroyImage(display, cache[i].image);
+          if (cache[i].fd >= 0) close(cache[i].fd);
+          cache[i] = CacheEntry{};
+        }
+        cacheSize = 0;
+        ctxPop(&previous);
+      }
+    }
     if (scaleDevice) {
       if (ctxPush(scaleContext) == 0) {
         synchronize();
@@ -445,55 +489,37 @@ bool cudaScaleEnsure(CudaImportState &st, AVBufferRef *device, CudaContext conte
   return true;
 }
 
-// Import a single-plane XRGB8888 DMA-BUF into a BGR0 CUDA hwframe from
-// cudaFramesCtx. Returns a new AVFrame owned by the caller, or nullptr
-// with st.error set.
-AVFrame *cudaImportBgr0(CudaImportState &st, const VideoFrame &frame,
-                        AVBufferRef *cudaDeviceCtx,
-                        AVBufferRef *cudaFramesCtx) {
-  AVFrame *out = nullptr;
-  CudaGraphicsResource res = nullptr;
-  EGLImage img = EGL_NO_IMAGE;
-  int fd = -1;
-  bool pushed = false;
-  // CUcontext is the first member of AVCUDADeviceContext (hwcontext_cuda.h);
-  // read by offset to avoid the <cuda.h> include.
-  auto fail = [&](const QString &msg) -> AVFrame * {
-    st.error = msg;
-    if (res)
-      st.unregisterResource(res);
-    if (pushed) {
-      CudaContext dummy = nullptr;
-      st.ctxPop(&dummy);
+// Find or create the cached EGL/CUDA registration for this producer buffer.
+// The caller must have made the CUDA context current. A miss imports the
+// dmabuf exactly once; every later frame on the same buffer is a lookup.
+CudaImportState::CacheEntry *cudaImportCacheAcquire(CudaImportState &st,
+                                                    const VideoFrame &frame) {
+  // The lease payload is the PipeWire buffer, stable for the stream's life.
+  const unsigned long long identity =
+      reinterpret_cast<unsigned long long>(frame.bufferLease.get());
+  struct stat sb{};
+  unsigned long long dev = 0, ino = 0;
+  // The dmabuf inode separates a re-created allocation from a reused fd
+  // number, so a recycled buffer can never inherit a stale registration.
+  if (fstat(frame.dmaBufFd, &sb) == 0) {
+    dev = static_cast<unsigned long long>(sb.st_dev);
+    ino = static_cast<unsigned long long>(sb.st_ino);
+  }
+  ++st.cacheClock;
+  for (int i = 0; i < st.cacheSize; ++i) {
+    auto &entry = st.cache[i];
+    if (entry.identity == identity && entry.dev == dev && entry.ino == ino &&
+        entry.width == frame.width && entry.height == frame.height &&
+        entry.stride == frame.dmaBufStride && entry.offset == frame.dmaBufOffset &&
+        entry.modifier == frame.drmModifier && entry.format == frame.drmFormat) {
+      entry.lastUse = st.cacheClock;
+      ++st.cacheHits;
+      return &entry;
     }
-    if (img != EGL_NO_IMAGE)
-      eglDestroyImage(st.display, img);
-    if (fd >= 0)
-      close(fd);
-    if (out)
-      av_frame_free(&out);
-    return nullptr;
-  };
+  }
+  ++st.cacheMisses;
 
-  if (!cudaImportEnsure(st))
-    return nullptr;
-  if (frame.drmFormat != DRM_FORMAT_XRGB8888 || frame.width <= 0 ||
-      frame.height <= 0 || frame.dmaBufStride <= 0 || frame.dmaBufFd < 0) {
-    st.error = QStringLiteral("unsupported DMA-BUF descriptor");
-    return nullptr;
-  }
-  auto *devCtx =
-      reinterpret_cast<AVHWDeviceContext *>(cudaDeviceCtx->data);
-  if (!devCtx || !devCtx->hwctx) {
-    st.error = QStringLiteral("no CUDA device context");
-    return nullptr;
-  }
-  CudaContext cuCtx = *reinterpret_cast<CudaContext *>(devCtx->hwctx);
-  if (!cuCtx) {
-    st.error = QStringLiteral("null CUDA context");
-    return nullptr;
-  }
-  fd = dup(frame.dmaBufFd);
+  const int fd = dup(frame.dmaBufFd);
   if (fd < 0) {
     st.error = QStringLiteral("dup(dmabuf) failed");
     return nullptr;
@@ -522,21 +548,104 @@ AVFrame *cudaImportBgr0(CudaImportState &st, const VideoFrame &frame,
       static_cast<EGLAttrib>(frame.drmModifier >> 32),
       EGL_NONE,
   };
-  img = eglCreateImage(st.display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
-                       nullptr, attrs);
-  if (img == EGL_NO_IMAGE)
-    return fail(QStringLiteral("eglCreateImage failed"));
-  if (st.ctxPush(cuCtx) != 0)
-    return fail(QStringLiteral("cuCtxPushCurrent failed"));
-  pushed = true;
-  int regRet = st.registerImage(&res, img, 0);
-  if (regRet != 0) {
-    QString msg =
-        QStringLiteral("register: ") + cudaErrorString(st, regRet);
-    return fail(msg);
+  EGLImage img = eglCreateImage(st.display, EGL_NO_CONTEXT,
+                                EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
+  if (img == EGL_NO_IMAGE) {
+    close(fd);
+    st.error = QStringLiteral("eglCreateImage failed");
+    return nullptr;
   }
+  CudaGraphicsResource res = nullptr;
+  const int regRet = st.registerImage(&res, img, 0);
+  if (regRet != 0) {
+    st.error = QStringLiteral("register: ") + cudaErrorString(st, regRet);
+    eglDestroyImage(st.display, img);
+    close(fd);
+    return nullptr;
+  }
+
+  int slot = 0;
+  if (st.cacheSize < CudaImportState::kCacheSlots) {
+    slot = st.cacheSize++;
+  } else {
+    // Evict the least recently used registration (compositors use far
+    // fewer buffers than kCacheSlots, so this is a safety valve).
+    for (int i = 1; i < st.cacheSize; ++i)
+      if (st.cache[i].lastUse < st.cache[slot].lastUse)
+        slot = i;
+    auto &old = st.cache[slot];
+    if (old.resource) st.unregisterResource(old.resource);
+    if (old.image != EGL_NO_IMAGE) eglDestroyImage(st.display, old.image);
+    if (old.fd >= 0) close(old.fd);
+  }
+  auto &entry = st.cache[slot];
+  entry = CudaImportState::CacheEntry{};
+  entry.identity = identity;
+  entry.fd = fd;
+  entry.dev = dev;
+  entry.ino = ino;
+  entry.width = frame.width;
+  entry.height = frame.height;
+  entry.stride = frame.dmaBufStride;
+  entry.offset = frame.dmaBufOffset;
+  entry.modifier = frame.drmModifier;
+  entry.format = frame.drmFormat;
+  entry.image = img;
+  entry.resource = res;
+  entry.lastUse = st.cacheClock;
+  return &entry;
+}
+
+// Import a single-plane XRGB8888 DMA-BUF into a BGR0 CUDA hwframe from
+// cudaFramesCtx. Returns a new AVFrame owned by the caller, or nullptr
+// with st.error set.
+AVFrame *cudaImportBgr0(CudaImportState &st, const VideoFrame &frame,
+                        AVBufferRef *cudaDeviceCtx,
+                        AVBufferRef *cudaFramesCtx) {
+  AVFrame *out = nullptr;
+  bool pushed = false;
+  // CUcontext is the first member of AVCUDADeviceContext (hwcontext_cuda.h);
+  // read by offset to avoid the <cuda.h> include.
+  auto fail = [&](const QString &msg) -> AVFrame * {
+    st.error = msg;
+    if (pushed) {
+      CudaContext dummy = nullptr;
+      st.ctxPop(&dummy);
+    }
+    if (out)
+      av_frame_free(&out);
+    return nullptr;
+  };
+
+  if (!cudaImportEnsure(st))
+    return nullptr;
+  if (frame.drmFormat != DRM_FORMAT_XRGB8888 || frame.width <= 0 ||
+      frame.height <= 0 || frame.dmaBufStride <= 0 || frame.dmaBufFd < 0) {
+    st.error = QStringLiteral("unsupported DMA-BUF descriptor");
+    return nullptr;
+  }
+  auto *devCtx =
+      reinterpret_cast<AVHWDeviceContext *>(cudaDeviceCtx->data);
+  if (!devCtx || !devCtx->hwctx) {
+    st.error = QStringLiteral("no CUDA device context");
+    return nullptr;
+  }
+  CudaContext cuCtx = *reinterpret_cast<CudaContext *>(devCtx->hwctx);
+  if (!cuCtx) {
+    st.error = QStringLiteral("null CUDA context");
+    return nullptr;
+  }
+  if (st.ctxPush(cuCtx) != 0) {
+    st.error = QStringLiteral("cuCtxPushCurrent failed");
+    return nullptr;
+  }
+  pushed = true;
+  st.importContext = cuCtx;
+  auto *entry = cudaImportCacheAcquire(st, frame);
+  if (!entry)
+    return fail(st.error);
   CudaEglFrame ef{};
-  int mapRet = st.getMappedEglFrame(&ef, res, 0, 0);
+  int mapRet = st.getMappedEglFrame(&ef, entry->resource, 0, 0);
   if (mapRet != 0) {
     QString msg =
         QStringLiteral("getMappedEglFrame: ") + cudaErrorString(st, mapRet);
@@ -598,15 +707,10 @@ AVFrame *cudaImportBgr0(CudaImportState &st, const VideoFrame &frame,
       return fail(QStringLiteral("CUDA scaling: ") +
                   cudaErrorString(st, mapRet != 0 ? mapRet : syncRet));
   }
-  st.unregisterResource(res);
-  res = nullptr;
+  // Registration stays cached: the next frame on this buffer reuses it.
   CudaContext dummy = nullptr;
   st.ctxPop(&dummy);
   pushed = false;
-  eglDestroyImage(st.display, img);
-  img = EGL_NO_IMAGE;
-  close(fd);
-  fd = -1;
   return out;
 }
 
@@ -630,6 +734,22 @@ FFmpegEncoder::FFmpegEncoder(EncoderType type, const QString &codecName,
 }
 
 FFmpegEncoder::~FFmpegEncoder() { cleanup(); }
+
+int64_t FFmpegEncoder::importCacheHits() const {
+#ifdef HAVE_EGL
+  return m_cudaImport ? int64_t(m_cudaImport->cacheHits.load()) : 0;
+#else
+  return 0;
+#endif
+}
+
+int64_t FFmpegEncoder::importCacheMisses() const {
+#ifdef HAVE_EGL
+  return m_cudaImport ? int64_t(m_cudaImport->cacheMisses.load()) : 0;
+#else
+  return 0;
+#endif
+}
 
 bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   if (m_initialized) cleanup();
@@ -1146,7 +1266,9 @@ void FFmpegEncoder::logSummary() {
            << "CPU-fallback:" << m_fallbackFrames
            << "dropped:" << m_droppedFrames
            << "backpressure:" << m_backpressureFrames
-           << "rejected:" << m_sendFailures;
+           << "rejected:" << m_sendFailures
+           << "import-cache-hits:" << importCacheHits()
+           << "import-cache-misses:" << importCacheMisses();
 }
 
 bool FFmpegEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {

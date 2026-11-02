@@ -292,6 +292,7 @@ Page {
                         [qsTr("Video packets produced"), root.captureInfoValue("videoPackets")],
                         [qsTr("Queue depth / capacity"), root.captureInfoValue("queueDepth") + " / " + root.captureInfoValue("queueCapacity")],
                         [qsTr("Peak queue depth"), root.captureInfoValue("peakQueueDepth")],
+                        [qsTr("Skipped by FPS cap"), root.captureInfoValue("rateLimitedFrames")],
                         [qsTr("Session queue drops"), root.captureInfoValue("queueDrops")],
                         [qsTr("Encoder input drops"), root.captureInfoValue("encoderDrops")],
                         [qsTr("EGL / CUDA imports"), root.captureInfoValue("eglImportFrames")],

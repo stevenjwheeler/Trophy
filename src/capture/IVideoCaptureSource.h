@@ -46,6 +46,10 @@ struct VideoFrame {
  * We dup() the fd on construction and retain the producer buffer lease so
  * PipeWire cannot overwrite pixels before consumption. The destructor closes
  * the duped fd and releases the lease.
+ *
+ * Shared-memory frames are always copied: the producer reuses its buffer as
+ * soon as we give it back, and holding it instead would throttle capture to
+ * the encoder's pace.
  * Copying is deleted to prevent double-close; use move semantics instead.
  */
 struct QueuedFrame : public VideoFrame {
@@ -53,6 +57,9 @@ struct QueuedFrame : public VideoFrame {
 
   explicit QueuedFrame(const VideoFrame &other) : VideoFrame(other) {
     if (!other.isDmaBuf && other.data && other.stride > 0 && other.height > 0) {
+      // Always copy shared-memory frames. Leasing them instead made capture
+      // wait for the encoder (the producer's pool is the only decoupling we
+      // have) and produced visibly uneven delivery with software encoders.
       ownedData.assign(other.data,
                        other.data + (size_t(other.stride) * other.height));
       data = ownedData.data();

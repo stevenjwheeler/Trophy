@@ -279,6 +279,10 @@ private:
   // Live diagnostics: published without taking the encoding/queue locks.
   std::atomic<qint64> m_deliveredFrames{0};
   std::atomic<qint64> m_dmaBufDelivered{0};
+  // Frames the capture callback filtered out before encoding: slot collisions
+  // from the FPS cap, plus unusable timestamps. Without this the gap between
+  // deliveredFrames and videoPackets had no explanation in the log.
+  std::atomic<qint64> m_rateSkipped{0};
   std::atomic<int> m_inputWidth{0}, m_inputHeight{0};
   std::atomic<qint64> m_encodeCalls{0}, m_encodeTimeUs{0};
   EncodeTimingWindow m_recentEncodeTimes;

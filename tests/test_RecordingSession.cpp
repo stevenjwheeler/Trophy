@@ -396,6 +396,10 @@ TEST(RecordingSessionTest, CaptureRateLimitPrecedesSoftwareQueueAndPreservesTime
     EXPECT_EQ(session.videoPositionMs(), 40);
     EXPECT_EQ(session.captureHealth().value("queueDrops").toULongLong(), 0u);
     EXPECT_EQ(session.captureHealth().value("targetFps").toInt(), fps);
+    // Every frame the callback saw is accounted for: capped ones are counted
+    // instead of vanishing between "delivered" and "encoded".
+    EXPECT_EQ(session.captureHealth().value("rateLimitedFrames").toULongLong(),
+              fps == 0 ? 0u : 3u);
   }
 }
 
