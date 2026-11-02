@@ -9,8 +9,10 @@
 #include <QElapsedTimer>
 #include <QThread>
 #include <QSignalSpy>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -190,6 +192,31 @@ protected:
     std::memcpy(result.data(), bytes.constData(), result.size() * sizeof(float));
     return result;
   }
+  // Largest gap between consecutive presentation timestamps and the number of
+  // frames: the property that makes a player wait. Per-packet *durations* are
+  // container-dependent (FFmpeg 6 writes one frame's duration, FFmpeg 9 the
+  // whole gap), so they cannot express this across versions.
+  QPair<double, int> ptsGap(const QString &path) {
+    QProcess probe;
+    probe.start("ffprobe", {"-v", "error", "-select_streams", "v:0",
+        "-show_entries", "packet=pts_time", "-of", "csv=p=0", path});
+    EXPECT_TRUE(probe.waitForFinished(60000));
+    const auto rows = QString::fromUtf8(probe.readAllStandardOutput())
+                          .split('\n', Qt::SkipEmptyParts);
+    std::vector<double> times;
+    for (const auto &row : rows) {
+      bool ok = false;
+      const double time = row.trimmed().toDouble(&ok);
+      if (ok)
+        times.push_back(time);
+    }
+    std::sort(times.begin(), times.end());
+    double longest = 0;
+    for (size_t i = 1; i < times.size(); ++i)
+      longest = std::max(longest, times[i] - times[i - 1]);
+    return {longest, int(times.size())};
+  }
+
   // Payload-only digest of the video packets: a re-encode would change it.
   QPair<qint64, quint64> videoDigest(const QString &path) {
     AVFormatContext *ctx = nullptr;
@@ -762,18 +789,10 @@ TEST_F(ShareExportTest, StillStretchIsCopiedThroughUnchanged) {
   const auto output = ShareExportEngine::run(gapped, directory.path(), {{1}}, cancel, progress);
   ASSERT_TRUE(output.error.isEmpty()) << output.error.toStdString();
 
-  QProcess probe;
-  probe.start("ffprobe", {"-v", "error", "-select_streams", "v:0",
-      "-show_entries", "packet=duration_time", "-of", "csv=p=0", output.path});
-  ASSERT_TRUE(probe.waitForFinished(60000));
-  const auto rows = QString::fromUtf8(probe.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
-  ASSERT_FALSE(rows.isEmpty());
-  double longest = 0;
-  for (const auto &row : rows)
-    longest = std::max(longest, row.trimmed().toDouble());
+  const auto [longest, frames] = ptsGap(output.path);
   // The hole is still there, and nothing was inserted to fill it.
   EXPECT_GT(longest, 0.5);
-  EXPECT_LT(rows.size(), 45); // roughly the source's own frames
+  EXPECT_LT(frames, 45); // roughly the source's own frames
 }
 
 // Conversion re-encodes, so it can fill a still stretch honestly: the repeated
@@ -794,16 +813,8 @@ TEST_F(ShareExportTest, ConversionFillsAStretchLeftByAStillScreen) {
   const auto output = ShareExportEngine::run(gapped, directory.path(), options, cancel, progress);
   ASSERT_TRUE(output.error.isEmpty()) << output.error.toStdString();
 
-  QProcess probe;
-  probe.start("ffprobe", {"-v", "error", "-select_streams", "v:0",
-      "-show_entries", "packet=duration_time", "-of", "csv=p=0", output.path});
-  ASSERT_TRUE(probe.waitForFinished(60000));
-  const auto rows = QString::fromUtf8(probe.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
-  ASSERT_FALSE(rows.isEmpty());
-  double longest = 0;
-  for (const auto &row : rows)
-    longest = std::max(longest, row.trimmed().toDouble());
-  EXPECT_LT(longest, 0.2) << "a sample still covers the still stretch";
+  const auto [longest, frames] = ptsGap(output.path);
+  EXPECT_LT(longest, 0.2) << "the timeline still has a hole";
   // ~2 s at 30 fps, so the hole is filled rather than skipped.
-  EXPECT_GE(rows.size(), 50);
+  EXPECT_GE(frames, 50);
 }

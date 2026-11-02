@@ -291,12 +291,42 @@ int conversionBitrateKbps(int width, int height) {
 // point, which takes its geometry from the frames; the legacy sws_scale()
 // ignores it. Measured at 1440p -> 1080p: 2.90 ms/frame with one thread,
 // 0.78 ms with eight, on identical output.
+//
+// libswscale 7 (FFmpeg 6, Ubuntu 24.04 and the AppImage baseline) does NOT
+// configure a fresh context from the frames: sws_scale_frame() on an
+// allocated-but-uninitialised context reads through null internals and
+// segfaults. Explicit geometry plus sws_init_context() works on every version
+// still in use, and the threads option still applies (2.22 ms -> 0.65 ms at
+// 1440p on 6.1). Later versions accept the same explicit setup, so one path
+// serves both.
 class ThreadedScaler {
 public:
   ~ThreadedScaler() { if (m_ctx) sws_freeContext(m_ctx); }
 
   bool initialize() {
-    if (m_ctx) sws_freeContext(m_ctx);
+    if (!buildContext())
+      return false;
+    m_configured = false;
+    return true;
+  }
+
+  bool scale(const AVFrame *src, AVFrame *dst) {
+    if (!src || !dst)
+      return false;
+    if (!m_ctx || !m_configured || m_srcWidth != src->width ||
+        m_srcHeight != src->height || m_srcFormat != src->format ||
+        m_dstWidth != dst->width || m_dstHeight != dst->height ||
+        m_dstFormat != dst->format) {
+      if (!configure(src, dst))
+        return false;
+    }
+    return sws_scale_frame(m_ctx, dst, src) >= 0;
+  }
+
+private:
+  bool buildContext() {
+    if (m_ctx)
+      sws_freeContext(m_ctx);
     m_ctx = sws_alloc_context();
     if (!m_ctx)
       return false;
@@ -307,14 +337,37 @@ public:
     return true;
   }
 
-  // The context takes width/height/format from the frames on first use and
-  // reconfigures itself if they change.
-  bool scale(const AVFrame *src, AVFrame *dst) {
-    return m_ctx && sws_scale_frame(m_ctx, dst, src) >= 0;
+  // Geometry has to be set explicitly, and the context initialised, before the
+  // first sws_scale_frame() on libswscale 7.
+  bool configure(const AVFrame *src, AVFrame *dst) {
+    m_configured = false;
+    if (!buildContext())
+      return false;
+    av_opt_set_int(m_ctx, "srcw", src->width, 0);
+    av_opt_set_int(m_ctx, "srch", src->height, 0);
+    av_opt_set_int(m_ctx, "src_format", src->format, 0);
+    av_opt_set_int(m_ctx, "dstw", dst->width, 0);
+    av_opt_set_int(m_ctx, "dsth", dst->height, 0);
+    av_opt_set_int(m_ctx, "dst_format", dst->format, 0);
+    if (sws_init_context(m_ctx, nullptr, nullptr) < 0) {
+      sws_freeContext(m_ctx);
+      m_ctx = nullptr;
+      return false;
+    }
+    m_srcWidth = src->width;
+    m_srcHeight = src->height;
+    m_srcFormat = src->format;
+    m_dstWidth = dst->width;
+    m_dstHeight = dst->height;
+    m_dstFormat = dst->format;
+    m_configured = true;
+    return true;
   }
 
-private:
   SwsContext *m_ctx = nullptr;
+  bool m_configured = false;
+  int m_srcWidth = 0, m_srcHeight = 0, m_srcFormat = AV_PIX_FMT_NONE;
+  int m_dstWidth = 0, m_dstHeight = 0, m_dstFormat = AV_PIX_FMT_NONE;
 };
 
 // Re-encode a recording to H.264 + one stereo AAC track. This is the
