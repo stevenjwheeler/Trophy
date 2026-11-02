@@ -9,6 +9,7 @@
 
 #include "InstallInfo.h"
 
+#include <QColor>
 #include <QDateTime>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -65,6 +66,12 @@ public:
   QString latestDigest() const { return m_latestDigest; }
   QString latestAssetFileName() const { return m_latestAssetFileName; }
   QString latestReleaseNotes() const { return m_latestReleaseNotes; }
+
+  // Release bodies arrive as GitHub-flavoured Markdown. The Info page
+  // renders them as themed rich text instead of showing raw syntax.
+  Q_INVOKABLE QString formatReleaseNotes(const QString &markdown,
+                                         const QColor &accentColor,
+                                         const QColor &cardColor) const;
 
   // Release tag -> comparable parts. Pure + static for unit
   // tests (no network involved). Returns false for non-release

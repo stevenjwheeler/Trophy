@@ -269,6 +269,7 @@ set(CORE_SOURCES
     src/core/AppRestart.cpp
     src/core/DesktopIntegration.cpp
     src/core/UpdateChecker.cpp
+    src/core/ReleaseNotes.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowService.cpp
     src/core/WindowChrome.cpp
@@ -347,6 +348,7 @@ set(CORE_HEADERS
     src/core/ReplayManager.h
     src/core/InstallInfo.h
     src/core/UpdateChecker.h
+    src/core/ReleaseNotes.h
     src/core/UpdateInstaller.h
     src/core/WindowService.h
     src/core/WindowChrome.h
@@ -487,6 +489,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/TrophyTextField.qml
         qml/controls/TrophySearchBox.qml
         qml/controls/TrophyDialog.qml
+        qml/controls/ReleaseNotesView.qml
         qml/controls/TrophyWindowButton.qml
     SOURCES
         ${ALL_SOURCES}
