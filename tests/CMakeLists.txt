@@ -306,6 +306,13 @@ target_include_directories(test_UpdateChecker PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_UpdateChecker PRIVATE ${TEST_LINK_LIBS} Qt6::Network)
 gtest_discover_tests(test_UpdateChecker)
 
+# --- CrashHandler (fatal signals must reach the log) ---
+add_executable(test_CrashHandler test_CrashHandler.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/CrashHandler.cpp)
+target_include_directories(test_CrashHandler PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_CrashHandler PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_CrashHandler)
+
 # --- UpdateInstaller (generated helper script + post-update notice) ---
 add_executable(test_UpdateInstaller test_UpdateInstaller.cpp
     ${CMAKE_SOURCE_DIR}/src/core/UpdateInstaller.cpp)

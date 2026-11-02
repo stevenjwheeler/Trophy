@@ -685,6 +685,8 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   m_vaapiVppFrames = 0;
   m_fallbackFrames = 0;
   m_droppedFrames = 0;
+  m_sendFailures = 0;
+  m_backpressureFrames = 0;
   m_lastMapSucceeded = true;
   m_lastImportSucceeded = true;
   m_summaryLogged = false;
@@ -993,23 +995,35 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
     if (source == FrameSource::Cpu)
       m_fallbackFrames++;
     finalFrame->pts = av_rescale_q(relativeMs, {1, 1000}, m_codecCtx->time_base);
-    int ret = avcodec_send_frame(m_codecCtx, finalFrame);
+    const int ret = avcodec_send_frame(m_codecCtx, finalFrame);
 
     if (ret >= 0) {
       m_frameCount++;
-      ret = avcodec_receive_packet(m_codecCtx, m_packet);
-      if (ret == 0) {
+      const int received = avcodec_receive_packet(m_codecCtx, m_packet);
+      if (received == 0) {
         success = processPacket(m_packet, output);
-      } else if (ret == AVERROR(EAGAIN)) {
+      } else if (received == AVERROR(EAGAIN)) {
         // Frame accepted but encoder needs more input before emitting.
         // Report false: no packet was produced, so there is nothing for
         // the caller to mux (writing `output` here would mux garbage).
         success = false;
+      } else {
+        reportEncodeRejection(received);
       }
-    } else if (frame.isDmaBuf && frame.requestCpuFallback) {
-      // Import success alone does not prove the encoder accepts the mapped
-      // surface (e.g. RGB imported into an NV12-only VA-API encoder).
-      frame.requestCpuFallback();
+    } else if (ret == AVERROR(EAGAIN)) {
+      // The encoder is still holding previous input. Backpressure is not a
+      // rejection: count it separately so a saturated encoder is not
+      // mistaken for a broken one.
+      ++m_backpressureFrames;
+    } else {
+      // A real refusal. This used to be silent, which made "encoder produced
+      // 4 frames in a minute" indistinguishable from a slow machine.
+      reportEncodeRejection(ret);
+      if (frame.isDmaBuf && frame.requestCpuFallback) {
+        // Import success alone does not prove the encoder accepts the mapped
+        // surface (e.g. RGB imported into an NV12-only VA-API encoder).
+        frame.requestCpuFallback();
+      }
     }
   } else {
     // Neither the DMA-BUF hwmap nor the CPU fallback produced a frame.
@@ -1104,6 +1118,18 @@ int FFmpegEncoder::flush(std::vector<EncodedPacket> &packets) {
   return count;
 }
 
+void FFmpegEncoder::reportEncodeRejection(int code) {
+  ++m_sendFailures;
+  const int64_t count = m_sendFailures.load();
+  if (count != 1 && count % 300 != 0)
+    return;
+  char message[AV_ERROR_MAX_STRING_SIZE] = {};
+  av_strerror(code, message, sizeof(message));
+  qWarning() << "FFmpegEncoder:" << m_codecName << "rejected a frame:"
+             << message << "(total rejected:" << count << ", accepted:"
+             << m_frameCount.load() << ")";
+}
+
 void FFmpegEncoder::logSummary() {
   if (m_summaryLogged)
     return;
@@ -1118,7 +1144,9 @@ void FFmpegEncoder::logSummary() {
             << "GPU-scaled:" << m_gpuScaledFrames
             << "VA-API-VPP:" << m_vaapiVppFrames
            << "CPU-fallback:" << m_fallbackFrames
-           << "dropped:" << m_droppedFrames;
+           << "dropped:" << m_droppedFrames
+           << "backpressure:" << m_backpressureFrames
+           << "rejected:" << m_sendFailures;
 }
 
 bool FFmpegEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {

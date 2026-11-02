@@ -14,6 +14,7 @@
 #include "Application.h"
 #include "AutostartManager.h"
 #include "BugReport.h"
+#include "CrashHandler.h"
 #include "ControlServer.h"
 #include "DiscordPresence.h"
 #include "GlobalShortcutManager.h"
@@ -159,6 +160,10 @@ bool Application::initialize() {
 
   // Open log file in append mode
   static FILE* logFile = std::fopen(logPath.toUtf8().constData(), "a");
+
+  // A crash writes nothing through the message handler, so arm a fatal-signal
+  // handler that appends its own report to the same log. Core dumps still work.
+  installCrashHandler(logPath);
 
   qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &context, const QString &msg) {
     const char *level = "UNKNOWN";

@@ -1978,3 +1978,67 @@ INSTANTIATE_TEST_SUITE_P(SeparateAndMergedStopAndHandoff,
                                            ::testing::Bool()));
 
 } // namespace
+
+TEST(RecordingSessionStallTest, EncoderThatEmitsNothingFailsWithAReason) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  EncoderConfig config;
+  config.width = 1280;
+  config.height = 720;
+  config.fps = 30;
+  config.bitrate = 8000;
+  encoder.initialize(config);
+  encoder.emitPackets = false; // accepts every frame, emits nothing
+
+  RecordingSession session("stall.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 128, 0);
+  session.setStallGuardForTesting(3, 50);
+  ASSERT_TRUE(session.start());
+
+  VideoFrame frame{};
+  frame.width = 640;
+  frame.height = 360;
+  for (int i = 0; i < 8; ++i) {
+    frame.timestamp = 1000000 + i * 33333;
+    capture.fire(frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  session.stop();
+
+  // The user must learn why, instead of a generic finalize failure later.
+  EXPECT_TRUE(session.outputFailed());
+  EXPECT_TRUE(session.outputErrorText().contains(QStringLiteral("produced no output")));
+  EXPECT_TRUE(session.outputErrorText().contains(QStringLiteral("VA-API H.264")));
+}
+
+TEST(RecordingSessionStallTest, EmittingEncoderDoesNotTripTheGuard) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  EncoderConfig config;
+  config.width = 1280;
+  config.height = 720;
+  config.fps = 30;
+  config.bitrate = 8000;
+  encoder.initialize(config);
+  encoder.emitPackets = true;
+
+  RecordingSession session("healthy.mkv", &capture, &encoder, &muxer,
+                           nullptr, true, 128, 0);
+  session.setStallGuardForTesting(3, 50);
+  ASSERT_TRUE(session.start());
+
+  VideoFrame frame{};
+  frame.width = 640;
+  frame.height = 360;
+  for (int i = 0; i < 8; ++i) {
+    frame.timestamp = 1000000 + i * 33333;
+    capture.fire(frame);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  session.stop();
+
+  EXPECT_FALSE(session.outputFailed());
+  EXPECT_TRUE(session.outputErrorText().isEmpty());
+}
