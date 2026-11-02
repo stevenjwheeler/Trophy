@@ -809,6 +809,8 @@ void Application::connectSignals() {
                           }
                         });
   });
+  connect(m_recordingManager.get(), &RecordingManager::captureStartLost, this,
+          &Application::onCaptureStartLost);
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
             if (!isCurrentCaptureGame(game) || identity != m_gameDetector->currentGameKey())
               return;
@@ -1511,6 +1513,31 @@ bool Application::isGameBlocked(const QString &game) const {
       m_gameDetector->isBlocked(m_gameDetector->currentGameKey()))
     return true;
   return m_gameDetector->isBlocked(game);
+}
+
+void Application::onCaptureStartLost(const QString &game,
+                                     const QString &identity) {
+  if (!m_gameDetector || game.isEmpty() ||
+      m_gameDetector->currentGameName() != game)
+    return;
+  if (!identity.isEmpty() && m_gameDetector->currentGameKey() != identity)
+    return;
+  if (isGameBlocked(game) || restoreTokenForGame(game).isEmpty())
+    return;
+  qCInfo(appLog) << "Capture source for" << game
+                 << "closed before recording started - retrying on the next window";
+  // Let the compositor publish the replacement window before asking the
+  // portal again; the retry is bounded in RecordingManager, so a game that
+  // never produces a usable window still reports the error eventually.
+  QTimer::singleShot(750, this, [this, game, identity]() {
+    if (!m_gameDetector || m_gameDetector->currentGameName() != game)
+      return;
+    if (!identity.isEmpty() && m_gameDetector->currentGameKey() != identity)
+      return;
+    if (isGameBlocked(game) || restoreTokenForGame(game).isEmpty())
+      return;
+    startWhenWindowReady(game, true);
+  });
 }
 
 void Application::startWhenWindowReady(const QString &game, bool isRecord) {

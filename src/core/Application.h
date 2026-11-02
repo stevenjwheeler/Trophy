@@ -262,6 +262,9 @@ private:
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
   void resumePendingCapture();
+  // A launcher/boot window was captured and disappeared before anything was
+  // recorded: wait for the window that replaces it and try again.
+  void onCaptureStartLost(const QString &game, const QString &identity);
   // Audio-settled capture: auto-armed recording/DVR waits for the
   // game's PipeWire node to exist (stable across two polls) before
   // starting, so launch sessions don't open on monitor fallback and
