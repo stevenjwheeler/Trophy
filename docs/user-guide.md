@@ -70,16 +70,17 @@ After recording, seek to a moment in the player and use **Add bookmark at curren
 
 Choose **Share** in the player, or select library captures and choose **Export → Share-ready MP4**.
 
-1. Choose original, 1080p, or 720p resolution and a quality or approximate size preset.
-2. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are averaged into one stereo AAC track; no selected audio produces a silent video.
-3. Choose a destination **outside the managed recording library**.
-4. Start the export. Progress and cancellation appear in background toasts.
+1. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are mixed into **one stereo track** — MP3, which is widely supported and encodes quickly (AAC is used when MP3 is unavailable) — because chat apps and social sites cannot switch between tracks. When exactly one stereo AAC track is selected, it is copied unchanged instead of re-encoded.
+2. Choose a destination **outside the managed recording library**.
+3. Start the export. Progress and cancellation appear in background toasts.
 
-For batches, quality and destination apply to all captures, while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
+The copy is a **remux**: the video bitstream is copied unchanged into an MP4 container with fast-start layout, so it finishes in seconds, loses no quality, and never modifies the original. Only the audio is re-encoded, to produce the single mixed track. Exports are **whole-file**: snip first to share only a range.
 
-**Animated Trophy watermark** is on by default in share options, and your choice is remembered. It is burned into re-encoded MP4 share copies only; recordings and original-file copies keep their original pixels.
+Because the video is copied, the MP4 keeps the recording's codec. H.264 is accepted everywhere; HEVC or AV1 recordings produce a file some sites and players may reject (the dialog warns when this applies). Record with VA-API H.264, NVENC H.264 or x264 for the widest compatibility.
 
-Exports use software H.264/YUV420P with fast-start MP4 and optional AAC audio, at up to 60fps. They never upscale or modify the original. Export is **whole-file**: snip first to share only a range. Size targets are approximate, not guaranteed upload limits. HDR-to-SDR conversion is unsupported; known HDR input is rejected.
+For batches, the destination applies to all captures while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
+
+Copying keeps the original dimensions and frame rate; there are no resolution or size presets. If a capture needs downscaling, a size limit or a different codec, transcode it with another tool — sharing here deliberately avoids re-encoding video.
 
 A track containing desktop audio may already include voice chat or microphone monitoring. Adding those tracks again can potentially double their sound. Check on the video player before exporting.
 
