@@ -47,8 +47,9 @@ def check_loader(pid, payload, expect_host_libva, expect_bundled_runtime):
 
     Qt and FFmpeg must always come from the AppImage: a host Qt with the same
     soname but an older version is the bug that produced
-    "version `Qt_6.12' not found". With a host libva installed, the whole libva
-    set must come from one host directory, never mixed with the bundle.
+    "version `Qt_6.12' not found". With a host libva installed, every libva
+    module the process loads must come from one host directory, never mixed
+    with the bundle.
 
     Bundle assertions only apply to AppImage payloads; a native prefix install
     links the host's Qt/FFmpeg by design, so its caller passes False.
@@ -72,8 +73,10 @@ def check_loader(pid, payload, expect_host_libva, expect_bundled_runtime):
                     f"host {soname}* shadowed the bundled copy (ABI mismatch risk): "
                     + ", ".join(shadowed))
     if expect_host_libva:
+        # libavutil links libva and libva-drm. libva-x11 is optional: FFmpeg 9
+        # no longer links it, so it is only checked when the process loaded it.
         parents = set()
-        for lib in ("libva.so.2", "libva-drm.so.2", "libva-x11.so.2"):
+        for lib in ("libva.so.2", "libva-drm.so.2"):
             paths = soname_paths(mapped, lib)
             if not paths:
                 raise RuntimeError(f"{lib} was never loaded")
@@ -82,9 +85,79 @@ def check_loader(pid, payload, expect_host_libva, expect_bundled_runtime):
                 raise RuntimeError(
                     f"bundled {lib} was used instead of the host's: " + ", ".join(bundled))
             parents |= {os.path.dirname(p) for p in paths}
+        optional = soname_paths(mapped, "libva-x11.so.2")
+        bundled = sorted(p for p in optional if p.startswith(prefix))
+        if bundled:
+            raise RuntimeError(
+                "bundled libva-x11.so.2 was used instead of the host's: "
+                + ", ".join(bundled))
+        parents |= {os.path.dirname(p) for p in optional}
         if len(parents) != 1:
             raise RuntimeError(
                 "libva modules came from different directories: " + ", ".join(sorted(parents)))
+
+
+def check_payload(payload):
+    """Verify the AppImage payload, including that it carries one FFmpeg.
+
+    Kept separate from the process checks so the packaging harness can be
+    tested against fake trees.
+    """
+    for pattern in (
+        "usr/bin/qt.conf", "usr/lib/libTrophy.so",
+        "usr/lib/**/trophy/libtrophy_layer.so",
+        "usr/lib/**/trophy/libtrophy_gl_shim.so",
+        "usr/plugins/platforms/libqwayland*.so",
+        "usr/plugins/platforms/libqoffscreen.so",
+        "usr/plugins/wayland-shell-integration/*.so",
+        "usr/plugins/wayland-graphics-integration-client/*.so",
+        "usr/plugins/multimedia/*.so",
+        # Unregistered AppImages fall back to Qt's own folder
+        # picker, which only exists in the QML payload.
+        "usr/qml/**/FolderDialog.qml",
+        "usr/share/applications/io.github.stevenjwheeler.Trophy.desktop",
+        "usr/share/trophy/vulkan_layer/trophy_layer.json",
+        "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",
+        "usr/share/metainfo/*.metainfo.xml",
+    ):
+        if not any(payload.glob(pattern)):
+            raise RuntimeError(f"AppImage payload is missing {pattern}")
+    # One FFmpeg generation only: libTrophy and Qt Multimedia share the slim
+    # FFmpeg 9 built by packaging/ffmpeg. A second major here means the
+    # duplicate-generation bundle came back, and Qt's SDK copy has no software
+    # H.264 encoder, so recording could silently lose x264.
+    avcodecs = sorted({
+        path.name
+        for pattern in ("usr/lib*/libavcodec.so.*",
+                        "usr/lib/*/libavcodec.so.*")
+        for path in payload.glob(pattern)
+    })
+    if avcodecs != ["libavcodec.so.63"]:
+        raise RuntimeError(
+            "AppImage must bundle exactly one FFmpeg generation "
+            f"(libavcodec.so.63), found: {avcodecs or 'none'}")
+    if not any(path for pattern in ("usr/lib*/libx264.so.*", "usr/lib/*/libx264.so.*")
+               for path in payload.glob(pattern)):
+        raise RuntimeError(
+            "AppImage bundles no libx264: software H.264 recording would regress")
+    # Packaging prunes payload the app can never load (packaging/prune_appdir.py):
+    # one libTrophy.so, and only the Qt Quick Controls styles the pinned Fusion
+    # style needs.
+    trophies = [p for p in payload.glob("usr/lib/**/libTrophy.so")
+                if p.is_file() and not p.is_symlink()]
+    if len(trophies) != 1:
+        raise RuntimeError(
+            "AppImage must contain exactly one libTrophy.so, found: "
+            + (", ".join(str(p.relative_to(payload)) for p in trophies) or "none"))
+    unused_styles = ("Imagine", "Material", "Universal", "FluentWinUI3")
+    leftovers = [p.name for p in payload.glob("usr/lib/libQt6QuickControls2*.so.6*")
+                 if any(style in p.name for style in unused_styles)]
+    leftovers += [style for style in unused_styles
+                  if (payload / "usr/qml/QtQuick/Controls" / style).exists()]
+    if leftovers:
+        raise RuntimeError(
+            "AppImage bundles Qt Quick Controls styles the app cannot select: "
+            + ", ".join(leftovers))
 
 
 def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False):
@@ -160,25 +233,7 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
                 check_loader(app_pid, payload, expect_host_libva,
                              expect_bundled_runtime)
                 if image.suffix == ".AppImage":
-                    for pattern in (
-                        "usr/bin/qt.conf", "usr/lib/libTrophy.so",
-                        "usr/lib/**/trophy/libtrophy_layer.so",
-                        "usr/lib/**/trophy/libtrophy_gl_shim.so",
-                        "usr/plugins/platforms/libqwayland*.so",
-                        "usr/plugins/platforms/libqoffscreen.so",
-                        "usr/plugins/wayland-shell-integration/*.so",
-                        "usr/plugins/wayland-graphics-integration-client/*.so",
-                        "usr/plugins/multimedia/*.so",
-                        # Unregistered AppImages fall back to Qt's own folder
-                        # picker, which only exists in the QML payload.
-                        "usr/qml/**/FolderDialog.qml",
-                        "usr/share/applications/io.github.stevenjwheeler.Trophy.desktop",
-                        "usr/share/trophy/vulkan_layer/trophy_layer.json",
-                        "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",
-                        "usr/share/metainfo/*.metainfo.xml",
-                    ):
-                        if not any(payload.glob(pattern)):
-                            raise RuntimeError(f"AppImage payload is missing {pattern}")
+                    check_payload(payload)
                 os.kill(app_pid, signal.SIGTERM)
                 process.wait(timeout=10)
             finally:
@@ -193,6 +248,16 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
                 if marker not in output:
                     raise RuntimeError(
                         f"startup log is missing the runtime library inventory ({marker})")
+            # The bundled FFmpeg must keep the software H.264 encoder that the
+            # Qt SDK's LGPL copy lacks; without x264 there is no recording
+            # fallback when no GPU encoder is usable. The encoder catalogue is
+            # DEBUG level, so it lands in trophy.log, not the console.
+            app_log = config / "trophy.log"
+            app_output = app_log.read_text(errors="replace") if app_log.exists() else ""
+            if "x264" not in output and "x264" not in app_output:
+                raise RuntimeError(
+                    "startup log does not report the software x264 encoder; "
+                    "the bundled FFmpeg lost its H.264 encoder")
         if re.search(r"ReferenceError|TypeError|Cannot assign to|"
                       r"QQmlApplicationEngine failed|Failed to initialize application|"
                       r"Binding loop detected|Detected recursive rearrange|"

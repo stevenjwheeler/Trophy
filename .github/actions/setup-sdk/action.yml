@@ -13,12 +13,16 @@ runs:
           echo 'SDK/AppImage builds require the pinned Ubuntu 24.04 baseline' >&2
           exit 1
         }
+        # No libav*-dev packages: the app links the single slim FFmpeg 9 that
+        # packaging/ffmpeg/build-ffmpeg.sh installs below (also what Qt's
+        # Multimedia plugin loads), so distributing FFmpeg 6 headers here could
+        # only make the build silently link the wrong generation.
         packages=(build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget zstd
           libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev
           libxcb-shm0-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0 libvulkan-dev
           libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber
-          libdrm-dev libgbm-dev libavcodec-dev libavformat-dev libavutil-dev
-          libswscale-dev libswresample-dev libva-dev libva-drm2 libgtest-dev
+          libdrm-dev libgbm-dev libva-dev libva-drm2 libgtest-dev
+          nasm libx264-dev libopus-dev zlib1g-dev git xz-utils
           desktop-file-utils appstream file ffmpeg dbus-daemon)
         for attempt in 1 2 3; do
           if sudo apt-get update && sudo apt-get install -y --no-install-recommends "${packages[@]}"; then
@@ -41,3 +45,105 @@ runs:
         version: '6.12.0'
         modules: 'qtmultimedia qtwaylandcompositor'
         cache: 'true'
+    - name: Restore slim FFmpeg 9 (the only FFmpeg generation)
+      id: ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/ffmpeg_install
+        key: trophy-ffmpeg-9.0.2-${{ runner.os }}-${{ hashFiles('packaging/ffmpeg/build-ffmpeg.sh') }}
+    - name: Build slim FFmpeg 9
+      if: steps.ffmpeg.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        PREFIX="$GITHUB_WORKSPACE/ffmpeg_install" bash packaging/ffmpeg/build-ffmpeg.sh
+    - name: Register FFmpeg 9 for the build, tests and packaging
+      shell: bash
+      run: |
+        set -euo pipefail
+        prefix="$GITHUB_WORKSPACE/ffmpeg_install"
+        libavcodec="$prefix/lib/libavcodec.so.63"
+        test -f "$libavcodec"
+
+        # Locate the Qt SDK's library directory without assuming QT_ROOT_DIR:
+        # install-qt-action only guarantees Qt6_DIR and the pkg-config path.
+        qt_libdir=""
+        for candidate in \
+            "$(command -v qmake6 >/dev/null 2>&1 && qmake6 -query QT_INSTALL_LIBS || true)" \
+            "$(command -v qmake >/dev/null 2>&1 && qmake -query QT_INSTALL_LIBS || true)" \
+            "${Qt6_DIR:-}/lib" \
+            "$(pkg-config --variable=libdir Qt6Core 2>/dev/null || true)"; do
+          if [[ -n "$candidate" && -f "$candidate/libQt6Core.so.6" ]]; then
+            qt_libdir=$candidate
+            break
+          fi
+        done
+        test -n "$qt_libdir" || {
+          echo "ERROR: cannot locate the Qt SDK library directory" >&2
+          exit 1
+        }
+        echo "Qt library directory: $qt_libdir"
+
+        # Qt's plugin is compiled against its own FFmpeg 9; a lower library
+        # version would be missing symbols at load time. Both are ABI-stable
+        # within libavcodec 63, but the minor must not go backwards. Read this
+        # before the Qt copy is removed below.
+        if ! qt_ffmpeg=$(readlink -f "$qt_libdir/libavcodec.so.63"); then
+          echo "ERROR: Qt Multimedia is not linked against libavcodec.so.63." >&2
+          echo "       Bump packaging/ffmpeg/build-ffmpeg.sh to match Qt's FFmpeg major." >&2
+          echo "       Qt ships: $(ls "$qt_libdir"/libavcodec.so.* 2>/dev/null || echo none)" >&2
+          exit 1
+        fi
+        export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PATH="$prefix/bin:$PATH"
+        ours=$(pkg-config --modversion libavcodec)
+        qtv=$(basename "$qt_ffmpeg" | sed -E 's/^libavcodec\.so\.([0-9.]+)$/\1/')
+        echo "libavcodec: ours=$ours Qt=$qtv"
+        python3 - "$ours" "$qtv" <<'PY'
+        import sys
+        def parts(v): return [int(x) for x in v.split(".")]
+        if parts(sys.argv[1]) < parts(sys.argv[2]):
+            sys.exit(f"bundled FFmpeg {sys.argv[1]} is older than Qt's {sys.argv[2]}")
+        PY
+
+        # The app (x264/Opus) and Qt Multimedia (same soname) must both load
+        # this copy. Put it ahead of the Qt SDK's identical-soname FFmpeg 9,
+        # which is LGPL and has no software H.264 encoder.
+        echo "$prefix/lib" | sudo tee /etc/ld.so.conf.d/trophy-ffmpeg.conf >/dev/null
+        # Removing the Qt SDK copy makes the wrong resolution impossible
+        # rather than merely unlikely: nothing can find a second
+        # libavcodec.so.63 without x264 by accident.
+        sudo rm -f "$qt_libdir"/libav*.so* "$qt_libdir"/libsw*.so*
+        sudo ldconfig
+        {
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+          echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "PATH=$PATH"
+        } >> "$GITHUB_ENV"
+
+        # Fixtures decode through both the libraries and the ffmpeg CLI, so the
+        # CLI must be this same build, not the distribution's.
+        built=$(sed -n 's/^ffmpeg=//p' "$prefix/BUILD-INFO")
+        test -n "$built"
+        ffmpeg -hide_banner -version > "$RUNNER_TEMP/trophy-ffmpeg-version.txt"
+        grep "version $built " "$RUNNER_TEMP/trophy-ffmpeg-version.txt" >/dev/null
+        test "$(command -v ffmpeg)" = "$prefix/bin/ffmpeg"
+
+        # Software recording and Opus must survive the slimming, and nothing
+        # may silently pull the distribution's FFmpeg 6 back in.
+        # grep without -q: with pipefail an early exit can SIGPIPE the
+        # producer and fail the whole pipeline.
+        readelf -d "$libavcodec" | grep 'libx264\.so' >/dev/null
+        readelf -d "$libavcodec" | grep 'libopus\.so' >/dev/null
+        if readelf -d "$libavcodec" | grep 'libavcodec\.so\.60' >/dev/null; then
+          echo "FFmpeg 6 leaked back into the FFmpeg 9 build" >&2; exit 1
+        fi
+        ldd "$libavcodec" | grep "$prefix/lib/libavutil.so.61" >/dev/null
+
+        # The slim build must keep every component recording, export, previews
+        # and Qt playback rely on. Finding a hardware encoder does not open a
+        # device, so this works on GPU-less runners.
+        cc "$GITHUB_WORKSPACE/packaging/ffmpeg/check-components.c" \
+           $(pkg-config --cflags --libs libavcodec libavformat libavutil) \
+           -o "$RUNNER_TEMP/trophy-ffmpeg-components"
+        "$RUNNER_TEMP/trophy-ffmpeg-components"

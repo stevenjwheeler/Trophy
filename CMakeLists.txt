@@ -134,6 +134,24 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 
+# Most targets link PkgConfig::AV* (absolute paths), but some test fixtures use
+# the plain ${AVCODEC_LIBRARIES} form, i.e. bare -lavcodec. Put the directory
+# pkg-config reported on the link search path so those links cannot pick up a
+# different FFmpeg generation that also happens to be installed (the AppImage
+# build links a private FFmpeg prefix, not the distribution's).
+link_directories(${AVCODEC_LIBRARY_DIRS} ${AVFORMAT_LIBRARY_DIRS}
+                 ${AVUTIL_LIBRARY_DIRS} ${SWSCALE_LIBRARY_DIRS}
+                 ${SWRESAMPLE_LIBRARY_DIRS})
+
+# FFmpeg headers are not installed system-wide when building the AppImage (the
+# pinned prefix is the only copy), and several test targets include Trophy
+# headers that pull FFmpeg in without listing the AV* include dirs themselves.
+# One directory-level include keeps every target consistent; targets that want
+# the imported target still link PkgConfig::AV*.
+include_directories(${AVCODEC_INCLUDE_DIRS} ${AVFORMAT_INCLUDE_DIRS}
+                    ${AVUTIL_INCLUDE_DIRS} ${SWSCALE_INCLUDE_DIRS}
+                    ${SWRESAMPLE_INCLUDE_DIRS})
+
 # Find PipeWire (Required)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 if(PIPEWIRE_FOUND)

@@ -29,10 +29,9 @@ is_elf64() {
 }
 
 find_libva_dir() {
-    # Return the first directory holding a COMPLETE 64-bit libva set. All three
-    # modules must come from one directory: FFmpeg 6's libavutil links libva-x11
-    # and libva-drm as well, so mixing a host core with a bundled module (or two
-    # host generations) would be a real ABI hazard.
+    # Return the first directory holding the libva modules libavutil links:
+    # the core and libva-drm. These are ABI-coupled, so a host core must never
+    # be mixed with a bundled module or with a second host generation.
     if [ -n "${TROPHY_LIBVA_DIRS:-}" ]; then
         candidates=$(printf '%s' "$TROPHY_LIBVA_DIRS" | tr ':' ' ')
     else
@@ -44,7 +43,7 @@ find_libva_dir() {
     for dir in $candidates; do
         [ -d "$dir" ] || continue
         complete=1
-        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        for lib in libva.so.2 libva-drm.so.2; do
             if ! is_elf64 "$dir/$lib"; then
                 complete=0
                 break
@@ -82,11 +81,16 @@ if [ -n "$VA_HOST_DIR" ]; then
 fi
 
 if [ -n "$VA_OVERRIDE" ]; then
+    # Only the modules libavutil links: the core and libva-drm. libva-x11 is
+    # deliberately not used (Trophy has no X11 path), so it is not required
+    # from the host either.
+    #
     # Publish each entry atomically (temp + rename) so a concurrently starting
     # instance never sees a half-built or momentarily empty directory, and
     # replace rather than append so stale targets from an earlier AppImage
     # version cannot linger.
-    for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+    VA_MODULES="libva.so.2 libva-drm.so.2"
+    for lib in $VA_MODULES; do
         tmp="$VA_OVERRIDE/.$lib.$$"
         if ln -sfn "$VA_HOST_DIR/$lib" "$tmp" 2>/dev/null \
            && mv -f "$tmp" "$VA_OVERRIDE/$lib" 2>/dev/null; then
@@ -97,10 +101,13 @@ if [ -n "$VA_OVERRIDE" ]; then
             break
         fi
     done
-    # A target that disappeared since the scan also disqualifies the override:
-    # -e follows the symlink, so this detects it.
     if [ -n "$VA_OVERRIDE" ]; then
-        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        # An older AppImage published libva-x11 here; drop it so the
+        # directory matches what this launcher actually uses.
+        rm -f "$VA_OVERRIDE/libva-x11.so.2" 2>/dev/null || true
+        # A target that disappeared since the scan also disqualifies the
+        # override: -e follows the symlink, so this detects it.
+        for lib in $VA_MODULES; do
             [ -e "$VA_OVERRIDE/$lib" ] || { VA_OVERRIDE=; break; }
         done
     fi

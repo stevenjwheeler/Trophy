@@ -8,7 +8,9 @@ for local diagnostic builds. Docker is **developer-only**: users receive a norma
 AppImage and Python launcher, not this filesystem or a Docker prerequisite.
 
 ```sh
-docker build -t trophy-appimage-ubuntu24 - < packaging/containers/appimage.Dockerfile
+# The packaging/ directory is the build context so the slim FFmpeg script can
+# be copied into the image.
+docker build -t trophy-appimage-ubuntu24 -f packaging/containers/appimage.Dockerfile packaging/
 work=$(mktemp -d /tmp/opencode/trophy-appimage-XXXXXX)
 docker run --rm --cpus 2 --memory 4g --cap-drop ALL \
     --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
@@ -22,6 +24,11 @@ The script builds the application/reporters and the focused source-free unit/GPU
 test executables, stages only under `/work`, and checks startup. It does not
 build a diagnostic AppImage kit or run the full CI suite. No host home/runtime,
 services, GPU devices or detection socket are mounted into the builder.
+
+The image itself compiles one slim FFmpeg 9 (`packaging/ffmpeg/build-ffmpeg.sh`)
+and removes the Qt SDK's duplicate copy, so the app and Qt Multimedia link the
+same `libavcodec.so.63`. CI does the same on the runner, caching the installed
+prefix by the script's hash.
 
 `appimage-runtime.Dockerfile` is the separate clean Ubuntu 24.04 startup baseline:
 only Python/D-Bus and ordinary desktop graphics/font/PipeWire client libraries,

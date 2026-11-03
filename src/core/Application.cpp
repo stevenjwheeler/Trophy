@@ -11,6 +11,8 @@
 
 #include <unistd.h> // isatty(STDIN_FILENO) for launch-context logging
 
+#include <QMessageBox>
+
 #include "Application.h"
 #include "AutostartManager.h"
 #include "BugReport.h"
@@ -226,6 +228,30 @@ bool Application::initialize() {
   setApplicationVersion(versionStr);
   qCInfo(appLog) << "Initializing Trophy - Game recording and clipping" << versionStr;
 
+  // Trophy has no native X11 path: the portal ScreenCast interface is a
+  // Wayland-session feature and CaptureFactory has no X11 source. Refuse before
+  // any service, tray icon or window exists, and say why -- launched from a
+  // desktop icon, the alternative is an app that silently does nothing. The
+  // dialog is skipped on headless platforms (tests, packaging smoke), where
+  // nobody could see it.
+  if (CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::X11) {
+    const QString message = tr("Trophy does not support native X11 sessions. "
+                               "Please switch to a Wayland session.");
+    qCCritical(appLog) << message;
+    emit fatalError(message);
+    const QString platform = QGuiApplication::platformName();
+    if (platform != QLatin1String("offscreen") && platform != QLatin1String("minimal")) {
+      QMessageBox box(QMessageBox::Critical, tr("Trophy requires Wayland"),
+                      tr("Trophy does not support native X11 sessions.\n\n"
+                         "Log in to a Wayland desktop session (KDE Plasma and GNOME are "
+                         "verified) and start Trophy again."),
+                      QMessageBox::Ok);
+      box.setWindowIcon(QApplication::windowIcon());
+      box.exec();
+    }
+    return false;
+  }
+
   // Best-effort: prevent NVIDIA driver from downclocking while NVENC is active.
   installNvidiaNoStablePerfLimitProfile();
 
@@ -324,12 +350,6 @@ bool Application::initialize() {
         m_settingsManager->globalShortcutsEnabled())
       m_shortcutManager->requestShortcuts();
   });
-
-  if (CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::X11) {
-    qCCritical(appLog) << "Trophy does not support native X11 sessions.";
-    emit fatalError("Trophy does not support native X11 sessions. Please switch to a Wayland session.");
-    return false;
-  }
 
   if (isWayland()) {
     // Capability discovery must not introspect a hung portal on the GUI

@@ -30,7 +30,7 @@ find_libva_dir() {
     for dir in $candidates; do
         [ -d "$dir" ] || continue
         complete=1
-        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        for lib in libva.so.2 libva-drm.so.2; do
             if ! is_elf64 "$dir/$lib"; then
                 complete=0
                 break
@@ -66,7 +66,11 @@ if [ -n "$VA_HOST_DIR" ]; then
 fi
 
 if [ -n "$VA_OVERRIDE" ]; then
-    for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+    # Only the modules libavutil links: the core and libva-drm. libva-x11 is
+    # deliberately not used (Trophy has no X11 path), so it is not required
+    # from the host either.
+    VA_MODULES="libva.so.2 libva-drm.so.2"
+    for lib in $VA_MODULES; do
         tmp="$VA_OVERRIDE/.$lib.$$"
         if ln -sfn "$VA_HOST_DIR/$lib" "$tmp" 2>/dev/null \
            && mv -f "$tmp" "$VA_OVERRIDE/$lib" 2>/dev/null; then
@@ -78,7 +82,10 @@ if [ -n "$VA_OVERRIDE" ]; then
         fi
     done
     if [ -n "$VA_OVERRIDE" ]; then
-        for lib in libva.so.2 libva-drm.so.2 libva-x11.so.2; do
+        # An older AppImage published libva-x11 here; drop it so the
+        # directory matches what this launcher actually uses.
+        rm -f "$VA_OVERRIDE/libva-x11.so.2" 2>/dev/null || true
+        for lib in $VA_MODULES; do
             [ -e "$VA_OVERRIDE/$lib" ] || { VA_OVERRIDE=; break; }
         done
     fi
