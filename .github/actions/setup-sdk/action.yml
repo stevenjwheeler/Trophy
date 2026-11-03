@@ -65,14 +65,33 @@ runs:
         libavcodec="$prefix/lib/libavcodec.so.63"
         test -f "$libavcodec"
 
+        # Locate the Qt SDK's library directory without assuming QT_ROOT_DIR:
+        # install-qt-action only guarantees Qt6_DIR and the pkg-config path.
+        qt_libdir=""
+        for candidate in \
+            "$(command -v qmake6 >/dev/null 2>&1 && qmake6 -query QT_INSTALL_LIBS || true)" \
+            "$(command -v qmake >/dev/null 2>&1 && qmake -query QT_INSTALL_LIBS || true)" \
+            "${Qt6_DIR:-}/lib" \
+            "$(pkg-config --variable=libdir Qt6Core 2>/dev/null || true)"; do
+          if [[ -n "$candidate" && -f "$candidate/libQt6Core.so.6" ]]; then
+            qt_libdir=$candidate
+            break
+          fi
+        done
+        test -n "$qt_libdir" || {
+          echo "ERROR: cannot locate the Qt SDK library directory" >&2
+          exit 1
+        }
+        echo "Qt library directory: $qt_libdir"
+
         # Qt's plugin is compiled against its own FFmpeg 9; a lower library
         # version would be missing symbols at load time. Both are ABI-stable
         # within libavcodec 63, but the minor must not go backwards. Read this
         # before the Qt copy is removed below.
-        if ! qt_ffmpeg=$(readlink -f "$QT_ROOT_DIR/lib/libavcodec.so.63"); then
+        if ! qt_ffmpeg=$(readlink -f "$qt_libdir/libavcodec.so.63"); then
           echo "ERROR: Qt Multimedia is not linked against libavcodec.so.63." >&2
           echo "       Bump packaging/ffmpeg/build-ffmpeg.sh to match Qt's FFmpeg major." >&2
-          echo "       Qt ships: $(ls "$QT_ROOT_DIR"/lib/libavcodec.so.* 2>/dev/null || echo none)" >&2
+          echo "       Qt ships: $(ls "$qt_libdir"/libavcodec.so.* 2>/dev/null || echo none)" >&2
           exit 1
         fi
         export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -94,8 +113,7 @@ runs:
         # Removing the Qt SDK copy makes the wrong resolution impossible
         # rather than merely unlikely: nothing can find a second
         # libavcodec.so.63 without x264 by accident.
-        test -d "$QT_ROOT_DIR/lib" || { echo "Qt SDK lib dir missing" >&2; exit 1; }
-        sudo rm -f "$QT_ROOT_DIR"/lib/libav*.so* "$QT_ROOT_DIR"/lib/libsw*.so*
+        sudo rm -f "$qt_libdir"/libav*.so* "$qt_libdir"/libsw*.so*
         sudo ldconfig
         {
           echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
