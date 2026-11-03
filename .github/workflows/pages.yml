@@ -20,6 +20,11 @@ concurrency:
 
 jobs:
   deploy:
+    # GitHub Pages only publishes a deployment whose ref is the default branch.
+    # This workflow used to deploy straight from the `release` event, whose ref is
+    # the release tag: deploy-pages reported success, but the live site kept the
+    # previous build. Release runs now re-dispatch this workflow on `main` instead.
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,8 +36,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.ref }}
+      - name: Require the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::GitHub Pages only publishes deployments run from refs/heads/$DEFAULT_BRANCH; this run is $GITHUB_REF. Deploying anyway would report success without updating the site."
+            exit 1
+          fi
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Resolve latest release downloads
@@ -94,3 +105,26 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # A published release changes the version and download links baked into the
+  # site, but the release event's ref is the tag, which GitHub Pages will not
+  # publish. Re-run the deployment on the default branch instead.
+  redeploy-on-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Redeploy from the default branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const defaultBranch = context.payload.repository.default_branch;
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'pages.yml',
+              ref: defaultBranch,
+            });
+            core.info(`Requested a ${defaultBranch} deployment for ${context.payload.release.tag_name}`);

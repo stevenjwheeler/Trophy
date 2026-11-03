@@ -22,18 +22,27 @@ Open <http://localhost:8080>. You can also open `index.html` directly.
 1. In the repository's **Settings → Pages → Build and deployment**, select
    **GitHub Actions** as the source.
 2. Merge the website and `.github/workflows/pages.yml` into `main`. Subsequent
-   changes to the website on `main` deploy automatically.
-3. Alternatively, run **Deploy Trophy website → Run workflow** from Actions,
-   selecting the branch you want to publish. The `github-pages` environment's
-   deployment branch rules must permit that branch.
+   changes to `website/**` or `docs/**` on `main` deploy automatically.
+3. To deploy without a content change, run **Deploy Trophy website → Run
+   workflow** from Actions on `main`. GitHub Pages only publishes deployments
+   whose ref is the default branch: a deployment run from any other ref (a
+   branch, or the tag ref of a `release` event) reports success while the live
+   site keeps the previous build. The workflow fails fast on a non-`main` ref
+   instead of silently publishing nothing.
 
-Published releases also refresh the deployment. Before uploading, the workflow
-resolves the latest stable release's AppImage, native packages, archive, and
-checksums using its read-only GitHub token. It also renders the visible release
-version and release-notes link from that same release. It writes these into the
-published HTML; visitors need no API access or JavaScript to download. A release
-must contain all five expected assets before deployment can succeed. If assets
-are uploaded after the release is published, run the workflow again afterward.
+Published releases also refresh the deployment, because the version and
+download links are baked into the published HTML rather than resolved in the
+browser. The `release` trigger does not deploy directly — its ref is the
+release tag, which Pages will not publish — so it re-dispatches this workflow
+on `main` after the release is published. That deployment resolves the latest
+stable release's AppImage, native packages, archive, and checksums using its
+read-only GitHub token, and renders the visible release version and
+release-notes link from the same release. Visitors need no API access or
+JavaScript to download. A release must contain all five expected assets before
+deployment can succeed. If assets are uploaded after the release is published,
+run the workflow again on `main` afterward. A push to `main` that lands
+between publication and that redeploy also refreshes the version, so the site
+is never left on the previous release unless every deployment attempt fails.
 Release downloads in a private repository require visitor access to that repo;
 public Pages hosting does not make private release assets public.
 
