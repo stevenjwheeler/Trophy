@@ -168,6 +168,10 @@ jobs:
             --executable "$TROPHY_BIN" --library "$TROPHY_LIB" \
             --exclude-library 'libcuda*.so*' --exclude-library 'libnvidia-*.so*' \
             --desktop-file packaging/io.github.stevenjwheeler.Trophy.desktop --icon-file resources/icons/trophy.png --plugin qt
+          # Remove payload Trophy cannot load: the multiarch copy of libTrophy
+          # (RUNPATH uses usr/lib) and the Qt Quick Controls styles the app pins
+          # away from (QQuickStyle::setStyle("Fusion")).
+          python3 packaging/prune_appdir.py AppDir
           # Newer appimagetool (continuous build 340+) needs .DirIcon or a
           # top-level PNG named after Icon=. With both the scalable SVG (from
           # cmake --install) and the PNG present, linuxdeploy links the SVG at
@@ -186,6 +190,24 @@ jobs:
           if (rm -rf /tmp/_verify_sq && mkdir -p /tmp/_verify_sq && cd /tmp/_verify_sq && APPIMAGE_EXTRACT_AND_RUN=1 "$GITHUB_WORKSPACE/${images[0]}" --appimage-extract >/dev/null 2>&1); then
             bad=$(find /tmp/_verify_sq/squashfs-root -type f \( -name 'libcuda*.so*' -o -name 'libnvidia-*.so*' -o -name '*_drv_video.so' -o -name '*_dri.so' \) | head)
             if [[ -n "$bad" ]]; then echo "ERROR: bundled host driver/interface libs found:"; echo "$bad"; exit 1; fi
+            # Exactly one FFmpeg generation, and it must be the slim FFmpeg 9
+            # with the software H.264 encoder (Qt's SDK copy has no x264).
+            avcodecs=$(find /tmp/_verify_sq/squashfs-root/usr/lib* -name 'libavcodec.so.*' -printf '%f\n' 2>/dev/null | sort -u)
+            echo "bundled libavcodec: ${avcodecs:-<none>}"
+            if [[ "$(printf '%s\n' "$avcodecs" | sed '/^$/d' | wc -l)" -ne 1 ]] \
+               || [[ "$avcodecs" != libavcodec.so.63* ]]; then
+              echo "ERROR: expected exactly one FFmpeg generation (libavcodec.so.63)" >&2
+              find /tmp/_verify_sq/squashfs-root/usr/lib* -name 'libav*.so.*' -printf '%p\n' >&2 || true
+              exit 1
+            fi
+            if [[ -z "$(find /tmp/_verify_sq/squashfs-root/usr/lib* -name 'libx264.so.*' -print -quit)" ]]; then
+              echo "ERROR: bundled FFmpeg has no x264: software recording would regress" >&2
+              exit 1
+            fi
+            if ! readelf -d /tmp/_verify_sq/squashfs-root/usr/lib*/libavcodec.so.63* | grep 'libx264\.so' >/dev/null; then
+              echo "ERROR: bundled libavcodec does not link libx264" >&2
+              exit 1
+            fi
             rm -rf /tmp/_verify_sq
           fi
           python3 packaging/check_appimage_abi.py "${images[0]}" --report "$RUNNER_TEMP/trophy-appimage-abi.json"

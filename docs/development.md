@@ -34,6 +34,11 @@ CMake currently declares Qt 6.5 as its minimum, but also uses newer Qt CMake pol
 
 The FFmpeg executable is used by optional test fixtures, not production recording, previews, or export. Share export requires FFmpeg library support for libx264 and AAC encoding.
 
+The AppImage does not use the distribution's FFmpeg. It builds one slim GPL
+FFmpeg 9 with `packaging/ffmpeg/build-ffmpeg.sh`, which both the app and Qt
+Multimedia load (`libavcodec.so.63`), so a single generation is bundled. Local
+native builds, DEB/TXZ and RPM packages still link the distribution's FFmpeg.
+
 ### Example package lists
 
 These are starting points, not a guarantee that every distribution release supplies sufficiently recent packages. Install a compiler/build toolchain too.

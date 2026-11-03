@@ -19,7 +19,7 @@ for tool in linuxdeploy linuxdeploy-plugin-qt; do
     chmod +x "/work/tools/$tool-x86_64.AppImage"
 done
 export QMAKE="$QT_ROOT_DIR/bin/qmake" QML_SOURCES_PATHS=/work/build/qml
-export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib"
+export LD_LIBRARY_PATH="/opt/trophy-ffmpeg/lib:$QT_ROOT_DIR/lib"
 export EXTRA_QT_MODULES='quickcontrols2;multimedia;waylandcompositor'
 plugins=$("$QMAKE" -query QT_INSTALL_PLUGINS)
 wayland=("$plugins"/platforms/libqwayland*.so)

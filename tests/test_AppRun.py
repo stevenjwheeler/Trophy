@@ -21,7 +21,12 @@ import unittest
 
 ROOT = Path(__file__).parents[1]
 SCRIPTS = (ROOT / "packaging/AppRun", ROOT / "packaging/DiagnosticAppRun")
-LIBS = ("libva.so.2", "libva-drm.so.2", "libva-x11.so.2")
+# libavutil links the core and libva-drm. libva-x11 is never used or required
+# (Trophy has no X11 path); the constant only exists to prove it is not
+# published and that an entry from an older AppImage is cleaned up.
+REQUIRED_LIBS = ("libva.so.2", "libva-drm.so.2")
+UNUSED_LIB = "libva-x11.so.2"
+LIBS = REQUIRED_LIBS + (UNUSED_LIB,)
 ELF64 = b"\x7fELF\x02\x01\x01" + b"\0" * 9
 ELF32 = b"\x7fELF\x01\x01\x01" + b"\0" * 9
 
@@ -40,11 +45,18 @@ class LauncherCase(unittest.TestCase):
         probe.chmod(0o755)
         self.payload_lib = self.appdir / "usr/lib"
 
-    def host_dir(self, name, *, complete=True, cls=ELF64):
+    def host_dir(self, name, *, complete=True, x11=True, cls=ELF64):
+        """Host libva directory.
+
+        complete=False omits a required module (libva-drm); x11=False omits the
+        unused libva-x11.
+        """
         directory = self.tmp / name
         directory.mkdir()
         for lib in LIBS:
-            if not complete and lib == "libva-x11.so.2":
+            if not complete and lib == "libva-drm.so.2":
+                continue
+            if not x11 and lib == UNUSED_LIB:
                 continue
             (directory / lib).write_bytes(cls)
         return directory
@@ -89,18 +101,35 @@ class LauncherCase(unittest.TestCase):
         value = self.run_apprun(host_dirs=[host])
         self.assertEqual(value.split(":"), [str(self.override()), str(self.payload_lib)])
         self.assertEqual(stat.S_IMODE(self.override().stat().st_mode), 0o700)
-        for lib in LIBS:
+        for lib in REQUIRED_LIBS:
             link = self.override() / lib
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), (host / lib).resolve())
+        # libva-x11 is not part of Trophy's runtime and must not be published
+        # even when the host happens to have it.
+        self.assertFalse((self.override() / UNUSED_LIB).exists())
 
-    def test_missing_module_falls_back_to_bundled(self):
-        # All-or-nothing: a host with only part of the set must not be mixed
-        # with the bundled modules, because FFmpeg links all three.
+    def test_missing_required_module_falls_back_to_bundled(self):
+        # All-or-nothing for the modules libavutil actually links: a host
+        # without libva-drm must not be mixed with the bundled copies.
         host = self.host_dir("host", complete=False)
         value = self.run_apprun(host_dirs=[host])
         self.assertEqual(value, str(self.payload_lib))
         self.assertFalse((self.override() / "libva.so.2").exists())
+
+    def test_previous_libva_x11_entry_is_removed(self):
+        # A Wayland-only host may not have libva-x11 at all, and an older
+        # AppImage published one here. The host libva override must still be
+        # used, with only the modules libavutil links.
+        host = self.host_dir("host", x11=False)
+        self.override().mkdir(parents=True)
+        stale = self.override() / UNUSED_LIB
+        stale.symlink_to("/nonexistent/libva-x11.so.2")
+        value = self.run_apprun(host_dirs=[host])
+        self.assertEqual(value.split(":"), [str(self.override()), str(self.payload_lib)])
+        for lib in REQUIRED_LIBS:
+            self.assertEqual((self.override() / lib).resolve(), (host / lib).resolve())
+        self.assertFalse((self.override() / UNUSED_LIB).exists())
 
     def test_32bit_host_library_is_rejected(self):
         # ldconfig also lists multilib copies; a 32-bit ELF must never enter a

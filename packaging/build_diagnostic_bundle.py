@@ -9,6 +9,7 @@ import shutil
 import subprocess
 
 from check_appimage_abi import check as check_abi
+from prune_appdir import prune as prune_appdir
 
 
 # Deliberately excludes tests that contact the frozen detection socket, require
@@ -91,6 +92,10 @@ def main():
     env = os.environ.copy()
     env.update(APPIMAGE_EXTRACT_AND_RUN="1", LINUXDEPLOY_OUTPUT_VERSION=args.version)
     subprocess.run(command, env=env, cwd=output, check=True)
+    # Drop payload Trophy can never load (duplicate libTrophy, unused Qt Quick
+    # Controls styles) before the image is generated.
+    removed, pruned_bytes = prune_appdir(stage)
+    print(f"Pruned {len(removed)} path(s), {pruned_bytes / 1048576:.1f} MiB uncompressed")
     # Newer appimagetool (continuous build 340+) needs .DirIcon or a top-level
     # PNG named after Icon=. linuxdeploy links the scalable SVG at the AppDir
     # root when both formats exist, which appimagetool rejects.

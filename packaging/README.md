@@ -16,6 +16,14 @@ Native CI builds target **Ubuntu 26.04** (DEB/archive) and **Fedora 44** (RPM),
 using each distribution's Qt/FFmpeg packages. They are not universal Debian/RPM
 packages: older distributions and different Qt private ABIs can be incompatible.
 The AppImage's SDK build, tests and packaging use **Ubuntu 24.04**, with Qt 6.12.0.
+It bundles **one** FFmpeg generation: a slim FFmpeg 9 built by
+[`packaging/ffmpeg/build-ffmpeg.sh`](ffmpeg/build-ffmpeg.sh) with x264, Opus,
+VA-API and NVENC, shared by the app and Qt Multimedia (`libavcodec.so.63`). It
+deliberately does not carry Ubuntu 24.04's separate FFmpeg 6 or the Qt SDK's
+LGPL FFmpeg 9, which has no software H.264 encoder. Before the image is built,
+`packaging/prune_appdir.py` drops payload the app can never load: the duplicate
+multiarch `libTrophy.so` (RUNPATH is `$ORIGIN/../lib`) and the Qt Quick Controls
+styles other than Basic/Fusion (`QQuickStyle::setStyle("Fusion")` is pinned).
 Its finished ELF payload is gated at GLIBC 2.39, GLIBCXX 3.4.32 and CXXABI 1.3.14;
 this is not a claim that every older distro, GPU driver or desktop is supported.
 The AppImage does not bundle a replacement glibc or vendor GPU drivers. Native
