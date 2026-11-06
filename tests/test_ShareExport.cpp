@@ -803,7 +803,12 @@ TEST_F(ShareExportTest, ShortResampledAudioSurvivesEntirelyBufferedFilterTail) {
     ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
     const auto pcm = audio(result.path);
     double energy = 0;
-    for (float sample : pcm) energy += sample * sample;
+    // Widen before squaring: a float product would round (and could overflow)
+    // before the sum, which CodeQL rightly flags as a precision hazard.
+    for (float sample : pcm) {
+      const double value = sample;
+      energy += value * value;
+    }
     EXPECT_GT(energy, 0.5) << "resampler-buffered audio vanished at EOF";
   }
 }
