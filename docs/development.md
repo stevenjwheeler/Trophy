@@ -155,6 +155,15 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
   responses/native-event rejection, and create a new session afterward. The
   active-session fixture emulates the final native-video startup boundary; it
   does not capture a real compositor or exercise a permission dialog.
+- Application lookup refreshes registry snapshots with current node properties
+  through a bounded sync barrier, replacing changed property dictionaries so
+  removed identities do not linger. Game lookup can fill missing identity
+  fields from the playback node's owning client; direct node matches win, and conflicting
+  process identities are not combined. Strict Voice binary matching and its
+  routing verification do not inherit client identity. Lookup diagnostics
+  distinguish no matching playback identity from connection/query failures.
+  Updates after the query barrier are picked up by the existing session retry,
+  not by a permanent registry subscription.
 - Application audio uses a private PipeWire daemon, WirePlumber's policy-only
   profile and a null sink. Tests remove/recreate playback sources and stop/restart
   only the launcher's owned services, checking real PCM delivery, error handling,

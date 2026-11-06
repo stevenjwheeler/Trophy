@@ -111,11 +111,12 @@ struct PlaybackClient {
   pw_context *context = nullptr;
   pw_core *core = nullptr;
   std::vector<std::unique_ptr<Stream>> streams;
-  PlaybackClient() {
+  explicit PlaybackClient(const char *appId = nullptr) {
     pw_init(nullptr, nullptr);
     loop = pw_thread_loop_new("group-test", nullptr);
     context = pw_context_new(pw_thread_loop_get_loop(loop), nullptr, 0);
-    core = pw_context_connect(context, nullptr, 0);
+    core = pw_context_connect(context,
+        appId ? pw_properties_new(PW_KEY_APP_ID, appId, nullptr) : nullptr, 0);
     pw_thread_loop_start(loop);
   }
   ~PlaybackClient() {
@@ -174,7 +175,111 @@ struct PlaybackClient {
     stream->stream = nullptr;
     pw_thread_loop_unlock(loop);
   }
+  void update(Stream *stream, const spa_dict &props) {
+    pw_thread_loop_lock(loop);
+    EXPECT_GE(pw_stream_update_properties(stream->stream, &props), 0);
+    pw_thread_loop_unlock(loop);
+  }
 };
+
+TEST(AppAudioGroupTest, LookupUsesOwningClientForMissingGameIdentity) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-lookup-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient game("org.trophy.LookupClientFixture");
+  auto *stream = game.add(0.1f, "anonymous-playback-fixture");
+  // The client owns the app id, but the stream does not publish it. Empty
+  // node fields are deliberately used to model incomplete ALSA/native nodes.
+  const spa_dict_item items[] = {{PW_KEY_APP_ID, ""},
+                                 {PW_KEY_APP_PROCESS_BINARY, ""},
+                                 {PW_KEY_APP_PROCESS_ID, ""}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  game.update(stream, props);
+  const auto target = privateCaptureNode("anonymous-playback-fixture");
+  ASSERT_NE(target, PW_ID_ANY);
+  QString nodeName, serial;
+  ASSERT_TRUE(waitFor([&] {
+    return PipeWireAudioSource::findNodeByProcessName(
+        "org.trophy.LookupClientFixture", &nodeName, &serial) == target;
+  }));
+  EXPECT_EQ(nodeName, "anonymous-playback-fixture");
+  EXPECT_FALSE(serial.isEmpty());
+  EXPECT_EQ(PipeWireAudioSource::findNodeByBinary("org.trophy.LookupClientFixture"), PW_ID_ANY);
+  game.remove(stream);
+  ASSERT_TRUE(waitFor([&] {
+    return PipeWireAudioSource::findNodeByProcessName(
+        "org.trophy.LookupClientFixture") == PW_ID_ANY;
+  }));
+}
+
+TEST(AppAudioGroupTest, LookupFollowsChangedIdentityAndEnumeratesOnce) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-lookup-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient game;
+  auto *stream = game.add(0.1f, "lookup-update-fixture", "old-lookup-binary");
+  const auto target = privateCaptureNode("lookup-update-fixture");
+  ASSERT_NE(target, PW_ID_ANY);
+  ASSERT_EQ(PipeWireAudioSource::findNodeByBinary("old-lookup-binary"), target);
+  const spa_dict_item items[] = {{PW_KEY_APP_PROCESS_BINARY, "new-lookup-binary"}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  game.update(stream, props);
+  ASSERT_TRUE(waitFor([&] {
+    return PipeWireAudioSource::findNodeByBinary("new-lookup-binary") == target;
+  }));
+  EXPECT_EQ(PipeWireAudioSource::findNodeByBinary("old-lookup-binary"), PW_ID_ANY);
+  int occurrences = 0;
+  for (const auto &app : PipeWireAudioSource::enumerateAudioApps()) {
+    const auto entry = app.toMap();
+    if (entry.value("nodeId").toUInt() == target) {
+      ++occurrences;
+      EXPECT_EQ(entry.value("binary").toString(), "new-lookup-binary");
+    }
+  }
+  EXPECT_EQ(occurrences, 1);
+  // Explicitly clear the published value: this PipeWire stream API does not
+  // propagate a nullptr deletion to the server's adapter properties (pw-dump
+  // still shows the previous binary). Absent-key info snapshots are tested
+  // separately in the daemon-free lookup suite.
+  const spa_dict_item removedItems[] = {{PW_KEY_APP_PROCESS_BINARY, ""}};
+  const spa_dict removed = SPA_DICT_INIT_ARRAY(removedItems);
+  game.update(stream, removed);
+  ASSERT_TRUE(waitFor([&] {
+    return PipeWireAudioSource::findNodeByBinary("new-lookup-binary") == PW_ID_ANY;
+  }));
+}
+
+TEST(AppAudioGroupTest, LookupPrefersDirectNodeIdentityOverClientFallback) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-lookup-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  PlaybackClient inherited("org.trophy.LookupPriorityFixture"), direct;
+  auto *first = inherited.add(0.1f, "anonymous-priority-fixture");
+  const spa_dict_item blankItems[] = {{PW_KEY_APP_ID, ""},
+                                      {PW_KEY_APP_PROCESS_BINARY, ""},
+                                      {PW_KEY_APP_PROCESS_ID, ""}};
+  const spa_dict blank = SPA_DICT_INIT_ARRAY(blankItems);
+  inherited.update(first, blank);
+  auto *second = direct.add(0.2f, "direct-priority-fixture");
+  const spa_dict_item items[] = {{PW_KEY_APP_ID, "org.trophy.LookupPriorityFixture"}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  direct.update(second, props);
+  const auto target = privateCaptureNode("direct-priority-fixture");
+  ASSERT_NE(target, PW_ID_ANY);
+  ASSERT_TRUE(waitFor([&] {
+    return PipeWireAudioSource::findNodeByProcessName(
+        "org.trophy.LookupPriorityFixture") == target;
+  }));
+}
 
 TEST(AppAudioGroupTest, SilentFirstStreamIncludesLateSiblingAndMixesOnOneClock) {
   if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")

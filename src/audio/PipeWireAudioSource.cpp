@@ -8,6 +8,7 @@
 #include "PipeWireAudioSource.h"
 #include "AppAudioGroup.h"
 #include "ApplicationAudioIdentity.h"
+#include "ApplicationAudioLookup.h"
 
 #include <QDebug>
 #include <QList>
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include <pipewire/extensions/metadata.h>
@@ -684,16 +686,18 @@ struct InfoMatchData;
 
 struct InfoBindEntry {
   uint32_t id = PW_ID_ANY;
-  struct pw_node *proxy = nullptr;
+  struct pw_proxy *proxy = nullptr;
   struct spa_hook hook = {};
-  bool gotInfo = false;
+  bool removed = false;
   InfoMatchData *owner = nullptr;
 };
 
 struct InfoMatchData {
   InfoMatchRequest *req = nullptr;
   QList<uint32_t> candidates;       // Stream/Output/Audio node ids (phase 1)
-  RegistryCache cache; // announce-time props per candidate id (phase 1)
+  std::map<uint32_t, detail::AudioLookupProperties> nodes;
+  std::map<uint32_t, detail::AudioLookupProperties> clients;
+  std::set<uint32_t> currentNodes, currentClients;
   std::vector<InfoBindEntry> binds; // phase 2 (reserved upfront: stable)
   int pendingSync = 0;
   bool syncComplete = false;
@@ -703,50 +707,27 @@ struct InfoMatchData {
   struct spa_hook coreListener = {};
 };
 
-static bool infoPropsMatch(const struct spa_dict *props,
-                           const InfoMatchRequest *req) {
-  if (!props || !req)
-    return false;
-  if (req->pid != 0) {
-    const char *pidStr = spa_dict_lookup(props, PW_KEY_APP_PROCESS_ID);
-    return pidStr && QString(pidStr).toUInt() == req->pid;
-  }
-  if (req->hintLower.isEmpty())
-    return false;
-  if (req->exactBinary) {
-    const char *binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY);
-    return binary && detail::matchesAudioBinary(QString::fromUtf8(binary),
-                                                req->hintLower);
-  }
-  auto matches = [&](const char *key) {
-    const char *s = spa_dict_lookup(props, key);
-    return s && QString(s).toLower().contains(req->hintLower);
-  };
-  return matches(PW_KEY_APP_PROCESS_BINARY) || matches(PW_KEY_APP_NAME) ||
-         matches(PW_KEY_NODE_NAME) || matches(PW_KEY_APP_ID);
-}
-
-static void infoMatchGather(const struct spa_dict *props, uint32_t id,
-                            InfoMatchRequest *req) {
-  const char *binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY);
-  const char *appName = spa_dict_lookup(props, PW_KEY_APP_NAME);
-  const char *nodeName = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+static void infoMatchGather(const detail::AudioLookupProperties &props, uint32_t id,
+                             InfoMatchRequest *req) {
+  const QString binary = props.get(PW_KEY_APP_PROCESS_BINARY);
+  const QString appName = props.get(PW_KEY_APP_NAME);
+  const QString nodeName = props.get(PW_KEY_NODE_NAME);
   // Display prefers the binary: it is the stable, recognizable product
   // name ("Discord") while node names are engine-internal
   // ("WEBRTC VoiceEngine"). The voice setting stores the binary, so the
   // dropdown value and the matcher speak the same language.
   QString display;
-  if (binary && strlen(binary) > 0)
-    display = QString::fromUtf8(binary);
-  else if (appName && strlen(appName) > 0)
-    display = QString::fromUtf8(appName);
-  else if (nodeName)
-    display = QString::fromUtf8(nodeName);
+  if (!binary.isEmpty())
+    display = binary;
+  else if (!appName.isEmpty())
+    display = appName;
+  else
+    display = nodeName;
   if (display.isEmpty())
     return;
   QVariantMap app;
   app["name"] = display;
-  app["binary"] = binary ? QString::fromUtf8(binary) : "";
+  app["binary"] = binary;
   app["nodeId"] = id;
   req->apps.append(app);
 }
@@ -754,28 +735,25 @@ static void infoMatchGather(const struct spa_dict *props, uint32_t id,
 static void infoMatchNodeInfo(void *userdata, const struct pw_node_info *info) {
   auto *entry = static_cast<InfoBindEntry *>(userdata);
   InfoMatchData *data = entry->owner;
-  if (!data || !data->req || data->req->done || entry->gotInfo)
-    return; // one evaluation per node
-  entry->gotInfo = true;
-  if (!info || !info->props)
+  if (!data || !data->req || entry->removed)
     return;
-  InfoMatchRequest *req = data->req;
-  if (req->gatherAll) {
-    infoMatchGather(info->props, entry->id, req);
+  if (!info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
     return;
+  const auto it = data->nodes.find(entry->id);
+  if (it != data->nodes.end()) {
+    it->second.updateInfo(info->props, true);
+    data->currentNodes.insert(entry->id);
   }
-  if (infoPropsMatch(info->props, req)) {
-    const char *name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
-    const char *serial = spa_dict_lookup(info->props, "object.serial");
-    req->foundId = entry->id;
-    if (name)
-      req->foundName = QString::fromUtf8(name);
-    if (serial)
-      req->foundSerial = QString::fromUtf8(serial);
-    req->done = true;
-    qDebug() << "Found PipeWire node via info props:" << req->foundName
-             << "-> ID:" << entry->id;
-    pw_main_loop_quit(data->loop);
+}
+
+static void infoMatchClientInfo(void *userdata, const struct pw_client_info *info) {
+  auto *entry = static_cast<InfoBindEntry *>(userdata);
+  if (entry->removed) return;
+  const auto it = entry->owner->clients.find(entry->id);
+  if (info && (info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS) &&
+      it != entry->owner->clients.end()) {
+    it->second.updateInfo(info->props, true);
+    entry->owner->currentClients.insert(entry->id);
   }
 }
 
@@ -784,20 +762,30 @@ static void infoMatchRegistryGlobal(void *userdata, uint32_t id,
                                     uint32_t /*version*/,
                                     const struct spa_dict *props) {
   auto *data = static_cast<InfoMatchData *>(userdata);
-  if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !props)
+  if (!props)
     return;
+  if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+    data->clients[id].update(props);
+    return;
+  }
+  if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
   // Phase-1 prefilter on announce-time class (core SPA property, always
   // present at announce); identity matching happens on current info.
   const char *mediaClass = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
   if (!mediaClass || strcmp(mediaClass, "Stream/Output/Audio") != 0)
     return;
-  data->cache.upsert(id, nodeFromProps(props));
-  data->candidates.append(id);
+  data->nodes[id].update(props);
+  if (!data->candidates.contains(id)) data->candidates.append(id);
 }
 
 static void infoMatchRegistryRemove(void *userdata, uint32_t id) {
   auto *data = static_cast<InfoMatchData *>(userdata);
-  data->cache.erase(id);
+  data->nodes.erase(id);
+  data->clients.erase(id);
+  data->currentNodes.erase(id);
+  data->currentClients.erase(id);
+  for (auto &entry : data->binds)
+    if (entry.id == id) entry.removed = true;
   data->candidates.removeAll(id);
 }
 
@@ -825,17 +813,21 @@ static void runInfoMatch(InfoMatchRequest &req) {
   InfoMatchData data;
   data.req = &req;
   data.loop = pw_main_loop_new(nullptr);
-  if (!data.loop)
+  if (!data.loop) {
+    qWarning() << "PipeWire application lookup: could not create main loop";
     return;
+  }
   struct pw_context *ctx =
       pw_context_new(pw_main_loop_get_loop(data.loop), nullptr, 0);
   if (!ctx) {
+    qWarning() << "PipeWire application lookup: could not create context";
     pw_main_loop_destroy(data.loop);
     data.loop = nullptr;
     return;
   }
   struct pw_core *core = pw_context_connect(ctx, nullptr, 0);
   if (!core) {
+    qWarning() << "PipeWire application lookup: could not connect to server";
     pw_context_destroy(ctx);
     pw_main_loop_destroy(data.loop);
     data.loop = nullptr;
@@ -869,70 +861,23 @@ static void runInfoMatch(InfoMatchRequest &req) {
       data.loop, data.pendingSync, [&] { return data.syncComplete; },
       [&] { return data.syncFailed; });
 
-  // Phase 1b: match on the announce-time snapshot before binding anything.
-  // A hit costs zero binds on the same connection (single pump total); a
-  // miss — or gatherAll, which needs current info props because identity
-  // fields like the binary arrive post-announce — falls through to the
-  // bind phase below. The predicate mirrors infoPropsMatch (announce-time
-  // edition — keep in sync); matching runs on copies taken under the lock,
-  // in announce order so the first-match choice matches the bind path.
-  if (success && !req.gatherAll) {
-    const std::map<uint32_t, CachedNode> snapshot = data.cache.copy();
-    const QList<uint32_t> order = data.candidates;
-    uint32_t hitId = PW_ID_ANY;
-    QString hitName;
-    QString hitSerial;
-    for (uint32_t id : order) {
-      const auto it = snapshot.find(id);
-      if (it == snapshot.end())
-        continue; // pruned by global_remove mid-pump
-      const CachedNode &n = it->second;
-      bool hit = false;
-      if (req.pid != 0) {
-        hit = n.hasPid && n.pid == req.pid;
-      } else if (!req.hintLower.isEmpty()) {
-        auto contains = [&](const QString &s) {
-          return !s.isEmpty() && s.toLower().contains(req.hintLower);
-        };
-        hit = req.exactBinary
-                  ? detail::matchesAudioBinary(n.binary, req.hintLower)
-                  : contains(n.binary) || contains(n.appName) ||
-                        contains(n.nodeName) || contains(n.appId);
-      }
-      if (hit) {
-        hitId = id;
-        hitName = n.nodeName;
-        hitSerial = n.serial;
-        break;
-      }
-    }
-    if (hitId != PW_ID_ANY) {
-      req.foundId = hitId;
-      req.foundName = hitName;
-      req.foundSerial = hitSerial;
-      req.done = true;
-      qDebug() << "Found PipeWire node via registry snapshot:" << hitName
-               << "-> ID:" << hitId;
-    }
-  }
-
-  // Phase 2: bind the cached candidates and match/gather on current info
-  // props. Only candidate Stream/Output/Audio globals are bound — never
-  // the full registry — and a phase-1b snapshot hit skips binds entirely
-  // (bindIds is empty, so the second sync below is skipped too).
-  // The server answers binds (info) before the sync reply on the same
-  // connection, so one round trip collects everything; done ends the loop
-  // even if some node never infos (no hang).
+  // Phase 2: merge current properties through the bounded sync barrier before
+  // choosing a result. An early hit/first-info exit misses later updates and
+  // removals in the same batch. Callback storage remains stable throughout.
   static const struct pw_node_events node_events = [] {
     struct pw_node_events e = {};
     e.version = PW_VERSION_NODE_EVENTS;
     e.info = infoMatchNodeInfo;
     return e;
   }();
-  data.binds.reserve(data.candidates.size());
-  // A snapshot hit binds nothing: the answer is already in req.
-  const QList<uint32_t> bindIds = req.done ? QList<uint32_t>{}
-                                           : data.candidates;
+  static const struct pw_client_events client_events = [] {
+    struct pw_client_events e = {};
+    e.version = PW_VERSION_CLIENT_EVENTS;
+    e.info = infoMatchClientInfo;
+    return e;
+  }();
+  data.binds.reserve(data.candidates.size() + data.clients.size());
+  const QList<uint32_t> bindIds = success ? data.candidates : QList<uint32_t>{};
   for (uint32_t id : bindIds) {
     struct pw_node *proxy = static_cast<struct pw_node *>(pw_registry_bind(
         registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0));
@@ -940,11 +885,34 @@ static void runInfoMatch(InfoMatchRequest &req) {
       continue;
     InfoBindEntry entry;
     entry.id = id;
-    entry.proxy = proxy;
+    entry.proxy = reinterpret_cast<pw_proxy *>(proxy);
     entry.owner = &data;
     data.binds.push_back(entry);
-    pw_node_add_listener(data.binds.back().proxy, &data.binds.back().hook,
+    pw_node_add_listener(proxy, &data.binds.back().hook,
                          &node_events, &data.binds.back());
+  }
+  // Bind only the owners of candidate playback nodes, not unrelated clients.
+  // A changed client.id discovered during phase 2 can be retried next tick;
+  // never substitute an unverified announce-only client identity.
+  if (success && !req.gatherAll && !req.exactBinary) {
+    std::set<uint32_t> owners;
+    for (const auto &[id, props] : data.nodes) {
+      bool valid = false;
+      const auto clientId = props.get(PW_KEY_CLIENT_ID).toUInt(&valid);
+      if (valid && data.clients.contains(clientId)) owners.insert(clientId);
+    }
+    for (uint32_t id : owners) {
+      auto *proxy = static_cast<pw_client *>(pw_registry_bind(
+          registry, id, PW_TYPE_INTERFACE_Client, PW_VERSION_CLIENT, 0));
+      if (!proxy) continue;
+      InfoBindEntry entry;
+      entry.id = id;
+      entry.proxy = reinterpret_cast<pw_proxy *>(proxy);
+      entry.owner = &data;
+      data.binds.push_back(entry);
+      pw_client_add_listener(proxy, &data.binds.back().hook,
+                             &client_events, &data.binds.back());
+    }
   }
   if (!data.binds.empty()) {
     data.syncComplete = false;
@@ -953,6 +921,45 @@ static void runInfoMatch(InfoMatchRequest &req) {
                              data.loop, data.pendingSync,
                              [&] { return data.syncComplete; },
                              [&] { return data.syncFailed; });
+  }
+
+  if (success) {
+    // Prefer node evidence over inherited client evidence regardless of
+    // registry order. Never use a client as the capture target itself.
+    for (int tier = 0; tier < 2 && !req.done; ++tier) {
+      if (tier == 1 && (req.gatherAll || req.exactBinary)) break;
+      for (uint32_t id : data.candidates) {
+        const auto it = data.nodes.find(id);
+        if (it == data.nodes.end() || !data.currentNodes.contains(id)) continue;
+        const auto &node = it->second;
+        if (node.get(PW_KEY_MEDIA_CLASS) != QLatin1String("Stream/Output/Audio")) continue;
+        if (req.gatherAll) {
+          infoMatchGather(node, id, &req);
+          continue;
+        }
+        auto identity = node;
+        if (tier == 1) {
+          bool valid = false;
+          const auto clientId = node.get(PW_KEY_CLIENT_ID).toUInt(&valid);
+          const auto client = data.clients.find(clientId);
+          if (!valid || client == data.clients.end() ||
+              !data.currentClients.contains(clientId)) continue;
+          identity = detail::gameAudioLookupProperties(node, client->second);
+        }
+        if (!identity.matches(req.pid, req.hintLower, req.exactBinary)) continue;
+        req.foundId = id;
+        req.foundName = node.get(PW_KEY_NODE_NAME);
+        req.foundSerial = node.get(PW_KEY_OBJECT_SERIAL);
+        req.done = true;
+        qDebug() << "Found PipeWire playback node:" << req.foundName << "ID:" << id
+                 << "identity:" << (tier ? "node + client" : "node");
+        break;
+      }
+    }
+    if (!req.gatherAll && !req.done)
+      qDebug() << "PipeWire application lookup: no matching playback identity; PID:"
+               << req.pid << "hint:" << req.hintLower << "strict binary:" << req.exactBinary
+               << "playback nodes:" << data.nodes.size();
   }
 
   for (auto &entry : data.binds) {
@@ -965,6 +972,7 @@ static void runInfoMatch(InfoMatchRequest &req) {
   pw_main_loop_destroy(data.loop);
   data.loop = nullptr;
   if (!success) {
+    qWarning() << "PipeWire application lookup: registry/info query failed or timed out";
     req.foundId = PW_ID_ANY;
     req.apps.clear();
   }
@@ -975,9 +983,7 @@ static void runInfoMatch(InfoMatchRequest &req) {
 uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
                                                     QString *outNodeName,
                                                     QString *outSerial) {
-  // Snapshot first (zero binds on hit), current node info on miss:
-  // identity props (notably application.process.binary) can arrive after
-  // announce, so globals alone cannot prove absence.
+  // Read current node info, with owning-client identity as a game fallback.
   InfoMatchRequest req;
   req.hintLower = processName.toLower();
   runInfoMatch(req);
@@ -993,7 +999,7 @@ uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
   if (pid == 0)
     return PW_ID_ANY;
 
-  // Same two-tier matching as names (snapshot hit, else current info).
+  // Same current-node/client matching as names.
   // PID props can also arrive after announce (and Proton streams carry no
   // PID at all — then this misses, and the exe-name hint is the fallback).
   InfoMatchRequest req;
