@@ -6,6 +6,7 @@
 
 #include "audio/PipeWireAudioSource.h"
 #include "audio/AppAudioGroup.h"
+#include "audio/ApplicationAudioLookup.h"
 #include <gtest/gtest.h>
 #include <spa/buffer/buffer.h>
 #include <pipewire/pipewire.h>
@@ -16,6 +17,106 @@
 #include <thread>
 
 using namespace TrophyBackend;
+
+namespace {
+void lookupUpdate(detail::AudioLookupProperties &props,
+                  std::initializer_list<spa_dict_item> items, bool info = false) {
+  const spa_dict dict{0, static_cast<uint32_t>(items.size()), items.begin()};
+  if (info) props.updateInfo(&dict, true);
+  else props.update(&dict);
+}
+}
+
+TEST(ApplicationAudioLookupTest, FollowsLatePropertiesAndIgnoresStateOnlyEvents) {
+  detail::AudioLookupProperties node;
+  lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"}});
+  EXPECT_FALSE(node.matches(0, "fixture", false));
+  node.updateInfo(nullptr, false); // First info can be state-only.
+  lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
+                      {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"}}, true);
+  EXPECT_TRUE(node.matches(0, "fixture", false));
+  lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
+                      {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"},
+                      {PW_KEY_APP_PROCESS_ID, "42"}}, true);
+  node.updateInfo(nullptr, false);
+  EXPECT_TRUE(node.matches(42, {}, false));
+  EXPECT_EQ(node.get(PW_KEY_OBJECT_SERIAL), "123");
+  EXPECT_EQ(node.get(PW_KEY_NODE_NAME), "engine");
+  EXPECT_TRUE(node.matches(0, "FIXTURE.EXE", true));
+}
+
+TEST(ApplicationAudioLookupTest, ExplicitIdentityRemovalAndReplacementAreNotStale) {
+  detail::AudioLookupProperties node;
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_BINARY, "old-game"}});
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_BINARY, nullptr}});
+  EXPECT_FALSE(node.matches(0, "old-game", false));
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_BINARY, "new-game"}});
+  EXPECT_FALSE(node.matches(0, "old-game", false));
+  EXPECT_TRUE(node.matches(0, "new-game", false));
+  node.update(nullptr);
+  EXPECT_TRUE(node.matches(0, "new-game", false));
+}
+
+TEST(ApplicationAudioLookupTest, FullInfoSnapshotDropsAbsentOldIdentity) {
+  detail::AudioLookupProperties node;
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_BINARY, "stale-registry-game"},
+                      {PW_KEY_NODE_NAME, "engine"}});
+  lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}}, true);
+  EXPECT_FALSE(node.matches(0, "stale-registry-game", true));
+  EXPECT_EQ(node.get(PW_KEY_NODE_NAME), "engine");
+  node.updateInfo(nullptr, true);
+  EXPECT_TRUE(node.values.isEmpty());
+}
+
+TEST(ApplicationAudioLookupTest, ClientFillsMissingGameIdentityNotCaptureTarget) {
+  detail::AudioLookupProperties node, client;
+  lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"}});
+  lookupUpdate(client, {{PW_KEY_APP_PROCESS_ID, "42"},
+                        {PW_KEY_APP_PROCESS_BINARY, "game"},
+                        {PW_KEY_APP_ID, "org.example.Game"},
+                        {PW_KEY_NODE_NAME, "not-the-target"},
+                        {PW_KEY_OBJECT_SERIAL, "456"}});
+  auto merged = detail::gameAudioLookupProperties(node, client);
+  EXPECT_TRUE(merged.matches(42, {}, false));
+  EXPECT_TRUE(merged.matches(0, "org.example.Game", false));
+  EXPECT_EQ(merged.get(PW_KEY_NODE_NAME), "engine");
+  EXPECT_EQ(merged.get(PW_KEY_OBJECT_SERIAL), "123");
+  EXPECT_FALSE(node.matches(0, "game", true)); // Voice never uses the merged view.
+}
+
+TEST(ApplicationAudioLookupTest, ConflictingBrokerIdentityCannotFillMissingFields) {
+  detail::AudioLookupProperties node, client;
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_BINARY, "real-game"}});
+  lookupUpdate(client, {{PW_KEY_APP_PROCESS_BINARY, "broker"},
+                        {PW_KEY_APP_PROCESS_ID, "42"}, {PW_KEY_APP_NAME, "broker"}});
+  auto merged = detail::gameAudioLookupProperties(node, client);
+  EXPECT_FALSE(merged.matches(42, {}, false));
+  EXPECT_FALSE(merged.matches(0, "broker", false));
+  EXPECT_TRUE(merged.matches(0, "real-game", false));
+}
+
+TEST(ApplicationAudioLookupTest, NodeFieldsOverrideClientAndPidIsValidated) {
+  detail::AudioLookupProperties node, client;
+  lookupUpdate(node, {{PW_KEY_APP_NAME, "game stream"}, {PW_KEY_APP_PROCESS_ID, "42"}});
+  lookupUpdate(client, {{PW_KEY_APP_NAME, "different client name"},
+                        {PW_KEY_APP_PROCESS_ID, "43"}});
+  auto merged = detail::gameAudioLookupProperties(node, client);
+  EXPECT_TRUE(merged.matches(42, {}, false));
+  EXPECT_FALSE(merged.matches(43, {}, false));
+  EXPECT_FALSE(merged.matches(0, "different client", false));
+  lookupUpdate(node, {{PW_KEY_APP_PROCESS_ID, "invalid"}});
+  EXPECT_FALSE(node.matches(42, {}, false));
+  EXPECT_FALSE(node.matches(0, {}, false));
+}
+
+TEST(ApplicationAudioLookupTest, StrictBinaryDoesNotAcceptFriendlyNames) {
+  detail::AudioLookupProperties node;
+  lookupUpdate(node, {{PW_KEY_APP_NAME, "Discord"},
+                      {PW_KEY_NODE_NAME, "Discord"},
+                      {PW_KEY_APP_PROCESS_BINARY, "DiscordHelper"}});
+  EXPECT_TRUE(node.matches(0, "discord", false));
+  EXPECT_FALSE(node.matches(0, "discord", true));
+}
 
 namespace TrophyBackend {
 class AppAudioGroupTestPeer {

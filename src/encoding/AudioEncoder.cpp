@@ -6,6 +6,7 @@
  */
 
 #include "AudioEncoder.h"
+#include "CodecPacketPump.h"
 #include "IEncoder.h"
 
 #include <QDebug>
@@ -199,85 +200,81 @@ void AudioEncoder::writeFrameSamples() {
 
 bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
                                EncodedPacket &output) {
-  if (!m_initialized) {
+  if (!encodeAudio(samples, frameCount, m_pendingPackets) || m_pendingPackets.empty())
     return false;
+  output = std::move(m_pendingPackets.front());
+  m_pendingPackets.erase(m_pendingPackets.begin());
+  return true;
+}
+
+bool AudioEncoder::submitFrame(std::vector<EncodedPacket> &packets, bool eof) {
+  const int result = pumpCodecPackets(
+      [&] {
+        const int ret = avcodec_send_frame(m_codecCtx, eof ? nullptr : m_frame);
+        if (ret >= 0 && !eof) {
+          // Input ownership advances on send success, even if receiving a
+          // later packet fails. Stop must not submit the same PCM twice.
+          m_sampleCount += m_requiredFrameSize;
+          const size_t count = size_t(m_requiredFrameSize) * m_frame->ch_layout.nb_channels;
+          m_accumBuffer.erase(m_accumBuffer.begin(), m_accumBuffer.begin() + count);
+        }
+        return ret;
+      },
+      [&] {
+        const int ret = avcodec_receive_packet(m_codecCtx, m_packet);
+        if (ret == 0) {
+          EncodedPacket packet;
+          processPacket(m_packet, packet);
+          packets.push_back(std::move(packet));
+        }
+        return ret;
+      }, eof);
+  if (result >= 0) return true;
+  char error[AV_ERROR_MAX_STRING_SIZE] = {};
+  av_strerror(result, error, sizeof(error));
+  emit encodingError(QString("Audio encoder %1 failed: %2")
+                         .arg(eof ? "flush" : "submission", error));
+  return false;
+}
+
+bool AudioEncoder::encodeAudio(const float *samples, int frameCount,
+                               std::vector<EncodedPacket> &packets) {
+  if (!m_initialized || frameCount < 0 || (frameCount && !samples)) return false;
+  if (&packets != &m_pendingPackets) {
+    for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
+    m_pendingPackets.clear();
   }
-
-  int channels = m_frame->ch_layout.nb_channels;
-  int totalIncomingSamples = frameCount * channels;
-
-  // Accumulate samples into buffer
-  m_accumBuffer.insert(m_accumBuffer.end(), samples,
-                       samples + totalIncomingSamples);
-
-  // Process complete frames from the accumulator
-  while (static_cast<int>(m_accumBuffer.size()) >=
-         m_requiredFrameSize * channels) {
+  const int channels = m_frame->ch_layout.nb_channels;
+  const size_t frameSamples = size_t(m_requiredFrameSize) * channels;
+  // Copy at most one codec frame at a time. Large native callback blocks must
+  // neither grow a permanent backlog nor create a huge transient accumulator.
+  while (frameCount > 0) {
+    const int frames = std::min(frameCount,
+        int((frameSamples - m_accumBuffer.size()) / channels));
+    m_accumBuffer.insert(m_accumBuffer.end(), samples, samples + size_t(frames) * channels);
+    samples += size_t(frames) * channels;
+    frameCount -= frames;
+    if (m_accumBuffer.size() < frameSamples) break;
     if (av_frame_make_writable(m_frame) < 0) {
       emit encodingError("Failed to make audio frame writable");
       return false;
     }
-
-    // Convert interleaved float accumulator to the codec's sample format
     writeFrameSamples();
-
-    // Set frame properties
     m_frame->nb_samples = m_requiredFrameSize;
     m_frame->pts =
         ((m_sampleCount + m_startOffset) * 1000LL) / m_codecCtx->sample_rate;
-    m_sampleCount += m_requiredFrameSize;
-
-    // Send frame to encoder
-    int ret = avcodec_send_frame(m_codecCtx, m_frame);
-    if (ret < 0) {
-      char err[AV_ERROR_MAX_STRING_SIZE];
-      av_strerror(ret, err, sizeof(err));
-      emit encodingError(QString("Error sending audio frame: %1").arg(err));
-      return false;
-    }
-
-    // Try to receive a packet
-    ret = avcodec_receive_packet(m_codecCtx, m_packet);
-    if (ret == AVERROR(EAGAIN)) {
-      // Encoder needs more frames, remove processed samples and continue
-      m_accumBuffer.erase(m_accumBuffer.begin(),
-                          m_accumBuffer.begin() +
-                              m_requiredFrameSize * channels);
-      continue;
-    }
-    if (ret < 0) {
-      // Error or EOF
-      m_accumBuffer.erase(m_accumBuffer.begin(),
-                          m_accumBuffer.begin() +
-                              m_requiredFrameSize * channels);
-      return false;
-    }
-
-    // Got a packet! Remove processed samples and return
-    m_accumBuffer.erase(m_accumBuffer.begin(),
-                        m_accumBuffer.begin() + m_requiredFrameSize * channels);
-    return processPacket(m_packet, output);
+    if (!submitFrame(packets)) return false;
   }
-
-  // Buffer has fewer than required samples, wait for more
-  return false;
+  return true;
 }
 
 bool AudioEncoder::advanceToSamplePosition(int64_t position, std::vector<EncodedPacket> &packets) {
   if (!m_initialized || position < 0) return false;
+  for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
+  m_pendingPackets.clear();
   const int channels = m_frame->ch_layout.nb_channels;
   const int64_t buffered = m_accumBuffer.size() / channels;
   if (position <= m_sampleCount + m_startOffset + buffered) return true;
-  auto receive = [&] {
-    while (true) {
-      const int result = avcodec_receive_packet(m_codecCtx, m_packet);
-      if (result == AVERROR(EAGAIN)) return true;
-      if (result < 0) return false;
-      EncodedPacket packet;
-      if (!processPacket(m_packet, packet)) return false;
-      packets.push_back(std::move(packet));
-    }
-  };
   const size_t frameSamples = size_t(m_requiredFrameSize) * channels;
   while (!m_accumBuffer.empty()) {
     if (m_accumBuffer.size() < frameSamples) m_accumBuffer.resize(frameSamples, 0.0f);
@@ -285,14 +282,7 @@ bool AudioEncoder::advanceToSamplePosition(int64_t position, std::vector<Encoded
     writeFrameSamples();
     m_frame->nb_samples = m_requiredFrameSize;
     m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) / m_codecCtx->sample_rate;
-    int result;
-    while ((result = avcodec_send_frame(m_codecCtx, m_frame)) == AVERROR(EAGAIN)) {
-      if (!receive()) return false;
-    }
-    if (result < 0) return false;
-    m_sampleCount += m_requiredFrameSize;
-    m_accumBuffer.erase(m_accumBuffer.begin(), m_accumBuffer.begin() + frameSamples);
-    if (!receive()) return false;
+    if (!submitFrame(packets)) return false;
   }
   m_startOffset += std::max(int64_t(0), position - m_sampleCount - m_startOffset);
   m_offsetApplied = true;
@@ -304,58 +294,27 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
     return 0;
   }
 
-  int count = 0;
+  const size_t before = packets.size();
+  for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
+  m_pendingPackets.clear();
   int channels = m_frame->ch_layout.nb_channels;
-  auto receiveAvailable = [&]() {
-    while (true) {
-      const int ret = avcodec_receive_packet(m_codecCtx, m_packet);
-      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-        return true;
-      if (ret < 0)
-        return false;
-      EncodedPacket output;
-      if (processPacket(m_packet, output)) {
-        packets.push_back(std::move(output));
-        ++count;
-      }
-    }
-  };
-  auto sendFrame = [&]() {
-    while (true) {
-      const int ret = avcodec_send_frame(m_codecCtx, m_frame);
-      if (ret == AVERROR(EAGAIN)) {
-        if (!receiveAvailable())
-          return false;
-        continue;
-      }
-      if (ret < 0)
-        return false;
-      m_sampleCount += m_requiredFrameSize;
-      return receiveAvailable();
-    }
-  };
 
   const size_t frameSamples =
       static_cast<size_t>(m_requiredFrameSize) * channels;
-  // Encode every complete frame left in the accumulator before treating
-  // the final partial frame as a padded tail. encodeAudio() intentionally
-  // returns after producing one packet, so larger input batches can leave
-  // multiple complete frames buffered here.
+  // Normally only a partial frame remains; handle a failed submission too.
   while (m_accumBuffer.size() >= frameSamples) {
     if (av_frame_make_writable(m_frame) < 0) {
       emit encodingError("Failed to make audio frame writable while flushing");
-      return count;
+      return -1;
     }
     writeFrameSamples();
     m_frame->nb_samples = m_requiredFrameSize;
     m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
                    m_codecCtx->sample_rate;
-    if (!sendFrame()) {
+    if (!submitFrame(packets)) {
       emit encodingError("Failed to send buffered audio frame while flushing");
-      return count;
+      return -1;
     }
-    m_accumBuffer.erase(m_accumBuffer.begin(),
-                        m_accumBuffer.begin() + frameSamples);
   }
 
   // Pad only a genuine incomplete tail to the next codec frame.
@@ -363,36 +322,23 @@ int AudioEncoder::flush(std::vector<EncodedPacket> &packets) {
     m_accumBuffer.resize(frameSamples, 0.0f);
     if (av_frame_make_writable(m_frame) < 0) {
       emit encodingError("Failed to make padded audio frame writable");
-      return count;
+      return -1;
     }
     writeFrameSamples();
     m_frame->nb_samples = m_requiredFrameSize;
     m_frame->pts = ((m_sampleCount + m_startOffset) * 1000LL) /
                    m_codecCtx->sample_rate;
-    if (!sendFrame()) {
+    if (!submitFrame(packets)) {
       emit encodingError("Failed to send padded audio frame while flushing");
-      return count;
+      return -1;
     }
     m_accumBuffer.clear();
   }
 
   // Send EOF only after all buffered frames have been submitted, then drain
   // the encoder's delayed packets.
-  while (true) {
-    const int ret = avcodec_send_frame(m_codecCtx, nullptr);
-    if (ret == AVERROR(EAGAIN)) {
-      if (!receiveAvailable())
-        break;
-      continue;
-    }
-    if (ret >= 0 || ret == AVERROR_EOF)
-      receiveAvailable();
-    else
-      emit encodingError("Failed to send audio encoder EOF");
-    break;
-  }
-
-  return count;
+  if (!submitFrame(packets, true)) return -1;
+  return int(packets.size() - before);
 }
 
 bool AudioEncoder::processPacket(AVPacket *packet, EncodedPacket &output) {
@@ -437,6 +383,7 @@ void AudioEncoder::cleanup() {
   m_offsetApplied = false;
   m_accumBuffer.clear();
   m_initialized = false;
+  m_pendingPackets.clear();
 }
 
 } // namespace TrophyBackend

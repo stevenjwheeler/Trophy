@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -151,7 +152,7 @@ bool ShareExporter::inspect(const QString &source) {
   m_timer.start(); emit changed(); return true;
 }
 bool ShareExporter::start(const QString &directory, const QVariantList &tracks,
-                          int mode, int maxHeight) {
+                          int mode, int maxHeight, const QVariantList &gains) {
   if (m_worker.valid() || m_source.isEmpty() || m_info.contains("error")) return false;
   const QString root = QFileInfo(m_storage->storagePath()).canonicalFilePath();
   const QString destination = QFileInfo(directory).canonicalFilePath();
@@ -173,6 +174,17 @@ bool ShareExporter::start(const QString &directory, const QVariantList &tracks,
     const int index = track.toInt(&ok);
     if (!ok) { m_error = tr("Invalid audio selection."); emit changed(); return false; }
     options.audioStreams.append(index);
+  }
+  if (!gains.isEmpty() && gains.size() != options.audioStreams.size()) {
+    m_error = tr("Invalid audio volume selection."); emit changed(); return false;
+  }
+  for (const auto &value : gains) {
+    bool ok = false;
+    const double gain = value.toDouble(&ok);
+    if (!ok || !std::isfinite(gain) || gain < 0.0 || gain > 1.0) {
+      m_error = tr("Invalid audio volume selection."); emit changed(); return false;
+    }
+    options.audioGains.append(gain);
   }
   auto job = std::make_unique<Job>();
   job->id = QString::number(++m_nextJobId);
@@ -215,6 +227,14 @@ bool ShareExporter::startBatch(const QString &directory, const QVariantList &cap
       const int index = track.toInt(&ok);
       valid = valid && ok && index >= 0 && !job->options.audioStreams.contains(index);
       job->options.audioStreams.append(index);
+    }
+    const auto gainRows = row.value("audioGains").toList();
+    valid = valid && (gainRows.isEmpty() || gainRows.size() == job->options.audioStreams.size());
+    for (const auto &value : gainRows) {
+      bool ok = false;
+      const double gain = value.toDouble(&ok);
+      valid = valid && ok && std::isfinite(gain) && gain >= 0.0 && gain <= 1.0;
+      job->options.audioGains.append(gain);
     }
     valid = valid && job->options.audioStreams.size() <= 8;
     if (!valid || file.isSymLink() || !file.isFile() || job->source.isEmpty() || !pin(job->source)) {

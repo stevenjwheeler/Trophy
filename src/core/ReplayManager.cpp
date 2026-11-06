@@ -56,6 +56,31 @@ ReplayManager::ReplayManager(QObject *parent) : QObject(parent) {
   m_retirementTimer = new QTimer(this);
   m_retirementTimer->setInterval(10);
   connect(m_retirementTimer, &QTimer::timeout, this, &ReplayManager::pollRetirements);
+  // Safety net for a persistent rotation whose keyframe never lands (the
+  // session aborts itself after ~2s; this covers a wedged encoding loop).
+  m_rotationWatchdog = new QTimer(this);
+  m_rotationWatchdog->setSingleShot(true);
+  m_rotationWatchdog->setInterval(3000);
+  connect(m_rotationWatchdog, &QTimer::timeout, this, [this] {
+    if (!m_rotationPending || !m_session)
+      return;
+    qWarning() << "DVR rotation watchdog: aborting persistent rotation";
+    m_session->abortOutputRotation(); // Emits the abort -> rebuild fallback.
+  });
+  auto *healthTimer = new QTimer(this);
+  healthTimer->setInterval(100);
+  connect(this, &ReplayManager::replayStateChanged, healthTimer, [this, healthTimer] {
+    if (m_state == State::Running) healthTimer->start();
+    else healthTimer->stop();
+  });
+  connect(healthTimer, &QTimer::timeout, this, [this] {
+    if (m_state != State::Running || !m_session || !m_session->outputFailed()) return;
+    const QString reason = m_session->outputErrorText();
+    stopDvr();
+    emit replayFailed(reason.isEmpty()
+                          ? QStringLiteral("Clips stopped: recording pipeline or output failed.")
+                          : QStringLiteral("Clips stopped: %1").arg(reason));
+  });
 }
 
 ReplayManager::~ReplayManager() {
@@ -207,6 +232,10 @@ void ReplayManager::stopDvr() {
   // clearing those files or destroying the manager that owns its callback.
   m_saveWaitingForRetirement = false;
   setState(State::Stopping);
+  // Settle a live persistent rotation first: a cut already made changes the
+  // live output path, and a pending arm must return its held audio to it.
+  // The finalized outgoing segment is cache-only here (the buffer is cleared).
+  settlePendingRotation();
   if (m_session) {
     auto retired = std::make_unique<RetiringSegment>();
     retired->session = std::move(m_session);
@@ -237,6 +266,10 @@ void ReplayManager::completeDvrStop() {
   const int closedCount = m_segments.size() + (m_openSegmentPath.isEmpty() ? 0 : 1);
   m_saveInputPaths.clear();
   m_saving = false;
+  m_rotationWatchdog->stop();
+  m_rotationPending = false;
+  m_pendingRotationPath.clear();
+  m_encoderSetupKey.clear();
   m_muxer.reset();
   m_encoder.reset();
   m_capture.reset();
@@ -383,9 +416,140 @@ QString ReplayManager::audioSetupKey() const {
          (effectiveSeparate ? "sep" : "mix");
 }
 
+QString ReplayManager::encoderSetupKey() const {
+  if (!m_settings)
+    return {};
+  return QString("%1|%2|%3|%4|%5|%6")
+      .arg(m_settings->encoder())
+      .arg(m_settings->fps())
+      .arg(m_settings->videoBitrate())
+      .arg(m_settings->maxVideoBitrate())
+      .arg(m_settings->useVBR() ? 1 : 0)
+      .arg(m_settings->encoderPreset());
+}
+
+void ReplayManager::drainRetiredMuxers() {
+  if (!m_session)
+    return;
+  // Finalized outgoing muxers are QObjects: destroy them on this owner thread.
+  m_session->takeRetiredMuxers().clear();
+}
+
+bool ReplayManager::settlePendingRotation() {
+  if (!m_session)
+    return true;
+  m_rotationPending = false;
+  m_rotationWatchdog->stop();
+  const QString pending = std::exchange(m_pendingRotationPath, {});
+  // settleRotation never emits: a pending arm is aborted (held audio returns
+  // to the live file) and a cut that already happened is finalized here.
+  const auto settled = m_session->settleRotation();
+  if (!pending.isEmpty())
+    QFile::remove(pending);
+  if (settled) {
+    const double now = elapsedSec();
+    if (m_state == State::Running && !settled->oldPath.isEmpty()) {
+      m_segments.push_back({settled->oldPath, m_openSegmentStart,
+                            std::max(0.0, now - m_openSegmentStart),
+                            settled->audioHistory});
+      std::sort(m_segments.begin(), m_segments.end(),
+                [](const auto &a, const auto &b) { return a.startSec < b.startSec; });
+    } else if (!settled->oldPath.isEmpty()) {
+      QFile::remove(settled->oldPath);
+    }
+    m_openSegmentPath = m_session->outputPath();
+    m_openSegmentStart = now;
+  }
+  drainRetiredMuxers();
+  return true;
+}
+
+void ReplayManager::onOutputRotated(const QString &oldPath,
+                                    const QString &newPath, qint64 oldBytes,
+                                    const QJsonObject &audioHistory) {
+  Q_UNUSED(oldBytes)
+  m_rotationPending = false;
+  m_rotationWatchdog->stop();
+  m_pendingRotationPath.clear();
+  drainRetiredMuxers();
+  const double now = elapsedSec();
+  if (m_state != State::Running) {
+    // Stop raced the queued notification: the finalized outgoing file is
+    // cache-only, and the retiring session already carries the live path.
+    if (!oldPath.isEmpty())
+      QFile::remove(oldPath);
+    return;
+  }
+  if (!oldPath.isEmpty() && oldPath != newPath) {
+    m_segments.push_back(
+        {oldPath, m_openSegmentStart, std::max(0.0, now - m_openSegmentStart),
+         audioHistory});
+    std::sort(m_segments.begin(), m_segments.end(),
+              [](const auto &a, const auto &b) { return a.startSec < b.startSec; });
+  }
+  m_openSegmentPath = newPath;
+  m_openSegmentStart = now;
+  pruneOldSegments(now);
+}
+
+void ReplayManager::onOutputRotationAborted(const QString &nextPath) {
+  m_rotationPending = false;
+  m_rotationWatchdog->stop();
+  m_pendingRotationPath.clear();
+  drainRetiredMuxers();
+  if (!nextPath.isEmpty())
+    QFile::remove(nextPath);
+  if (m_state != State::Running)
+    return;
+  qWarning() << "DVR: persistent rotation aborted; rebuilding the segment";
+  const double now = elapsedSec();
+  if (!switchSegment()) {
+    stopDvr();
+    emit replayFailed("Clips stopped: recording pipeline or output failed.");
+    return;
+  }
+  pruneOldSegments(now);
+}
+
+bool ReplayManager::armPersistentRotation() {
+  if (!m_session || !m_settings || m_rotationPending)
+    return false;
+  if (m_session->rotationPending())
+    return false;
+  // Encoder or audio-source changes need the full rebuild (new pipeline).
+  if (audioSetupKey() != m_audioSetupKey ||
+      encoderSetupKey() != m_encoderSetupKey)
+    return false;
+
+  const QString path = QString("%1/seg_%2.mkv")
+                           .arg(cacheDir())
+                           .arg(m_segmentIndex++, 3, 10, QChar('0'));
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<FFmpegMuxer>());
+  QMap<QString, QString> meta;
+  meta["title"] = m_gameName;
+  meta["creation_time"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+  meta["comment"] = "trophy-replay-segment";
+  stampTrophyVersionDateTime(meta);
+  if (m_encoder)
+    stampTrophyEncoder(meta, m_encoder->name());
+
+  if (!m_session->beginOutputRotation(next, m_muxer, path, meta)) {
+    QFile::remove(path);
+    return false;
+  }
+  m_rotationPending = true;
+  m_pendingRotationPath = path;
+  m_rotationWatchdog->start();
+  return true;
+}
+
 bool ReplayManager::switchSegment() {
   if (!m_capture || !m_settings)
     return false;
+
+  // A pending persistent rotation must settle before this session is retired;
+  // its outgoing segment (if the cut already happened) is enlisted here.
+  settlePendingRotation();
 
   // Build the replacement leg while the current session (if any) keeps
   // recording: encoder init alone costs hundreds of ms, and paying it
@@ -485,6 +649,20 @@ bool ReplayManager::switchSegment() {
             if (owner && owner == m_session.get())
               onCaptureError(error);
           }, Qt::QueuedConnection);
+  // Persistent-rotation outcomes are queued from the encoding thread.
+  connect(newSession.get(), &RecordingSession::outputRotated, this,
+          [this, owner = QPointer<RecordingSession>(newSession.get())]
+          (const QString &oldPath, const QString &newPath, qint64 oldBytes,
+           const QJsonObject &history) {
+            if (owner && owner == m_session.get())
+              onOutputRotated(oldPath, newPath, oldBytes, history);
+          }, Qt::QueuedConnection);
+  connect(newSession.get(), &RecordingSession::outputRotationAborted, this,
+          [this, owner = QPointer<RecordingSession>(newSession.get())]
+          (const QString &nextPath) {
+            if (owner && owner == m_session.get())
+              onOutputRotationAborted(nextPath);
+          }, Qt::QueuedConnection);
   // Wire the session's node retry (the DVR previously never re-checked:
   // voice joining mid-game and stream churn never healed until rotation).
   newSession->setGameAudioHints(gamePid, gameHints);
@@ -517,6 +695,10 @@ bool ReplayManager::switchSegment() {
   m_session = std::move(newSession);
   m_openSegmentStart = switchSec;
   m_openSegmentPath = path;
+  m_encoderSetupKey = encoderSetupKey();
+  m_rotationPending = false;
+  m_pendingRotationPath.clear();
+  m_rotationWatchdog->stop();
   // Publish the successor even on failure: the caller's stopDvr() must
   // drain the leg that now owns capture/mixer routing before destroying it.
   return retired;
@@ -908,6 +1090,11 @@ void ReplayManager::rotateSegment() {
   if (m_state != State::Running)
     return;
   const double now = elapsedSec();
+  // Preferred path: keep the encoder/session/audio live and swap only the
+  // container on a forced keyframe. Settings changes or a failed arm fall
+  // back to the make-before-break rebuild.
+  if (armPersistentRotation())
+    return;
   if (!switchSegment()) {
     qWarning() << "Replay DVR: rotation failed";
     stopDvr();

@@ -5,6 +5,44 @@
 
 using namespace TrophyBackend;
 
+TEST(PipeWireVideoFormatTest, ShmHonorsOffsetAndRejectsTruncatedOrInvalidRows) {
+  uint8_t pixels[80]{};
+  spa_chunk chunk{};
+  chunk.offset = 16;
+  chunk.size = 64;
+  chunk.stride = 32;
+  spa_data data{};
+  data.type = SPA_DATA_MemFd;
+  data.data = pixels;
+  data.maxsize = sizeof(pixels);
+  data.chunk = &chunk;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), pixels + 16);
+  chunk.size = 63;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  chunk.size = 64;
+  data.maxsize = 79;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  data.maxsize = 80;
+  chunk.offset = UINT32_MAX;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  chunk.offset = 16;
+  EXPECT_EQ(pipeWireVideoShmData(data, 9, 2), nullptr);
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, INT32_MAX), nullptr);
+  EXPECT_EQ(pipeWireVideoShmData(data, 0, 2), nullptr);
+  chunk.stride = -32;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  chunk.stride = 32;
+  chunk.flags = SPA_CHUNK_FLAG_CORRUPTED;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  chunk.flags = 0;
+  data.type = SPA_DATA_DmaBuf;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+  data.type = SPA_DATA_MemPtr;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), pixels + 16);
+  data.chunk = nullptr;
+  EXPECT_EQ(pipeWireVideoShmData(data, 7, 2), nullptr);
+}
+
 TEST(PipeWireVideoFormatTest, DrmXrgbUsesBgrxAndProducerFixation) {
   uint8_t storage[4096];
   auto builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
