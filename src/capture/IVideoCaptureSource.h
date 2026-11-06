@@ -37,6 +37,8 @@ struct VideoFrame {
   int dmaBufOffset = 0;
   std::shared_ptr<void> bufferLease; // delays producer reuse, separate from fd ownership
   std::function<void()> requestCpuFallback;
+  // Optional immutable CPU snapshot, independent of the producer's mapping.
+  std::shared_ptr<const std::vector<uint8_t>> cpuStorage;
 };
 
 /**
@@ -47,7 +49,7 @@ struct VideoFrame {
  * PipeWire cannot overwrite pixels before consumption. The destructor closes
  * the duped fd and releases the lease.
  *
- * Shared-memory frames are always copied: the producer reuses its buffer as
+  * Borrowed shared-memory frames are copied: the producer reuses its buffer as
  * soon as we give it back, and holding it instead would throttle capture to
  * the encoder's pace.
  * Copying is deleted to prevent double-close; use move semantics instead.
@@ -57,7 +59,13 @@ struct QueuedFrame : public VideoFrame {
 
   explicit QueuedFrame(const VideoFrame &other) : VideoFrame(other) {
     if (!other.isDmaBuf && other.data && other.stride > 0 && other.height > 0) {
-      // Always copy shared-memory frames. Leasing them instead made capture
+      // Share an already-owned snapshot; never lease a producer SHM buffer.
+      if (other.cpuStorage && other.data == other.cpuStorage->data() &&
+          other.cpuStorage->size() >= size_t(other.stride) * size_t(other.height)) {
+        return;
+      }
+      cpuStorage.reset();
+      // Copy borrowed shared-memory frames. Leasing them instead made capture
       // wait for the encoder (the producer's pool is the only decoupling we
       // have) and produced visibly uneven delivery with software encoders.
       ownedData.assign(other.data,

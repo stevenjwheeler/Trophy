@@ -14,6 +14,10 @@ namespace TrophyBackend {
 // watermark), so exports are limited by disk I/O rather than encoding.
 struct ShareExportOptions {
   QList<int> audioStreams; // absolute stream indices to mix; empty = silent
+  // Linear gain per selected stream, aligned with audioStreams. Empty means
+  // 1.0 for every track. A zero gain selects a silent (but still decoded)
+  // track; callers normally omit zero-gain tracks from audioStreams.
+  QList<double> audioGains;
   enum class Mode {
     Copy,    // remux: video bitstream copied, audio mixed/encoded (fast, lossless)
     Convert  // re-encode to H.264 + AAC for sources MP4 sharing cannot use as-is

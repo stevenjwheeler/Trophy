@@ -6,6 +6,7 @@
  */
 
 #include "FFmpegEncoder.h"
+#include "CodecPacketPump.h"
 #include "capture/EglDmaBuf.h"
 #include "capture/IVideoCaptureSource.h"
 
@@ -886,7 +887,44 @@ bool FFmpegEncoder::initializeHardwareContext() {
 }
 
 bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) {
+  encodeFrames(frame, m_pendingPackets);
+  if (m_pendingPackets.empty()) return false;
+  output = std::move(m_pendingPackets.front());
+  m_pendingPackets.erase(m_pendingPackets.begin());
+  return true;
+}
+
+int FFmpegEncoder::submitFrame(AVFrame *frame, std::vector<EncodedPacket> &packets,
+                               bool *accepted) {
+  if (accepted) *accepted = false;
+  return pumpCodecPackets(
+      [&] {
+        const int ret = avcodec_send_frame(m_codecCtx, frame);
+        if (ret == AVERROR(EAGAIN)) ++m_backpressureFrames;
+        if (ret >= 0 && frame) {
+          ++m_frameCount;
+          if (accepted) *accepted = true;
+        }
+        return ret;
+      },
+      [&] {
+        const int ret = avcodec_receive_packet(m_codecCtx, m_packet);
+        if (ret == 0) {
+          EncodedPacket packet;
+          processPacket(m_packet, packet);
+          packets.push_back(std::move(packet));
+        }
+        return ret;
+      }, frame == nullptr);
+}
+
+bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
+                                  std::vector<EncodedPacket> &packets) {
   if (!m_initialized || !m_codecCtx) return false;
+  if (&packets != &m_pendingPackets) {
+    for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
+    m_pendingPackets.clear();
+  }
 
   if (frame.width <= 0 || frame.height <= 0) {
     qWarning() << "FFmpegEncoder: Ignoring invalid frame size" << frame.width << "x" << frame.height;
@@ -1115,34 +1153,33 @@ bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) 
     if (source == FrameSource::Cpu)
       m_fallbackFrames++;
     finalFrame->pts = av_rescale_q(relativeMs, {1, 1000}, m_codecCtx->time_base);
-    const int ret = avcodec_send_frame(m_codecCtx, finalFrame);
-
-    if (ret >= 0) {
-      m_frameCount++;
-      const int received = avcodec_receive_packet(m_codecCtx, m_packet);
-      if (received == 0) {
-        success = processPacket(m_packet, output);
-      } else if (received == AVERROR(EAGAIN)) {
-        // Frame accepted but encoder needs more input before emitting.
-        // Report false: no packet was produced, so there is nothing for
-        // the caller to mux (writing `output` here would mux garbage).
-        success = false;
-      } else {
-        reportEncodeRejection(received);
-      }
-    } else if (ret == AVERROR(EAGAIN)) {
-      // The encoder is still holding previous input. Backpressure is not a
-      // rejection: count it separately so a saturated encoder is not
-      // mistaken for a broken one.
-      ++m_backpressureFrames;
+    // Persistent DVR rotation asks for a forced IDR so the container can be
+    // cut on a known keyframe. m_frame is reused, so the marker is cleared
+    // on every other frame (a stale I pict_type would pin the whole stream).
+    if (m_keyframeRequested.exchange(false)) {
+      finalFrame->pict_type = AV_PICTURE_TYPE_I;
+      finalFrame->flags |= AV_FRAME_FLAG_KEY;
     } else {
+      finalFrame->pict_type = AV_PICTURE_TYPE_NONE;
+      finalFrame->flags &= ~AV_FRAME_FLAG_KEY;
+    }
+    const size_t before = packets.size();
+    bool accepted = false;
+    const int ret = submitFrame(finalFrame, packets, &accepted);
+    success = packets.size() != before;
+    if (ret < 0) {
       // A real refusal. This used to be silent, which made "encoder produced
       // 4 frames in a minute" indistinguishable from a slow machine.
       reportEncodeRejection(ret);
-      if (frame.isDmaBuf && frame.requestCpuFallback) {
-        // Import success alone does not prove the encoder accepts the mapped
-        // surface (e.g. RGB imported into an NV12-only VA-API encoder).
+      if (!accepted && ret == AVERROR(EINVAL) && frame.isDmaBuf && frame.requestCpuFallback) {
+        // Preserve the recoverable surface-rejection path. Import success
+        // does not prove the codec accepts this surface; try SHM once. A
+        // receive failure or a failure on CPU input is not an import issue.
         frame.requestCpuFallback();
+      } else {
+        char error[AV_ERROR_MAX_STRING_SIZE] = {};
+        av_strerror(ret, error, sizeof(error));
+        emit encodingError(QString("Video encoder %1 failed: %2").arg(m_codecName, error));
       }
     }
   } else {
@@ -1226,16 +1263,17 @@ bool FFmpegEncoder::convertSoftwareFrame(const VideoFrame &frame) {
 int FFmpegEncoder::flush(std::vector<EncodedPacket> &packets) {
   if (!m_initialized) return 0;
   logSummary();
-  avcodec_send_frame(m_codecCtx, nullptr);
-  int count = 0;
-  while (avcodec_receive_packet(m_codecCtx, m_packet) >= 0) {
-    EncodedPacket out;
-    if (processPacket(m_packet, out)) {
-      packets.push_back(std::move(out));
-      count++;
-    }
+  const size_t before = packets.size();
+  for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
+  m_pendingPackets.clear();
+  const int result = submitFrame(nullptr, packets);
+  if (result < 0) {
+    char error[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(result, error, sizeof(error));
+    emit encodingError(QString("Video encoder %1 flush failed: %2").arg(m_codecName, error));
+    return -1;
   }
-  return count;
+  return int(packets.size() - before);
 }
 
 void FFmpegEncoder::reportEncodeRejection(int code) {
@@ -1307,6 +1345,7 @@ std::vector<uint8_t> FFmpegEncoder::extraData() const {
 int FFmpegEncoder::codecId() const { return m_codecCtx ? m_codecCtx->codec_id : 0; }
 
 void FFmpegEncoder::cleanup() {
+  m_pendingPackets.clear();
   // Scaler modules/scratch must be retired on their current CUDA context
   // before the encoder's hardware device references are released.
   m_cudaImport.reset();

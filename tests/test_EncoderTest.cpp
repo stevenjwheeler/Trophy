@@ -36,6 +36,17 @@ public:
     return encoder.convertSoftwareFrame(frame);
   }
   static SwsContext *scaler(FFmpegEncoder &encoder) { return encoder.m_swsCtx; }
+  static int fillUntilBackpressure(FFmpegEncoder &encoder, const VideoFrame &frame) {
+    if (!encoder.convertSoftwareFrame(frame)) return -1;
+    encoder.m_firstTimestamp = frame.timestamp;
+    for (int i = 0; i < 256; ++i) {
+      encoder.m_frame->pts = i * 17;
+      const int ret = avcodec_send_frame(encoder.m_codecCtx, encoder.m_frame);
+      if (ret == AVERROR(EAGAIN)) return i;
+      if (ret < 0) return -1;
+    }
+    return -1;
+  }
 };
 }
 
@@ -103,6 +114,38 @@ TEST(EncoderRateTest, UncappedRetainsOneHundredFpsPacketTimestamps) {
   std::sort(timestamps.begin(), timestamps.end());
   ASSERT_EQ(timestamps.size(), 100u);
   for (int i = 0; i < 100; ++i) EXPECT_EQ(timestamps[i], i * 10);
+}
+
+TEST(EncoderRateTest, RealCodecBackpressurePreservesInputAndFlushesDelayedFrames) {
+  if (!avcodec_find_encoder_by_name("libx264")) GTEST_SKIP() << "libx264 unavailable";
+  for (bool sendAnother : {false, true}) {
+    SCOPED_TRACE(sendAnother ? "retry input" : "retry EOF");
+    FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "libx264");
+    EncoderConfig config;
+    config.width = config.height = 64;
+    config.preset = "ultrafast";
+    ASSERT_TRUE(encoder.initialize(config));
+    std::vector<uint8_t> pixels(64 * 64 * 4, 128);
+    VideoFrame frame{};
+    frame.width = frame.height = 64;
+    frame.stride = 256;
+    frame.data = pixels.data();
+    frame.pixelFormat = AV_PIX_FMT_BGRA;
+    frame.timestamp = 1000000;
+    const int sent = FFmpegEncoderTestAccess::fillUntilBackpressure(encoder, frame);
+    ASSERT_GT(sent, 0);
+    std::vector<EncodedPacket> packets;
+    if (sendAnother) {
+      frame.timestamp += int64_t(sent) * 17000;
+      encoder.encodeFrames(frame, packets);
+    }
+    EXPECT_GE(encoder.flush(packets), 0);
+    ASSERT_EQ(packets.size(), size_t(sent + (sendAnother ? 1 : 0)));
+    std::vector<int64_t> pts;
+    for (const auto &packet : packets) pts.push_back(packet.pts);
+    std::sort(pts.begin(), pts.end());
+    for (size_t i = 0; i < pts.size(); ++i) EXPECT_EQ(pts[i], int64_t(i) * 17);
+  }
 }
 
 TEST_P(EncoderMatrixTest, FullPipelineTest) {

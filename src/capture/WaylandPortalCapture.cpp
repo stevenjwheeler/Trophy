@@ -1466,7 +1466,16 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   } else if (d.data) {
     // ---- Shared-memory (MemFd / mmap) path ----
     frame.isDmaBuf    = false;
-    frame.data        = static_cast<const uint8_t *>(d.data);
+    frame.data = pipeWireVideoShmData(d, frame.width, frame.height);
+    if (!frame.data) {
+      ++self->m_droppedBuffers;
+      if (self->m_droppedBuffers == 1 || self->m_droppedBuffers % 600 == 0)
+        qWarning() << "PipeWire: invalid shared-memory video buffer"
+                   << "offset/size/maxsize/stride:" << d.chunk->offset
+                   << d.chunk->size << d.maxsize << d.chunk->stride;
+      pw_stream_queue_buffer(self->m_pw_stream, b);
+      return;
+    }
     frame.stride      = d.chunk->stride;
     frame.pixelFormat = AV_PIX_FMT_BGRA;
     // Copy-on-enqueue, deliberately. The PipeWire buffer pool (KWin: three

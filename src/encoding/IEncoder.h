@@ -95,12 +95,28 @@ public:
    */
   virtual bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) = 0;
 
+  // Batch output used by recording sessions: a single accepted input can
+  // release multiple delayed packets. Legacy implementations produce one.
+  virtual bool encodeFrames(const VideoFrame &frame,
+                            std::vector<EncodedPacket> &packets) {
+    EncodedPacket packet;
+    if (!encodeFrame(frame, packet)) return false;
+    packets.push_back(std::move(packet));
+    return true;
+  }
+
   /**
    * @brief Flush encoder and get remaining packets
    * @param packets Output vector for remaining packets
-   * @return Number of packets flushed
+   * @return Number of packets flushed, or negative on failure. Packets already
+   *         produced remain valid even on failure.
    */
   virtual int flush(std::vector<EncodedPacket> &packets) = 0;
+
+  // Ask for the next submitted video frame to be encoded as an IDR. Persistent
+  // DVR rotation cuts the container on this frame without rebuilding the
+  // encoder. Best-effort: encoders that cannot force one ignore the request.
+  virtual void requestKeyframe() {}
 
   /**
    * @brief Get encoder type

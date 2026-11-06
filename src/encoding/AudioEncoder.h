@@ -56,11 +56,17 @@ public:
    * @return true if packet was produced
    */
   bool encodeAudio(const float *samples, int frameCount, EncodedPacket &output);
+  // Consumes all complete PCM frames and appends every available packet.
+  // Unlike the single-packet compatibility API, true means success (possibly
+  // buffered), not that a packet was produced.
+  bool encodeAudio(const float *samples, int frameCount,
+                   std::vector<EncodedPacket> &packets);
 
   /**
    * @brief Flush encoder
    * @param packets Output packets
-   * @return Number of packets flushed
+   * @return Number of packets flushed, or negative on failure. Already
+   *         produced packets remain valid even when draining fails.
    */
   int flush(std::vector<EncodedPacket> &packets);
 
@@ -91,6 +97,8 @@ signals:
   void encodingError(const QString &error);
 
 private:
+  bool submitFrame(std::vector<EncodedPacket> &packets, bool eof = false);
+  std::vector<EncodedPacket> m_pendingPackets;
   void cleanup();
   bool processPacket(AVPacket *packet, EncodedPacket &output);
   // Convert one frame from the interleaved-float accumulator into m_frame,

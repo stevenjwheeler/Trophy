@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "encoding/AudioEncoder.h"
+#include "encoding/CodecPacketPump.h"
 #include "encoding/IEncoder.h"
 
 extern "C" {
@@ -99,6 +100,54 @@ TEST(AudioEncoderTest, FlushEncodesAllCompleteBufferedFramesBeforeTail) {
   EXPECT_GE(encodedDurationMs * cfg.sampleRate,
             static_cast<int64_t>(completeFrames) * frameSize * 1000)
       << "flush dropped complete frames left behind by a large input batch";
+}
+
+TEST(AudioEncoderTest, SustainedLargeBlocksProducePacketsWithoutWaitingForStop) {
+  AudioEncoder enc;
+  AudioEncoderConfig cfg;
+  ASSERT_TRUE(enc.initialize(cfg));
+  std::vector<float> samples(4096 * cfg.channels, 0.2f);
+  size_t total = 0;
+  for (int block = 0; block < 100; ++block) {
+    std::vector<EncodedPacket> packets;
+    ASSERT_TRUE(enc.encodeAudio(samples.data(), 4096, packets));
+    total += packets.size();
+    // AAC may delay the first packet, but must not retain complete input
+    // frames on every callback. This bound is independent of wall time.
+    EXPECT_GE(total + 2, size_t((block + 1) * 4));
+  }
+  std::vector<EncodedPacket> tail;
+  EXPECT_GE(enc.flush(tail), 0);
+  EXPECT_LE(tail.size(), 3u);
+}
+
+TEST(CodecPacketPumpTest, DrainsBackpressureThenRetriesSameInputAndAllOutput) {
+  int sends = 0, receives = 0;
+  std::vector<int> order;
+  const int result = pumpCodecPackets([&] {
+    order.push_back(1);
+    return ++sends == 1 ? AVERROR(EAGAIN) : 0;
+  }, [&] {
+    order.push_back(2);
+    return ++receives == 3 || receives == 6 ? AVERROR(EAGAIN) : 0;
+  });
+  EXPECT_EQ(result, 0);
+  EXPECT_EQ(sends, 2);
+  EXPECT_EQ(receives, 6);
+  EXPECT_EQ(order, (std::vector<int>{1, 2, 2, 2, 1, 2, 2, 2}));
+}
+
+TEST(CodecPacketPumpTest, NoProgressAndCodecErrorsAreFailuresNotSuccessfulDrain) {
+  EXPECT_EQ(pumpCodecPackets([] { return AVERROR(EAGAIN); },
+                             [] { return AVERROR(EAGAIN); }), AVERROR_BUG);
+  EXPECT_EQ(pumpCodecPackets([] { return AVERROR(EIO); },
+                             [] { return 0; }), AVERROR(EIO));
+  EXPECT_EQ(pumpCodecPackets([] { return 0; },
+                             [] { return AVERROR(EIO); }), AVERROR(EIO));
+  EXPECT_EQ(pumpCodecPackets([] { return 0; },
+                             [] { return AVERROR_EOF; }, true), 0);
+  EXPECT_EQ(pumpCodecPackets([] { return 0; },
+                             [] { return AVERROR(EAGAIN); }, true), AVERROR_BUG);
 }
 
 TEST(AudioEncoderTest, OpusInitializesWhenAvailable) {
