@@ -37,8 +37,10 @@ public:
   Q_INVOKABLE bool inspect(const QString &source);
   // Mode 0 = remux (default, instant), 1 = convert to H.264 + AAC.
   // maxHeight applies to the conversion mode only (0 = keep source size).
+  // audioGains is aligned with audioStreams (0..1 linear); empty means 1.0.
   Q_INVOKABLE bool start(const QString &directory, const QVariantList &audioStreams,
-                         int mode = 0, int maxHeight = 0);
+                         int mode = 0, int maxHeight = 0,
+                         const QVariantList &audioGains = {});
   Q_INVOKABLE bool startBatch(const QString &directory, const QVariantList &captures,
                               int mode = 0, int maxHeight = 0);
   Q_INVOKABLE bool copyOriginals(const QStringList &sources, const QString &directory);

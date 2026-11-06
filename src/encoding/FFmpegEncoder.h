@@ -44,7 +44,10 @@ public:
   bool initialize(const EncoderConfig &config) override;
   EncoderConfig config() const override { return m_config; }
   bool encodeFrame(const VideoFrame &frame, EncodedPacket &output) override;
+  bool encodeFrames(const VideoFrame &frame,
+                    std::vector<EncodedPacket> &packets) override;
   int flush(std::vector<EncodedPacket> &packets) override;
+  void requestKeyframe() override { m_keyframeRequested.store(true); }
 
   EncoderType type() const override { return m_type; }
   QString name() const override { return m_name; }
@@ -81,6 +84,9 @@ private:
   void logSummary();
   void reportEncodeRejection(int code);
   bool convertSoftwareFrame(const VideoFrame &frame);
+  int submitFrame(AVFrame *frame, std::vector<EncodedPacket> &packets,
+                  bool *accepted = nullptr);
+  std::vector<EncodedPacket> m_pendingPackets;
 
   int m_lastInputWidth = 0;
   int m_lastInputHeight = 0;
@@ -114,6 +120,9 @@ private:
   std::atomic<int64_t> m_droppedFrames{0};
   std::atomic<int64_t> m_sendFailures{0};
   std::atomic<int64_t> m_backpressureFrames{0};
+  // Set by requestKeyframe() (owner/rotation thread), consumed by the next
+  // encodeFrames() submission (encoding thread).
+  std::atomic<bool> m_keyframeRequested{false};
   bool m_lastMapSucceeded = true; // suppress transition spam; first failure logs
   bool m_lastImportSucceeded = true;
   bool m_summaryLogged = false;

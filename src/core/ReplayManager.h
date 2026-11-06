@@ -125,6 +125,18 @@ private:
   // order dropped ~300ms of A/V on every switch (visible as a freeze in
   // any clip spanning the seam).
   bool switchSegment();
+  // Persistent rotation: swap only the container on a forced keyframe while
+  // the encoder/session/audio stay live. Returns false when a rebuild is
+  // required (settings changed or the successor could not be armed).
+  bool armPersistentRotation();
+  // Abort a pending persistent rotation and finalize a cut that already
+  // happened, enlisting the outgoing segment. No rotation signals fire.
+  bool settlePendingRotation();
+  void drainRetiredMuxers();
+  QString encoderSetupKey() const;
+  void onOutputRotated(const QString &oldPath, const QString &newPath,
+                       qint64 oldBytes, const QJsonObject &audioHistory);
+  void onOutputRotationAborted(const QString &nextPath);
   bool retireOpenSegment(double switchSec);
   void pollRetirements();
   void completeDvrStop();
@@ -264,6 +276,14 @@ private:
   int m_segmentIndex = 0;
   double m_openSegmentStart = 0.0;
   QString m_openSegmentPath;
+  // Persistent-rotation bookkeeping (owner thread). m_muxer is null once the
+  // session owns the live muxer after the first successful arm.
+  QTimer *m_rotationWatchdog = nullptr;
+  bool m_rotationPending = false;
+  QString m_pendingRotationPath;
+  // Settings snapshot the live session/encoder was built from. A mismatch
+  // at rotation time forces the make-before-break rebuild instead.
+  QString m_encoderSetupKey;
 };
 
 } // namespace TrophyBackend

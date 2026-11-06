@@ -9,9 +9,11 @@
 
 #include "audio/AudioMixer.h"
 #include "capture/IVideoCaptureSource.h"
+#include "capture/CpuFramePool.h"
 #include "encoding/AudioEncoder.h"
 #include "EncodeTimingWindow.h"
 #include "audio/AudioDriftCorrector.h"
+#include "muxing/IMuxer.h"
 #include <QElapsedTimer>
 #include <QMap>
 #include <QObject>
@@ -26,10 +28,13 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
+#include <vector>
 #include "FrameDispatcher.h"
 
 
@@ -89,6 +94,39 @@ public:
   QString outputErrorText() const;
   bool outputSucceeded() const {
     return m_outputFinalized.load() && !m_outputFailed.load();
+  }
+
+  // --- Persistent DVR output rotation ---------------------------------
+  // Swap only the container while the encoder/audio pipeline stays live.
+  // The cut lands on a forced video keyframe. `nextMuxer` must be an
+  // uninitialized muxer; `currentMuxer` is the externally owned current
+  // muxer, or null once this session already owns it. On success the
+  // session takes ownership of both and outputPath() becomes nextPath.
+  // Returns false (ownership stays with the caller) when a rotation is
+  // already pending or the successor cannot be prepared.
+  bool beginOutputRotation(std::unique_ptr<IMuxer> &nextMuxer,
+                           std::unique_ptr<IMuxer> &currentMuxer,
+                           const QString &nextPath,
+                           const QMap<QString, QString> &metadata);
+  // Abort a rotation that has not cut yet: held audio is written to the
+  // current file and the successor is discarded. Emits outputRotationAborted.
+  void abortOutputRotation();
+  struct RotationResult {
+    QString oldPath;
+    qint64 oldBytes = 0;
+    QJsonObject audioHistory{};
+  };
+  // Settle any rotation synchronously (stop path). A cut already made is
+  // finalized and returned so the owner can enlist that segment; a rotation
+  // still waiting for its keyframe is aborted. Never emits a signal.
+  std::optional<RotationResult> settleRotation();
+  bool rotationPending() const;
+  // Owner-thread cleanup: finalized outgoing muxers are deleted here because
+  // QObject destruction must not happen on the encoding thread.
+  std::vector<std::unique_ptr<IMuxer>> takeRetiredMuxers();
+  QString outputPath() const {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    return m_outputPath;
   }
 
   qint64 frameCount() const { return m_frameCount; }
@@ -161,9 +199,16 @@ public:
 signals:
   void errorOccurred(const QString &error);
   void stopFinished();
+  // Emitted after a persistent rotation cut has finalized the outgoing file.
+  // Queued to the owner, which must call takeRetiredMuxers() to release it.
+  void outputRotated(const QString &oldPath, const QString &newPath,
+                     qint64 oldBytes, const QJsonObject &audioHistory);
+  // Emitted when a rotation could not cut and was rolled back.
+  void outputRotationAborted(const QString &nextPath);
 
 private:
   friend class RecordingSessionTestPeer;
+  std::function<void()> m_realFrameHandoverHook; // Test-only publication gate.
   void encodingLoop();
   bool retireStopRouting(bool keepCaptureSource, bool handoffRouting);
   void finishStopNative();
@@ -173,7 +218,59 @@ private:
   bool m_asyncHandoff = false;
   bool m_finishCaptureStop = false;
   bool writeOutputPacket(const EncodedPacket &packet);
+  qint64 currentMuxerBytes() const;
+  bool writeToMuxer(IMuxer *muxer, const EncodedPacket &packet);
+  // Rotation state machine. All of these require m_rotationMutex held.
+  bool performRotationCutLocked(const EncodedPacket &keyframe);
+  bool abortRotationLocked();
+  void finalizeRotationOldLocked();
+  void checkRotationFenceLocked();
+  bool rotationFenceSatisfiedLocked() const;
+  void noteOutgoingLocked(const EncodedPacket &packet);
+  void markAudioCaughtUpLocked(int stream);
+  void resetAudioHistoryForSegment();
+  void pollRotation();
+  void flushRotationEvents(); // Emits outside m_rotationMutex.
+  struct RotationEvent {
+    bool aborted = false;
+    QString oldPath;
+    QString newPath;
+    qint64 oldBytes = 0;
+    QJsonObject audioHistory;
+  };
+  enum class RotationState { None, Pending, Rotating };
+  static constexpr int64_t kNoPts = std::numeric_limits<int64_t>::min();
+  static constexpr int64_t kRotationKeyframeTimeoutMs = 2000;
+  static constexpr int64_t kRotationFenceTimeoutMs = 1500;
+  static constexpr qint64 kRotationHeldAudioLimit = 1 << 20; // ~1 MiB
+  mutable std::mutex m_rotationMutex;
+  RotationState m_rotationState = RotationState::None;
+  // Owns the current muxer once this session has adopted it (after the first
+  // rotation). Before that the muxer is externally owned (m_ownedCurrent null).
+  std::unique_ptr<IMuxer> m_ownedCurrent;
+  std::unique_ptr<IMuxer> m_rotationNext;
+  std::unique_ptr<IMuxer> m_rotationOld;
+  std::vector<std::unique_ptr<IMuxer>> m_retiredMuxers;
+  std::vector<StreamInfo> m_streamInfos; // start() stream layout, in order
+  std::vector<EncodedPacket> m_heldAudio;
+  qint64 m_heldAudioBytes = 0;
+  int64_t m_lastWrittenVideoPts = kNoPts;
+  std::vector<int64_t> m_lastWrittenAudioPts; // indexed by muxer stream
+  // Streams whose outgoing-file audio must reach the cut before it finalizes.
+  std::vector<bool> m_rotationFencePending;
+  std::vector<RotationEvent> m_rotationEvents;
+  qint64 m_rotationOldBytes = 0;
+  QString m_rotationNextPath;
+  QString m_rotationOldPath;
+  QJsonObject m_rotationOldHistory;
+  int64_t m_rotationHoldFrom = 0;
+  int64_t m_rotationCutPts = 0;
+  int64_t m_rotationArmedAtMs = 0;
+  int64_t m_rotationCutAtMs = 0;
   void setOutputError(const QString &text);
+  void failOutput(const QString &text);
+  void encodeAudioPackets(AudioEncoder &encoder, const float *samples,
+                          int frames, int stream);
   // Caller holds m_mergeMutex; silence fills missing slots after bounded grace.
   void drainMergedAudio(int channels, bool flushTail = false);
   void noteCapturedVideo(const VideoFrame &frame);
@@ -339,7 +436,7 @@ private:
   // Shared-memory frames borrow the producer's mapping, which goes straight
   // back to PipeWire, so the pixels are copied here; DMA-BUF frames are kept
   // alive by their lease instead.
-  std::shared_ptr<std::vector<uint8_t>> m_lastFramePixels;
+  CpuFramePool m_cpuFramePool;
   // The capture callback runs on the PipeWire thread while the timer runs on
   // the session's thread, so the retained frame is published under a lock.
   mutable std::mutex m_stillFrameMutex;
@@ -367,9 +464,16 @@ private:
   bool m_gameIsFallback = false;
   bool m_desktopAudio = false;
   void noteAudioRouting(); // Owner-thread routing history; audio receipt is atomic.
-  bool m_audioHistoryStarted = false;
-  bool m_usedSystemAudio = false;
-  bool m_usedGameAudio = false;
+  // Read on the encoding thread when a persistent rotation snapshots and
+  // resets per-segment history, so these are atomics.
+  std::atomic<bool> m_audioHistoryStarted{false};
+  std::atomic<bool> m_usedSystemAudio{false};
+  std::atomic<bool> m_usedGameAudio{false};
+  // Last routing state published by noteAudioRouting (owner thread). The cut
+  // seeds the next segment's history from these instead of racing the plain
+  // owner-thread routing flags.
+  std::atomic<bool> m_historyFallback{false};
+  std::atomic<bool> m_historyDesktop{false};
   std::array<std::atomic<bool>, kAudioTrackCount> m_audioReceived{};
   std::atomic<quint64> m_queueDrops{0};
   // One-shot note when voice capture is suppressed by full-mix fallback

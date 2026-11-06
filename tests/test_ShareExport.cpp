@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QDir>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QThread>
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <thread>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -474,6 +476,66 @@ TEST_F(ShareExportTest, SingleStereoTrackIsCopiedWithoutReencoding) {
       ShareExportEngine::run(aacSource, directory.path(), {{1}}, cancel, progress);
   ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
   EXPECT_EQ(digest(result.path, AVMEDIA_TYPE_AUDIO, 0), expected);
+
+  // A reduced gain cannot be expressed by copying: the track is re-encoded
+  // and the mix is scaled.
+  ShareExportOptions reduced;
+  reduced.audioStreams = {1};
+  reduced.audioGains = {0.5};
+  const auto quiet =
+      ShareExportEngine::run(aacSource, directory.path(), reduced, cancel, progress);
+  ASSERT_TRUE(quiet.error.isEmpty()) << quiet.error.toStdString();
+  EXPECT_NE(digest(quiet.path, AVMEDIA_TYPE_AUDIO, 0), expected);
+  const double copiedTone = tone(audio(result.path), 440);
+  const double quietTone = tone(audio(quiet.path), 440);
+  EXPECT_GT(copiedTone, 0.04);
+  EXPECT_NEAR(quietTone, copiedTone * 0.5, 0.02);
+}
+
+TEST_F(ShareExportTest, PerTrackGainsScaleTheMixAndZeroIsSilent) {
+  ShareExportOptions full;
+  full.audioStreams = {1};
+  const auto fullResult = ShareExportEngine::run(source, directory.path(), full, cancel, progress);
+  ASSERT_TRUE(fullResult.error.isEmpty()) << fullResult.error.toStdString();
+  const double fullTone = tone(audio(fullResult.path), 440);
+
+  ShareExportOptions half;
+  half.audioStreams = {1};
+  half.audioGains = {0.5};
+  const auto halfResult = ShareExportEngine::run(source, directory.path(), half, cancel, progress);
+  ASSERT_TRUE(halfResult.error.isEmpty()) << halfResult.error.toStdString();
+  const double halfTone = tone(audio(halfResult.path), 440);
+  EXPECT_GT(fullTone, 0.04);
+  EXPECT_NEAR(halfTone, fullTone * 0.5, 0.015);
+
+  ShareExportOptions silent;
+  silent.audioStreams = {1};
+  silent.audioGains = {0.0};
+  const auto silentResult = ShareExportEngine::run(source, directory.path(), silent, cancel, progress);
+  ASSERT_TRUE(silentResult.error.isEmpty()) << silentResult.error.toStdString();
+  EXPECT_LT(tone(audio(silentResult.path), 440), 0.001);
+}
+
+TEST_F(ShareExportTest, ServiceForwardsAudioGainsToTheEngine) {
+  ShareExportOptions reference;
+  reference.audioStreams = {1};
+  const auto full = ShareExportEngine::run(source, directory.path(), reference, cancel, progress);
+  ASSERT_TRUE(full.error.isEmpty()) << full.error.toStdString();
+  const double fullTone = tone(audio(full.path), 440);
+
+  QTemporaryDir output;
+  ASSERT_TRUE(output.isValid());
+  StorageManager storage(directory.path());
+  ShareExporter service(&storage);
+  ASSERT_TRUE(service.inspect(source));
+  ASSERT_TRUE(wait(service));
+  ASSERT_TRUE(service.start(output.path(), {1}, 0, 0, {0.5}));
+  ASSERT_TRUE(wait(service));
+  ASSERT_TRUE(service.error().isEmpty()) << service.error().toStdString();
+  ASSERT_FALSE(service.resultPath().isEmpty());
+  EXPECT_NEAR(tone(audio(service.resultPath()), 440), fullTone * 0.5, 0.015);
+  service.release();
+  EXPECT_TRUE(storage.reserveRecordings({source})); storage.releaseRecordings({source});
 }
 
 TEST_F(ShareExportTest, TrackSelectionExcludesVoiceAndPreservesLateOffset) {
@@ -537,7 +599,8 @@ TEST_F(ShareExportTest, BatchQueuesDifferentCapturesWithIndependentAudioAndReser
   ASSERT_TRUE(service.inspect(second)); // The batch form retains its last probe.
   ASSERT_TRUE(wait(service));
   ASSERT_TRUE(service.startBatch(output.path(), {
-      QVariantMap{{"sourcePath", source}, {"audioStreams", QVariantList{1}}},
+      QVariantMap{{"sourcePath", source}, {"audioStreams", QVariantList{1}},
+                  {"audioGains", QVariantList{0.0}}},
       QVariantMap{{"sourcePath", second}, {"audioStreams", QVariantList{}}}}));
   ASSERT_EQ(service.jobs().size(), 2);
   EXPECT_TRUE(service.jobs()[0].toMap()["active"].toBool());
@@ -554,6 +617,9 @@ TEST_F(ShareExportTest, BatchQueuesDifferentCapturesWithIndependentAudioAndReser
     ASSERT_GE(avformat_find_stream_info(ctx, nullptr), 0);
     EXPECT_EQ(ctx->nb_streams, i == 0 ? 2u : 1u);
     avformat_close_input(&ctx);
+    // The per-capture gain travelled with the batch row.
+    if (i == 0)
+      EXPECT_LT(tone(audio(path), 440), 0.001);
   }
   EXPECT_TRUE(storage.reserveRecordings({source, second}));
   storage.releaseRecordings({source, second});
@@ -692,6 +758,189 @@ TEST_F(ShareExportTest, AacResamplingPreservesLateAudioAndAudibleTail) {
   EXPECT_LT(tone(pcm, 880, 0.05, 0.2), 0.001);
   EXPECT_GT(tone(pcm, 880), 0.04);
   EXPECT_GT(tone(pcm, 880, 1.6, 0.2), 0.04);
+}
+
+TEST_F(ShareExportTest, MutingAnotherTrackDoesNotChangeRemainingTrackGain) {
+  for (auto mode : {ShareExportOptions::Mode::Copy, ShareExportOptions::Mode::Convert}) {
+    ShareExportOptions options;
+    options.mode = mode;
+    options.audioStreams = {1};
+    const auto single = ShareExportEngine::run(source, directory.path(), options, cancel, progress);
+    ASSERT_TRUE(single.error.isEmpty()) << single.error.toStdString();
+    const double reference = tone(audio(single.path), 440);
+    ASSERT_GT(reference, 0.04);
+    options.audioStreams = {1, 2};
+    options.audioGains = {1.0, 0.01};
+    const auto mixed = ShareExportEngine::run(source, directory.path(), options, cancel, progress);
+    ASSERT_TRUE(mixed.error.isEmpty()) << mixed.error.toStdString();
+    EXPECT_NEAR(tone(audio(mixed.path), 440), reference, reference * 0.08);
+  }
+}
+
+TEST_F(ShareExportTest, ConversionRejectsDuplicateAudioStreams) {
+  ShareExportOptions options;
+  options.mode = ShareExportOptions::Mode::Convert;
+  options.audioStreams = {1, 1};
+  const auto result = ShareExportEngine::run(source, directory.path(), options, cancel, progress);
+  EXPECT_TRUE(result.path.isEmpty());
+  EXPECT_TRUE(result.error.contains("audio selection")) << result.error.toStdString();
+}
+
+TEST_F(ShareExportTest, ShortResampledAudioSurvivesEntirelyBufferedFilterTail) {
+  const auto tiny = directory.filePath("tiny-audio.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "color=size=64x64:rate=10:duration=2", "-f", "lavfi", "-i",
+      "aevalsrc=0.5:s=44100,atrim=end_sample=32", "-map", "0:v", "-map", "1:a",
+      "-c:v", "mpeg4", "-c:a", "pcm_s16le", tiny});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  for (auto mode : {ShareExportOptions::Mode::Copy, ShareExportOptions::Mode::Convert}) {
+    ShareExportOptions options;
+    options.mode = mode;
+    options.audioStreams = {1};
+    const auto result = ShareExportEngine::run(tiny, directory.path(), options, cancel, progress);
+    ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+    const auto pcm = audio(result.path);
+    double energy = 0;
+    for (float sample : pcm) energy += sample * sample;
+    EXPECT_GT(energy, 0.5) << "resampler-buffered audio vanished at EOF";
+  }
+}
+
+TEST_F(ShareExportTest, LongVideoGapStreamsAudioOnDemandWithoutLosingContent) {
+  const auto gapped = directory.filePath("audio-ahead.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "color=size=64x64:rate=10:duration=0.2", "-f", "lavfi", "-i",
+      "sine=sample_rate=48000:duration=40", "-map", "0:v", "-map", "1:a", "-map", "1:a", "-map", "1:a",
+      "-vf", "setpts=N*100/TB", "-fps_mode", "passthrough", "-c:v", "mpeg4", "-c:a", "pcm_s16le", gapped});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  for (auto mode : {ShareExportOptions::Mode::Copy, ShareExportOptions::Mode::Convert}) {
+    ShareExportOptions options;
+    options.mode = mode;
+    options.audioStreams = {1, 2, 3};
+    const auto result = ShareExportEngine::run(gapped, directory.path(), options, cancel, progress);
+    ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+    const auto pcm = audio(result.path);
+    // Three 40-second streams formerly exceeded the 32 MiB queue while the
+    // video cursor waited for its next frame at 100 seconds. They must now
+    // export all the way through, retaining their summed gain and timing.
+    EXPECT_GT(tone(pcm, 440, 0.5, 0.2), 0.20);
+    EXPECT_GT(tone(pcm, 440, 20.0, 0.2), 0.20);
+    EXPECT_GT(tone(pcm, 440, 39.5, 0.2), 0.20);
+    EXPECT_LT(tone(pcm, 440, 41.0, 0.2), 0.001);
+    EXPECT_TRUE(QDir(directory.path()).entryList({"*.part"}, QDir::Files | QDir::Hidden).isEmpty());
+    EXPECT_TRUE(QFile::exists(gapped));
+  }
+}
+
+TEST_F(ShareExportTest, CopyAudioTailUsesLastPacketDurationNotAverageFrameRate) {
+  const auto variable = directory.filePath("variable-duration.mov");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=64x64:rate=10:duration=0.3", "-f", "lavfi", "-i",
+      "sine=sample_rate=48000:duration=0.1", "-map", "0:v", "-map", "1:a",
+      "-vf", "setpts='if(eq(N,2),9,N)/(10*TB)'", "-fps_mode", "passthrough",
+      "-c:v", "mpeg4", "-c:a", "pcm_s16le", variable});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  const auto result = ShareExportEngine::run(variable, directory.path(), {{1}}, cancel, progress);
+  ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+  AVFormatContext *ctx = nullptr;
+  ASSERT_GE(avformat_open_input(&ctx, QFile::encodeName(result.path).constData(), nullptr, nullptr), 0);
+  ASSERT_GE(avformat_find_stream_info(ctx, nullptr), 0);
+  const int index = av_find_best_stream(ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  ASSERT_GE(index, 0);
+  const auto *stream = ctx->streams[index];
+  EXPECT_NEAR(stream->duration * av_q2d(stream->time_base), 1.0, 0.05);
+  avformat_close_input(&ctx);
+}
+
+TEST_F(ShareExportTest, DemandAudioPreservesGapsLateTracksAndTailBeyondVideoEof) {
+  const auto late = directory.filePath("late-long-audio.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=64x64:rate=30:duration=0.3", "-f", "lavfi", "-i",
+      "sine=frequency=440:sample_rate=44100:duration=3,aselect='not(between(t,0.8,1.8))'", "-itsoffset", "1.2",
+      "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=32000:duration=1.8",
+      "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "mpeg4", "-c:a", "pcm_s16le", late});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  for (auto mode : {ShareExportOptions::Mode::Copy, ShareExportOptions::Mode::Convert}) {
+    ShareExportOptions options;
+    options.mode = mode;
+    options.audioStreams = {2, 1}; // Cursor/stream order must not change gains.
+    options.audioGains = {0.25, 0.75};
+    const auto result = ShareExportEngine::run(late, directory.path(), options, cancel, progress);
+    ASSERT_TRUE(result.error.isEmpty()) << result.error.toStdString();
+    const auto pcm = audio(result.path);
+    EXPECT_NEAR(double(pcm.size()) / (48000 * 2), 3.0, 0.05);
+    EXPECT_GT(tone(pcm, 440, 0.5, 0.2), 0.04);
+    EXPECT_LT(tone(pcm, 880, 0.5, 0.2), 0.001);
+    EXPECT_LT(tone(pcm, 440, 1.3, 0.2), 0.001);
+    EXPECT_GT(tone(pcm, 880, 1.3, 0.2), 0.015);
+    EXPECT_GT(tone(pcm, 440, 2.5, 0.2), 0.04);
+    EXPECT_GT(tone(pcm, 880, 2.5, 0.2), 0.015);
+  }
+}
+
+TEST_F(ShareExportTest, CancelDuringStillFrameExpansionStopsAndRemovesPartial) {
+  // Start a fresh process, rather than forking an initialized GPU runtime.
+  // The parent bounds a regression that would otherwise encode for hours.
+  if (!qEnvironmentVariableIsSet("TROPHY_TEST_EXPORT_CANCEL_CHILD")) {
+    QProcess child;
+    auto env = QProcessEnvironment::systemEnvironment();
+    env.insert("TROPHY_TEST_EXPORT_CANCEL_CHILD", "1");
+    child.setProcessEnvironment(env);
+    child.setProcessChannelMode(QProcess::MergedChannels);
+    child.start(QCoreApplication::applicationFilePath(),
+                {"--gtest_filter=ShareExportTest.CancelDuringStillFrameExpansionStopsAndRemovesPartial"});
+    ASSERT_TRUE(child.waitForStarted());
+    if (!child.waitForFinished(10000)) {
+      child.kill();
+      child.waitForFinished();
+      FAIL() << "export kept expanding still frames after cancellation";
+    }
+    ASSERT_EQ(child.exitStatus(), QProcess::NormalExit) << child.readAll().toStdString();
+    EXPECT_EQ(child.exitCode(), 0) << child.readAll().toStdString();
+    return;
+  }
+  const auto gapped = directory.filePath("cancel-gap.mkv");
+  QProcess ffmpeg;
+  ffmpeg.start("ffmpeg", {"-y", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=64x64:rate=30:duration=0.066", "-vf", "setpts=N*36000/TB",
+      "-fps_mode", "passthrough", "-c:v", "mpeg4", gapped});
+  ASSERT_TRUE(ffmpeg.waitForFinished(30000));
+  ASSERT_EQ(ffmpeg.exitCode(), 0) << ffmpeg.readAllStandardError().toStdString();
+  std::atomic_bool expanding{false};
+  // The two tiny source frames cannot write 32 KiB on their own. Waiting
+  // for output proves cancellation happened inside the repeat loop, not
+  // before encoder initialization or demux.
+  std::thread stop([&] {
+    QElapsedTimer timer; timer.start();
+    while (timer.elapsed() < 5000) {
+      const auto files = QDir(directory.path()).entryInfoList({"*.part"}, QDir::Files | QDir::Hidden);
+      for (const auto &file : files) {
+        if (file.size() >= 32768) {
+          expanding = true;
+          cancel = true;
+          return;
+        }
+      }
+      QThread::msleep(1);
+    }
+    cancel = true;
+  });
+  ShareExportOptions options;
+  options.mode = ShareExportOptions::Mode::Convert;
+  const auto result = ShareExportEngine::run(gapped, directory.path(), options, cancel, progress);
+  stop.join();
+  EXPECT_TRUE(expanding);
+  EXPECT_TRUE(result.path.isEmpty());
+  EXPECT_TRUE(result.error.contains("cancel", Qt::CaseInsensitive)) << result.error.toStdString();
+  EXPECT_TRUE(QDir(directory.path()).entryList({"*.part"}, QDir::Files | QDir::Hidden).isEmpty());
 }
 
 TEST_F(ShareExportTest, RealOutputWriteLimitFailureLeavesNoPartialOrDeletedSource) {

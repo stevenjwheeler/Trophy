@@ -152,12 +152,20 @@ ApplicationWindow {
         }
     }
 
-    function openShareExport(path, excludedAudioOrdinals) {
+    function openShareExport(path, audioVolumes) {
         if (!path || shareExporter.inspecting)
             return;
         shareDialog.sourcePath = path;
         shareDialog.sourcePaths = [];
-        shareDialog.excludedAudioOrdinals = excludedAudioOrdinals || [];
+        // The player passes per-track volumes keyed by audio ordinal. Legacy
+        // callers may still pass an excluded-ordinals array.
+        if (Array.isArray(audioVolumes)) {
+            shareDialog.excludedAudioOrdinals = audioVolumes;
+            shareDialog.sourceAudioVolumes = ({});
+        } else {
+            shareDialog.excludedAudioOrdinals = [];
+            shareDialog.sourceAudioVolumes = audioVolumes || ({});
+        }
         shareDialog.open();
     }
 
@@ -170,6 +178,7 @@ ApplicationWindow {
         }
         shareDialog.sourcePaths = paths.slice();
         shareDialog.excludedAudioOrdinals = [];
+        shareDialog.sourceAudioVolumes = ({});
         shareDialog.open();
     }
 

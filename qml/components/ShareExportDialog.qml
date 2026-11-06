@@ -61,6 +61,12 @@ TrophyDialog {
         ? exportHeight + "p" : qsTr("original resolution")
     readonly property string producesText: qsTr("MP4 · %1 video · one AAC stereo track · %2")
         .arg(root.producedVideo).arg(root.producedResolution)
+    // Optional per-ordinal volumes from the player (0..1). A zero stays out
+    // of selectedAudio, exactly like flipping a track off used to.
+    property var sourceAudioVolumes: ({})
+    property var selectedGains: ({})
+    property var captureGains: []
+    // Legacy single-file exclusion list (still accepted from older callers).
     property var excludedAudioOrdinals: []
     property bool tracksLoaded: false
     // Audio collapses to one line by default; the checkboxes are behind it.
@@ -91,7 +97,10 @@ TrophyDialog {
         };
     }
     function audioCountFor(index) {
-        return batch ? (captureAudio[index] || []).length : selectedAudio.length;
+        if (!batch)
+            return selectedAudio.length;
+        return index === currentCapture ? selectedAudio.length
+                                        : (captureAudio[index] || []).length;
     }
     // Rough export cost from the engine's measured rates. Guidance, not a
     // promise: conversion assumes a hardware encoder and is far slower on a
@@ -129,12 +138,26 @@ TrophyDialog {
             ? qsTr("Estimated time to complete export: %1 (hardware encoder; longer without one)").arg(text)
             : qsTr("Estimated time to complete export: %1").arg(text);
     }
+    // Raw gain for the slider/label, independent of whether the track is
+    // currently selected. This keeps a drag from being reset while the
+    // selection list and the gain map are updated in sequence.
+    function gainValue(index) {
+        const gain = selectedGains[index];
+        return gain === undefined ? (selectedAudio.indexOf(index) !== -1 ? 1 : 0) : gain;
+    }
+    // Selection-aware gain used by the summary and the export.
+    function trackGain(index) {
+        return selectedAudio.indexOf(index) === -1 ? 0 : gainValue(index);
+    }
     readonly property string audioSummary: {
         if (!tracksLoaded)
             return qsTr("Reading tracks…");
         const tracks = currentInfo.tracks || [];
-        const names = tracks.filter(track => selectedAudio.indexOf(track.index) !== -1)
-            .map(track => track.label + (track.inferred ? "*" : ""));
+        const names = tracks.filter(track => trackGain(track.index) > 0.001).map(track => {
+            const gain = trackGain(track.index);
+            return track.label + (track.inferred ? "*" : "")
+                + (gain < 0.995 ? " " + Math.round(gain * 100) + "%" : "");
+        });
         return names.length ? names.join(" + ") : qsTr("No audio");
     }
     // The recording behind this export, for the header. Resolved from the
@@ -197,10 +220,42 @@ TrophyDialog {
                              Math.max(320, (parent ? parent.height : 800) - Theme.spacingLarge))
     closePolicy: working ? Popup.NoAutoClose : Popup.CloseOnEscape
 
-    function defaultAudio(info) {
+    function defaultGainFor(track, ordinal) {
+        const key = track.ordinal !== undefined ? track.ordinal : ordinal;
+        // The player's per-lane volumes win for a single capture; batch
+        // exports from the library keep the engine's default selection.
+        if (!batch && sourceAudioVolumes && sourceAudioVolumes[key] !== undefined) {
+            const volume = Number(sourceAudioVolumes[key]);
+            return isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
+        }
+        if (excludedAudioOrdinals.indexOf(key) !== -1)
+            return 0;
+        if (track.defaultExcluded)
+            return 0;
+        return 1;
+    }
+    function defaultGains(info) {
+        const gains = ({});
+        (info.tracks || []).forEach((track, ordinal) => {
+            gains[track.index] = defaultGainFor(track, ordinal);
+        });
+        return gains;
+    }
+    function includedIndices(info, gains) {
         return (info.tracks || [])
-            .filter((track, ordinal) => !track.defaultExcluded && (batch || excludedAudioOrdinals.indexOf(track.ordinal !== undefined ? track.ordinal : ordinal) === -1))
+            .filter(track => (gains[track.index] === undefined ? 0 : gains[track.index]) > 0.001)
             .map(track => track.index);
+    }
+    function setTrackGain(index, value) {
+        const gain = Math.max(0, Math.min(1, value));
+        const gains = Object.assign({}, selectedGains);
+        gains[index] = gain;
+        selectedGains = gains;
+        const tracks = selectedAudio.slice();
+        const at = tracks.indexOf(index);
+        if (gain > 0.001 && at < 0) tracks.push(index);
+        if (gain <= 0.001 && at >= 0) tracks.splice(at, 1);
+        selectedAudio = tracks;
     }
 
     // Called once every selected capture has been probed.
@@ -223,18 +278,31 @@ TrophyDialog {
         let selections = captureAudio.slice();
         selections[currentCapture] = selectedAudio.slice();
         captureAudio = selections;
+        let gains = captureGains.slice();
+        gains[currentCapture] = Object.assign({}, selectedGains);
+        captureGains = gains;
         currentCapture = index;
         selectedAudio = (captureAudio[index] || []).slice();
+        selectedGains = Object.assign({}, captureGains[index] || {});
     }
 
     function exportCaptures() {
         // Video is copied and the selected tracks are mixed into one stereo
-        // track: chat apps cannot switch audio tracks.
+        // track: chat apps cannot switch audio tracks. Per-track gains travel
+        // with the selection so the player's volume mix carries into the file.
         const height = effectiveMode === 1 ? exportHeight : 0;
+        const gains = selectedAudio.map(index => trackGain(index));
         if (!batch)
-            return exporter.start(destination, selectedAudio, effectiveMode, height);
+            return exporter.start(destination, selectedAudio, effectiveMode, height, gains);
         chooseCapture(currentCapture);
-        const captures = sourcePaths.map((path, index) => ({sourcePath: path, audioStreams: captureAudio[index]}));
+        const captures = sourcePaths.map((path, index) => ({
+            sourcePath: path,
+            audioStreams: captureAudio[index],
+            audioGains: (captureAudio[index] || []).map(stream => {
+                const trackGains = captureGains[index] || {};
+                return trackGains[stream] === undefined ? 1 : trackGains[stream];
+            })
+        }));
         return exporter.startBatch(destination, captures, effectiveMode, height);
     }
 
@@ -246,6 +314,8 @@ TrophyDialog {
         preparationError = "";
         captureInfos = [];
         captureAudio = [];
+        captureGains = [];
+        selectedGains = ({});
         currentCapture = 0;
         scanIndex = 0;
         ++scanTicket;
@@ -282,16 +352,21 @@ TrophyDialog {
                 }
                 let infos = root.captureInfos.slice();
                 let selections = root.captureAudio.slice();
+                let gains = root.captureGains.slice();
+                const captureGains = root.defaultGains(info);
                 infos.push(info);
-                selections.push(root.defaultAudio(info));
+                selections.push(root.includedIndices(info, captureGains));
+                gains.push(captureGains);
                 root.captureInfos = infos;
                 root.captureAudio = selections;
+                root.captureGains = gains;
                 ++root.scanIndex;
                 if (root.scanIndex < root.sourcePaths.length) {
                     const ticket = root.scanTicket;
                     Qt.callLater(() => root.inspectNext(ticket));
                 } else {
                     root.selectedAudio = root.captureAudio[0].slice();
+                    root.selectedGains = Object.assign({}, root.captureGains[0] || {});
                     root.preparingBatch = false;
                     root.tracksLoaded = true;
                     root.applyModeDefault();
@@ -300,7 +375,8 @@ TrophyDialog {
             }
             if (!root.tracksLoaded && root.exporter.sourcePath === root.sourcePath
                     && !root.exporter.inspecting && root.exporter.info.tracks) {
-                root.selectedAudio = root.defaultAudio(root.exporter.info);
+                root.selectedGains = root.defaultGains(root.exporter.info);
+                root.selectedAudio = root.includedIndices(root.exporter.info, root.selectedGains);
                 root.tracksLoaded = true;
                 root.applyModeDefault();
             }
@@ -584,10 +660,9 @@ TrophyDialog {
                         required property var modelData
                         objectName: "shareAudioTrack" + modelData.index
                         // Kept as a property so callers can read the label the
-                        // same way they did when this was a checkbox.
+                        // same way they did when this row had a switch.
                         property string text: modelData.label
                             + (modelData.inferred ? qsTr(" (estimated)") : "")
-                        visible: !modelData.defaultExcluded
                         Layout.fillWidth: true
                         Layout.topMargin: Theme.spacingTiny
                         Layout.bottomMargin: Theme.spacingTiny
@@ -597,22 +672,33 @@ TrophyDialog {
                             text: trackRow.text
                             textFormat: Text.PlainText
                             color: Theme.textColor
+                            opacity: root.gainValue(trackRow.modelData.index) > 0.001 ? 1 : 0.55
                             wrapMode: Text.WordWrap
                             verticalAlignment: Text.AlignVCenter
                         }
-                        // A switch per source: the label fills the row and the
-                        // control sits where the eye expects it.
-                        TrophySwitch {
-                            objectName: "shareAudioSwitch" + trackRow.modelData.index
+                        // A gain bar per source: zero removes it from the
+                        // mix, exactly like the player's lane volume.
+                        TrophySlider {
+                            objectName: "shareAudioSlider" + trackRow.modelData.index
+                            Layout.preferredWidth: 120
                             Layout.alignment: Qt.AlignVCenter
-                            checked: root.selectedAudio.indexOf(trackRow.modelData.index) !== -1
-                            onToggled: {
-                                let tracks = root.selectedAudio.slice();
-                                const at = tracks.indexOf(trackRow.modelData.index);
-                                if (checked && at < 0) tracks.push(trackRow.modelData.index);
-                                if (!checked && at >= 0) tracks.splice(at, 1);
-                                root.selectedAudio = tracks;
-                            }
+                            from: 0
+                            to: 1
+                            stepSize: 0.01
+                            snapMode: Slider.SnapAlways
+                            value: root.gainValue(trackRow.modelData.index)
+                            onMoved: root.setTrackGain(trackRow.modelData.index, value)
+                        }
+                        Label {
+                            objectName: "shareAudioVolume" + trackRow.modelData.index
+                            Layout.preferredWidth: 42
+                            horizontalAlignment: Text.AlignRight
+                            text: root.gainValue(trackRow.modelData.index) <= 0.001
+                                ? qsTr("Muted")
+                                : qsTr("%1%").arg(Math.round(root.gainValue(trackRow.modelData.index) * 100))
+                            color: root.gainValue(trackRow.modelData.index) <= 0.001
+                                ? Theme.errorColor : Theme.textSecondaryColor
+                            font.pixelSize: Theme.fontSizeSmall
                         }
                     }
                 }

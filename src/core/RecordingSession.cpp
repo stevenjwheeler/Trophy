@@ -61,6 +61,11 @@ RecordingSession::RecordingSession(const QString &outputPath,
   m_stopTimer = new QTimer(this);
   m_stopTimer->setInterval(10);
   connect(m_stopTimer, &QTimer::timeout, this, &RecordingSession::pollStopWorker);
+  // Native errors can occur during final draining, after the GUI stopped
+  // polling. Latch synchronously; never tear down from the encoder thread.
+  if (m_encoder)
+    connect(m_encoder, &IEncoder::encodingError, this,
+            &RecordingSession::failOutput, Qt::DirectConnection);
 }
 
 RecordingSession::~RecordingSession() {
@@ -131,18 +136,47 @@ bool RecordingSession::start() {
   m_shmTransitions = 0;
   m_outputPayloadBytes = 0;
   m_audioStreamInfo.clear();
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    m_rotationState = RotationState::None;
+    m_ownedCurrent.reset();
+    m_rotationNext.reset();
+    m_rotationOld.reset();
+    m_retiredMuxers.clear();
+    m_heldAudio.clear();
+    m_heldAudioBytes = 0;
+    m_rotationFencePending.clear();
+    m_rotationEvents.clear();
+    m_streamInfos.clear();
+    m_lastWrittenVideoPts = kNoPts;
+    m_lastWrittenAudioPts.clear();
+    m_rotationNextPath.clear();
+    m_rotationOldPath.clear();
+    m_rotationOldHistory = QJsonObject();
+    m_rotationOldBytes = 0;
+    m_rotationArmedAtMs = 0;
+    m_rotationCutAtMs = 0;
+    m_rotationHoldFrom = 0;
+    m_rotationCutPts = 0;
+  }
   m_recentRates.clear();
   m_rateDelivered = m_ratePayload = 0;
   const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
   m_rateAccepted = ffmpeg ? ffmpeg->acceptedFrames() : 0;
   m_rateSampleUs = nowUs();
-  m_audioHistoryStarted = false;
-  m_usedSystemAudio = false;
-  m_usedGameAudio = false;
+  m_audioHistoryStarted.store(false);
+  m_usedSystemAudio.store(false);
+  m_usedGameAudio.store(false);
+  m_historyFallback.store(false);
+  m_historyDesktop.store(false);
   for (auto &received : m_audioReceived) received.store(false);
   m_queueDrops = 0;
   m_bytesWritten = 0;
   m_outputFailed = false;
+  {
+    std::lock_guard lock(m_outputErrorMutex);
+    m_outputErrorText.clear();
+  }
   m_outputFinalized = false;
   m_running = true;
   // A/V origin alignment baseline (see header): session wall start for
@@ -203,6 +237,7 @@ bool RecordingSession::start() {
     emit errorOccurred("Failed to add video stream to muxer");
     return false;
   }
+  m_streamInfos.push_back(videoStream);
 
   // --- Audio streams ---
   if (m_audioMixer) {
@@ -225,6 +260,8 @@ bool RecordingSession::start() {
           m_audioEncoders[i].reset();
           continue;
         }
+        connect(m_audioEncoders[i].get(), &AudioEncoder::encodingError, this,
+                &RecordingSession::failOutput, Qt::DirectConnection);
         // Wall-clock drift correction for this track (no-op pass-through
         // if SWR allocation fails).
         m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
@@ -241,6 +278,7 @@ bool RecordingSession::start() {
           qDebug() << "Added separate audio stream" << idx << "for"
                    << trackNames[i];
           m_trackToStreamMap[i] = idx;
+          m_streamInfos.push_back(s);
           m_audioStreamInfo.append(QVariantMap{
               {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
               {"sampleRate", s.sampleRate}, {"channels", s.channels},
@@ -256,7 +294,6 @@ bool RecordingSession::start() {
             if (trackIndex < 0 || trackIndex >= kAudioTrackCount)
               return;
 
-            EncodedPacket packet;
             std::lock_guard<std::mutex> lock(m_audioEncoderMutexes[trackIndex]);
             // Null-check inside the mutex: a future reset/teardown of the
             // encoder array can't slip in between the check and the use.
@@ -294,7 +331,7 @@ bool RecordingSession::start() {
                     writeOutputPacket(oldPacket);
                   }
                 }
-                m_bytesWritten = m_muxer->bytesWritten();
+                m_bytesWritten = currentMuxerBytes();
               }
               if (m_driftCorrectors[trackIndex]) m_driftCorrectors[trackIndex]->reset();
               m_trackOffsetApplied[trackIndex].store(true);
@@ -309,16 +346,8 @@ bool RecordingSession::start() {
               if (fedFrames <= 0)
                 return;
             }
-            if (m_audioEncoders[trackIndex]->encodeAudio(fed, fedFrames,
-                                                         packet)) {
-              int streamIdx = m_trackToStreamMap[trackIndex];
-              if (streamIdx >= 0) {
-                packet.streamIndex = streamIdx;
-                if (writeOutputPacket(packet)) {
-                    m_bytesWritten = m_muxer->bytesWritten();
-                }
-              }
-            }
+            encodeAudioPackets(*m_audioEncoders[trackIndex], fed, fedFrames,
+                               m_trackToStreamMap[trackIndex]);
           });
 
     } else {
@@ -327,6 +356,8 @@ bool RecordingSession::start() {
         qWarning() << "Failed to init merged audio encoder";
         m_mergedEncoder.reset();
       } else {
+        connect(m_mergedEncoder.get(), &AudioEncoder::encodingError, this,
+                &RecordingSession::failOutput, Qt::DirectConnection);
         for (int i = 0; i < kAudioTrackCount; ++i) {
           m_driftCorrectors[i] = std::make_unique<AudioDriftCorrector>(
               audioConfig.sampleRate, audioConfig.channels);
@@ -341,6 +372,7 @@ bool RecordingSession::start() {
         int idx = m_muxer->addStream(s);
         if (idx >= 0) {
           qDebug() << "Added merged audio stream" << idx;
+          m_streamInfos.push_back(s);
           m_audioStreamInfo.append(QVariantMap{
               {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
               {"sampleRate", s.sampleRate}, {"channels", s.channels},
@@ -418,9 +450,13 @@ bool RecordingSession::start() {
     emit errorOccurred("Failed to write muxer header");
     return false;
   }
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    m_lastWrittenAudioPts.assign(m_streamInfos.size(), kNoPts);
+  }
 
   // Pin initial routing before callbacks start.
-  m_audioHistoryStarted = true;
+  m_audioHistoryStarted.store(true);
   noteAudioRouting();
 
   // Set video capture callback
@@ -503,15 +539,20 @@ bool RecordingSession::start() {
 }
 
 void RecordingSession::noteAudioRouting() {
-  if (!m_running || !m_audioHistoryStarted) return;
-  m_usedSystemAudio |= m_desktopAudio || m_gameIsFallback;
-  m_usedGameAudio |= !m_desktopAudio && !m_gameIsFallback;
+  if (!m_running || !m_audioHistoryStarted.load()) return;
+  const bool fallback = m_gameIsFallback;
+  const bool desktop = m_desktopAudio;
+  m_historyFallback.store(fallback);
+  m_historyDesktop.store(desktop);
+  if (desktop || fallback) m_usedSystemAudio.store(true);
+  if (!desktop && !fallback) m_usedGameAudio.store(true);
 }
 
 QJsonObject RecordingSession::audioHistory() const {
   AudioRoutingInfo info;
-  info.known = m_audioHistoryStarted;
-  info.system = m_usedSystemAudio; info.game = m_usedGameAudio;
+  info.known = m_audioHistoryStarted.load();
+  info.system = m_usedSystemAudio.load();
+  info.game = m_usedGameAudio.load();
   info.separate = m_separateAudioTracks;
   if (m_separateAudioTracks) {
     int ordinal = 0;
@@ -802,7 +843,6 @@ void RecordingSession::finishStopNative() {
   {
     std::lock_guard<std::mutex> lock(m_stillFrameMutex);
     m_lastFrame.reset();
-    m_lastFramePixels.reset();
   }
   if (m_finishCaptureStop && m_capture) {
     m_capture->finishStopCapture();
@@ -813,6 +853,12 @@ void RecordingSession::finishStopNative() {
     m_audioCallbackRegistration.reset();
   }
 
+  // A rotation cut that already happened must be settled before this
+  // session's own muxer is finalized; one still waiting for its keyframe is
+  // rolled back so its held audio lands in the current file. Owners normally
+  // settle first (to enlist the outgoing segment); this is the safety net.
+  settleRotation();
+
   if (m_encodingThread.joinable()) {
     m_encodingThread.join();
   }
@@ -822,7 +868,8 @@ void RecordingSession::finishStopNative() {
       continue;
 
     std::vector<EncodedPacket> flushed;
-    m_audioEncoders[i]->flush(flushed);
+    if (m_audioEncoders[i]->flush(flushed) < 0)
+      failOutput("Failed to flush audio encoder");
     for (auto &pkt : flushed) {
       if (m_trackToStreamMap[i] >= 0) {
         pkt.streamIndex = m_trackToStreamMap[i];
@@ -848,7 +895,8 @@ void RecordingSession::finishStopNative() {
         for (auto &buffer : m_trackAccumulators) buffer.clear();
     }
     std::vector<EncodedPacket> flushed;
-    m_mergedEncoder->flush(flushed);
+    if (m_mergedEncoder->flush(flushed) < 0)
+      failOutput("Failed to flush merged audio encoder");
     for (auto &pkt : flushed) {
       pkt.streamIndex = 1;
       writeOutputPacket(pkt);
@@ -857,7 +905,8 @@ void RecordingSession::finishStopNative() {
 
   if (m_muxer) {
     if (!m_muxer->finalize())
-      m_outputFailed = true;
+      failOutput(m_muxer->lastError().isEmpty()
+                     ? QStringLiteral("Failed to finalize recording") : m_muxer->lastError());
     m_outputFinalized = true;
     
     m_bytesWritten = m_muxer->bytesWritten();
@@ -899,13 +948,17 @@ void RecordingSession::encodingLoop() {
       }
     }
 
-    EncodedPacket packet;
+    // Rotation timeouts/fences advance even when no frame arrived.
+    pollRotation();
+
+    std::vector<EncodedPacket> packets;
     bool producedPacket = false;
     if (haveFrame) {
       // Host wall time, including conversion/import and driver waits. Count
       // buffered calls too: false is not proof that the input was dropped.
       const auto begin = std::chrono::steady_clock::now();
-      producedPacket = m_encoder->encodeFrame(frame, packet);
+      m_encoder->encodeFrames(frame, packets);
+      producedPacket = !packets.empty();
       const auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now() - begin).count();
       m_encodeTimeUs += durationUs;
@@ -914,12 +967,14 @@ void RecordingSession::encodingLoop() {
     }
     const auto now = std::chrono::steady_clock::now();
     if (producedPacket) {
-      packet.streamIndex = 0;
-      if (writeOutputPacket(packet)) {
-        m_bytesWritten = m_muxer->bytesWritten();
+      for (auto &packet : packets) {
+        packet.streamIndex = 0;
+        if (writeOutputPacket(packet)) {
+          m_bytesWritten = currentMuxerBytes();
+          ++m_videoPacketsWritten;
+        }
+        ++m_frameCount;
       }
-      m_frameCount++;
-      ++m_videoPacketsWritten;
       framesSincePacket = 0;
       lastPacketAt = now;
     } else if (haveFrame) {
@@ -942,22 +997,26 @@ void RecordingSession::encodingLoop() {
         break;
       }
     }
+    if (m_outputFailed) break;
     catchup = advanceMergedClock(!m_running.load());
     if (!haveFrame && !m_running && !catchup)
       break;
   }
 
   std::vector<EncodedPacket> flushedPackets;
-  if (m_encoder && m_encoder->flush(flushedPackets) > 0) {
+  if (m_encoder) {
+    if (m_encoder->flush(flushedPackets) < 0)
+      failOutput("Failed to flush video encoder");
     // Delayed encoders (x264 lookahead) emit their last frames here, not in
     // the loop. Not counting them made a stopped session report 181 frames
     // for a 243-packet file.
     for (auto &pkt : flushedPackets) {
       pkt.streamIndex = 0;
-      if (writeOutputPacket(pkt))
-        m_bytesWritten = m_muxer->bytesWritten();
+      if (writeOutputPacket(pkt)) {
+        m_bytesWritten = currentMuxerBytes();
+        ++m_videoPacketsWritten;
+      }
       ++m_frameCount;
-      ++m_videoPacketsWritten;
     }
   }
 
@@ -972,14 +1031,14 @@ void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
   // Shared-memory frames borrow the producer's mapping, which goes straight
   // back to PipeWire, so the pixels are copied; DMA-BUF frames are kept alive
   // by their lease instead.
-  std::shared_ptr<std::vector<uint8_t>> pixels;
+  VideoFrame snapshot = frame;
   if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
     const size_t bytes = size_t(frame.stride) * size_t(frame.height);
-    pixels = std::make_shared<std::vector<uint8_t>>(bytes);
-    std::memcpy(pixels->data(), frame.data, bytes);
+    snapshot.cpuStorage = m_cpuFramePool.copy(frame.data, bytes);
+    snapshot.data = snapshot.cpuStorage->data();
   }
   const int64_t wall = nowUs();
-  auto last = std::make_shared<VideoFrame>(frame);
+  auto last = std::make_shared<VideoFrame>(snapshot);
   int64_t timestamp;
   {
     std::lock_guard<std::mutex> lock(m_stillFrameMutex);
@@ -987,20 +1046,19 @@ void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
     if (m_lastIssuedTimestampUs >= timestamp)
       timestamp = m_lastIssuedTimestampUs + kStillRetimeStepUs;
     last->timestamp = timestamp;
-    m_lastFramePixels = std::move(pixels);
     m_lastFrame = std::move(last);
     m_lastFrameWallUs = wall;
     m_lastIssuedTimestampUs = timestamp;
     // Capture timestamps trail their arrival by the pipeline's own latency.
     // This turns the wall clock back into the capture clock.
     m_frameClockOffsetUs = timestamp - wall;
-  }
-  if (timestamp == frame.timestamp) {
-    handFrameToEncoding(frame);
-  } else {
-    VideoFrame retimed = frame;
-    retimed.timestamp = timestamp;
-    handFrameToEncoding(retimed);
+    // Real frames must publish to the queue under the same ordering lock as
+    // fillers. Otherwise a descheduled capture thread lets newer fillers pass
+    // its already-reserved timestamp before it reaches the queue.
+    if (m_realFrameHandoverHook)
+      m_realFrameHandoverHook();
+    snapshot.timestamp = timestamp;
+    handFrameToEncoding(snapshot);
   }
 }
 
@@ -1056,9 +1114,6 @@ void RecordingSession::emitStillFrames() {
   std::lock_guard<std::mutex> lock(m_stillFrameMutex);
   if (!m_lastFrame)
     return;
-  // Hold a reference to the pixels: the capture thread may replace them as
-  // soon as the lock is released, and the repeats below still point into them.
-  const std::shared_ptr<std::vector<uint8_t>> pixels = m_lastFramePixels;
   // Stay a frame and a half behind the capture clock so a real frame that is
   // already on its way never lands behind a filler.
   const int64_t captureNow = nowUs() + m_frameClockOffsetUs;
@@ -1067,8 +1122,6 @@ void RecordingSession::emitStillFrames() {
   while (emitted < 8 &&
          captureNow >= m_lastIssuedTimestampUs + interval * 3 / 2) {
     VideoFrame still = *m_lastFrame;
-    if (pixels)
-      still.data = pixels->data();
     m_lastIssuedTimestampUs += interval;
     still.timestamp = m_lastIssuedTimestampUs;
     if (emitted == 0 && m_stillFrameHandoverHook)
@@ -1255,12 +1308,9 @@ bool RecordingSession::drainClockedMergedAudio(int channels, bool finalDrain) {
       base += count;
     }
     for (auto &sample : mixed) sample = std::clamp(sample, -1.0f, 1.0f);
-    EncodedPacket packet;
     m_mergedSubmittedFrames += frames;
-    if (m_mergedEncoder->encodeAudio(mixed.data(), frames, packet)) {
-      packet.streamIndex = 1;
-      if (writeOutputPacket(packet)) m_bytesWritten = m_muxer->bytesWritten();
-    }
+    encodeAudioPackets(*m_mergedEncoder, mixed.data(), frames, 1);
+    if (m_outputFailed) return false;
   }
   return target > m_mergedOffsetFrames + m_mergedSubmittedFrames + (finalDrain ? 0 : 1023);
 }
@@ -1268,6 +1318,23 @@ bool RecordingSession::drainClockedMergedAudio(int channels, bool finalDrain) {
 QString RecordingSession::outputErrorText() const {
   std::lock_guard<std::mutex> lock(m_outputErrorMutex);
   return m_outputErrorText;
+}
+
+void RecordingSession::failOutput(const QString &text) {
+  setOutputError(text);
+  m_outputFailed = true;
+}
+
+void RecordingSession::encodeAudioPackets(AudioEncoder &encoder, const float *samples,
+                                          int frames, int stream) {
+  std::vector<EncodedPacket> packets;
+  if (!encoder.encodeAudio(samples, frames, packets))
+    failOutput("Failed to encode audio");
+  for (auto &packet : packets) {
+    if (stream < 0) continue;
+    packet.streamIndex = stream;
+    if (writeOutputPacket(packet)) m_bytesWritten = currentMuxerBytes();
+  }
 }
 
 void RecordingSession::setOutputError(const QString &text) {
@@ -1287,20 +1354,428 @@ void RecordingSession::setStillFrameHandoverHookForTesting(
   m_stillFrameHandoverHook = std::move(hook);
 }
 
-bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
-  if (m_muxer && m_muxer->writePacket(packet)) {
+bool RecordingSession::writeToMuxer(IMuxer *muxer, const EncodedPacket &packet) {
+  if (!muxer)
+    return false;
+  if (muxer->writePacket(packet)) {
     m_outputPayloadBytes += qint64(packet.data.size());
     return true;
   }
-  if (m_muxer) {
-    // Keep the muxer's own reason (e.g. a real I/O failure) instead of the
-    // generic "output may be incomplete" fallback shown by the manager.
-    const QString reason = m_muxer->lastError();
-    if (!reason.isEmpty())
-      setOutputError(reason);
-  }
-  m_outputFailed = true;
+  // Keep the muxer's own reason (e.g. a real I/O failure) instead of the
+  // generic "output may be incomplete" fallback shown by the manager.
+  const QString reason = muxer->lastError();
+  if (!reason.isEmpty())
+    setOutputError(reason);
   return false;
+}
+
+qint64 RecordingSession::currentMuxerBytes() const {
+  std::lock_guard<std::mutex> lock(m_rotationMutex);
+  if (m_muxer)
+    return m_muxer->bytesWritten();
+  return m_bytesWritten.load();
+}
+
+void RecordingSession::noteOutgoingLocked(const EncodedPacket &packet) {
+  if (packet.streamIndex == 0) {
+    if (packet.pts != kNoPts && packet.pts > m_lastWrittenVideoPts)
+      m_lastWrittenVideoPts = packet.pts;
+    return;
+  }
+  if (packet.streamIndex < 0 ||
+      packet.streamIndex >= static_cast<int>(m_lastWrittenAudioPts.size()))
+    return;
+  if (packet.pts != kNoPts &&
+      packet.pts > m_lastWrittenAudioPts[packet.streamIndex])
+    m_lastWrittenAudioPts[packet.streamIndex] = packet.pts;
+}
+
+void RecordingSession::markAudioCaughtUpLocked(int stream) {
+  if (stream >= 0 && stream < static_cast<int>(m_rotationFencePending.size()))
+    m_rotationFencePending[stream] = false;
+}
+
+bool RecordingSession::rotationFenceSatisfiedLocked() const {
+  for (bool pending : m_rotationFencePending)
+    if (pending)
+      return false;
+  return true;
+}
+
+void RecordingSession::resetAudioHistoryForSegment() {
+  const bool fallback = m_historyFallback.load();
+  const bool desktop = m_historyDesktop.load();
+  m_usedSystemAudio.store(desktop || fallback);
+  m_usedGameAudio.store(!desktop && !fallback);
+  m_audioHistoryStarted.store(true);
+  for (auto &received : m_audioReceived) received.store(false);
+}
+
+void RecordingSession::finalizeRotationOldLocked() {
+  if (!m_rotationOld)
+    return;
+  const QString oldPath = m_rotationOldPath;
+  const QString newPath = m_outputPath;
+  if (!m_rotationOld->finalize())
+    qWarning() << "Recording rotation: outgoing file finalize failed:"
+               << m_rotationOld->lastError();
+  const qint64 bytes = m_rotationOld->bytesWritten();
+  m_rotationOldBytes = bytes;
+  // Deleted by the owner: QObject teardown must not run on the encoding
+  // thread.
+  m_retiredMuxers.push_back(std::move(m_rotationOld));
+
+  RotationEvent event;
+  event.oldPath = oldPath;
+  event.newPath = newPath;
+  event.oldBytes = bytes;
+  event.audioHistory = m_rotationOldHistory;
+  m_rotationEvents.push_back(std::move(event));
+
+  m_rotationOldPath.clear();
+  m_rotationOldHistory = QJsonObject();
+  m_rotationFencePending.clear();
+  m_rotationState = RotationState::None;
+  m_rotationCutAtMs = 0;
+}
+
+void RecordingSession::checkRotationFenceLocked() {
+  if (m_rotationState != RotationState::Rotating || !m_rotationOld)
+    return;
+  if (rotationFenceSatisfiedLocked()) {
+    finalizeRotationOldLocked();
+    return;
+  }
+  if (m_rotationCutAtMs > 0 &&
+      steadyNowMs() - m_rotationCutAtMs > kRotationFenceTimeoutMs) {
+    qWarning() << "Recording rotation: outgoing audio did not reach the cut"
+               << "within the fence timeout; finalizing the segment anyway";
+    finalizeRotationOldLocked();
+  }
+}
+
+bool RecordingSession::performRotationCutLocked(const EncodedPacket &keyframe) {
+  if (!m_rotationNext || !m_ownedCurrent || !m_muxer)
+    return false;
+  const int64_t cut = keyframe.pts;
+  if (cut == kNoPts || cut < m_rotationHoldFrom)
+    return false;
+
+  // The successor's first packet is the forced keyframe; FFmpegMuxer also
+  // rebases that file from this timestamp.
+  if (!writeToMuxer(m_rotationNext.get(), keyframe))
+    return false;
+
+  m_rotationOld = std::move(m_ownedCurrent);
+  m_rotationOldPath = m_outputPath;
+  m_rotationCutPts = cut;
+  m_rotationCutAtMs = steadyNowMs();
+  m_rotationOldBytes = 0;
+  m_ownedCurrent = std::move(m_rotationNext);
+  m_muxer = m_ownedCurrent.get();
+  m_outputPath = m_rotationNextPath;
+  m_rotationNextPath.clear();
+  m_rotationState = RotationState::Rotating;
+
+  // The outgoing segment's history ends at the cut; the successor starts a
+  // fresh one from the current routing.
+  m_rotationOldHistory = audioHistory();
+  resetAudioHistoryForSegment();
+
+  // Only streams that were already carrying audio can be fenced; one that
+  // never wrote anything has nothing to finish in the outgoing file.
+  m_rotationFencePending.assign(m_streamInfos.size(), false);
+  for (size_t i = 1; i < m_lastWrittenAudioPts.size(); ++i) {
+    if (m_lastWrittenAudioPts[i] != kNoPts && m_lastWrittenAudioPts[i] < cut)
+      m_rotationFencePending[i] = true;
+  }
+
+  // Held audio belongs on either side of the cut.
+  std::vector<EncodedPacket> held;
+  held.swap(m_heldAudio);
+  m_heldAudioBytes = 0;
+  bool writesOk = true;
+  for (auto &pkt : held) {
+    if (pkt.pts != kNoPts && pkt.pts < cut) {
+      if (!writeToMuxer(m_rotationOld.get(), pkt)) {
+        writesOk = false;
+        break;
+      }
+      noteOutgoingLocked(pkt);
+    } else {
+      if (!writeToMuxer(m_ownedCurrent.get(), pkt)) {
+        writesOk = false;
+        break;
+      }
+      markAudioCaughtUpLocked(pkt.streamIndex);
+    }
+  }
+  if (!writesOk) {
+    setOutputError(
+        QStringLiteral("Failed to write held audio during segment rotation"));
+    m_outputFailed = true;
+    return true; // The cut is live; the file is already broken.
+  }
+
+  checkRotationFenceLocked();
+  return true;
+}
+
+bool RecordingSession::abortRotationLocked() {
+  if (m_rotationState == RotationState::None)
+    return true;
+  if (m_rotationState != RotationState::Pending)
+    return false; // A cut already happened; it cannot be rolled back.
+
+  const QString nextPath = m_rotationNextPath;
+  std::vector<EncodedPacket> held;
+  held.swap(m_heldAudio);
+  m_heldAudioBytes = 0;
+  bool ok = true;
+  for (auto &pkt : held) {
+    if (!writeToMuxer(m_muxer, pkt)) {
+      ok = false;
+      break;
+    }
+    noteOutgoingLocked(pkt);
+  }
+  m_rotationNext.reset();
+  m_rotationNextPath.clear();
+  m_rotationFencePending.clear();
+  m_rotationState = RotationState::None;
+  m_rotationArmedAtMs = 0;
+  m_rotationCutAtMs = 0;
+
+  if (!nextPath.isEmpty()) {
+    RotationEvent event;
+    event.aborted = true;
+    event.newPath = nextPath;
+    m_rotationEvents.push_back(std::move(event));
+  }
+  if (!ok) {
+    setOutputError(QStringLiteral(
+        "Failed to write held audio after aborting segment rotation"));
+    m_outputFailed = true;
+  }
+  return ok;
+}
+
+void RecordingSession::flushRotationEvents() {
+  std::vector<RotationEvent> events;
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    events.swap(m_rotationEvents);
+  }
+  for (auto &event : events) {
+    if (event.aborted)
+      emit outputRotationAborted(event.newPath);
+    else
+      emit outputRotated(event.oldPath, event.newPath, event.oldBytes,
+                         event.audioHistory);
+  }
+}
+
+bool RecordingSession::beginOutputRotation(
+    std::unique_ptr<IMuxer> &nextMuxer, std::unique_ptr<IMuxer> &currentMuxer,
+    const QString &nextPath, const QMap<QString, QString> &metadata) {
+  if (!nextMuxer || nextPath.isEmpty())
+    return false;
+
+  std::lock_guard<std::mutex> lock(m_rotationMutex);
+  if (m_rotationState != RotationState::None || !m_muxer)
+    return false;
+  if (m_streamInfos.empty())
+    return false;
+  // No video packet has reached the file yet: there is no known cut point,
+  // and cutting at the very first packet would leave an empty outgoing
+  // segment. Let the caller fall back to a full rebuild instead.
+  if (m_lastWrittenVideoPts == kNoPts)
+    return false;
+
+  if (!nextMuxer->initialize(nextPath) || !nextMuxer->setMetadata(metadata))
+    return false;
+  for (size_t i = 0; i < m_streamInfos.size(); ++i) {
+    const int idx = nextMuxer->addStream(m_streamInfos[i]);
+    if (idx < 0 || idx != static_cast<int>(i)) {
+      qWarning() << "Recording rotation: successor stream layout mismatch at"
+                 << i << "(got" << idx << ")";
+      return false;
+    }
+  }
+  if (!nextMuxer->writeHeader())
+    return false;
+
+  // From the first rotation on the session owns the live muxer so it can be
+  // swapped on the encoding thread without the owner's unique_ptr racing.
+  if (currentMuxer)
+    m_ownedCurrent = std::move(currentMuxer);
+  if (!m_ownedCurrent)
+    return false;
+  m_muxer = m_ownedCurrent.get();
+
+  m_rotationNext = std::move(nextMuxer);
+  m_rotationNextPath = nextPath;
+  m_heldAudio.clear();
+  m_heldAudioBytes = 0;
+  m_rotationHoldFrom =
+      (m_lastWrittenVideoPts == kNoPts) ? 0 : m_lastWrittenVideoPts + 1;
+  m_rotationArmedAtMs = steadyNowMs();
+  m_rotationCutAtMs = 0;
+  m_rotationState = RotationState::Pending;
+
+  // Ask for the next submitted frame to be an IDR. Under the lock so an
+  // audio-only write cannot observe Pending before the request is armed.
+  if (m_encoder)
+    m_encoder->requestKeyframe();
+  return true;
+}
+
+void RecordingSession::abortOutputRotation() {
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    if (m_rotationState == RotationState::Pending)
+      abortRotationLocked();
+  }
+  flushRotationEvents();
+}
+
+std::optional<RecordingSession::RotationResult>
+RecordingSession::settleRotation() {
+  std::optional<RotationResult> result;
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    // A synchronous settle is not signalled; the owner enlists the segment.
+    m_rotationEvents.clear();
+    if (m_rotationState == RotationState::Pending) {
+      abortRotationLocked();
+    } else if (m_rotationState == RotationState::Rotating && m_rotationOld) {
+      RotationResult r;
+      r.oldPath = m_rotationOldPath;
+      r.audioHistory = m_rotationOldHistory;
+      finalizeRotationOldLocked();
+      r.oldBytes = m_rotationOldBytes;
+      result = std::move(r);
+    }
+    m_rotationEvents.clear();
+  }
+  return result;
+}
+
+bool RecordingSession::rotationPending() const {
+  std::lock_guard<std::mutex> lock(m_rotationMutex);
+  return m_rotationState != RotationState::None;
+}
+
+std::vector<std::unique_ptr<IMuxer>> RecordingSession::takeRetiredMuxers() {
+  std::vector<std::unique_ptr<IMuxer>> retired;
+  std::lock_guard<std::mutex> lock(m_rotationMutex);
+  retired.swap(m_retiredMuxers);
+  return retired;
+}
+
+void RecordingSession::pollRotation() {
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    if (m_rotationState == RotationState::Pending && m_rotationArmedAtMs > 0 &&
+        steadyNowMs() - m_rotationArmedAtMs > kRotationKeyframeTimeoutMs) {
+      qWarning() << "Recording rotation: no keyframe arrived in time;"
+                 << "falling back to a segment rebuild";
+      abortRotationLocked();
+    } else if (m_rotationState == RotationState::Rotating) {
+      checkRotationFenceLocked();
+    }
+  }
+  flushRotationEvents();
+}
+
+bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
+  bool ok = false;
+  {
+    std::lock_guard<std::mutex> lock(m_rotationMutex);
+    if (!m_muxer) {
+      setOutputError(QStringLiteral("Recording output is not available"));
+      m_outputFailed = true;
+      return false;
+    }
+    const bool isVideo = packet.streamIndex == 0;
+    const int64_t pts = packet.pts;
+
+    switch (m_rotationState) {
+    case RotationState::None:
+      ok = writeToMuxer(m_muxer, packet);
+      if (ok)
+        noteOutgoingLocked(packet);
+      break;
+
+    case RotationState::Pending:
+      if (isVideo) {
+        if (packet.isKeyframe && pts != kNoPts && pts >= m_rotationHoldFrom) {
+          ok = performRotationCutLocked(packet);
+          if (!ok) {
+            // The successor could not take the cut: roll it back and keep
+            // recording into the current file.
+            ok = abortRotationLocked();
+            if (ok) {
+              ok = writeToMuxer(m_muxer, packet);
+              if (ok)
+                noteOutgoingLocked(packet);
+            }
+          }
+        } else {
+          ok = writeToMuxer(m_muxer, packet);
+          if (ok)
+            noteOutgoingLocked(packet);
+        }
+      } else if (pts != kNoPts && pts >= m_rotationHoldFrom) {
+        // Audio past the cut point waits for the keyframe so it lands in the
+        // successor file in order.
+        m_heldAudio.push_back(packet);
+        m_heldAudioBytes += qint64(packet.data.size());
+        ok = true;
+        if (m_heldAudioBytes > kRotationHeldAudioLimit) {
+          qWarning() << "Recording rotation: held audio exceeded the budget;"
+                     << "falling back to a segment rebuild";
+          ok = abortRotationLocked();
+        }
+      } else {
+        ok = writeToMuxer(m_muxer, packet);
+        if (ok)
+          noteOutgoingLocked(packet);
+      }
+      break;
+
+    case RotationState::Rotating:
+      if (isVideo) {
+        ok = writeToMuxer(m_muxer, packet);
+        if (ok)
+          noteOutgoingLocked(packet);
+      } else if (pts != kNoPts && pts < m_rotationCutPts) {
+        // Late audio from before the cut still belongs to the outgoing file
+        // until that file is finalized; afterwards it is dropped.
+        if (m_rotationOld) {
+          ok = writeToMuxer(m_rotationOld.get(), packet);
+          if (ok)
+            noteOutgoingLocked(packet);
+        } else {
+          ok = true;
+        }
+      } else {
+        ok = writeToMuxer(m_muxer, packet);
+        if (ok)
+          markAudioCaughtUpLocked(packet.streamIndex);
+      }
+      if (ok)
+        checkRotationFenceLocked();
+      break;
+    }
+  }
+  if (!ok) {
+    m_outputFailed = true;
+    flushRotationEvents();
+    return false;
+  }
+  flushRotationEvents();
+  return true;
 }
 
 void RecordingSession::drainMergedAudio(int channels, bool flushTail) {
@@ -1338,12 +1813,8 @@ void RecordingSession::drainMergedAudio(int channels, bool flushTail) {
       v = std::clamp(v, -1.0f, 1.0f);
     applyMergedOffset();
     m_mergedSubmittedFrames += 1024;
-    EncodedPacket packet;
-    if (m_mergedEncoder->encodeAudio(mixed.data(), 1024, packet)) {
-      packet.streamIndex = 1;
-      if (writeOutputPacket(packet))
-        m_bytesWritten = m_muxer->bytesWritten();
-    }
+    encodeAudioPackets(*m_mergedEncoder, mixed.data(), 1024, 1);
+    if (m_outputFailed) return;
   }
 }
 
