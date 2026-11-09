@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "audio/PipeWireAudioSource.h"
+#include "capture/IVideoCaptureSource.h"
+#include "core/RecordingManager.h"
+#include "core/ReplayManager.h"
+#include "core/StorageManager.h"
+#include "detection/GameDetectionService.h"
+#include "detection/WaylandWindowMonitor.h"
+#include "settings/SettingsManager.h"
 #include <gtest/gtest.h>
 #include <QCoreApplication>
 #include <QTest>
@@ -10,6 +17,7 @@
 #include <QFile>
 #include <QSaveFile>
 #include <QElapsedTimer>
+#include <QTemporaryDir>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <atomic>
@@ -19,6 +27,61 @@
 #include <memory>
 
 using namespace TrophyBackend;
+
+class GenericAudioTestCapture : public IVideoCaptureSource {
+public:
+  bool initialize(const CaptureConfig &) override { return true; }
+  void setFrameCallback(FrameCallback) override {}
+  bool startCapture() override { return true; }
+  void stopCapture() override {}
+  bool isCapturing() const override { return true; }
+  CaptureCapabilities capabilities() const override { return {}; }
+  QSize nativeResolution() const override { return {}; }
+  QString name() const override { return "generic portal fixture"; }
+};
+
+class RecordingManagerTest {
+public:
+  static void prepareAudioOnly(RecordingManager &mgr, uint32_t node,
+                               GenericAudioTestCapture *&capture) {
+    mgr.m_captureFactory = [&capture] {
+      auto source = std::make_unique<GenericAudioTestCapture>();
+      capture = source.get();
+      return source;
+    };
+    mgr.m_pipelineBuilder = [&mgr, node] {
+      EXPECT_EQ(mgr.m_preparedAudio.gameNode, node);
+      EXPECT_EQ(mgr.m_preparedAudio.gameNodeName, "Wwise");
+      return true; // Exercise real lookup, not native video/encoding.
+    };
+  }
+};
+
+namespace TrophyBackend {
+class ReplayManagerTest {
+public:
+  static void prepareAudioOnly(ReplayManager &mgr, uint32_t node, uint32_t pid,
+                               GenericAudioTestCapture *&capture) {
+    mgr.m_captureFactory = [&capture] {
+      auto source = std::make_unique<GenericAudioTestCapture>();
+      capture = source.get();
+      return source;
+    };
+    mgr.m_segmentBuilder = [&mgr, node, pid] {
+      EXPECT_EQ(mgr.m_lookupCache.gameNodeId, node);
+      EXPECT_EQ(mgr.m_lookupCache.gameNodeName, "Wwise");
+      int tracks = 0, voice = -1, mic = -1;
+      uint32_t sessionPid = 0;
+      QStringList hints;
+      bool found = false, voiceFound = false;
+      mgr.setupAudioSources(tracks, hints, sessionPid, found, voice, voiceFound, mic, false);
+      EXPECT_EQ(sessionPid, pid);
+      EXPECT_TRUE(found);
+      return true;
+    };
+  }
+};
+}
 
 // Test-only negative control: reproduce the old single-target capture path.
 class PipeWireAudioSourceTest {
@@ -181,6 +244,74 @@ struct PlaybackClient {
     pw_thread_loop_unlock(loop);
   }
 };
+
+TEST(AppAudioGroupTest, GenericPortalManagersFindWwiseByPinnedGamePid) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-manager-handoff-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  QProcess gameProcess;
+  gameProcess.start("sleep", {"30"});
+  ASSERT_TRUE(gameProcess.waitForStarted());
+  struct StopChild {
+    QProcess &child;
+    ~StopChild() { child.kill(); child.waitForFinished(); }
+  } stopChild{gameProcess};
+  const auto pid = static_cast<uint32_t>(gameProcess.processId());
+  PlaybackClient game;
+  auto *stream = game.add(0.1f, "Wwise", "bg3.exe");
+  const auto pidText = QByteArray::number(pid);
+  const spa_dict_item items[] = {{PW_KEY_APP_PROCESS_ID, pidText.constData()}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  game.update(stream, props);
+  const auto node = privateCaptureNode("Wwise");
+  ASSERT_NE(node, PW_ID_ANY);
+  ASSERT_TRUE(waitFor([&] { return PipeWireAudioSource::findNodeByPid(pid) == node; }));
+  ASSERT_EQ(PipeWireAudioSource::findNodeByProcessName("Baldur's Gate 3"), PW_ID_ANY);
+  WaylandWindowMonitor monitor;
+  GameDetectionService detector;
+  detector.setWindowMonitor(&monitor);
+  detector.addToWhitelist("steam_app_1086940", "Baldur's Gate 3");
+  WindowInfo window;
+  window.pid = pid; window.appId = "steam_app_1086940";
+  window.focused = window.fullscreen = true;
+  monitor.ingestSnapshot({window});
+  ASSERT_EQ(detector.currentGamePid(), pid);
+  QTemporaryDir library;
+  ASSERT_TRUE(library.isValid());
+  SettingsManager settings;
+  settings.setRecordingsPath(library.path());
+  settings.setReplayCachePath(library.path() + "/replay");
+  settings.setAudioMode("game");
+  settings.setVoiceChatApp("");
+  settings.setInstantReplayEnabled(true);
+  StorageManager storage(library.path());
+  RecordingManager recording;
+  recording.setSettingsManager(&settings);
+  recording.setStorageManager(&storage);
+  recording.setGameDetectionService(&detector);
+  GenericAudioTestCapture *capture = nullptr;
+  ::RecordingManagerTest::prepareAudioOnly(recording, node, capture);
+  recording.startRecording("Baldur's Gate 3");
+  ASSERT_NE(capture, nullptr);
+  emit capture->ready();
+  ASSERT_TRUE(waitFor([&] { return recording.isRecording(); }));
+  recording.stopRecording();
+  ASSERT_TRUE(waitFor([&] { return recording.state() == RecordingManager::RecordingState::Idle; }));
+  ReplayManager replay;
+  replay.setSettingsManager(&settings);
+  replay.setGameDetectionService(&detector);
+  capture = nullptr;
+  TrophyBackend::ReplayManagerTest::prepareAudioOnly(replay, node, pid, capture);
+  replay.startDvr("Baldur's Gate 3");
+  ASSERT_NE(capture, nullptr);
+  emit capture->ready();
+  ASSERT_TRUE(waitFor([&] { return replay.isActive(); }));
+  replay.stopDvr();
+  ASSERT_TRUE(waitFor([&] { return !replay.isActive() && !replay.isStarting(); }));
+}
 
 TEST(AppAudioGroupTest, LookupUsesOwningClientForMissingGameIdentity) {
   if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")

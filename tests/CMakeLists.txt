@@ -542,7 +542,7 @@ gtest_discover_tests(test_PipeWireAudioSource)
 if(Python3_Interpreter_FOUND)
     add_executable(test_AppAudioGroup test_AppAudioGroup.cpp)
     target_include_directories(test_AppAudioGroup PRIVATE ${TEST_INCLUDE_DIRS})
-    target_link_libraries(test_AppAudioGroup PRIVATE Trophy GTest::GTest GTest::Main Qt6::Test PkgConfig::PIPEWIRE)
+    target_link_libraries(test_AppAudioGroup PRIVATE Trophy GTest::GTest GTest::Main Qt6::Test Qt6::Network PkgConfig::PIPEWIRE)
     add_test(NAME AppAudioGroupTest.PrivatePipeWire
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
             $<TARGET_FILE:test_AppAudioGroup>)

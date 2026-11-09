@@ -164,6 +164,12 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
   distinguish no matching playback identity from connection/query failures.
   Updates after the query barrier are picked up by the existing session retry,
   not by a permanent registry subscription.
+- Automatic recordings and DVR pin the detected game's identity at capture
+  start. When the portal reports PID 0, audio setup and session retries retain
+  that pinned game PID, rather than relying on a display title that may not
+  match an engine-named stream (for example, `Wwise`). A nonzero capture-source
+  PID takes precedence. Manual capture never borrows the current detected
+  game's PID/title, and later detections cannot retarget an existing capture.
 - Application audio uses a private PipeWire daemon, WirePlumber's policy-only
   profile and a null sink. Tests remove/recreate playback sources and stop/restart
   only the launcher's owned services, checking real PCM delivery, error handling,

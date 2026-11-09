@@ -811,11 +811,18 @@ ReplayManager::lookupDvrNodes(uint32_t gamePid, const QStringList &gameHints,
   return out;
 }
 
+uint32_t ReplayManager::gameAudioPid() const {
+  const uint32_t sourcePid = m_capture ? m_capture->sourcePid() : 0;
+  // Snapshot the targeted detection at beginCapture, never whichever game is
+  // current when a lookup or segment rotation happens to run.
+  return sourcePid ? sourcePid : m_detectedGameInfo.value("detectedGamePid").toUInt();
+}
+
 void ReplayManager::refreshLookupCacheAsync() {
   if (m_lookupWorker.valid() || !m_settings)
     return;
   // Snapshot inputs on the GUI thread; the worker runs pure lookups only.
-  const uint32_t pid = m_capture ? m_capture->sourcePid() : 0;
+  const uint32_t pid = gameAudioPid();
   QStringList hints;
   if (m_capture) {
     const QString hint = m_capture->sourceProcessName();
@@ -905,7 +912,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
   // Game mode: game node (PID first, name hints, monitor fallback), voice,
   // mic. Proton nodes expose only the exe basename, so the DVR game name
   // (detector display name) is a first-class hint.
-  gamePid = m_capture ? m_capture->sourcePid() : 0;
+  gamePid = gameAudioPid();
   if (m_capture) {
     const QString hint = m_capture->sourceProcessName();
     if (!hint.isEmpty())
