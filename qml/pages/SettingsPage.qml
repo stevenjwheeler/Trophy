@@ -544,7 +544,7 @@ Page {
 
                     SettingRow {
                         label: qsTr("Encoder Preset")
-                        help: qsTr("'Fast' balances quality and GPU load while gaming.")
+                        help: qsTr("'Fast' balances quality and GPU load while gaming. Slower presets compress better at the same bitrate. Applies to NVENC and x264; VA-API uses its driver default.")
 
                         TrophyComboBox {
                             id: presetBox
