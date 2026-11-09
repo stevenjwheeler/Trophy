@@ -50,6 +50,8 @@ using Seg = ReplayManager::Segment;
 
 class ReplayFakeCapture : public IVideoCaptureSource {
 public:
+  uint32_t pid = 0;
+  uint32_t sourcePid() const override { return pid; }
   bool initialize(const CaptureConfig &) override { return true; }
   void setFrameCallback(FrameCallback) override {}
   bool startCapture() override { return true; }
@@ -217,6 +219,65 @@ protected:
     mgr.m_state = ReplayManager::State::Running;
   }
   QString setupKey(ReplayManager &mgr) { return mgr.audioSetupKey(); }
+  void audioPidHandoff(int scenario) {
+    SettingsManager settings;
+    settings.setAudioMode("game");
+    settings.setVoiceChatApp("");
+    WaylandWindowMonitor monitor;
+    GameDetectionService detector;
+    detector.setWindowMonitor(&monitor);
+    detector.addToWhitelist("steam_app_1086940", "Baldur's Gate 3");
+    detector.addToWhitelist("steam_app_999", "Baldur's Gate 3");
+    WindowInfo window;
+    window.pid = 61010; window.appId = "steam_app_1086940";
+    window.focused = window.fullscreen = true;
+    monitor.ingestSnapshot({window});
+    ASSERT_EQ(detector.currentGamePid(), 61010);
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_gameDetector = &detector;
+    mgr.m_gameName = scenario == 2 ? "Other target" : "Baldur's Gate 3";
+    mgr.m_captureFactory = [scenario] {
+      auto capture = std::make_unique<ReplayFakeCapture>();
+      if (scenario == 1) capture->pid = 62020;
+      return capture;
+    };
+    ASSERT_TRUE(mgr.beginCapture());
+    detector.addToBlacklist("steam_app_1086940");
+    window.pid = 61011; window.appId = "steam_app_999";
+    monitor.ingestSnapshot({window});
+    ASSERT_EQ(detector.currentGamePid(), 61011);
+    const uint32_t expected = scenario == 1 ? 62020 : scenario == 2 ? 0 : 61010;
+    mgr.m_nodeLookup = [expected](uint32_t pid, const QStringList &, const QString &) {
+      EXPECT_EQ(pid, expected);
+      ReplayManager::DvrNodeLookup result;
+      if (pid == 61010) {
+        result.gameFound = true;
+        result.gameNodeId = 120;
+        result.gameNodeName = "Wwise";
+        result.gameNodeSerial = "1200";
+      }
+      return result;
+    };
+    for (int rotation = 0; rotation < 2; ++rotation) {
+      mgr.refreshLookupCacheAsync();
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      while (mgr.m_lookupWorker.valid() && std::chrono::steady_clock::now() < deadline) {
+        mgr.pollLookupWorker();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      ASSERT_FALSE(mgr.m_lookupWorker.valid());
+      int tracks = 0, voice = -1, mic = -1;
+      uint32_t pid = 0;
+      QStringList hints;
+      bool found = false, voiceFound = false;
+      // This is also the input handed to successor session reconciliation.
+      mgr.setupAudioSources(tracks, hints, pid, found, voice, voiceFound, mic, false);
+      EXPECT_EQ(pid, expected);
+      EXPECT_TRUE(hints.contains(mgr.m_gameName));
+      EXPECT_EQ(found, expected == 61010);
+    }
+  }
   void beginDiagnosticCapture(ReplayManager &mgr, SettingsManager &settings,
                               GameDetectionService &detector) {
     mgr.m_settings = &settings;
@@ -868,6 +929,10 @@ static QList<Seg> threeSegments() {
   // 60s segments starting at 0/60/120.
   return {{"s0.mkv", 0.0, 60.0}, {"s1.mkv", 60.0, 60.0}, {"s2.mkv", 120.0, 60.0}};
 }
+
+TEST_F(ReplayManagerTest, GenericPortalRetainsGamePidAcrossAudioLookupAndRotation) { audioPidHandoff(0); }
+TEST_F(ReplayManagerTest, PortalAudioPidTakesPriorityOverDetectedPid) { audioPidHandoff(1); }
+TEST_F(ReplayManagerTest, AudioLookupWithoutMatchingDetectionDoesNotBorrowCurrentGame) { audioPidHandoff(2); }
 
 TEST_F(ReplayManagerTest, DiagnosticIdentitySurvivesANamesakeDetectionChange) {
   SettingsManager settings;
