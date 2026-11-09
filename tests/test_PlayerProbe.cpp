@@ -17,6 +17,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QElapsedTimer>
+#include <QDateTime>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
@@ -191,6 +192,65 @@ TEST_F(PlayerProbeTest, SpeedPopupAlignsTrackNotchesAndLabels) {
   ASSERT_TRUE(QMetaObject::invokeMethod(popup, "close"));
 }
 
+TEST_F(PlayerProbeTest, LaneVolumePopupSetsGainAndZeroMutes) {
+  open("/fake/volume.mkv");
+  window.resize(1024, 720);
+  window.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  emit waveform.audioTrackCountReady("/fake/volume.mkv", requestId(), 3);
+  QCoreApplication::processEvents();
+  auto *lane = findVisual(page.get(), "playerAudioLane1");
+  ASSERT_NE(lane, nullptr);
+  auto *button = findVisual(lane, "playerLaneVolumeButtonCompact1");
+  ASSERT_NE(button, nullptr);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return button->isVisible() && button->width() > 0; }));
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      button->mapToScene(QPointF(button->width() / 2, button->height() / 2)).toPoint());
+  ASSERT_TRUE(QTest::qWaitFor([&] { return lane->property("volumePopupOpen").toBool(); }));
+  auto *slider = lane->findChild<QQuickItem *>("playerLaneVolumeSlider1");
+  ASSERT_NE(slider, nullptr);
+
+  slider->setProperty("value", 0.4);
+  ASSERT_TRUE(QMetaObject::invokeMethod(slider, "moved"));
+  QCoreApplication::processEvents();
+  EXPECT_NEAR(lane->property("laneVolume").toDouble(), 0.4, 0.0001);
+  EXPECT_FALSE(lane->property("laneMuted").toBool());
+  auto *pipelines = page->findChild<QObject *>("playerAudioPipelines");
+  ASSERT_NE(pipelines, nullptr);
+  QObject *pipeline = nullptr;
+  ASSERT_TRUE(QMetaObject::invokeMethod(pipelines, "objectAt", Q_RETURN_ARG(QObject *, pipeline),
+                                        Q_ARG(int, 1)));
+  ASSERT_NE(pipeline, nullptr);
+  auto *output = pipeline->property("audioOutput").value<QObject *>();
+  ASSERT_NE(output, nullptr);
+  EXPECT_NEAR(output->property("volume").toDouble(), 0.4, 0.0001);
+  EXPECT_FALSE(output->property("muted").toBool());
+
+  slider->setProperty("value", 0.0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(slider, "moved"));
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(lane->property("laneMuted").toBool());
+  EXPECT_TRUE(output->property("muted").toBool());
+  EXPECT_DOUBLE_EQ(output->property("volume").toDouble(), 0.0);
+  close();
+}
+
+TEST_F(PlayerProbeTest, ShareVolumesCarryTrackGains) {
+  open("/fake/share-volumes.mkv");
+  emit waveform.audioTrackCountReady("/fake/share-volumes.mkv", requestId(), 3);
+  QCoreApplication::processEvents();
+  page->setProperty("trackVolumes", QVariantMap{{"1", 0.35}});
+  QCoreApplication::processEvents();
+  QVariant result;
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "shareAudioVolumes",
+                                        Q_RETURN_ARG(QVariant, result)));
+  const auto map = result.canConvert<QJSValue>()
+      ? result.value<QJSValue>().toVariant().toMap() : result.toMap();
+  ASSERT_EQ(map.size(), 1);
+  EXPECT_DOUBLE_EQ(map.value("1").toDouble(), 0.35);
+  close();
+}
+
 TEST_F(PlayerProbeTest, SnapshotChoosesDestinationAndCancelWritesNothing) {
   QTemporaryDir dir;
   ASSERT_TRUE(dir.isValid());
@@ -328,6 +388,26 @@ TEST_F(PlayerProbeTest, SamePathReopenRejectsOldProbe) {
   EXPECT_FALSE(pending());
   EXPECT_EQ(count(), 0);
   EXPECT_EQ(waveform.requests, 2);
+}
+
+TEST_F(PlayerProbeTest, TrailingScrubIsCancelledByOpenCloseAndDiscreteSeek) {
+  auto queueScrub = [&] {
+    page->setProperty("lastScrubMs", QDateTime::currentMSecsSinceEpoch());
+    ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekTo", Q_ARG(QVariant, QVariant(1700))));
+    EXPECT_EQ(page->property("pendingScrubMs").toInt(), 1700);
+  };
+  open("/tmp/first.mkv");
+  queueScrub();
+  open("/tmp/second.mkv");
+  EXPECT_EQ(page->property("pendingScrubMs").toInt(), -1);
+  queueScrub();
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(300))));
+  EXPECT_EQ(page->property("pendingScrubMs").toInt(), -1);
+  queueScrub();
+  close();
+  EXPECT_EQ(page->property("pendingScrubMs").toInt(), -1);
+  QTest::qWait(150);
+  EXPECT_EQ(page->property("lastScrubMs").toLongLong(), 0);
 }
 
 TEST_F(PlayerProbeTest, BoundFilmstripDelegatesKeepIndicesAcrossRefreshZoomAndReopen) {
@@ -691,10 +771,25 @@ TEST_F(PlayerProbeTest, SystemOnlyHistoryHidesVoiceWithoutRenumberingMic) {
   QObject *pipeline = nullptr;
   ASSERT_TRUE(QMetaObject::invokeMethod(pipelines, "objectAt", Q_RETURN_ARG(QObject *, pipeline), Q_ARG(int, 1)));
   ASSERT_NE(pipeline, nullptr); EXPECT_EQ(pipeline->property("modelData").toInt(), 2);
-  page->setProperty("mutedTracks", QVariantList{2});
+  page->setProperty("trackVolumes", QVariantMap{{"2", 0.0}});
   QCoreApplication::processEvents();
   auto *output = pipeline->property("audioOutput").value<QObject *>();
-  ASSERT_NE(output, nullptr); EXPECT_TRUE(output->property("muted").toBool());
+  ASSERT_NE(output, nullptr);
+  EXPECT_TRUE(output->property("muted").toBool());
+  EXPECT_DOUBLE_EQ(output->property("volume").toDouble(), 0.0);
+  page->setProperty("trackVolumes", QVariantMap{{"2", 0.4}});
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(output->property("muted").toBool());
+  EXPECT_NEAR(output->property("volume").toDouble(), 0.4, 0.0001);
+  QVariant volumes;
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "shareAudioVolumes",
+                                        Q_RETURN_ARG(QVariant, volumes)));
+  const auto volumeMap = volumes.canConvert<QJSValue>()
+      ? volumes.value<QJSValue>().toVariant().toMap() : volumes.toMap();
+  EXPECT_DOUBLE_EQ(volumeMap.value("2").toDouble(), 0.4);
+  // The redundant Voice lane hidden by routing history is excluded.
+  EXPECT_DOUBLE_EQ(volumeMap.value("1").toDouble(), 0.0);
+  EXPECT_FALSE(volumeMap.contains("0"));
   routing["game"] = true; routing["voice"] = true;
   library.entry.insert("audioRouting", routing);
   QCoreApplication::processEvents();

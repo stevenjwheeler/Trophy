@@ -54,7 +54,7 @@ The library offers grid/list views, search, capture-type filters, sorting, renam
 Open a capture in the built-in player to use:
 
 - A filmstrip and per-track audio waveforms with shared zoom and pan.
-- Individual audio mute controls.
+- Per-track volume controls: click a track's speaker button to open its volume popup. Dragging it to zero mutes that lane; the mute button in the popup provides a one-click toggle.
 - Timeline bookmarks and an editable clip range.
 - Playback speed, seek controls, fullscreen, and snapshots. The screenshot button captures the current frame and opens a Save dialog so you can choose the PNG's name and location; cancelling saves nothing.
 
@@ -72,7 +72,7 @@ After recording, seek to a moment in the player and use **Add bookmark at curren
 
 Choose **Share** in the player, or select library captures and choose **Export → Share-ready MP4**.
 
-1. Review the audio tracks. Player-muted lanes start unchecked. Selected tracks are mixed into **one stereo AAC track**, because chat apps and social sites cannot switch between tracks and AAC-LC is the audio format every player accepts. When exactly one stereo AAC track is selected, it is copied unchanged instead of re-encoded. Mixing costs an audio encode, so three tracks take noticeably longer than one; the dialog shows an estimate for the current selection before you start.
+1. Review the audio tracks. Each track has a gain bar; the player's per-lane volumes carry over, and a track at zero is left out. Selected tracks are mixed into **one stereo AAC track**, because chat apps and social sites cannot switch between tracks and AAC-LC is the audio format every player accepts. Gains are summed without automatically raising the remaining tracks when another is muted. Peaks exceeding full scale are clipped; lower the track gains if the mix is too loud. The player's master listening volume does not change the export. When exactly one stereo AAC track is selected at full volume, it is copied unchanged instead of re-encoded; a reduced volume needs a re-encode. Mixing costs an audio encode, so three tracks take noticeably longer than one; the dialog shows an estimate for the current selection before you start.
 2. Choose a destination **outside the managed recording library**.
 3. Start the export. Progress and cancellation appear in background toasts.
 
@@ -85,6 +85,8 @@ HEVC and AV1 recordings cannot be copied into something a phone will reliably pl
 Record with VA-API H.264, NVENC H.264 or x264 if you mostly share your recordings: that keeps every export on the copy path. Copied HEVC is tagged `hvc1` so Apple's players accept it, but browsers and older players still may not.
 
 A copy also preserves the recording's timing exactly. An older recording with a long still stretch keeps that stretch as one long frame, which some players treat as a freeze; **Convert** re-encodes and fills those stretches with repeated frames. That is the only way to remove them — repeating a frame in a copy would break the encoded predictions that follow it.
+
+Audio is decoded on demand using an independent reading cursor for each selected track. Only the next decoded block is retained, so long video gaps and unusual track interleaving do not accumulate audio in memory or impose a recording-length limit. This can require additional file reading, especially with several selected tracks. Defensive limits still reject abnormal decoded frames; the original remains intact if export fails.
 
 For batches, the destination applies to all captures while audio choices remain per file. Expand Audio and use the capture picker to review each one. Jobs run one at a time and can be cancelled independently. The destination is remembered.
 

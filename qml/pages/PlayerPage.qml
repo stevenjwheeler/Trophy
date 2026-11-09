@@ -132,10 +132,11 @@ Page {
         }
     }
 
-    // True per-track mute: one audio-only pipeline per stream
-    // (the video output stays silent), all driven in lockstep.
-    // A muted lane is genuinely silent, not soloed away.
-    property var mutedTracks: []
+    // Per-track volume, keyed by audio ordinal. Missing = full volume; a
+    // value of zero is a true mute (the pipeline stays silent rather than
+    // being soloed away). One audio-only pipeline runs per stream, all
+    // driven in lockstep with the video output.
+    property var trackVolumes: ({})
     property real masterVolume: 1.0
     property bool masterMuted: false
 
@@ -338,25 +339,42 @@ Page {
         tracksHeight = Math.max(floor, Math.min(tracksNaturalHeight, height))
     }
 
+    function trackVolume(index) {
+        const volume = trackVolumes[index]
+        return volume === undefined ? 1.0 : volume
+    }
+
+    function setTrackVolume(index, volume) {
+        var next = Object.assign({}, trackVolumes)
+        next[index] = Math.max(0, Math.min(1, volume))
+        trackVolumes = next
+    }
+
     function isMuted(index) {
-        return mutedTracks.indexOf(index) !== -1
+        return trackVolume(index) <= 0.001
     }
 
     function toggleMute(index) {
-        var next = mutedTracks.slice()
-        var at = next.indexOf(index)
-        if (at === -1)
-            next.push(index)
-        else
-            next.splice(at, 1)
-        mutedTracks = next
+        setTrackVolume(index, isMuted(index) ? 1.0 : 0.0)
+    }
+
+    // Per-ordinal volumes handed to the share dialog. Only tracks the user
+    // has actually adjusted are sent, so the export keeps the engine's
+    // routing defaults for everything else. The redundant Voice lane hidden
+    // by the routing history stays explicitly excluded.
+    function shareAudioVolumes() {
+        var volumes = Object.assign({}, trackVolumes)
+        if (playerPage.hiddenVoiceTrack >= 0)
+            volumes[playerPage.hiddenVoiceTrack] = 0
+        return volumes
     }
 
     // Open a library file (closes any current one first).
     function open(path, title, dateStr) {
+        cancelScrub()
         cancelSnapshot()
         player.stop()
-        mutedTracks = []
+        trackVolumes = ({})
         clipMode = false
         clearClipRange()
         clipError = ""
@@ -382,6 +400,7 @@ Page {
     }
 
     function close() {
+        cancelScrub()
         cancelSnapshot()
         bookmarksDialog.close()
         stopAll()
@@ -393,7 +412,7 @@ Page {
         trackCount = 0
         audioProbeId++
         audioProbePending = false
-        mutedTracks = []
+        trackVolumes = ({})
         clipMode = false
         clearClipRange()
         clipError = ""
@@ -404,6 +423,12 @@ Page {
         tracksHeight = 0
         playerFullscreen = false
         visible = false
+    }
+
+    function cancelScrub() {
+        scrubTimer.stop()
+        pendingScrubMs = -1
+        lastScrubMs = 0
     }
 
     function seekTo(ms) {
@@ -548,6 +573,8 @@ Page {
     }
 
     function seekAll(ms) {
+        scrubTimer.stop()
+        pendingScrubMs = -1
         // Seeking clears EndOfMedia, so remember it before moving any clock.
         // Restart every pipeline after EOF; an ordinary paused seek stays paused.
         var resumeAfterEnd = player.atEnd && ms < player.duration
@@ -818,7 +845,7 @@ Page {
                 text: qsTr("Share")
                 icon.source: "qrc:/icons/share.svg"
                 enabled: !!playerPage.infoRec
-                onClicked: window.openShareExport(playerPage.filePath, playerPage.mutedTracks.concat(playerPage.hiddenVoiceTrack >= 0 ? [playerPage.hiddenVoiceTrack] : []))
+                onClicked: window.openShareExport(playerPage.filePath, playerPage.shareAudioVolumes())
             }
 
             TrophyButton {
@@ -916,7 +943,9 @@ Page {
                     }
                 }
                 audioOutput: AudioOutput {
-                    volume: playerPage.masterVolume
+                    // Master volume scales the whole mix; the lane's own
+                    // slider scales just this stream and zero mutes it.
+                    volume: playerPage.masterVolume * playerPage.trackVolume(audioPipeline.modelData)
                     muted: playerPage.masterMuted || playerPage.isMuted(audioPipeline.modelData)
                 }
             }
@@ -1223,7 +1252,7 @@ Page {
                         trackIndex: modelData
                         trackLabelOverride: playerPage.audioTrackName(modelData)
                         trackTotal: playerPage.audioLanes
-                        laneMuted: playerPage.mutedTracks.indexOf(modelData) !== -1
+                        laneVolume: playerPage.trackVolume(modelData)
                         playPosition: playerPage.playPosition
                         playDuration: playerPage.playDuration
                         viewStartMs: playerPage.viewStartMs
@@ -1243,8 +1272,8 @@ Page {
                         onPanRequested: function(startMs) {
                             playerPage.panViewTo(startMs)
                         }
-                        onMuteToggled: function(t) {
-                            playerPage.toggleMute(t)
+                        onVolumeChanged: function(t, v) {
+                            playerPage.setTrackVolume(t, v)
                         }
                     }
                 }
@@ -1319,9 +1348,11 @@ Page {
         property int trackTotal: 1
         property string trackLabelOverride: ""
         property real headerWidth: 64
-        // True mute from the page (this lane's pipeline is
-        // silent). Dimmed while muted.
-        property bool laneMuted: false
+        // Per-track gain from the page (0..1). Zero is a true mute: the
+        // lane's own pipeline is silent, and the lane is dimmed.
+        property real laneVolume: 1.0
+        readonly property bool laneMuted: laneVolume <= 0.001
+        readonly property bool volumePopupOpen: laneVolumePopup.opened
         property double playPosition: 0
         property double playDuration: 0
         // Shared zoom window (subset of the file the lane
@@ -1345,7 +1376,7 @@ Page {
         property real laneHeight: 64
 
         signal seekRequested(double ms)
-        signal muteToggled(int track)
+        signal volumeChanged(int track, real volume)
         // Clip range overlay (page-owned selection): the lane only
         // draws it — drags report back via clipHandleMoved and the
         // page clamps. Never read player.* here (see page note).
@@ -1361,6 +1392,10 @@ Page {
         // Middle-drag pan anchor (pressed position + view).
         property double panAnchorX: 0
         property double panAnchorView: 0
+
+        function openVolumePopup() {
+            laneVolumePopup.open()
+        }
 
         function scrub(x) {
             if (viewSpanMs > 0 && waveArea.width > 0) {
@@ -1437,6 +1472,7 @@ Page {
                 visible: lane.laneHeight >= laneHeader.implicitHeight
 
                 TrophyButton {
+                    objectName: "playerLaneVolumeButton" + lane.trackIndex
                     Layout.alignment: Qt.AlignHCenter
                     implicitWidth: 28
                     implicitHeight: 28
@@ -1448,7 +1484,12 @@ Page {
                     icon.source: lane.laneMuted ? "qrc:/icons/volume-muted.svg" : "qrc:/icons/volume-high.svg"
                     icon.width: 16
                     icon.height: 16
-                    onClicked: lane.muteToggled(lane.trackIndex)
+                    ToolTip.text: lane.laneMuted
+                        ? qsTr("Track volume (muted)")
+                        : qsTr("Track volume: %1%").arg(Math.round(lane.laneVolume * 100))
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    onClicked: lane.openVolumePopup()
                 }
 
                 Label {
@@ -1474,6 +1515,7 @@ Page {
                 visible: lane.laneHeight < laneHeader.implicitHeight
 
                 TrophyButton {
+                    objectName: "playerLaneVolumeButtonCompact" + lane.trackIndex
                     implicitWidth: 28
                     implicitHeight: 28
                     // Hug the lane's left edge: cancel the
@@ -1488,7 +1530,12 @@ Page {
                     icon.source: lane.laneMuted ? "qrc:/icons/volume-muted.svg" : "qrc:/icons/volume-high.svg"
                     icon.width: 16
                     icon.height: 16
-                    onClicked: lane.muteToggled(lane.trackIndex)
+                    ToolTip.text: lane.laneMuted
+                        ? qsTr("Track volume (muted)")
+                        : qsTr("Track volume: %1%").arg(Math.round(lane.laneVolume * 100))
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    onClicked: lane.openVolumePopup()
                 }
 
                 Label {
@@ -1745,6 +1792,67 @@ Page {
                             var px = waveHandleEnd.x + mouse.x - grabDx + waveHandleEnd.width / 2
                             lane.clipHandleMoved(1, lane.viewStartMs + px / waveArea.width * lane.viewSpanMs)
                         }
+                    }
+                }
+            }
+        }
+
+        // Per-track volume popup: the lane's volume button opens this
+        // instead of toggling outright. Dragging to zero is a true mute.
+        Popup {
+            id: laneVolumePopup
+            objectName: "playerLaneVolumePopup" + lane.trackIndex
+            parent: lane
+            width: 240
+            padding: 20
+            x: Theme.spacingSmall
+            y: -height - Theme.spacingSmall
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+            background: Rectangle {
+                color: Theme.cardColor
+                radius: Theme.radiusMedium
+                border.color: Theme.borderColor
+            }
+
+            contentItem: ColumnLayout {
+                spacing: 8
+
+                Label {
+                    text: lane.headerText !== ""
+                        ? qsTr("%1 volume").arg(lane.headerText)
+                        : qsTr("Track volume")
+                    color: Theme.textColor
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Medium
+                    Layout.alignment: Qt.AlignLeft
+                }
+
+                TrophySlider {
+                    objectName: "playerLaneVolumeSlider" + lane.trackIndex
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 1
+                    stepSize: 0.01
+                    value: lane.laneVolume
+                    onMoved: lane.volumeChanged(lane.trackIndex, value)
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: lane.laneMuted
+                            ? qsTr("Muted")
+                            : qsTr("%1%").arg(Math.round(lane.laneVolume * 100))
+                        color: lane.laneMuted ? Theme.errorColor : Theme.textSecondaryColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+
+                    TrophyButton {
+                        implicitHeight: 24
+                        text: lane.laneMuted ? qsTr("Unmute") : qsTr("Mute")
+                        onClicked: lane.volumeChanged(lane.trackIndex, lane.laneMuted ? 1.0 : 0.0)
                     }
                 }
             }

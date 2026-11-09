@@ -9,6 +9,25 @@
 
 namespace TrophyBackend {
 
+// Packed BGRx SHM consumers copy complete rows, including their padding.
+// Validate before exposing a pointer: neither chunk metadata nor negotiated
+// dimensions prove that the producer supplied that many mapped bytes.
+inline const uint8_t *pipeWireVideoShmData(const spa_data &data,
+                                         int width, int height) {
+  if ((data.type != SPA_DATA_MemFd && data.type != SPA_DATA_MemPtr) ||
+      !data.data || !data.chunk || width <= 0 || height <= 0 ||
+      (data.chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) ||
+      data.chunk->stride <= 0)
+    return nullptr;
+  const uint64_t stride = data.chunk->stride;
+  const uint64_t bytes = stride * uint64_t(height);
+  const uint64_t offset = data.chunk->offset;
+  if (stride < uint64_t(width) * 4 || offset > data.maxsize ||
+      bytes > uint64_t(data.maxsize) - offset || bytes > data.chunk->size)
+    return nullptr;
+  return static_cast<const uint8_t *>(data.data) + offset;
+}
+
 // SPA names describe byte order, whereas DRM XRGB8888 describes a packed
 // integer. On little-endian Linux its bytes are B, G, R, X, not X, R, G, B.
 // Use the same format for DMA-BUF and SHM; the modifier property's presence

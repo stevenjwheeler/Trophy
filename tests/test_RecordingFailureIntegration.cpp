@@ -805,6 +805,11 @@ protected:
     checkMedia(Peer::finalized(replay));
     ASSERT_TRUE(waitFor([&] { return Peer::frames(replay) >= 15; }));
     const auto oldCapture = Peer::capture(replay);
+    // The first rotation above took the persistent path (container swap on a
+    // forced keyframe, no retiring leg). Changing a video setting forces the
+    // make-before-break rebuild, so this second rotation still lands the
+    // failure inside the handoff-ownership window this case exists to cover.
+    settings.setFps(24);
     Peer::rotate(replay);
     ASSERT_GT(Peer::retiring(replay), 0); // Failure arrives during handoff ownership.
     fail(failure);

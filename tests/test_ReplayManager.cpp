@@ -313,6 +313,261 @@ protected:
       }
     }
   }
+
+  void verifyLiveEncoderFailure() {
+    ReplayManager mgr;
+    mgr.m_capture = std::make_unique<ReplayFakeCapture>();
+    mgr.m_encoder = std::make_unique<ReplayOutputEncoder>();
+    mgr.m_muxer = std::make_unique<ReplayOutputMuxer>(true, true);
+    mgr.m_session = std::make_unique<RecordingSession>(
+        "unused.mkv", mgr.m_capture.get(), mgr.m_encoder.get(), mgr.m_muxer.get(),
+        nullptr, true, 128, 0);
+    ASSERT_TRUE(mgr.m_session->start());
+    mgr.setState(ReplayManager::State::Running);
+    QSignalSpy errors(&mgr, &ReplayManager::replayFailed);
+    emit mgr.m_encoder->encodingError("injected active encoder failure");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((errors.empty() || mgr.m_state != ReplayManager::State::Idle) &&
+           std::chrono::steady_clock::now() < deadline) {
+      QCoreApplication::processEvents();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(errors.count(), 1);
+    EXPECT_TRUE(errors.at(0).at(0).toString().contains("injected active encoder failure"));
+    EXPECT_EQ(mgr.m_state, ReplayManager::State::Idle);
+  }
+
+  // --- Persistent-rotation manager helpers ------------------------------
+  void makeLiveFakeSession(ReplayManager &mgr, const QString &path) {
+    mgr.m_capture = std::make_unique<ReplayFakeCapture>();
+    mgr.m_encoder = std::make_unique<ReplayOutputEncoder>();
+    mgr.m_muxer = std::make_unique<ReplayOutputMuxer>(true, true);
+    mgr.m_session = std::make_unique<RecordingSession>(
+        path, mgr.m_capture.get(), mgr.m_encoder.get(), mgr.m_muxer.get(),
+        nullptr, true, 128, 0);
+    ASSERT_TRUE(mgr.m_session->start());
+  }
+  void deliverRotation(ReplayManager &mgr, const QString &oldPath,
+                       const QString &newPath, const QJsonObject &history) {
+    mgr.onOutputRotated(oldPath, newPath, 0, history);
+  }
+  void deliverRotationAbort(ReplayManager &mgr, const QString &nextPath) {
+    mgr.onOutputRotationAborted(nextPath);
+  }
+  bool armRotation(ReplayManager &mgr) { return mgr.armPersistentRotation(); }
+  void markRotationPending(ReplayManager &mgr, const QString &path) {
+    mgr.m_rotationPending = true;
+    mgr.m_pendingRotationPath = path;
+    mgr.m_rotationWatchdog->start();
+  }
+  bool rotationPending(const ReplayManager &mgr) const {
+    return mgr.m_rotationPending;
+  }
+  QString pendingRotationPath(const ReplayManager &mgr) const {
+    return mgr.m_pendingRotationPath;
+  }
+  bool rotationWatchdogActive(const ReplayManager &mgr) const {
+    return mgr.m_rotationWatchdog->isActive();
+  }
+  QString encoderKey(ReplayManager &mgr) { return mgr.encoderSetupKey(); }
+  void setRotationSetupKeys(ReplayManager &mgr, const QString &audio,
+                            const QString &encoder) {
+    mgr.m_audioSetupKey = audio;
+    mgr.m_encoderSetupKey = encoder;
+  }
+  QStringList cachedSegmentFiles(ReplayManager &mgr) {
+    return QDir(defaultCacheDir(mgr)).entryList({"seg_*.mkv"}, QDir::Files);
+  }
+
+  void verifyRotationEnlistsOutgoing() {
+    SettingsManager settings;
+    settings.setClipBufferSeconds(600);
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_state = ReplayManager::State::Running;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    makeLiveFakeSession(mgr, oldPath);
+    mgr.m_openSegmentPath = oldPath;
+    mgr.m_openSegmentStart = 0.0;
+    const QString newPath = makeSegFile("seg_001.mkv");
+    markRotationPending(mgr, newPath);
+    ASSERT_TRUE(rotationWatchdogActive(mgr));
+
+    const QJsonObject history{{"known", true}, {"system", true}, {"game", false}};
+    deliverRotation(mgr, oldPath, newPath, history);
+
+    // The queued cut enlists the outgoing file with the history it recorded
+    // and makes the successor the live open segment.
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(pendingRotationPath(mgr).isEmpty());
+    ASSERT_EQ(mgr.m_segments.size(), 1);
+    EXPECT_EQ(mgr.m_segments.front().path, oldPath);
+    EXPECT_DOUBLE_EQ(mgr.m_segments.front().startSec, 0.0);
+    EXPECT_TRUE(mgr.m_segments.front().audioHistory.value("known").toBool());
+    EXPECT_TRUE(mgr.m_segments.front().audioHistory.value("system").toBool());
+    EXPECT_EQ(mgr.m_openSegmentPath, newPath);
+    EXPECT_TRUE(QFileInfo::exists(oldPath));
+    EXPECT_TRUE(QFileInfo::exists(newPath));
+  }
+
+  void verifyQueuedRotationAfterStop() {
+    SettingsManager settings;
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_state = ReplayManager::State::Stopping;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    const QString newPath = makeSegFile("seg_001.mkv");
+    mgr.m_openSegmentPath = oldPath;
+    markRotationPending(mgr, newPath);
+
+    // Stop raced the encoding thread's queued notification: the finalized
+    // outgoing file is cache-only and the live path is already retired.
+    deliverRotation(mgr, oldPath, newPath, QJsonObject{{"known", true}});
+
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(pendingRotationPath(mgr).isEmpty());
+    EXPECT_FALSE(QFileInfo::exists(oldPath));
+    EXPECT_TRUE(QFileInfo::exists(newPath));
+    EXPECT_TRUE(mgr.m_segments.isEmpty());
+    EXPECT_EQ(mgr.m_openSegmentPath, oldPath);
+  }
+
+  void verifyAbortAfterStop() {
+    SettingsManager settings;
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_state = ReplayManager::State::Stopping;
+    const QString nextPath = makeSegFile("seg_001.mkv");
+    markRotationPending(mgr, nextPath);
+    QSignalSpy failed(&mgr, &ReplayManager::replayFailed);
+
+    // A queued abort after stop must not start a rebuild or report a failure;
+    // it only discards the successor it created.
+    deliverRotationAbort(mgr, nextPath);
+
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(pendingRotationPath(mgr).isEmpty());
+    EXPECT_FALSE(QFileInfo::exists(nextPath));
+    EXPECT_EQ(failed.count(), 0);
+    EXPECT_EQ(mgr.m_state, ReplayManager::State::Stopping);
+  }
+
+  void verifyAbortWhileRunningFallsBack() {
+    ReplayManager mgr;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    makeLiveFakeSession(mgr, oldPath);
+    mgr.m_openSegmentPath = oldPath;
+    // No settings snapshot: the make-before-break rebuild cannot run, so the
+    // abort path must stop the DVR instead of leaving it half-rotated.
+    mgr.m_settings = nullptr;
+    mgr.m_state = ReplayManager::State::Running;
+    const QString nextPath = makeSegFile("seg_001.mkv");
+    markRotationPending(mgr, nextPath);
+    QSignalSpy failed(&mgr, &ReplayManager::replayFailed);
+
+    deliverRotationAbort(mgr, nextPath);
+
+    EXPECT_FALSE(QFileInfo::exists(nextPath));
+    ASSERT_EQ(failed.count(), 1);
+    EXPECT_TRUE(failed.at(0).at(0).toString().contains("Clips stopped"));
+    EXPECT_EQ(mgr.m_state, ReplayManager::State::Stopping);
+    EXPECT_TRUE(mgr.m_openSegmentPath.isEmpty());
+  }
+
+  void verifyStopSettlesPendingRotation() {
+    SettingsManager settings;
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    // Gate finalize so the retiring leg cannot settle before the assertions.
+    auto gate = std::make_shared<ReplayOperationGate>();
+    mgr.m_capture = std::make_unique<ReplayFakeCapture>();
+    mgr.m_encoder = std::make_unique<ReplayOutputEncoder>();
+    mgr.m_muxer = std::make_unique<ReplayGatedMuxer>(gate, true);
+    mgr.m_session = std::make_unique<RecordingSession>(
+        oldPath, mgr.m_capture.get(), mgr.m_encoder.get(), mgr.m_muxer.get(),
+        nullptr, true, 128, 0);
+    ASSERT_TRUE(mgr.m_session->start());
+    mgr.m_openSegmentPath = oldPath;
+    mgr.m_state = ReplayManager::State::Running;
+    const QString nextPath = makeSegFile("seg_001.mkv");
+    markRotationPending(mgr, nextPath);
+
+    mgr.stopDvr();
+    ASSERT_TRUE(gate->waitForEntry());
+
+    // The pending arm is settled: held audio stays in the outgoing file and
+    // the unopened successor is removed. The live outgoing file is retired
+    // normally (it is not treated as a cache-only rotation output).
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(pendingRotationPath(mgr).isEmpty());
+    EXPECT_FALSE(QFileInfo::exists(nextPath));
+    EXPECT_TRUE(QFileInfo::exists(oldPath));
+    EXPECT_TRUE(mgr.m_openSegmentPath.isEmpty());
+
+    gate->release();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((!mgr.m_retiringSegments.empty() ||
+            mgr.m_state == ReplayManager::State::Stopping) &&
+           std::chrono::steady_clock::now() < deadline) {
+      QCoreApplication::processEvents();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(mgr.m_retiringSegments.empty());
+    EXPECT_EQ(gate->destructions, 1);
+  }
+
+  void verifyArmRefusesOnSetupChange() {
+    SettingsManager settings;
+    settings.setClipBufferSeconds(600);
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    makeLiveFakeSession(mgr, oldPath);
+    mgr.m_openSegmentPath = oldPath;
+
+    setRotationSetupKeys(mgr, setupKey(mgr), "stale-encoder");
+    EXPECT_FALSE(armRotation(mgr));
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(cachedSegmentFiles(mgr).isEmpty());
+
+    setRotationSetupKeys(mgr, "stale-audio", encoderKey(mgr));
+    EXPECT_FALSE(armRotation(mgr));
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(cachedSegmentFiles(mgr).isEmpty());
+    EXPECT_EQ(mgr.m_openSegmentPath, oldPath);
+  }
+
+  void verifyArmRefusesBeforeVideo() {
+    SettingsManager settings;
+    ReplayManager mgr;
+    mgr.m_settings = &settings;
+    mgr.m_dvrClock.start();
+    const QString oldPath = makeSegFile("seg_000.mkv");
+    makeLiveFakeSession(mgr, oldPath);
+    mgr.m_openSegmentPath = oldPath;
+    setRotationSetupKeys(mgr, setupKey(mgr), encoderKey(mgr));
+
+    // The live session has not written a video packet yet, so there is no cut
+    // point; the manager must fall back to the rebuild rather than arm.
+    EXPECT_FALSE(armRotation(mgr));
+    EXPECT_FALSE(rotationPending(mgr));
+    EXPECT_FALSE(rotationWatchdogActive(mgr));
+    EXPECT_TRUE(cachedSegmentFiles(mgr).isEmpty());
+    EXPECT_EQ(mgr.m_openSegmentPath, oldPath);
+  }
+
   void prepareLateVoiceRouting(ReplayManager &mgr, SettingsManager &settings) {
     mgr.m_settings = &settings;
     mgr.m_state = ReplayManager::State::Running;
@@ -1033,6 +1288,10 @@ TEST_F(ReplayManagerTest, AsyncHandoffFailureStopsOnceWithoutEnlistingOutput) {
   gatedRetirement(false, false);
 }
 
+TEST_F(ReplayManagerTest, ActiveEncoderFailureStopsBeforeRotationWithItsReason) {
+  verifyLiveEncoderFailure();
+}
+
 TEST_F(ReplayManagerTest, StartupSettingsChangeRejectsOldSnapshot) {
   gatedStartup(false);
 }
@@ -1051,4 +1310,32 @@ TEST_F(ReplayManagerTest, ExplicitStopCancelsDeferredSameGameRestart) {
 
 TEST_F(ReplayManagerTest, SemanticControlsRememberIdlePreferencesAcrossPhysicalRelayout) {
   semanticPreferencesSurviveIdleAndRelayout();
+}
+
+TEST_F(ReplayManagerTest, RotationEnlistsOutgoingSegmentAndAdvancesOpenPath) {
+  verifyRotationEnlistsOutgoing();
+}
+
+TEST_F(ReplayManagerTest, QueuedRotationAfterStopDropsOnlyTheOutgoingFile) {
+  verifyQueuedRotationAfterStop();
+}
+
+TEST_F(ReplayManagerTest, AbortAfterStopRemovesOnlyTheSuccessor) {
+  verifyAbortAfterStop();
+}
+
+TEST_F(ReplayManagerTest, AbortWhileRunningWithoutPipelineFallsBackAndStops) {
+  verifyAbortWhileRunningFallsBack();
+}
+
+TEST_F(ReplayManagerTest, StopSettlesPendingRotationAndRemovesSuccessor) {
+  verifyStopSettlesPendingRotation();
+}
+
+TEST_F(ReplayManagerTest, ArmRefusesWhenEncoderOrAudioSetupChanged) {
+  verifyArmRefusesOnSetupChange();
+}
+
+TEST_F(ReplayManagerTest, ArmRefusesBeforeTheFirstVideoPacket) {
+  verifyArmRefusesBeforeVideo();
 }

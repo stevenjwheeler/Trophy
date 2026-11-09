@@ -35,6 +35,7 @@ public:
   QString source, destination;
   QVariantMap data;
   QVariantList selected;
+  QVariantList selectedGains;
   QVariantList queueRows;
   QVariantList batchCaptures;
   QHash<QString, QVariantMap> captureData;
@@ -58,8 +59,9 @@ public:
     emit changed(); return true;
   }
   Q_INVOKABLE bool start(const QString &folder, const QVariantList &tracks,
-                        int mode = 0, int height = 0) {
-    ++exports; destination = folder; selected = tracks; lastMode = mode; lastHeight = height;
+                        int mode = 0, int height = 0, const QVariantList &gains = {}) {
+    ++exports; destination = folder; selected = tracks; selectedGains = gains;
+    lastMode = mode; lastHeight = height;
     active = true; emit changed(); return true;
   }
   Q_INVOKABLE bool startBatch(const QString &folder, const QVariantList &captures,
@@ -816,6 +818,62 @@ TEST_F(SharingUiTest, BatchReviewsIndependentAudioLayoutsAndQueuesAllWithSharedS
 // The panel offers two square, described choices rather than a dropdown, shows
 // them only when there is a real choice, and always exposes what the export
 // will contain plus how long it will take.
+TEST_F(SharingUiTest, BatchGainsStayWithTheirCapture) {
+  exporter.captureData["/fake/First.mkv"] = {{"tracks", QVariantList{
+      QVariantMap{{"index", 1}, {"label", "System"}},
+      QVariantMap{{"index", 2}, {"label", "Voice"}}}}};
+  exporter.captureData["/fake/Second.mkv"] = {{"tracks", QVariantList{
+      QVariantMap{{"index", 3}, {"label", "System"}},
+      QVariantMap{{"index", 5}, {"label", "Voice"}}}}};
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePaths", QVariantList{"/fake/First.mkv", "/fake/Second.mkv"}},
+      {"destination", "/fake/output"}});
+  ASSERT_TRUE(bool(object));
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  object->setProperty("audioExpanded", true);
+  auto *content = object->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  ASSERT_TRUE(wait([&] { return findItem(content, "shareAudioSlider1") != nullptr; }));
+  auto *firstSystem = findItem(content, "shareAudioSlider1");
+  auto *firstVoice = findItem(content, "shareAudioSlider2");
+  ASSERT_NE(firstSystem, nullptr); ASSERT_NE(firstVoice, nullptr);
+  firstSystem->setProperty("value", 0.25);
+  ASSERT_TRUE(QMetaObject::invokeMethod(firstSystem, "moved"));
+  firstVoice->setProperty("value", 0.0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(firstVoice, "moved"));
+
+  auto *picker = object->findChild<QObject *>("shareCapturePicker");
+  ASSERT_NE(picker, nullptr);
+  picker->setProperty("currentIndex", 1);
+  ASSERT_TRUE(QMetaObject::invokeMethod(picker, "activated", Q_ARG(int, 1)));
+  ASSERT_TRUE(wait([&] { return findItem(content, "shareAudioSlider3") != nullptr; }));
+  auto *secondSystem = findItem(content, "shareAudioSlider3");
+  auto *secondVoice = findItem(content, "shareAudioSlider5");
+  ASSERT_NE(secondSystem, nullptr); ASSERT_NE(secondVoice, nullptr);
+  secondSystem->setProperty("value", 0.5);
+  ASSERT_TRUE(QMetaObject::invokeMethod(secondSystem, "moved"));
+  secondVoice->setProperty("value", 0.0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(secondVoice, "moved"));
+
+  picker->setProperty("currentIndex", 0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(picker, "activated", Q_ARG(int, 0)));
+  ASSERT_TRUE(wait([&] { return findItem(content, "shareAudioSlider1") != nullptr; }));
+  EXPECT_NEAR(findItem(content, "shareAudioSlider1")->property("value").toDouble(), 0.25, 0.001);
+  EXPECT_DOUBLE_EQ(findItem(content, "shareAudioSlider2")->property("value").toDouble(), 0.0);
+
+  auto *start = object->findChild<QObject *>("startShareExport");
+  ASSERT_NE(start, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(start, "clicked"));
+  ASSERT_EQ(exporter.batchCaptures.size(), 2);
+  const auto first = exporter.batchCaptures[0].toMap();
+  const auto second = exporter.batchCaptures[1].toMap();
+  EXPECT_EQ(first["audioStreams"].toList(), QVariantList{1});
+  EXPECT_EQ(first["audioGains"].toList(), QVariantList{0.25});
+  EXPECT_EQ(second["audioStreams"].toList(), QVariantList{3});
+  EXPECT_EQ(second["audioGains"].toList(), QVariantList{0.5});
+}
+
 TEST_F(SharingUiTest, OutputOffersDescribedChoicesAndAlwaysShowsTheResult) {
   exporter.captureData["/fake/Game.mkv"] = QVariantMap{
       {"tracks", QVariantList{QVariantMap{{"index", 1}, {"label", "Game"}}}},
@@ -1240,15 +1298,15 @@ TEST_F(SharingUiTest, FolderAcceptanceDecodesLocalUrlAndEnablesExport) {
   EXPECT_EQ(exporter.destination, folder);
 }
 TEST_F(SharingUiTest, NamedTracksPreserveOriginalIndicesAndEstimatedLabels) {
+  exporter.captureData["/fake/Game.mkv"] = {{"tracks", QVariantList{
+    QVariantMap{{"index", 1}, {"label", "System"}},
+    QVariantMap{{"index", 2}, {"label", "Voice"}, {"defaultExcluded", true}},
+    QVariantMap{{"index", 3}, {"label", "Microphone"}, {"inferred", true}}}}};
   create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)}, {"sourcePath", "/fake/Game.mkv"}});
   ASSERT_TRUE(bool(object));
   ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
   ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-  exporter.data = {{"tracks", QVariantList{
-    QVariantMap{{"index", 1}, {"label", "System"}},
-    QVariantMap{{"index", 2}, {"label", "Voice"}, {"defaultExcluded", true}},
-    QVariantMap{{"index", 3}, {"label", "Microphone"}, {"inferred", true}}}}};
-  emit exporter.changed();
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
   object->setProperty("audioExpanded", true);
   auto *content = object->property("contentItem").value<QQuickItem *>();
   ASSERT_NE(content, nullptr);
@@ -1257,17 +1315,66 @@ TEST_F(SharingUiTest, NamedTracksPreserveOriginalIndicesAndEstimatedLabels) {
   auto *mic = findItem(content, "shareAudioTrack3");
   EXPECT_EQ(mic->property("text").toString(), "Microphone (estimated)");
   EXPECT_EQ(findItem(content, "shareAudioTrack1")->property("text").toString(), "System");
-  EXPECT_FALSE(findItem(content, "shareAudioTrack2")->isVisible());
+  // The redundant voice source stays listed at zero gain instead of hidden.
+  auto *voice = findItem(content, "shareAudioTrack2");
+  ASSERT_NE(voice, nullptr);
+  EXPECT_TRUE(voice->isVisible());
+  auto *voiceSlider = findItem(content, "shareAudioSlider2");
+  ASSERT_NE(voiceSlider, nullptr);
+  EXPECT_DOUBLE_EQ(voiceSlider->property("value").toDouble(), 0.0);
   object->setProperty("selectedAudio", QVariantList{1});
-  // Each source is a label plus a switch now.
-  auto *micSwitch = findItem(content, "shareAudioSwitch3");
-  ASSERT_NE(micSwitch, nullptr);
-  micSwitch->setProperty("checked", true);
-  ASSERT_TRUE(QMetaObject::invokeMethod(micSwitch, "toggled"));
+  // Each source is a label plus a gain bar now.
+  auto *micSlider = findItem(content, "shareAudioSlider3");
+  ASSERT_NE(micSlider, nullptr);
+  micSlider->setProperty("value", 1.0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(micSlider, "moved"));
   const auto selection = object->property("selectedAudio");
   const auto tracks = selection.canConvert<QJSValue>() ? selection.value<QJSValue>().toVariant().toList() : selection.toList();
   EXPECT_EQ(tracks, (QVariantList{1, 3}));
   EXPECT_EQ(object->property("audioSummary").toString(), "System + Microphone*");
+}
+TEST_F(SharingUiTest, PlayerTrackVolumesSeedExportBarsAndTravelToTheEngine) {
+  exporter.captureData["/fake/Game.mkv"] = {{"tracks", QVariantList{
+    QVariantMap{{"index", 1}, {"ordinal", 0}, {"label", "System"}},
+    QVariantMap{{"index", 2}, {"ordinal", 1}, {"label", "Voice"}},
+    QVariantMap{{"index", 3}, {"ordinal", 2}, {"label", "Mic"}}}},
+    {"durationSeconds", 60.0}, {"videoCodecLabel", "H.264"},
+    {"copyable", true}, {"shareable", true}};
+  create("ShareExportDialog.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"sourcePath", "/fake/Game.mkv"},
+      {"sourceAudioVolumes", QVariantMap{{"0", 1.0}, {"1", 0.35}, {"2", 0.0}}}});
+  ASSERT_TRUE(bool(object));
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
+  ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
+  ASSERT_TRUE(wait([&] { return object->property("tracksLoaded").toBool(); }));
+  object->setProperty("audioExpanded", true);
+  auto *content = object->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  ASSERT_TRUE(wait([&] { return findItem(content, "shareAudioSlider2") != nullptr; }));
+  const auto selection = object->property("selectedAudio");
+  const auto tracks = selection.canConvert<QJSValue>()
+      ? selection.value<QJSValue>().toVariant().toList() : selection.toList();
+  EXPECT_EQ(tracks, (QVariantList{1, 2}));
+  auto *voice = findItem(content, "shareAudioSlider2");
+  ASSERT_NE(voice, nullptr);
+  EXPECT_NEAR(voice->property("value").toDouble(), 0.35, 0.001);
+  auto *mic = findItem(content, "shareAudioSlider3");
+  ASSERT_NE(mic, nullptr);
+  EXPECT_DOUBLE_EQ(mic->property("value").toDouble(), 0.0);
+
+  // Taking a track to zero removes it, and the remaining gains still travel
+  // to the exporter.
+  voice->setProperty("value", 0.0);
+  ASSERT_TRUE(QMetaObject::invokeMethod(voice, "moved"));
+  const auto after = object->property("selectedAudio");
+  const auto remaining = after.canConvert<QJSValue>()
+      ? after.value<QJSValue>().toVariant().toList() : after.toList();
+  EXPECT_EQ(remaining, QVariantList{1});
+  object->setProperty("destination", "/fake/output");
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "exportCaptures"));
+  EXPECT_EQ(exporter.selected, QVariantList{1});
+  ASSERT_EQ(exporter.selectedGains.size(), 1);
+  EXPECT_DOUBLE_EQ(exporter.selectedGains[0].toDouble(), 1.0);
 }
 // Two choices, a compact resolution row, one line of audio summary, a details
 // box and the destination - nothing dominating the panel.

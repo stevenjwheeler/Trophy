@@ -13,12 +13,16 @@
 #include <QSignalSpy>
 #include <QTimer>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
+#include <QFile>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <future>
+#include <functional>
+#include <limits>
 #include <thread>
 #include <tuple>
 #include <gtest/gtest.h>
@@ -40,17 +44,63 @@ void captureQtMessage(QtMsgType, const QMessageLogContext &, const QString &mess
 #include "encoding/IEncoder.h"
 #include "encoding/FFmpegEncoder.h"
 #include "muxing/IMuxer.h"
+#include "muxing/FFmpegMuxer.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 #include <libavutil/pixfmt.h>
 }
 
 using namespace TrophyBackend;
 
 namespace TrophyBackend {
+class CpuFramePoolTestPeer {
+public:
+  static size_t idleBytes(const CpuFramePool &pool) {
+    std::lock_guard lock(pool.m_state->mutex);
+    return pool.m_state->bytes;
+  }
+  static size_t idleCount(const CpuFramePool &pool) {
+    std::lock_guard lock(pool.m_state->mutex);
+    return pool.m_state->idle.size();
+  }
+};
 class RecordingSessionTestPeer {
 public:
+  static void verifySharedSnapshots(RecordingSession &session) {
+    session.m_running = true;
+    session.m_videoFrameDurationUs = 1000;
+    std::vector<uint8_t> producer(256, 42);
+    VideoFrame frame{};
+    frame.width = 8; frame.height = 8; frame.stride = 32;
+    frame.data = producer.data(); frame.timestamp = 10000;
+    session.queueCapturedFrame(frame);
+    ASSERT_EQ(session.m_videoQueue.size(), 1u);
+    const auto original = session.m_videoQueue.front().cpuStorage;
+    ASSERT_TRUE(original);
+    EXPECT_NE(original->data(), producer.data());
+    EXPECT_EQ(session.m_lastFrame->cpuStorage, original);
+    EXPECT_EQ(session.m_videoQueue.front().data, original->data());
+    EXPECT_TRUE(session.m_videoQueue.front().ownedData.empty());
+    std::fill(producer.begin(), producer.end(), 99);
+    EXPECT_EQ(original->front(), 42);
+    session.m_frameClockOffsetUs -= 5000;
+    session.m_lastIssuedTimestampUs -= 10000;
+    session.emitStillFrames();
+    ASSERT_GT(session.m_videoQueue.size(), 1u);
+    while (!session.m_videoQueue.empty()) {
+      EXPECT_EQ(session.m_videoQueue.front().cpuStorage, original);
+      EXPECT_EQ(session.m_videoQueue.front().data, original->data());
+      session.m_videoQueue.pop();
+    }
+    frame.timestamp += 20000;
+    session.queueCapturedFrame(frame);
+    EXPECT_NE(session.m_lastFrame->cpuStorage, original);
+    EXPECT_EQ(original->front(), 42);
+    EXPECT_EQ(session.m_lastFrame->data[0], 99);
+    session.m_running = false;
+  }
   static void clock(RecordingSession &session, std::shared_ptr<std::atomic<int64_t>> now) {
     session.m_clockNowUs = [now] { return now->load(); };
   }
@@ -152,8 +202,136 @@ public:
   static void emitStills(RecordingSession &session) {
     session.emitStillFrames();
   }
+  static void realFrameGate(RecordingSession &session, std::function<void()> hook) {
+    session.m_realFrameHandoverHook = std::move(hook);
+  }
+  static void audioError(RecordingSession &session, bool separate) {
+    auto *encoder = separate ? session.m_audioEncoders[0].get() : session.m_mergedEncoder.get();
+    ASSERT_NE(encoder, nullptr);
+    emit encoder->encodingError("injected native audio failure");
+  }
+  // --- Persistent rotation state-machine helpers -----------------------
+  static void prepareRotation(RecordingSession &session, int audioStreams,
+                              int64_t lastVideoPts,
+                              std::vector<int64_t> lastAudioPts) {
+    session.m_streamInfos.clear();
+    StreamInfo video;
+    video.type = StreamInfo::Type::Video;
+    video.codecId = AV_CODEC_ID_H264;
+    video.width = 64;
+    video.height = 64;
+    video.fps = 30;
+    session.m_streamInfos.push_back(video);
+    for (int i = 0; i < audioStreams; ++i) {
+      StreamInfo audio;
+      audio.type = StreamInfo::Type::Audio;
+      audio.codecId = AV_CODEC_ID_AAC;
+      audio.sampleRate = 48000;
+      audio.channels = 2;
+      session.m_streamInfos.push_back(audio);
+    }
+    session.m_audioHistoryStarted.store(true);
+    std::lock_guard<std::mutex> lock(session.m_rotationMutex);
+    session.m_lastWrittenVideoPts = lastVideoPts;
+    session.m_lastWrittenAudioPts = std::move(lastAudioPts);
+  }
+  static void publishRoutingHistory(RecordingSession &session, bool fallback,
+                                    bool desktop) {
+    session.m_historyFallback.store(fallback);
+    session.m_historyDesktop.store(desktop);
+  }
+  // Make audioHistory() report a known separate primary track.
+  static void seedSeparateRouting(RecordingSession &session) {
+    session.m_trackToStreamMap[0] = 1;
+    session.m_audioReceived[0].store(true);
+  }
+  static bool outputAt(RecordingSession &session, int stream, int64_t pts,
+                       bool keyframe = false, size_t bytes = 4) {
+    EncodedPacket packet;
+    packet.streamIndex = stream;
+    packet.pts = packet.dts = pts;
+    packet.isKeyframe = keyframe;
+    packet.data.assign(bytes, 1);
+    return session.writeOutputPacket(packet);
+  }
+  static int heldAudio(RecordingSession &session) {
+    std::lock_guard<std::mutex> lock(session.m_rotationMutex);
+    return static_cast<int>(session.m_heldAudio.size());
+  }
+  static void forceRotationTimeout(RecordingSession &session, int64_t armedAtMs) {
+    std::lock_guard<std::mutex> lock(session.m_rotationMutex);
+    session.m_rotationArmedAtMs = armedAtMs;
+  }
+  static void pollRotation(RecordingSession &session) {
+    session.pollRotation();
+  }
+  static std::vector<std::unique_ptr<IMuxer>> takeRetired(RecordingSession &session) {
+    return session.takeRetiredMuxers();
+  }
 };
 } // namespace TrophyBackend
+
+TEST(CpuFramePoolTest, SharedSnapshotsRecycleOnlyAfterLastConsumerAndSurviveOwner) {
+  std::vector<uint8_t> source(4096, 17);
+  std::shared_ptr<const std::vector<uint8_t>> survivor;
+  {
+    CpuFramePool pool;
+    auto first = pool.copy(source.data(), source.size());
+    auto consumer = first;
+    const auto *firstAddress = first->data();
+    first.reset();
+    source[0] = 29;
+    auto second = pool.copy(source.data(), source.size());
+    EXPECT_NE(second->data(), firstAddress);
+    EXPECT_EQ(consumer->front(), 17);
+    consumer.reset();
+    survivor = pool.copy(source.data(), source.size());
+    EXPECT_EQ(survivor->data(), firstAddress);
+    EXPECT_EQ(survivor->front(), 29);
+  }
+  EXPECT_EQ(survivor->front(), 29);
+  survivor.reset();
+}
+
+TEST(CpuFramePoolTest, BorrowedQueuedFramesStillCopyAndOwnedFramesSurviveMoves) {
+  CpuFramePool pool;
+  std::vector<uint8_t> source(256, 17);
+  VideoFrame frame{};
+  frame.width = 8; frame.height = 8; frame.stride = 32; frame.data = source.data();
+  QueuedFrame borrowed(frame);
+  EXPECT_NE(borrowed.data, source.data());
+  frame.cpuStorage = pool.copy(source.data(), source.size());
+  frame.data = frame.cpuStorage->data();
+  QueuedFrame queued(frame);
+  const auto *address = queued.data;
+  EXPECT_TRUE(queued.ownedData.empty());
+  QueuedFrame moved(std::move(queued));
+  borrowed = std::move(moved);
+  frame.cpuStorage.reset();
+  EXPECT_EQ(borrowed.data, address);
+  EXPECT_EQ(borrowed.data[0], 17);
+}
+
+TEST(CpuFramePoolTest, IdleCacheIsBoundedAndResizeReplacesObsoleteBuffers) {
+  CpuFramePool pool;
+  std::vector<uint8_t> source(24 * 1024 * 1024, 7);
+  std::vector<std::shared_ptr<const std::vector<uint8_t>>> pending;
+  for (int i = 0; i < 4; ++i) pending.push_back(pool.copy(source.data(), source.size()));
+  // Release on other threads, as the encoder and capture queues do.
+  std::thread consumer([owned = std::move(pending)]() mutable { owned.clear(); });
+  consumer.join();
+  EXPECT_LE(CpuFramePoolTestPeer::idleBytes(pool), CpuFramePool::maxIdleBytes);
+  EXPECT_LE(CpuFramePoolTestPeer::idleCount(pool), CpuFramePool::maxIdleBuffers);
+  auto resized = pool.copy(source.data(), 4096);
+  EXPECT_EQ(CpuFramePoolTestPeer::idleBytes(pool), 0u);
+  resized.reset();
+  EXPECT_EQ(CpuFramePoolTestPeer::idleBytes(pool), 4096u);
+  // A single oversized buffer must not enter the idle cache.
+  source.resize(CpuFramePool::maxIdleBytes + 1);
+  auto large = pool.copy(source.data(), source.size());
+  large.reset();
+  EXPECT_EQ(CpuFramePoolTestPeer::idleBytes(pool), 0u);
+}
 
 class RecordingSessionTestEnvironment : public ::testing::Environment {
 public:
@@ -225,6 +403,10 @@ public:
     return emitPackets;
   }
   int flush(std::vector<EncodedPacket> &packets) override {
+    if (failFlush) {
+      emit encodingError("injected codec drain failure");
+      return -1;
+    }
     if (!emitFlushPacket)
       return 0;
     EncodedPacket packet;
@@ -235,6 +417,7 @@ public:
   bool emitPackets = false;
   std::vector<int64_t> timestamps;
   bool emitFlushPacket = false;
+  bool failFlush = false;
   std::function<void()> encodeGate;
   EncoderType type() const override { return EncoderType::Software_x264; }
   QString name() const override { return QStringLiteral("fake"); }
@@ -2111,6 +2294,39 @@ TEST(RecordingSessionTest, StillScreenRepeatsTheLastFrameAtTheEncodeRate) {
   EXPECT_LT(encoder.timestamps.back() - encoder.timestamps.front(), 250000);
 }
 
+TEST(RecordingSessionTest, CodecFlushFailureCannotBeReportedAsSuccessfulOutput) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  encoder.failFlush = true;
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr,
+                           true, 128, 0);
+  ASSERT_TRUE(session.start());
+  session.stop();
+  EXPECT_FALSE(session.outputSucceeded());
+  EXPECT_EQ(session.outputErrorText(), "injected codec drain failure");
+}
+
+TEST(RecordingSessionTest, AudioErrorsLatchBeforeOwnerThreadDeliveryOrFinalization) {
+  for (bool separate : {false, true}) {
+    FakeCapture capture;
+    FakeVideoEncoder encoder;
+    FakeMuxer muxer;
+    AudioMixer mixer(48000, 2);
+    RecordingSession session("unused.mkv", &capture, &encoder, &muxer, &mixer,
+                             separate, 128, 0);
+    ASSERT_TRUE(session.start());
+    std::thread native([&] { RecordingSessionTestPeer::audioError(session, separate); });
+    native.join();
+    // No processEvents: the failure must already be latched before a stop
+    // worker can announce a successful trailer/close to the owner thread.
+    EXPECT_TRUE(session.outputFailed());
+    session.stop();
+    EXPECT_FALSE(session.outputSucceeded());
+    EXPECT_EQ(session.outputErrorText(), "injected native audio failure");
+  }
+}
+
 // A real frame can arrive after the filler has already published timestamps
 // past its own (producer timestamps lag their delivery by more than a frame on
 // a jittery callback). The session must keep the timeline strictly increasing
@@ -2162,6 +2378,14 @@ TEST(RecordingSessionTest, StillFillersNeverOvertakeALateRealFrame) {
 // refused the packet ("non monotonically increasing dts to muxer in stream 0")
 // and the session aborted the whole recording. Reserving and handing the batch
 // over must be one step.
+TEST(RecordingSessionTest, RealAndStillFramesShareOneProducerIndependentSnapshot) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true, 48000, 0);
+  RecordingSessionTestPeer::verifySharedSnapshots(session);
+}
+
 TEST(RecordingSessionTest, PendingStillFrameBatchCannotBeOvertakenByARealFrame) {
   FakeCapture capture;
   FakeVideoEncoder encoder;
@@ -2220,6 +2444,51 @@ TEST(RecordingSessionTest, PendingStillFrameBatchCannotBeOvertakenByARealFrame) 
   for (size_t i = 1; i < encoder.timestamps.size(); ++i)
     EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1])
         << "the filler batch overtook a real frame at index " << i;
+}
+
+TEST(RecordingSessionTest, ReservedRealFrameCannotBeOvertakenByFillers) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  EncoderConfig config;
+  config.fps = 60;
+  ASSERT_TRUE(encoder.initialize(config));
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr,
+                           true, 48000, 0);
+  auto clock = std::make_shared<std::atomic<int64_t>>(1000000);
+  RecordingSessionTestPeer::clock(session, clock);
+  ASSERT_TRUE(session.start());
+  std::vector<uint8_t> pixels(64 * 64 * 4);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 256;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  frame.timestamp = 1000000;
+  capture.fire(frame);
+
+  std::thread fillers;
+  std::atomic<bool> finished{false};
+  RecordingSessionTestPeer::realFrameGate(session, [&] {
+    clock->store(1080000);
+    fillers = std::thread([&] {
+      RecordingSessionTestPeer::emitStills(session);
+      finished.store(true);
+    });
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(200);
+    while (!finished.load() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  });
+  clock->store(1020000);
+  frame.timestamp = 1020000;
+  capture.fire(frame);
+  fillers.join();
+  session.stop();
+  ASSERT_GE(encoder.timestamps.size(), 4u);
+  EXPECT_EQ(encoder.timestamps[1], 1020000);
+  for (size_t i = 1; i < encoder.timestamps.size(); ++i)
+    EXPECT_GT(encoder.timestamps[i], encoder.timestamps[i - 1]);
 }
 
 // The encoder converts the capture clock to whole milliseconds before the
@@ -2309,4 +2578,269 @@ TEST(RecordingSessionTest, AsyncStopDoesNotStopThePacingTimerFromTheWorker) {
   for (const auto &message : g_qtMessages)
     EXPECT_FALSE(message.contains("Timers cannot be stopped from another thread"))
         << message.toStdString();
+}
+
+namespace {
+
+class RejectingMuxer : public FakeMuxer {
+public:
+  int addStream(const StreamInfo &) override { return -1; }
+};
+
+bool waitForCondition(const std::function<bool()> &condition,
+                      std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!condition() && std::chrono::steady_clock::now() < deadline) {
+    QCoreApplication::processEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return condition();
+}
+
+// Count decodable video frames; fails (returns -1) on demux/decode errors.
+int decodeVideoFrames(const QString &path) {
+  AVFormatContext *input = nullptr;
+  if (avformat_open_input(&input, QFile::encodeName(path).constData(), nullptr,
+                          nullptr) < 0)
+    return -1;
+  int frames = -1;
+  if (avformat_find_stream_info(input, nullptr) >= 0) {
+    const int stream = av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1,
+                                           nullptr, 0);
+    if (stream >= 0) {
+      const AVCodec *codec =
+          avcodec_find_decoder(input->streams[stream]->codecpar->codec_id);
+      AVCodecContext *ctx = codec ? avcodec_alloc_context3(codec) : nullptr;
+      if (ctx && avcodec_parameters_to_context(
+                     ctx, input->streams[stream]->codecpar) >= 0 &&
+          avcodec_open2(ctx, codec, nullptr) >= 0) {
+        frames = 0;
+        AVPacket *packet = av_packet_alloc();
+        AVFrame *frame = av_frame_alloc();
+        bool clean = packet && frame;
+        while (clean && av_read_frame(input, packet) >= 0) {
+          if (packet->stream_index == stream) {
+            if (avcodec_send_packet(ctx, packet) < 0) {
+              clean = false;
+            } else {
+              int ret = 0;
+              while ((ret = avcodec_receive_frame(ctx, frame)) == 0)
+                ++frames;
+              if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+                clean = false;
+            }
+          }
+          av_packet_unref(packet);
+        }
+        if (clean && avcodec_send_packet(ctx, nullptr) >= 0) {
+          while (avcodec_receive_frame(ctx, frame) == 0)
+            ++frames;
+        }
+        if (!clean)
+          frames = -1;
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+      }
+      avcodec_free_context(&ctx);
+    }
+  }
+  avformat_close_input(&input);
+  return frames;
+}
+
+} // namespace
+
+TEST(RecordingSessionRotationTest, SplitsAtForcedKeyframeAndFencesAudio) {
+  FakeCapture capture;
+  std::unique_ptr<IMuxer> current = std::make_unique<FakeMuxer>();
+  auto *oldMuxer = static_cast<FakeMuxer *>(current.get());
+  RecordingSession session("/old.mkv", &capture, nullptr, current.get(),
+                           nullptr, true, 128, 0);
+  // Stream 0 video + stream 1 audio; last audio packet sits before the cut.
+  RecordingSessionTestPeer::prepareRotation(
+      session, 1, /*lastVideoPts=*/1000,
+      {std::numeric_limits<int64_t>::min(), 500});
+  RecordingSessionTestPeer::seedSeparateRouting(session);
+  RecordingSessionTestPeer::publishRoutingHistory(session, true, false);
+
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<FakeMuxer>());
+  auto *nextMuxer = static_cast<FakeMuxer *>(next.get());
+  QSignalSpy rotated(&session, &RecordingSession::outputRotated);
+  ASSERT_TRUE(session.beginOutputRotation(next, current, "/new.mkv", {}));
+  // The path only changes when the cut actually happens.
+  EXPECT_EQ(session.outputPath(), QStringLiteral("/old.mkv"));
+
+  // Below the hold point: stays in the outgoing file.
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 1, 400));
+  // At/after the hold point: held until the cut.
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 1, 1500));
+  EXPECT_EQ(RecordingSessionTestPeer::heldAudio(session), 1);
+  EXPECT_EQ(oldMuxer->audioPackets(), 1);
+
+  // Forced IDR performs the cut. Held audio older than the cut belongs to
+  // the outgoing file, and the outgoing file waits for audio at/after the
+  // cut before finalizing.
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 0, 2000, true));
+  EXPECT_EQ(session.outputPath(), QStringLiteral("/new.mkv"));
+  EXPECT_EQ(RecordingSessionTestPeer::heldAudio(session), 0);
+  EXPECT_EQ(oldMuxer->audioPackets(), 2);
+  EXPECT_EQ(oldMuxer->finalizations(), 0);
+  EXPECT_EQ(nextMuxer->audioPackets(), 0);
+  EXPECT_EQ(rotated.count(), 0);
+
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 1, 2000));
+  EXPECT_EQ(nextMuxer->audioPackets(), 1);
+  EXPECT_EQ(oldMuxer->finalizations(), 1);
+  ASSERT_EQ(rotated.count(), 1);
+  const auto args = rotated.takeFirst();
+  EXPECT_EQ(args.at(0).toString(), QStringLiteral("/old.mkv"));
+  EXPECT_EQ(args.at(1).toString(), QStringLiteral("/new.mkv"));
+
+  // The successor starts a fresh routing history seeded from the live state.
+  const QJsonObject history = session.audioHistory();
+  EXPECT_TRUE(history.value("system").toBool());
+  EXPECT_FALSE(history.value("game").toBool());
+
+  auto retired = RecordingSessionTestPeer::takeRetired(session);
+  EXPECT_EQ(retired.size(), 1u);
+  EXPECT_FALSE(session.rotationPending());
+}
+
+TEST(RecordingSessionRotationTest, AbortReturnsHeldAudioToTheCurrentFile) {
+  FakeCapture capture;
+  std::unique_ptr<IMuxer> current = std::make_unique<FakeMuxer>();
+  auto *oldMuxer = static_cast<FakeMuxer *>(current.get());
+  RecordingSession session("/old.mkv", &capture, nullptr, current.get(),
+                           nullptr, false, 128, 0);
+  RecordingSessionTestPeer::prepareRotation(
+      session, 1, 1000, {std::numeric_limits<int64_t>::min(), 500});
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<FakeMuxer>());
+  QSignalSpy aborted(&session, &RecordingSession::outputRotationAborted);
+  ASSERT_TRUE(session.beginOutputRotation(next, current, "/next.mkv", {}));
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 1, 1500));
+  EXPECT_EQ(RecordingSessionTestPeer::heldAudio(session), 1);
+
+  session.abortOutputRotation();
+  EXPECT_EQ(RecordingSessionTestPeer::heldAudio(session), 0);
+  EXPECT_EQ(oldMuxer->audioPackets(), 1); // Held audio returned, not lost.
+  EXPECT_EQ(session.outputPath(), QStringLiteral("/old.mkv"));
+  EXPECT_FALSE(session.rotationPending());
+  ASSERT_EQ(aborted.count(), 1);
+  EXPECT_EQ(aborted.takeFirst().at(0).toString(), QStringLiteral("/next.mkv"));
+}
+
+TEST(RecordingSessionRotationTest, KeyframeTimeoutAbortsAndRestoresHeldAudio) {
+  FakeCapture capture;
+  std::unique_ptr<IMuxer> current = std::make_unique<FakeMuxer>();
+  auto *oldMuxer = static_cast<FakeMuxer *>(current.get());
+  RecordingSession session("/old.mkv", &capture, nullptr, current.get(),
+                           nullptr, false, 128, 0);
+  RecordingSessionTestPeer::prepareRotation(
+      session, 1, 1000, {std::numeric_limits<int64_t>::min(), 500});
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<FakeMuxer>());
+  QSignalSpy aborted(&session, &RecordingSession::outputRotationAborted);
+  ASSERT_TRUE(session.beginOutputRotation(next, current, "/next.mkv", {}));
+  ASSERT_TRUE(RecordingSessionTestPeer::outputAt(session, 1, 1500));
+
+  // Pretend the arm happened well before now: pollRotation must time out.
+  RecordingSessionTestPeer::forceRotationTimeout(session, 1);
+  RecordingSessionTestPeer::pollRotation(session);
+  EXPECT_FALSE(session.rotationPending());
+  EXPECT_EQ(RecordingSessionTestPeer::heldAudio(session), 0);
+  EXPECT_EQ(oldMuxer->audioPackets(), 1);
+  ASSERT_EQ(aborted.count(), 1);
+}
+
+TEST(RecordingSessionRotationTest, SuccessorPreparationFailureKeepsOwnership) {
+  FakeCapture capture;
+  std::unique_ptr<IMuxer> current = std::make_unique<FakeMuxer>();
+  RecordingSession session("/old.mkv", &capture, nullptr, current.get(),
+                           nullptr, false, 128, 0);
+  RecordingSessionTestPeer::prepareRotation(
+      session, 1, 1000, {std::numeric_limits<int64_t>::min(), 500});
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<RejectingMuxer>());
+  EXPECT_FALSE(session.beginOutputRotation(next, current, "/next.mkv", {}));
+  // Ownership stays with the caller; the session never took the live muxer.
+  EXPECT_TRUE(current != nullptr);
+  EXPECT_EQ(session.outputPath(), QStringLiteral("/old.mkv"));
+  EXPECT_FALSE(session.rotationPending());
+}
+
+TEST(RecordingSessionRotationTest, RefusesToCutBeforeAnyVideoIsWritten) {
+  FakeCapture capture;
+  std::unique_ptr<IMuxer> current = std::make_unique<FakeMuxer>();
+  RecordingSession session("/old.mkv", &capture, nullptr, current.get(),
+                           nullptr, false, 128, 0);
+  // Stream layout exists but no video packet has reached the file yet: there
+  // is no cut point, and cutting at the first packet would leave an empty
+  // outgoing segment.
+  RecordingSessionTestPeer::prepareRotation(
+      session, 1, std::numeric_limits<int64_t>::min(),
+      {std::numeric_limits<int64_t>::min(), 500});
+  auto next = std::unique_ptr<IMuxer>(std::make_unique<FakeMuxer>());
+  EXPECT_FALSE(session.beginOutputRotation(next, current, "/new.mkv", {}));
+  EXPECT_TRUE(current != nullptr);
+  EXPECT_TRUE(next != nullptr);
+  EXPECT_FALSE(session.rotationPending());
+  EXPECT_EQ(session.outputPath(), QStringLiteral("/old.mkv"));
+}
+
+TEST(RecordingSessionRotationTest, RealX264RotationProducesTwoDecodableFiles) {
+  if (!avcodec_find_encoder_by_name("libx264"))
+    GTEST_SKIP() << "x264 unavailable";
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString first = dir.filePath("segment-1.mkv");
+  const QString second = dir.filePath("segment-2.mkv");
+
+  FakeCapture capture;
+  FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "libx264");
+  EncoderConfig config;
+  config.width = config.height = 64;
+  config.fps = 30;
+  config.bitrate = 800;
+  config.keyframeInterval = 1;
+  ASSERT_TRUE(encoder.initialize(config));
+
+  std::unique_ptr<IMuxer> current = std::unique_ptr<IMuxer>(std::make_unique<FFmpegMuxer>());
+  RecordingSession session(first, &capture, &encoder, current.get(), nullptr,
+                           false, 128, 0);
+  QSignalSpy rotated(&session, &RecordingSession::outputRotated);
+  ASSERT_TRUE(session.start());
+
+  std::vector<uint8_t> pixels(64 * 64 * 4, 90);
+  VideoFrame frame{};
+  frame.data = pixels.data();
+  frame.width = frame.height = 64;
+  frame.stride = 64 * 4;
+  frame.pixelFormat = AV_PIX_FMT_BGRA;
+  int64_t timestamp = 1000000;
+  auto feed = [&](int count) {
+    for (int i = 0; i < count; ++i) {
+      frame.timestamp = timestamp;
+      timestamp += 33333;
+      capture.fire(frame);
+    }
+  };
+
+  feed(45);
+  ASSERT_TRUE(waitForCondition([&] { return encoder.acceptedFrames() >= 45; },
+                               std::chrono::seconds(5)));
+  // Let the encoder's lookahead drain into the outgoing file before arming:
+  // the cut point is the last written video pts.
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  std::unique_ptr<IMuxer> next = std::unique_ptr<IMuxer>(std::make_unique<FFmpegMuxer>());
+  ASSERT_TRUE(session.beginOutputRotation(next, current, second, {}));
+  // Keep feeding: the forced IDR must emerge from the lookahead, then a few
+  // more frames make the successor non-empty.
+  feed(60);
+  ASSERT_TRUE(waitForCondition([&] { return rotated.count() > 0; },
+                               std::chrono::seconds(8)));
+  feed(10);
+  session.stop();
+  ASSERT_TRUE(session.outputSucceeded());
+  EXPECT_TRUE(QFile::exists(first));
+  EXPECT_TRUE(QFile::exists(second));
+  EXPECT_GT(decodeVideoFrames(first), 0);
+  EXPECT_GT(decodeVideoFrames(second), 0);
 }
