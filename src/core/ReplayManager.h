@@ -174,6 +174,7 @@ private:
   static QString legacyCacheDir();
   QString clipOutputPath() const;
   double elapsedSec() const;
+  uint32_t gameAudioPid() const;
   void setupAudioSources(int &trackCount, QStringList &gameHints,
                            uint32_t &gamePid, bool &gameFound, int &voiceTrack,
                            bool &voiceFound, int &micTrack,

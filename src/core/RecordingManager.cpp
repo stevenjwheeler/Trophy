@@ -420,8 +420,13 @@ RecordingManager::AudioPreparation RecordingManager::snapshotAudioPreparation() 
     const QString hint = m_captureSource->sourceProcessName();
     if (!hint.isEmpty() && !input.hints.contains(hint)) input.hints << hint;
   }
-  if (m_gameDetector && m_gameDetector->isGameRunning()) {
-    const QString hint = m_gameDetector->currentGameName();
+  if (!m_isManualRecording) {
+    // Generic portal metadata (e.g. KWin PID 0) must not discard the game PID
+    // that the readiness check used. This identity was pinned at startRecording;
+    // a later detection, even a same-named game, cannot retarget this capture.
+    if (!input.pid)
+      input.pid = m_detectedGameInfo.value("detectedGamePid").toUInt();
+    const QString hint = m_captureGameName;
     if (!hint.isEmpty() && !input.hints.contains(hint, Qt::CaseInsensitive))
       input.hints << hint;
   }

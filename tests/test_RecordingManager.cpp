@@ -56,6 +56,8 @@ static auto *env =
 // IVideoCaptureSource signal, using the manager's production connections.
 class PendingCapture : public IVideoCaptureSource {
 public:
+  uint32_t pid = 0;
+  uint32_t sourcePid() const override { return pid; }
   CaptureErrorKind errorKind = CaptureErrorKind::Other;
   CaptureErrorKind lastErrorKind() const override { return errorKind; }
   CaptureConfig config;
@@ -428,6 +430,83 @@ protected:
       capture = source.get();
       return source;
     };
+  }
+
+  void audioPidHandoff(int scenario) {
+    SettingsManager settings;
+    settings.setRecordingsPath(tempDir.path());
+    settings.setAudioMode("game");
+    settings.setVoiceChatApp("");
+    StorageManager storage(tempDir.path());
+    WaylandWindowMonitor monitor;
+    GameDetectionService detector;
+    detector.setWindowMonitor(&monitor);
+    detector.addToWhitelist("steam_app_1086940", "Baldur's Gate 3");
+    detector.addToWhitelist("steam_app_999", scenario == 3 ? "Another game" : "Baldur's Gate 3");
+    WindowInfo window;
+    window.pid = 61010; window.appId = "steam_app_1086940";
+    window.focused = window.fullscreen = true;
+    monitor.ingestSnapshot({window});
+    ASSERT_EQ(detector.currentGamePid(), 61010);
+    RecordingManager recorder;
+    recorder.setSettingsManager(&settings);
+    recorder.setStorageManager(&storage);
+    recorder.setGameDetectionService(&detector);
+    QPointer<PendingCapture> capture;
+    installPendingCapture(recorder, capture);
+    const QString target = scenario == 4 ? QString() :
+                           scenario == 5 ? "Other target" : "Baldur's Gate 3";
+    recorder.startRecording(target);
+    ASSERT_FALSE(capture.isNull());
+    if (scenario == 1) capture->pid = 62020;
+    if (scenario == 2 || scenario == 3) {
+      detector.addToBlacklist("steam_app_1086940");
+      window.pid = 61011; window.appId = "steam_app_999";
+      monitor.ingestSnapshot({window});
+      ASSERT_EQ(detector.currentGamePid(), 61011);
+    }
+    const uint32_t expected = scenario == 1 ? 62020 :
+                              (scenario == 4 || scenario == 5) ? 0 : 61010;
+    std::atomic<int> lookups{0};
+    recorder.m_audioPreparationLookup = [&](auto input) {
+      EXPECT_EQ(input.pid, expected);
+      if (scenario == 4) EXPECT_TRUE(input.hints.isEmpty());
+      else EXPECT_TRUE(input.hints.contains(target));
+      if (scenario == 3) EXPECT_FALSE(input.hints.contains("Another game"));
+      if (scenario == 5) EXPECT_FALSE(input.hints.contains("Baldur's Gate 3"));
+      // Wwise has no title match: only the retained game PID finds its node.
+      if (input.pid == 61010) {
+        input.gameNode = 120;
+        input.gameNodeName = "Wwise";
+        input.gameSerial = "1200";
+      }
+      ++lookups;
+      return input;
+    };
+    recorder.m_pipelineBuilder = [&] {
+      EXPECT_EQ(recorder.m_preparedAudio.pid, expected);
+      if (expected == 61010) {
+        EXPECT_EQ(recorder.m_preparedAudio.gameNode, 120u);
+        EXPECT_EQ(recorder.m_preparedAudio.gameNodeName, "Wwise");
+      }
+      return true; // No native encoder, portal or audio source needed.
+    };
+    emit capture->ready();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!recorder.isRecording() && std::chrono::steady_clock::now() < deadline) {
+      QCoreApplication::processEvents();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(recorder.isRecording());
+    EXPECT_GE(lookups.load(), 1);
+    EXPECT_EQ(recorder.snapshotAudioPreparation().pid, expected); // Same retry input.
+    recorder.stopRecording();
+    ASSERT_TRUE(waitForIdle(recorder));
+    recorder.startRecording(""); // A new manual capture must not inherit the old PID.
+    EXPECT_EQ(recorder.snapshotAudioPreparation().pid, 0u);
+    EXPECT_TRUE(recorder.snapshotAudioPreparation().hints.isEmpty());
+    recorder.stopRecording();
+    ASSERT_TRUE(waitForIdle(recorder));
   }
 
   void captureEndRace(int scenario) {
@@ -922,6 +1001,13 @@ TEST_F(RecordingManagerTest, CaptureLossWithMinimizedGameplaySuccessorStillFails
 TEST_F(RecordingManagerTest, CaptureProgressDoesNotReplaceGamePidWithLauncherPid) { captureEndRace(13); }
 TEST_F(RecordingManagerTest, CaptureLauncherReturnDoesNotHideFinalizationFailure) { captureEndRace(14); }
 TEST_F(RecordingManagerTest, CaptureProgressFollowsGameplayHandoffWithoutBorrowingOldPidExit) { captureEndRace(15); }
+
+TEST_F(RecordingManagerTest, GenericPortalRetainsGamePidForAudioPreparation) { audioPidHandoff(0); }
+TEST_F(RecordingManagerTest, PortalAudioPidTakesPriorityOverDetectedPid) { audioPidHandoff(1); }
+TEST_F(RecordingManagerTest, AudioPreparationDoesNotFollowANamesakeDetection) { audioPidHandoff(2); }
+TEST_F(RecordingManagerTest, AudioPreparationDoesNotBorrowAnotherGameTitle) { audioPidHandoff(3); }
+TEST_F(RecordingManagerTest, ManualAudioPreparationDoesNotBorrowDetectedGame) { audioPidHandoff(4); }
+TEST_F(RecordingManagerTest, AudioPreparationWithoutMatchingDetectionKeepsOnlyTargetHint) { audioPidHandoff(5); }
 
 TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
   SettingsManager settings;
