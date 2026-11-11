@@ -573,8 +573,8 @@ TEST_F(X264RateControlTest, PresetAndVbrCeilingReachTheCodec) {
   AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
   ASSERT_NE(ctx, nullptr);
   EXPECT_EQ(ctx->bit_rate, 5000000);
-  EXPECT_EQ(ctx->rc_max_rate, 8000000);
-  EXPECT_EQ(ctx->rc_buffer_size, 16000000);
+  EXPECT_EQ(ctx->rc_max_rate, 6666666);
+  EXPECT_EQ(ctx->rc_buffer_size, 13333332);
   // The dropdown used to be stored and then ignored entirely.
   EXPECT_EQ(privateOption(ctx, "preset"), QStringLiteral("slow"));
 }
@@ -590,26 +590,29 @@ TEST_F(X264RateControlTest, UnknownPresetFallsBackInsteadOfFailingOpen) {
   EXPECT_EQ(privateOption(ctx, "preset"), QStringLiteral("medium"));
 }
 
-TEST_F(X264RateControlTest, CeilingIgnoredWhenCbrOrNotAboveTarget) {
-  // A maximum at (or below) the target would fight rate control, so it is
-  // deliberately not installed.
-  EncoderConfig atTarget = smallConfig();
-  atTarget.maxBitrate = atTarget.bitrate;
-  FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264, "libx264");
-  if (!encoder.initialize(atTarget))
-    GTEST_SKIP() << "libx264 not available.";
-  AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
-  ASSERT_NE(ctx, nullptr);
-  EXPECT_EQ(ctx->rc_max_rate, 0);
-  EXPECT_EQ(ctx->rc_buffer_size, 0);
+TEST_F(X264RateControlTest, CeilingScalesWithTargetAndIgnoresLegacyMaximum) {
+  for (const int target : {1000, 10000, 15000, 20000, 30000}) {
+    EncoderConfig atTarget = smallConfig();
+    atTarget.bitrate = target;
+    atTarget.maxBitrate = 100; // Ignore even a legacy ceiling below the target.
+    FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264, "libx264");
+    ASSERT_TRUE(encoder.initialize(atTarget));
+    AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
+    ASSERT_NE(ctx, nullptr);
+    const int64_t peak = static_cast<int64_t>(target) * 1000 * 4 / 3;
+    EXPECT_EQ(ctx->rc_max_rate, peak) << target;
+    EXPECT_EQ(ctx->rc_buffer_size, peak * 2) << target;
+  }
+}
 
+TEST_F(X264RateControlTest, CeilingIgnoredWhenCbr) {
   // CBR mode owns its own rate; no extra VBR ceiling is installed.
   EncoderConfig cbr = smallConfig();
   cbr.useVBR = false;
   FFmpegEncoder cbrEncoder(FFmpegEncoder::EncoderType::Software_x264,
                            "libx264");
   ASSERT_TRUE(cbrEncoder.initialize(cbr));
-  ctx = FFmpegEncoderTestAccess::codecContext(cbrEncoder);
+  AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(cbrEncoder);
   ASSERT_NE(ctx, nullptr);
   EXPECT_EQ(ctx->rc_max_rate, 0);
   EXPECT_EQ(ctx->rc_buffer_size, 0);

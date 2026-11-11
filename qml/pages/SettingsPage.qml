@@ -391,7 +391,7 @@ Page {
 
                     SettingStack {
                         label: qsTr("Video Bitrate")
-                        help: qsTr("Controls video quality. 10,000–15,000 kbps is great for 1080p. Use 20,000+ kbps for 1440p/4K.")
+                        help: qsTr("Controls video quality. 10,000–15,000 kbps is great for 1080p. Use 20,000+ kbps for 1440p/4K. VBR allows peaks one-third above this target (15,000 → 20,000 kbps).")
 
                         RowLayout {
                             Layout.fillWidth: true

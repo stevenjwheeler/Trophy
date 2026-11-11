@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <type_traits>
 #include <new>
+#include <limits>
 #include <unistd.h>
 
 extern "C" {
@@ -843,16 +844,15 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
 
   m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrate) * 1000;
 
-  // The configured VBR ceiling. SettingsManager::maxVideoBitrate() was
-  // plumbed through both managers but no encoder ever read it, so the
-  // "maximum" was cosmetic. A ceiling at or below the target would fight
-  // the rate control (and could starve it), so only lift it above target.
-  const int64_t peakRate = static_cast<int64_t>(config.maxBitrate) * 1000;
-  if (config.useVBR && peakRate > m_codecCtx->bit_rate) {
+  // Give every VBR target the same one-third headroom, independent of the
+  // legacy saved maximum. Calculate in bits/s with 64-bit arithmetic.
+  const int64_t peakRate = m_codecCtx->bit_rate * 4 / 3;
+  if (config.useVBR && peakRate > 0) {
     m_codecCtx->rc_max_rate = peakRate;
     // Two seconds of headroom at the ceiling: standard VBV sizing that lets
     // complex scenes borrow bits instead of flattening the whole target.
-    m_codecCtx->rc_buffer_size = static_cast<int>(peakRate * 2);
+    m_codecCtx->rc_buffer_size = static_cast<int>(
+        std::min<int64_t>(peakRate * 2, std::numeric_limits<int>::max()));
   }
 
   AVDictionary *opts = nullptr;
