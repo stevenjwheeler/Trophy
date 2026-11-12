@@ -1,4 +1,5 @@
 #include "capture/IVideoCaptureSource.h"
+#include "encoding/EncoderTuning.h"
 #include "encoding/FFmpegEncoder.h"
 #include <QCoreApplication>
 #include <QSize>
@@ -36,6 +37,9 @@ public:
     return encoder.convertSoftwareFrame(frame);
   }
   static SwsContext *scaler(FFmpegEncoder &encoder) { return encoder.m_swsCtx; }
+  static AVCodecContext *codecContext(FFmpegEncoder &encoder) {
+    return encoder.m_codecCtx;
+  }
   static int fillUntilBackpressure(FFmpegEncoder &encoder, const VideoFrame &frame) {
     if (!encoder.convertSoftwareFrame(frame)) return -1;
     encoder.m_firstTimestamp = frame.timestamp;
@@ -439,3 +443,177 @@ INSTANTIATE_TEST_SUITE_P(ResizePaths, EncoderResizeTest, ::testing::Values(
     ResizeEncoder{IEncoder::EncoderType::Software_x264, "libx264"},
     ResizeEncoder{IEncoder::EncoderType::NVENC_H264, "h264_nvenc"},
     ResizeEncoder{IEncoder::EncoderType::VAAPI_H264, "h264_vaapi"}));
+
+// --- Generic preset mapping and rate-control wiring ------------------------
+//
+// Settings exposes x264's preset names for every encoder, but NVENC only
+// accepts p1–p7. These cases pin the mapping and prove that the names we pass
+// to each codec are valid AVOptions, without needing a GPU (av_opt_set
+// validates named constants on the codec's private context).
+
+namespace {
+const std::array<QString, 7> kGenericPresets{
+    {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
+     "slow"}};
+const std::array<QString, 7> kNvencPresets{
+    {"p1", "p2", "p3", "p4", "p5", "p6", "p7"}};
+} // namespace
+
+TEST(EncoderTuningTest, NvencPresetsMapToPLevels) {
+  for (size_t i = 0; i < kGenericPresets.size(); ++i) {
+    EXPECT_EQ(EncoderTuning::nvencPreset(kGenericPresets[i]),
+              kNvencPresets[i])
+        << kGenericPresets[i].toStdString();
+  }
+  // Empty/unknown keeps NVENC's own medium default rather than failing open.
+  EXPECT_EQ(EncoderTuning::nvencPreset(""), QStringLiteral("p4"));
+  EXPECT_EQ(EncoderTuning::nvencPreset("bogus"), QStringLiteral("p4"));
+  EXPECT_EQ(EncoderTuning::nvencPreset(" SLOW "), QStringLiteral("p7"));
+}
+
+TEST(EncoderTuningTest, X264PresetsPassThroughAndFallBack) {
+  for (const auto &preset : kGenericPresets)
+    EXPECT_EQ(EncoderTuning::x264Preset(preset), preset);
+  EXPECT_EQ(EncoderTuning::x264Preset("bogus"), QStringLiteral("medium"));
+  EXPECT_EQ(EncoderTuning::x264Preset(""), QStringLiteral("medium"));
+}
+
+TEST(EncoderTuningTest, MappedNamesAreValidCodecOptions) {
+  // NVENC: the exact strings initializeCodec() hands to avcodec_open2 must be
+  // accepted, otherwise the codec fails to open (the old code passed x264's
+  // names to NVENC, which is why the option was ignored instead).
+  const AVCodec *nvenc = avcodec_find_encoder_by_name("h264_nvenc");
+  if (!nvenc) {
+    GTEST_SKIP() << "FFmpeg built without NVENC";
+  }
+  AVCodecContext *ctx = avcodec_alloc_context3(nvenc);
+  ASSERT_NE(ctx, nullptr);
+  for (const auto &preset : kGenericPresets) {
+    const QString mapped = EncoderTuning::nvencPreset(preset);
+    EXPECT_EQ(av_opt_set(ctx->priv_data, "preset", mapped.toUtf8().constData(),
+                         0),
+              0)
+        << preset.toStdString() << " -> " << mapped.toStdString();
+  }
+  EXPECT_EQ(av_opt_set(ctx->priv_data, "tune", "hq", 0), 0);
+  avcodec_free_context(&ctx);
+
+  // x264 stores the preset as a string, so any value is "accepted" by the
+  // option layer and only an unknown name fails at open time. Prove both
+  // sides: the raw name fails, the sanitised name opens.
+  const AVCodec *x264 = avcodec_find_encoder_by_name("libx264");
+  if (!x264) {
+    GTEST_SKIP() << "FFmpeg built without libx264";
+  }
+  auto openWithPreset = [&](const QString &preset) {
+    AVCodecContext *codec = avcodec_alloc_context3(x264);
+    if (!codec) return -1;
+    codec->width = 64;
+    codec->height = 64;
+    codec->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec->time_base = {1, 30};
+    codec->framerate = {30, 1};
+    AVDictionary *opts = nullptr;
+    av_dict_set(&opts, "preset", preset.toUtf8().constData(), 0);
+    const int ret = avcodec_open2(codec, x264, &opts);
+    av_dict_free(&opts);
+    avcodec_free_context(&codec);
+    return ret;
+  };
+  EXPECT_LT(openWithPreset("bogus"), 0)
+      << "an unsanitised preset name must fail, not silently encode";
+  EXPECT_EQ(openWithPreset(EncoderTuning::x264Preset("bogus")), 0);
+  for (const auto &preset : kGenericPresets)
+    EXPECT_EQ(openWithPreset(EncoderTuning::x264Preset(preset)), 0)
+        << preset.toStdString();
+}
+
+namespace {
+
+class X264RateControlTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    if (!QCoreApplication::instance()) {
+      static int argc = 1;
+      static char arg0[] = "test";
+      static char *argv[] = {arg0, nullptr};
+      new QCoreApplication(argc, argv);
+    }
+  }
+
+  static EncoderConfig smallConfig() {
+    EncoderConfig config;
+    config.width = 320;
+    config.height = 180;
+    config.fps = 30;
+    config.bitrate = 5000;
+    config.maxBitrate = 8000;
+    config.preset = "slow";
+    config.useVBR = true;
+    return config;
+  }
+
+  static QString privateOption(AVCodecContext *ctx, const char *name) {
+    uint8_t *value = nullptr;
+    if (av_opt_get(ctx->priv_data, name, 0, &value) < 0 || !value)
+      return QString();
+    const QString text = QString::fromUtf8(reinterpret_cast<char *>(value));
+    av_free(value);
+    return text;
+  }
+};
+
+} // namespace
+
+TEST_F(X264RateControlTest, PresetAndVbrCeilingReachTheCodec) {
+  FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264, "libx264");
+  if (!encoder.initialize(smallConfig()))
+    GTEST_SKIP() << "libx264 not available.";
+
+  AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(ctx->bit_rate, 5000000);
+  EXPECT_EQ(ctx->rc_max_rate, 6666666);
+  EXPECT_EQ(ctx->rc_buffer_size, 13333332);
+  // The dropdown used to be stored and then ignored entirely.
+  EXPECT_EQ(privateOption(ctx, "preset"), QStringLiteral("slow"));
+}
+
+TEST_F(X264RateControlTest, UnknownPresetFallsBackInsteadOfFailingOpen) {
+  EncoderConfig config = smallConfig();
+  config.preset = "bogus";
+  FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264, "libx264");
+  if (!encoder.initialize(config))
+    FAIL() << "unknown preset must not fail encoder startup";
+  AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(privateOption(ctx, "preset"), QStringLiteral("medium"));
+}
+
+TEST_F(X264RateControlTest, CeilingScalesWithTargetAndIgnoresLegacyMaximum) {
+  for (const int target : {1000, 10000, 15000, 20000, 30000}) {
+    EncoderConfig atTarget = smallConfig();
+    atTarget.bitrate = target;
+    atTarget.maxBitrate = 100; // Ignore even a legacy ceiling below the target.
+    FFmpegEncoder encoder(FFmpegEncoder::EncoderType::Software_x264, "libx264");
+    ASSERT_TRUE(encoder.initialize(atTarget));
+    AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(encoder);
+    ASSERT_NE(ctx, nullptr);
+    const int64_t peak = static_cast<int64_t>(target) * 1000 * 4 / 3;
+    EXPECT_EQ(ctx->rc_max_rate, peak) << target;
+    EXPECT_EQ(ctx->rc_buffer_size, peak * 2) << target;
+  }
+}
+
+TEST_F(X264RateControlTest, CeilingIgnoredWhenCbr) {
+  // CBR mode owns its own rate; no extra VBR ceiling is installed.
+  EncoderConfig cbr = smallConfig();
+  cbr.useVBR = false;
+  FFmpegEncoder cbrEncoder(FFmpegEncoder::EncoderType::Software_x264,
+                           "libx264");
+  ASSERT_TRUE(cbrEncoder.initialize(cbr));
+  AVCodecContext *ctx = FFmpegEncoderTestAccess::codecContext(cbrEncoder);
+  ASSERT_NE(ctx, nullptr);
+  EXPECT_EQ(ctx->rc_max_rate, 0);
+  EXPECT_EQ(ctx->rc_buffer_size, 0);
+}

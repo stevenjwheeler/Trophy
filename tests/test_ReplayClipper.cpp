@@ -642,7 +642,11 @@ TEST_F(ReplayClipperTest, ForwardKeyframeBeyondRangeEndFailsAndRetries) {
   if (!haveCodecs())
     GTEST_SKIP() << "libx264/AAC unavailable";
   const QString source = tempDir.path() + "/short-range-source.mkv";
-  makeSegment(source, 90);
+  // A B-frame preset is required for this scenario: only the encoder's
+  // reorder delay leaves the head IDR without a demuxable DTS. (The encoder
+  // now honours the preset, so the default "ultrafast" fixture has no
+  // B-frames and would give the head keyframe a valid DTS.)
+  makeSegment(source, 90, "medium");
   ASSERT_FALSE(HasFatalFailure());
   const QString output = tempDir.path() + "/short-range.mkv.part";
   QString error;

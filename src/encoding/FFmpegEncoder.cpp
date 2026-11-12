@@ -7,6 +7,7 @@
 
 #include "FFmpegEncoder.h"
 #include "CodecPacketPump.h"
+#include "EncoderTuning.h"
 #include "capture/EglDmaBuf.h"
 #include "capture/IVideoCaptureSource.h"
 
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <type_traits>
 #include <new>
+#include <limits>
 #include <unistd.h>
 
 extern "C" {
@@ -841,13 +843,40 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   }
 
   m_codecCtx->bit_rate = static_cast<int64_t>(config.bitrate) * 1000;
-  
+
+  // Give every VBR target the same one-third headroom, independent of the
+  // legacy saved maximum. Calculate in bits/s with 64-bit arithmetic.
+  const int64_t peakRate = m_codecCtx->bit_rate * 4 / 3;
+  if (config.useVBR && peakRate > 0) {
+    m_codecCtx->rc_max_rate = peakRate;
+    // Two seconds of headroom at the ceiling: standard VBV sizing that lets
+    // complex scenes borrow bits instead of flattening the whole target.
+    m_codecCtx->rc_buffer_size = static_cast<int>(
+        std::min<int64_t>(peakRate * 2, std::numeric_limits<int>::max()));
+  }
+
   AVDictionary *opts = nullptr;
   if (m_codecName.contains("nvenc")) {
-    av_dict_set(&opts, "preset", "p4", 0);
-    av_dict_set(&opts, "tune", "ull", 0); 
+    // This is a local recording, not a stream, so "hq" costs nothing that
+    // matters and compresses better than the ultra-low-latency tune that
+    // was hard-coded here. B-frames stay off on purpose: the still-frame
+    // ordering and the DVR rotation cut assume no reordering delay.
+    av_dict_set(&opts, "preset",
+                EncoderTuning::nvencPreset(config.preset).toUtf8().constData(),
+                0);
+    av_dict_set(&opts, "tune", "hq", 0);
+    // Emit each packet as soon as its frame is encoded. FFmpeg's default
+    // (INT_MAX) lets the driver hold frames back, which starves the
+    // still-frame bookkeeping and the DVR rotation cut's keyframe handoff.
     av_dict_set(&opts, "delay", "0", 0);
     av_dict_set(&opts, "rc", config.useVBR ? "vbr" : "cbr", 0);
+  } else if (m_codecName == QLatin1String("libx264")) {
+    // Honour the same preset selection for the software encoder. VA-API
+    // encoders keep their driver default until their quality levels can be
+    // validated on real AMD/Intel hardware.
+    av_dict_set(&opts, "preset",
+                EncoderTuning::x264Preset(config.preset).toUtf8().constData(),
+                0);
   }
 
   m_codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;

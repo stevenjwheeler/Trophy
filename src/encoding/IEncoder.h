@@ -36,7 +36,7 @@ struct EncoderConfig {
   int height = 1080;
   int fps = 60; // 0 = uncapped capture; codec uses a nominal 60 FPS hint.
   int bitrate = 15000;      // kbps
-  int maxBitrate = 20000;   // kbps, for VBR
+  int maxBitrate = 20000;   // Legacy compatibility only; VBR peak is 4/3 of bitrate.
   QString preset = "fast";  // Encoder-specific preset
   QString profile = "high"; // H.264 profile
   int keyframeInterval = 2; // Seconds between keyframes
