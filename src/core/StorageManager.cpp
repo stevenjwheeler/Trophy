@@ -109,11 +109,13 @@ bool StorageManager::reserveRecordings(const QStringList &paths) {
 }
 
 void StorageManager::releaseRecordings(const QStringList &paths) {
+  bool changed = false;
   for (const auto &path : paths) {
     // Reservations retain the original absolute path even after unlink.
     const QString key = m_reservationKeys.take(QFileInfo(path).absoluteFilePath());
-    if (!key.isEmpty()) m_reservedRecordings.remove(key);
+    if (!key.isEmpty()) changed |= m_reservedRecordings.remove(key) > 0;
   }
+  if (changed) emit recordingAvailabilityChanged();
 }
 
 bool StorageManager::recordingInUse(const QString &path) const {
@@ -211,15 +213,19 @@ void StorageManager::setAutoDeleteOldest(bool enabled) {
 }
 
 void StorageManager::setExcludedRecordingPath(const QString &filePath) {
+  const QString previous = m_excludedRecordingPath;
   QFileInfo info(filePath);
   m_excludedRecordingPath = info.canonicalFilePath();
   if (m_excludedRecordingPath.isEmpty()) {
     m_excludedRecordingPath = info.absoluteFilePath();
   }
+  if (previous != m_excludedRecordingPath) emit recordingAvailabilityChanged();
 }
 
 void StorageManager::clearExcludedRecordingPath() {
+  const bool changed = !m_excludedRecordingPath.isEmpty();
   m_excludedRecordingPath.clear();
+  if (changed) emit recordingAvailabilityChanged();
 }
 
 bool StorageManager::requestCleanup(bool force) {
@@ -545,6 +551,7 @@ void StorageManager::finishBulkDelete(const QStringList &deletedPaths,
   if (m_bulkDeletesActive > 0) {
     --m_bulkDeletesActive;
   }
+  emit recordingAvailabilityChanged();
   emit bulkDeleteInProgressChanged();
   refresh();
   emit bulkDeleteFinished(deletedPaths.size(), totalCount);

@@ -370,7 +370,30 @@ Page {
     }
 
     // Open a library file (closes any current one first).
+    property bool recoveryReloading: false
+    property string recoveryReloadPath: ""
+    property double recoveryPosition: 0
+    property bool recoveryWasPlaying: false
+
+    function reloadRecoveredRecording(path) {
+        if (path !== filePath || filePath === "") return
+        cancelScrub()
+        recoveryPosition = player.position
+        recoveryWasPlaying = player.playing
+        recoveryReloadPath = path
+        recoveryReloading = true
+        stopAll()
+        player.source = ""
+        Qt.callLater(function() {
+            if (playerPage.filePath !== path || playerPage.recoveryReloadPath !== path) return
+            playerPage.recoveryReloading = false
+            player.source = recordingLibrary.localFileUrl(path)
+        })
+    }
+
     function open(path, title, dateStr) {
+        recoveryReloadPath = ""
+        recoveryReloading = false
         cancelScrub()
         cancelSnapshot()
         player.stop()
@@ -400,6 +423,8 @@ Page {
     }
 
     function close() {
+        recoveryReloadPath = ""
+        recoveryReloading = false
         cancelScrub()
         cancelSnapshot()
         bookmarksDialog.close()
@@ -864,6 +889,13 @@ Page {
 
         VideoPlayer {
             id: player
+            onMediaLoaded: {
+                if (!playerPage.recoveryReloading && playerPage.recoveryReloadPath !== "" && playerPage.recoveryReloadPath === playerPage.filePath) {
+                    playerPage.recoveryReloadPath = ""
+                    playerPage.seekAll(playerPage.recoveryPosition)
+                    if (playerPage.recoveryWasPlaying) playerPage.playAll()
+                }
+            }
             objectName: "playerVideo"
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -922,7 +954,7 @@ Page {
                 id: audioPipeline
                 required property int modelData
                 objectName: "playerAudioPipeline" + modelData
-                source: playerPage.filePath !== "" ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
+                source: playerPage.filePath !== "" && !playerPage.recoveryReloading ? recordingLibrary.localFileUrl(playerPage.filePath) : ""
                 autoPlay: false
                 playbackRate: playerPage.playbackRate
                 function pinTrack() {
@@ -955,6 +987,9 @@ Page {
         // arrive from the Application wiring, chime included).
         Connections {
             target: recordingLibrary
+            function onRecordingRecovered(path) {
+                playerPage.reloadRecoveredRecording(path)
+            }
             function onClipSaved(path, game, secs) {
                 // Switch to the fresh clip while still showing its
                 // source (open() resets the editor, so the clip
@@ -1960,6 +1995,14 @@ Page {
                     vlane.thumbs = readyPaths
                     vlane.stripDone = true
                 }
+            }
+        }
+
+        Connections {
+            target: playerPage.library
+            ignoreUnknownSignals: true
+            function onRecordingRecovered(path) {
+                if (path === vlane.filePath) vlane.refresh()
             }
         }
 

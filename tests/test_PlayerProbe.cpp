@@ -16,6 +16,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QFile>
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <gtest/gtest.h>
@@ -80,13 +81,15 @@ public:
   Q_INVOKABLE QObject *getRecording(const QString &) { return hasEntry ? &entry : nullptr; }
 signals:
   void clipSaved(const QString &path, const QString &game, double seconds);
+  void recordingRecovered(const QString &path);
   void clipSaveFailed(const QString &reason);
 };
 
 class PlayerFilmstripFake : public QObject {
   Q_OBJECT
 public:
-  Q_INVOKABLE void requestThumbs(const QString &, int) {}
+  int requests = 0;
+  Q_INVOKABLE void requestThumbs(const QString &, int) { ++requests; }
 signals:
   void filmstripReady(const QString &path, const QStringList &thumbs);
 };
@@ -248,6 +251,47 @@ TEST_F(PlayerProbeTest, ShareVolumesCarryTrackGains) {
       ? result.value<QJSValue>().toVariant().toMap() : result.toMap();
   ASSERT_EQ(map.size(), 1);
   EXPECT_DOUBLE_EQ(map.value("1").toDouble(), 0.35);
+  close();
+}
+
+TEST_F(PlayerProbeTest, BackgroundRecoveryReloadsOnlyCurrentFileAndPreservesUserState) {
+  open("/fake/recovered.mkv");
+  emit waveform.audioTrackCountReady("/fake/recovered.mkv", requestId(), 3);
+  QCoreApplication::processEvents();
+  page->setProperty("trackVolumes", QVariantMap{{"1", 0.35}});
+  page->setProperty("playbackRate", 1.5);
+  const int oldStripRequests = filmstrip.requests;
+  emit library.recordingRecovered("/fake/other.mkv");
+  EXPECT_TRUE(page->property("recoveryReloadPath").toString().isEmpty());
+  emit library.recordingRecovered("/fake/recovered.mkv");
+  EXPECT_EQ(page->property("recoveryReloadPath").toString(), "/fake/recovered.mkv");
+  EXPECT_TRUE(page->property("recoveryReloading").toBool());
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(page->property("recoveryReloading").toBool());
+  EXPECT_GT(filmstrip.requests, oldStripRequests);
+  EXPECT_EQ(count(), 3);
+  EXPECT_DOUBLE_EQ(page->property("playbackRate").toDouble(), 1.5);
+  QVariant gains;
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "shareAudioVolumes", Q_RETURN_ARG(QVariant, gains)));
+  const auto volumes = gains.canConvert<QJSValue>() ? gains.value<QJSValue>().toVariant().toMap() : gains.toMap();
+  EXPECT_DOUBLE_EQ(volumes.value("1").toDouble(), 0.35);
+  close();
+  EXPECT_TRUE(page->property("recoveryReloadPath").toString().isEmpty());
+}
+
+TEST_F(PlayerProbeTest, RecoveryReloadCannotReopenAClosedOrReplacedFile) {
+  open("/fake/old.mkv");
+  emit library.recordingRecovered("/fake/old.mkv");
+  close();
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(page->property("filePath").toString().isEmpty());
+  EXPECT_FALSE(page->property("recoveryReloading").toBool());
+  open("/fake/old.mkv");
+  emit library.recordingRecovered("/fake/old.mkv");
+  open("/fake/new.mkv");
+  QCoreApplication::processEvents();
+  EXPECT_EQ(page->property("filePath").toString(), "/fake/new.mkv");
+  EXPECT_TRUE(page->property("recoveryReloadPath").toString().isEmpty());
   close();
 }
 
@@ -482,6 +526,52 @@ TEST_F(PlayerProbeTest, SeekAfterEndResumesButPausedSeekStaysPaused) {
   ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(100))));
   QTest::qWait(150);
   EXPECT_FALSE(video->property("playing").toBool());
+  close();
+}
+
+TEST_F(PlayerProbeTest, RecoveredOpenMediaGainsASeekableTimelineWithoutLosingPauseState) {
+  if (QStandardPaths::findExecutable("ffmpeg").isEmpty()) GTEST_SKIP();
+  QTemporaryDir dir; ASSERT_TRUE(dir.isValid());
+  const auto path = dir.filePath("unfinished.mkv");
+  const auto fixed = dir.filePath("fixed.mkv");
+  QProcess generate;
+  generate.start("ffmpeg", {"-nostdin", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=15:duration=6", "-c:v", "mpeg4", "-live", "1", path});
+  ASSERT_TRUE(generate.waitForFinished(15000)); ASSERT_EQ(generate.exitCode(), 0);
+  library.realMedia = true;
+  window.resize(1024, 720); window.show(); ASSERT_TRUE(QTest::qWaitForWindowExposed(&window));
+  open(path); emit waveform.audioTrackCountReady(path, requestId(), 0);
+  auto *video = page->findChild<QObject *>("playerVideo"); ASSERT_NE(video, nullptr);
+  auto wait = [](auto predicate) {
+    QElapsedTimer timer; timer.start();
+    while (!predicate() && timer.elapsed() < 10000) QTest::qWait(20);
+    return predicate();
+  };
+  ASSERT_TRUE(wait([&] { return page->property("playPosition").toDouble() > 100; }));
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "pauseAll"));
+  ASSERT_TRUE(wait([&] { return !video->property("playing").toBool(); }));
+  const double position = page->property("playPosition").toDouble();
+  QProcess remux;
+  remux.start("ffmpeg", {"-nostdin", "-v", "error", "-i", path, "-map", "0", "-c", "copy", fixed});
+  ASSERT_TRUE(remux.waitForFinished(15000)); ASSERT_EQ(remux.exitCode(), 0);
+  ASSERT_EQ(::rename(QFile::encodeName(fixed).constData(), QFile::encodeName(path).constData()), 0);
+  emit library.recordingRecovered(path);
+  ASSERT_TRUE(wait([&] { return page->property("playDuration").toDouble() > 5000 &&
+      page->property("recoveryReloadPath").toString().isEmpty(); }))
+      << "duration=" << page->property("playDuration").toDouble()
+      << " reload=" << page->property("recoveryReloadPath").toString().toStdString()
+      << " reloading=" << page->property("recoveryReloading").toBool()
+      << " source=" << video->property("source").toUrl().toString().toStdString();
+  EXPECT_FALSE(video->property("playing").toBool());
+  EXPECT_NEAR(page->property("playPosition").toDouble(), position, 100);
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "seekAll", Q_ARG(QVariant, QVariant(2500))));
+  ASSERT_TRUE(wait([&] { return page->property("playPosition").toDouble() >= 2400; }));
+  EXPECT_FALSE(video->property("playing").toBool());
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "playAll"));
+  ASSERT_TRUE(wait([&] { return video->property("playing").toBool(); }));
+  emit library.recordingRecovered(path);
+  ASSERT_TRUE(wait([&] { return page->property("recoveryReloadPath").toString().isEmpty() &&
+      video->property("playing").toBool(); }));
   close();
 }
 

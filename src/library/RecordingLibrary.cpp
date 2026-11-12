@@ -7,6 +7,7 @@
 
 #include "RecordingLibrary.h"
 #include "Recording.h"
+#include "RecordingRecovery.h"
 #include "RecordingSidecars.h"
 #include "RecordingAnnotations.h"
 #include "ThumbnailGenerator.h"
@@ -26,8 +27,10 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QUuid>
+#include <QThread>
 #include <algorithm>
 #include <thread>
+#include <QtConcurrent/QtConcurrent>
 
 namespace TrophyBackend {
 
@@ -70,11 +73,54 @@ RecordingLibrary::RecordingLibrary(const QString &libraryPath, QObject *parent)
 
   loadCustomTitles();
 
+  m_recoveryTimer.setSingleShot(true);
+  m_recoveryTimer.setTimerType(Qt::PreciseTimer);
+  connect(&m_recoveryTimer, &QTimer::timeout, this, &RecordingLibrary::recoverNextRecording);
+  connect(&m_recoveryWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
+    const QString path = m_recoveryPath;
+    // All policy checks and publication run on the owner thread; worker code
+    // never touches managers/QObjects. Reservation survives until publication.
+    const bool allowed = !*m_recoveryCancel && path != m_activeRecordingPath && !m_bulkOperationDepth &&
+        !m_hiddenRecordings.contains(path) && isInsideLibrary(path, m_libraryPath) &&
+        getRecording(path);
+    if (!allowed) m_recoveryAttempts.remove(path);
+    if (m_recoveryWatcher.result() && allowed) {
+      const auto routing = RecordingAnnotations::audioRouting(path);
+      if (m_recovery->publish()) {
+        const QFileInfo repaired(path);
+        m_recoveryAttempts.insert(path, QString::number(repaired.size()) + ':' +
+            QString::number(repaired.lastModified().toMSecsSinceEpoch()));
+        if (!routing.isEmpty() && !RecordingAnnotations::setAudioRouting(path, routing))
+          qWarning() << "Could not refresh recovered recording audio annotation:" << path;
+        auto *recording = getRecording(path);
+        recording->reloadAnnotations();
+        recording->loadMetadata();
+        emit recordingRecovered(path);
+        qInfo() << "Recovered unfinished recording:" << path;
+        if (m_storage) m_storage->refresh();
+      }
+    } else if (!m_recoveryWatcher.result() && !*m_recoveryCancel) {
+      qWarning() << "Unfinished recording recovery deferred; original preserved:" << path;
+    }
+    m_recovery.reset();
+    m_recoveryCancel.reset();
+    if (m_storage) m_storage->releaseRecordings({path});
+    m_recoveryPath.clear();
+    scheduleRecovery();
+  });
+
   // Initial scan
   refresh();
 }
 
 RecordingLibrary::~RecordingLibrary() {
+  m_recoveryShuttingDown = true;
+  m_recoveryTimer.stop();
+  if (m_recoveryCancel) *m_recoveryCancel = true;
+  m_recoveryWatcher.waitForFinished();
+  m_recovery.reset();
+  if (m_storage && !m_recoveryPath.isEmpty())
+    m_storage->releaseRecordings({m_recoveryPath});
   // The worker may still be returning after it queues its completion event.
   // Keep its captures alive until it has exited; a detached worker can race
   // QObject teardown (and process shutdown) even after clipSaved is emitted.
@@ -103,6 +149,7 @@ int RecordingLibrary::totalCount() const { return allRecordings().size(); }
 
 void RecordingLibrary::setLibraryPath(const QString &path) {
   if (m_libraryPath != path) {
+    if (m_recoveryCancel) *m_recoveryCancel = true;
     // Remove old watch
     if (!m_libraryPath.isEmpty() &&
         m_watcher.directories().contains(m_libraryPath)) {
@@ -145,6 +192,7 @@ void RecordingLibrary::refresh() {
   beginBatch();
   scanDirectory();
   endBatch();
+  scheduleRecovery();
 }
 
 void RecordingLibrary::setProtectedOnly(bool value) {
@@ -225,13 +273,82 @@ void RecordingLibrary::deleteRecording(const QString &filePath) {
 }
 
 void RecordingLibrary::setActiveRecordingPath(const QString &path) {
+  if (!path.isEmpty() && path == m_recoveryPath && m_recoveryCancel)
+    *m_recoveryCancel = true;
   m_activeRecordingPath = path;
   updateFilteredRecordings();
+  scheduleRecovery();
+}
+
+void RecordingLibrary::setStorageManager(StorageManager *storage) {
+  if (m_storage == storage) return;
+  if (m_storage)
+    disconnect(m_storage, &StorageManager::recordingAvailabilityChanged, this, nullptr);
+  m_storage = storage;
+  if (m_storage)
+    connect(m_storage, &StorageManager::recordingAvailabilityChanged, this,
+            [this]() { scheduleRecovery(); });
+  scheduleRecovery();
+}
+
+void RecordingLibrary::scheduleRecovery(int delayMs) {
+  if (m_recoveryShuttingDown) return;
+  // Coalesce event bursts; only a recent candidate needs a delayed wake-up.
+  // With an idle/healthy library there is no running timer or polling.
+  if (!m_recoveryTimer.isActive() || m_recoveryTimer.remainingTime() > delayMs)
+    m_recoveryTimer.start(delayMs);
+}
+
+void RecordingLibrary::recoverNextRecording() {
+  m_recoveryTimer.stop();
+  if (!m_storage || !m_recoveryPath.isEmpty() || m_bulkOperationDepth) return;
+  int nextDelay = -1;
+  for (const auto &recording : m_recordings) {
+    const QString path = recording->filePath();
+    const QFileInfo info(path);
+    if (!recording->needsRecovery() || path == m_activeRecordingPath ||
+        m_hiddenRecordings.contains(path) || info.isSymLink() || !info.isFile() ||
+        !isInsideLibrary(path, m_libraryPath) || m_storage->recordingInUse(path))
+      continue;
+    const QString fingerprint = QString::number(info.size()) + ':' +
+                                QString::number(info.lastModified().toMSecsSinceEpoch());
+    if (m_recoveryAttempts.value(path) == fingerprint) continue;
+    const qint64 age = info.lastModified().msecsTo(QDateTime::currentDateTime());
+    if (age < 30000) {
+      const int delay = int(std::clamp<qint64>(30000 - age, 1, 2147483647));
+      nextDelay = nextDelay < 0 ? delay : std::min(nextDelay, delay);
+      continue;
+    }
+    if (!m_storage->reserveRecordings({path})) continue;
+    m_recoveryAttempts.insert(path, fingerprint);
+    m_recoveryPath = path;
+    m_recovery = std::make_shared<RecordingRecovery>();
+    m_recoveryCancel = std::make_shared<std::atomic_bool>(false);
+    const auto recovery = m_recovery;
+    const auto cancel = m_recoveryCancel;
+    m_recoveryWatcher.setFuture(QtConcurrent::run([recovery, cancel, path]() {
+      auto *thread = QThread::currentThread();
+      const auto priority = thread->priority();
+      thread->setPriority(QThread::LowPriority);
+      bool result = false;
+      try {
+        result = recovery->prepare(path, *cancel);
+      } catch (...) {
+        // Failed allocations must not turn optional crash recovery into
+        // another application crash. Staging is RAII-owned and unpublished.
+      }
+      thread->setPriority(priority == QThread::InheritPriority ? QThread::NormalPriority : priority);
+      return result;
+    }));
+    return; // Completion schedules the next candidate in the serial queue.
+  }
+  if (nextDelay >= 0) scheduleRecovery(nextDelay);
 }
 
 void RecordingLibrary::setHiddenRecordings(const QStringList &paths) {
   m_hiddenRecordings = QSet<QString>(paths.begin(), paths.end());
   updateFilteredRecordings();
+  scheduleRecovery();
 }
 
 void RecordingLibrary::refreshAnnotations(const QString &path) {
@@ -578,6 +695,8 @@ void RecordingLibrary::addRecording(const QString &filePath) {
   // the current view when probing completes (including renamed clips).
   connect(recording.get(), &Recording::metadataChanged, this,
           &RecordingLibrary::updateFilteredRecordings);
+  connect(recording.get(), &Recording::metadataChanged, this,
+          [this]() { scheduleRecovery(); });
 
   // Request thumbnail generation
   if (recording->thumbnailPath().isEmpty()) {
@@ -632,6 +751,7 @@ void RecordingLibrary::setBulkOperationActive(bool active) {
   } else if (m_bulkOperationDepth > 0) {
     --m_bulkOperationDepth;
   }
+  if (!m_bulkOperationDepth) scheduleRecovery();
 }
 
 void RecordingLibrary::removeRecordings(const QStringList &filePaths) {

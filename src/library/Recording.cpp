@@ -223,6 +223,11 @@ Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
     return result;
   }
 
+  result.needsRecovery = formatCtx->duration == AV_NOPTS_VALUE &&
+      QString::fromLatin1(formatCtx->iformat->name).contains("matroska") &&
+      av_dict_get(formatCtx->metadata, "trophy-version", nullptr, 0) &&
+      av_dict_get(formatCtx->metadata, "trophy-kind", nullptr, 0);
+
   // Read container metadata tags first. These are more reliable than
   // filename parsing for game title and recording date — unless the user
   // renamed the file, in which case the embedded title is stale and the
@@ -324,6 +329,9 @@ Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
 
   // Audio layout: stream count plus the first audio codec's name. Same
   // header-only read, no extra demux cost.
+  // Re-probing after recovery/rename replaces the count, not adds to it.
+  result.audioTrackCount = 0;
+  result.audioCodec.clear();
   for (unsigned int i = 0; i < formatCtx->nb_streams; i++) {
     AVStream *stream = formatCtx->streams[i];
     if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -356,6 +364,12 @@ Recording::ProbeResult Recording::probeVideoFile(const QString &filePath,
 }
 
 void Recording::applyProbeResult(const ProbeResult &result) {
+  m_needsRecovery = result.needsRecovery;
+  const auto size = QFileInfo(m_filePath).size();
+  if (size != m_size) {
+    m_size = size;
+    emit fileChanged();
+  }
   m_gameName = result.gameName;
   m_date = result.date;
   m_duration = result.duration;

@@ -106,6 +106,19 @@ TEST_F(RecordingTest, ConstructorSetsFilePath) {
   EXPECT_EQ(rec.filePath(), path);
 }
 
+TEST_F(RecordingTest, ReprobeReplacesAudioTrackCountInsteadOfAccumulatingIt) {
+  if (QStandardPaths::findExecutable("ffmpeg").isEmpty()) GTEST_SKIP();
+  const QString path = tempDir.filePath("reprobe.mkv");
+  QProcess proc;
+  proc.start("ffmpeg", {"-nostdin", "-v", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=160x90:rate=15:duration=1", "-f", "lavfi", "-i",
+      "sine=duration=1", "-c:v", "mpeg4", "-c:a", "aac", path});
+  ASSERT_TRUE(proc.waitForFinished(15000)); ASSERT_EQ(proc.exitCode(), 0);
+  Recording recording(path);
+  recording.loadMetadata(); waitForProbe(); EXPECT_EQ(recording.audioTrackCount(), 1);
+  recording.loadMetadata(); waitForProbe(); EXPECT_EQ(recording.audioTrackCount(), 1);
+}
+
 TEST_F(RecordingTest, ConstructorSetsFileName) {
   QString path = createFile("Test_Game_2026-01-15_20-30-00.mkv");
   Recording rec(path);
