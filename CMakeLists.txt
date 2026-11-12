@@ -337,6 +337,7 @@ set(LIBRARY_SOURCES
     src/library/ShareExporter.cpp
     src/library/RecordingLibrary.cpp
     src/library/Recording.cpp
+    src/library/RecordingRecovery.cpp
     src/library/ThumbnailGenerator.cpp
     src/library/ActivityFeed.cpp
     src/library/WaveformCache.cpp

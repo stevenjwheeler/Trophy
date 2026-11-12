@@ -8,6 +8,10 @@
 #pragma once
 
 #include <QFileSystemWatcher>
+#include <QFutureWatcher>
+#include <QTimer>
+#include <QHash>
+#include <atomic>
 #include <QList>
 #include <QObject>
 #include <QSet>
@@ -18,11 +22,14 @@
 #include <thread>
 #include <vector>
 
+class RecordingLibraryTest;
+
 namespace TrophyBackend {
 
 class Recording;
 class ThumbnailGenerator;
 class StorageManager;
+class RecordingRecovery;
 
 /**
  * @brief Manages the library of recorded videos
@@ -105,7 +112,7 @@ public:
                                  double startSeconds, double endSeconds);
   // Optional storage gate for saveClipRange (see ReplayManager::m_storage
   // for the policy). Wired by Application; unset means no limit checks.
-  void setStorageManager(StorageManager *storage) { m_storage = storage; }
+  void setStorageManager(StorageManager *storage);
   // Batch counterpart of removeRecording: erases every listed path in
   // one pass and settles the filtered model once, then emits
   // recordingsRemoved with the paths actually dropped. Emits nothing
@@ -143,6 +150,7 @@ signals:
   void recordingsChanged();
   void libraryPathChanged();
   void recordingAdded(Recording *recording);
+  void recordingRecovered(const QString &filePath);
   void recordingRemoved(const QString &filePath);
   // Batch counterpart of recordingRemoved, emitted once per
   // removeRecordings() with every path actually dropped from the
@@ -163,11 +171,14 @@ private slots:
   void onThumbnailReady(const QString &videoPath, const QString &thumbnailPath);
 
 private:
+  friend class ::RecordingLibraryTest;
   void scanDirectory();
   void addRecording(const QString &filePath);
   void updateFilteredRecordings();
   void loadCustomTitles();
   void saveCustomTitles() const;
+  void recoverNextRecording();
+  void scheduleRecovery(int delayMs = 0);
   QString customTitlesPath() const;
   // Batch scope for scan/refresh: defers recordingsChanged emits and
   // custom-titles disk writes so a 100-file scan settles once at the end
@@ -221,6 +232,15 @@ private:
   bool m_clipSaving = false;
   std::thread m_clipThread;
   QString m_clipPinnedSource;
+  QTimer m_recoveryTimer;
+  bool m_recoveryShuttingDown = false;
+  QFutureWatcher<bool> m_recoveryWatcher;
+  std::shared_ptr<std::atomic_bool> m_recoveryCancel;
+  std::shared_ptr<RecordingRecovery> m_recovery;
+  QString m_recoveryPath;
+  // Failed unchanged inputs are attempted at most once per process, not on
+  // every watcher tick. Changed files can be reconsidered after settling.
+  QHash<QString, QString> m_recoveryAttempts;
 };
 
 } // namespace TrophyBackend

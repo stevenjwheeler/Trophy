@@ -39,6 +39,7 @@ Rectangle {
     signal rateRequested(double rate)
     signal snapshotRequested()
     signal snapshotSaved(string path, bool ok)
+    signal mediaLoaded()
 
     // Mirrored from the page (master volume/mute live there).
     property real volumeLevel: 1.0
@@ -103,6 +104,10 @@ Rectangle {
     clip: true
 
     MediaPlayer {
+        onMediaStatusChanged: {
+            if (mediaStatus === MediaPlayer.LoadedMedia)
+                root.mediaLoaded()
+        }
         id: mediaPlayer
 
         // Video only: the player screen runs a separate

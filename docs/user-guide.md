@@ -10,6 +10,15 @@ With DVR enabled and ready, the clip shortcut saves recent gameplay from the rep
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+After an interrupted recording (for example, a crash), Trophy automatically
+rebuilds missing duration and seeking information in the background. This is
+lossless and keeps the same filename, bookmarks and protection. Active recordings
+are skipped. Recovery is triggered on startup and library changes, not by
+periodic polling; newly added unfinished files get a delayed quiet-period check.
+Recovery temporarily needs approximately one recording's worth of
+free disk space; if it cannot finish safely, the original is left unchanged.
+Content that never reached disk cannot be recovered.
+
 **Settings → Frame Rate** limits full recordings and DVR without limiting the game's FPS. Choose **∞ (Uncapped)** to keep every delivered frame instead. Uncapped capture can increase processing load; the actual rate depends on the game, compositor and encoder. Fixed limits skip excess frames without speeding up playback or changing audio timing. Capture Info can therefore show capture FPS above the selected limit while encode FPS stays near it; intentional rate limiting is not a queue-overflow drop.
 
 The compositor sends no frames at all while the screen is still — a loading screen, a menu, or a paused game. Trophy repeats the last frame at the target rate in that case, so recordings stay constant-rate and players never wait on a frame that covers many seconds. A repeated frame compresses to almost nothing. Recordings made before this change can still contain those long frames.

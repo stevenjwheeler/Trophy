@@ -94,7 +94,173 @@ protected:
     QThreadPool::globalInstance()->waitForDone(10000);
     QCoreApplication::processEvents();
   }
+
+  QString unfinished() {
+    const auto source = makeTitledClip("source.mkv", "Recovery Game", 3, "recording");
+    if (source.isEmpty()) return {};
+    const QString path = tempDir.filePath("unfinished.mkv");
+    QProcess proc;
+    proc.start("ffmpeg", {"-nostdin", "-v", "error", "-i", source, "-map", "0", "-c", "copy",
+                         "-metadata", "trophy-version=test", "-live", "1", path});
+    if (!proc.waitForFinished(30000) || proc.exitCode()) return {};
+    QFile file(path);
+    if (!file.open(QIODevice::ReadWrite) ||
+        !file.setFileTime(QDateTime::currentDateTime().addSecs(-60), QFileDevice::FileModificationTime)) return {};
+    return path;
+  }
+  void recover(RecordingLibrary &lib) { lib.recoverNextRecording(); }
+  bool recovering(const RecordingLibrary &lib) { return !lib.m_recoveryPath.isEmpty(); }
+  bool settleRecovery(RecordingLibrary &lib) {
+    QElapsedTimer timer; timer.start();
+    while (recovering(lib) && timer.elapsed() < 10000) {
+      QCoreApplication::processEvents(); QThread::msleep(1);
+    }
+    waitForProbes();
+    return !recovering(lib);
+  }
+  bool waitUntil(const std::function<bool()> &predicate) {
+    QElapsedTimer timer; timer.start();
+    while (!predicate() && timer.elapsed() < 10000) {
+      QCoreApplication::processEvents(); QThread::msleep(1);
+    }
+    return predicate();
+  }
+  bool recoveryWakePending(const RecordingLibrary &lib) { return lib.m_recoveryTimer.isActive(); }
 };
+
+TEST_F(RecordingLibraryTest, StartupRecoveryIsEventDrivenAndLeavesNoPollingTimer) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  StorageManager storage(tempDir.path()); RecordingLibrary lib(tempDir.path());
+  QSignalSpy repaired(&lib, &RecordingLibrary::recordingRecovered);
+  lib.setStorageManager(&storage);
+  ASSERT_TRUE(waitUntil([&] { return repaired.count() == 1 && !recovering(lib) &&
+      lib.getRecording(path)->duration() > 0 && !recoveryWakePending(lib); }));
+  EXPECT_FALSE(lib.getRecording(path)->needsRecovery());
+  EXPECT_FALSE(recoveryWakePending(lib));
+}
+
+TEST_F(RecordingLibraryTest, AddedFileRecoversFromWatcherWithoutPeriodicChecks) {
+  StorageManager storage(tempDir.path()); RecordingLibrary lib(tempDir.path());
+  lib.setStorageManager(&storage); QCoreApplication::processEvents();
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  ASSERT_TRUE(waitUntil([&] { const auto *r = lib.getRecording(path);
+    return r && r->duration() > 0 && !r->needsRecovery() && !recoveryWakePending(lib); }));
+}
+
+TEST_F(RecordingLibraryTest, StartupQueueDrainsMultipleFilesFromCompletionEvents) {
+  const auto first = unfinished(); ASSERT_FALSE(first.isEmpty());
+  const auto second = tempDir.filePath("second.mkv");
+  ASSERT_TRUE(QFile::copy(first, second));
+  QFile file(second); ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+  ASSERT_TRUE(file.setFileTime(QDateTime::currentDateTime().addSecs(-60), QFileDevice::FileModificationTime)); file.close();
+  StorageManager storage(tempDir.path()); RecordingLibrary lib(tempDir.path());
+  QSignalSpy repaired(&lib, &RecordingLibrary::recordingRecovered);
+  lib.setStorageManager(&storage);
+  ASSERT_TRUE(waitUntil([&] { return repaired.count() == 2 && !recovering(lib) &&
+      lib.getRecording(first)->duration() > 0 && lib.getRecording(second)->duration() > 0 &&
+      !recoveryWakePending(lib); }));
+}
+
+TEST_F(RecordingLibraryTest, ReleasingReservationWakesDeferredRecoveryWithoutPolling) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  StorageManager storage(tempDir.path()); ASSERT_TRUE(storage.reserveRecordings({path}));
+  RecordingLibrary lib(tempDir.path()); lib.setStorageManager(&storage);
+  waitForProbes(); QCoreApplication::processEvents();
+  EXPECT_FALSE(recovering(lib)); EXPECT_FALSE(recoveryWakePending(lib));
+  storage.releaseRecordings({path});
+  ASSERT_TRUE(waitUntil([&] { return lib.getRecording(path)->duration() > 0 &&
+      !recovering(lib) && !recoveryWakePending(lib); }));
+}
+
+TEST_F(RecordingLibraryTest, RecentCandidateGetsOneShotQuietPeriodRatherThanPolling) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  QFile file(path); ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+  ASSERT_TRUE(file.setFileTime(QDateTime::currentDateTime().addMSecs(-28000), QFileDevice::FileModificationTime)); file.close();
+  StorageManager storage(tempDir.path()); RecordingLibrary lib(tempDir.path()); lib.setStorageManager(&storage);
+  waitForProbes(); QCoreApplication::processEvents();
+  EXPECT_FALSE(recovering(lib));
+  EXPECT_TRUE(recoveryWakePending(lib));
+  ASSERT_TRUE(waitUntil([&] { return lib.getRecording(path)->duration() > 0 &&
+      !recovering(lib) && !recoveryWakePending(lib); }));
+}
+
+TEST_F(RecordingLibraryTest, AutomaticallyRecoversInPlaceAndPreservesAnnotations) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  ASSERT_TRUE(RecordingAnnotations::setProtected(path, true));
+  ASSERT_TRUE(RecordingAnnotations::addBookmark(path, 500));
+  AudioRoutingInfo routing;
+  routing.known = true; routing.game = true; routing.primary = 0;
+  ASSERT_TRUE(RecordingAnnotations::setAudioRouting(path, routing.toJson()));
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path()); lib.setStorageManager(&storage); waitForProbes();
+  auto *recording = lib.getRecording(path); ASSERT_NE(recording, nullptr);
+  ASSERT_TRUE(recording->needsRecovery());
+  QSignalSpy added(&lib, &RecordingLibrary::recordingAdded);
+  QSignalSpy removed(&lib, &RecordingLibrary::recordingRemoved);
+  QSignalSpy repaired(&lib, &RecordingLibrary::recordingRecovered);
+  recover(lib); ASSERT_TRUE(recovering(lib));
+  EXPECT_TRUE(storage.recordingInUse(path));
+  EXPECT_FALSE(storage.deleteRecording(path));
+  ASSERT_TRUE(settleRecovery(lib));
+  ASSERT_EQ(repaired.count(), 1);
+  EXPECT_EQ(lib.getRecording(path), recording);
+  EXPECT_GT(recording->duration(), 0);
+  EXPECT_FALSE(recording->needsRecovery());
+  EXPECT_TRUE(recording->protectedFromCleanup());
+  EXPECT_EQ(recording->bookmarks().size(), 1);
+  EXPECT_EQ(RecordingAnnotations::audioRouting(path), routing.toJson());
+  EXPECT_FALSE(storage.recordingInUse(path));
+  EXPECT_EQ(added.count(), 0); EXPECT_EQ(removed.count(), 0);
+  recover(lib); EXPECT_FALSE(recovering(lib));
+}
+
+TEST_F(RecordingLibraryTest, RecoveryDefersActiveReservedHiddenAndBulkFiles) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path()); lib.setActiveRecordingPath(path);
+  lib.setStorageManager(&storage); waitForProbes();
+  ASSERT_TRUE(lib.getRecording(path)->needsRecovery());
+  lib.setActiveRecordingPath(path); recover(lib); EXPECT_FALSE(recovering(lib));
+  lib.setActiveRecordingPath({});
+  ASSERT_TRUE(storage.reserveRecordings({path})); recover(lib); EXPECT_FALSE(recovering(lib));
+  storage.releaseRecordings({path});
+  lib.setHiddenRecordings({path}); recover(lib); EXPECT_FALSE(recovering(lib)); lib.setHiddenRecordings({});
+  lib.setBulkOperationActive(true); recover(lib); EXPECT_FALSE(recovering(lib)); lib.setBulkOperationActive(false);
+  recover(lib); ASSERT_TRUE(recovering(lib)); ASSERT_TRUE(settleRecovery(lib));
+  EXPECT_GT(lib.getRecording(path)->duration(), 0);
+}
+
+TEST_F(RecordingLibraryTest, RecoveryNeverReplacesAFileThatBecomesActive) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  StorageManager storage(tempDir.path());
+  RecordingLibrary lib(tempDir.path()); lib.setStorageManager(&storage); waitForProbes();
+  QFile original(path); ASSERT_TRUE(original.open(QIODevice::ReadOnly)); const auto bytes = original.readAll(); original.close();
+  recover(lib); ASSERT_TRUE(recovering(lib)); lib.setActiveRecordingPath(path);
+  ASSERT_TRUE(settleRecovery(lib));
+  ASSERT_TRUE(original.open(QIODevice::ReadOnly)); EXPECT_EQ(original.readAll(), bytes);
+  original.close();
+  EXPECT_FALSE(storage.recordingInUse(path));
+  lib.setActiveRecordingPath({});
+  recover(lib); ASSERT_TRUE(recovering(lib)); ASSERT_TRUE(settleRecovery(lib));
+  EXPECT_GT(lib.getRecording(path)->duration(), 0);
+}
+
+TEST_F(RecordingLibraryTest, RecoverySkipsRecentFilesAndJoinsOnDestruction) {
+  const auto path = unfinished(); ASSERT_FALSE(path.isEmpty());
+  StorageManager storage(tempDir.path());
+  {
+    QFile file(path); ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    ASSERT_TRUE(file.setFileTime(QDateTime::currentDateTime(), QFileDevice::FileModificationTime)); file.close();
+    RecordingLibrary lib(tempDir.path()); lib.setStorageManager(&storage); waitForProbes();
+    recover(lib); EXPECT_FALSE(recovering(lib));
+    ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    ASSERT_TRUE(file.setFileTime(QDateTime::currentDateTime().addSecs(-60), QFileDevice::FileModificationTime)); file.close();
+    recover(lib); ASSERT_TRUE(recovering(lib));
+  }
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(storage.recordingInUse(path));
+  EXPECT_TRUE(QDir(tempDir.path()).entryList({".trophy-recovery-*"}, QDir::Files | QDir::Hidden).isEmpty());
+}
 
 TEST_F(RecordingLibraryTest, DashboardTotalsIgnoreViewFiltersAndUndoHiding) {
   const auto first = createFile("Game.mkv");

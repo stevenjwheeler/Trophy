@@ -102,6 +102,9 @@ public:
   Q_INVOKABLE static QString formatSize(qint64 bytes);
 
 signals:
+  // A reservation or active-output exclusion was released/changed. Allows
+  // deferred library work to resume without periodically polling storage.
+  void recordingAvailabilityChanged();
   void storagePathChanged();
   void usedSizeChanged();
   void maxSizeChanged();

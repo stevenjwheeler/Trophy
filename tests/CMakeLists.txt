@@ -138,6 +138,7 @@ gtest_discover_tests(test_PreviewCache)
 # thumbnail). Views never polish offscreen here, so this covers the card
 # bindings only; the model side is covered in test_RecordingLibrary.
 add_executable(test_RecordingCardBinding test_RecordingCardBinding.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingRecovery.cpp
     ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.cpp
     ${CMAKE_SOURCE_DIR}/src/library/PreviewCache.h
     ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.cpp
@@ -720,7 +721,15 @@ endif()
 
 
 # --- RecordingLibrary (dummy files; thumbnails fail gracefully) ---
+add_executable(test_RecordingRecovery test_RecordingRecovery.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingRecovery.cpp)
+target_include_directories(test_RecordingRecovery PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_RecordingRecovery PRIVATE GTest::GTest GTest::gtest_main
+    Qt6::Core Qt6::Test PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
+gtest_discover_tests(test_RecordingRecovery)
+
 add_executable(test_RecordingLibrary test_RecordingLibrary.cpp
+    ${CMAKE_SOURCE_DIR}/src/library/RecordingRecovery.cpp
     ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.cpp
     ${CMAKE_SOURCE_DIR}/src/library/RecordingLibrary.h
     ${CMAKE_SOURCE_DIR}/src/library/Recording.cpp

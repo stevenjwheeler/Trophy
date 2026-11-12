@@ -80,6 +80,7 @@ public:
   int audioTrackCount() const { return m_audioTrackCount; }
   QString audioCodec() const { return m_audioCodec; }
   QString encoderName() const { return m_encoderName; }
+  bool needsRecovery() const { return m_needsRecovery; }
   bool protectedFromCleanup() const { return m_protectedFromCleanup; }
   QVariantList bookmarks() const { return m_bookmarks; }
   QVariantMap audioRouting() const { return m_audioRouting; }
@@ -147,6 +148,7 @@ private:
     int audioTrackCount = 0;
     QString audioCodec;
     QString encoderName;
+    bool needsRecovery = false;
   };
   void parseFileNameForGameName();
   static ProbeResult probeVideoFile(const QString &filePath, ProbeResult result,
@@ -176,6 +178,7 @@ private:
   QString m_audioCodec;
   QString m_encoderName;
   bool m_protectedFromCleanup = false;
+  bool m_needsRecovery = false;
   QVariantList m_bookmarks;
   QVariantMap m_audioRouting;
   QFuture<void> m_probeFuture;
