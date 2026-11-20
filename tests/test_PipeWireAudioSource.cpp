@@ -5,7 +5,13 @@
  */
 
 #include "audio/PipeWireAudioSource.h"
+#include <pipewire/pipewire.h>
+// Keep this header buildable without newer SPA convenience macros, even
+// when the developer's installed PipeWire is newer than the CI baseline.
+#pragma push_macro("spa_api_method_r")
+#undef spa_api_method_r
 #include "audio/AppAudioGroup.h"
+#pragma pop_macro("spa_api_method_r")
 #include "audio/ApplicationAudioLookup.h"
 #include <gtest/gtest.h>
 #include <spa/buffer/buffer.h>
@@ -28,13 +34,17 @@ void lookupUpdate(detail::AudioLookupProperties &props,
 }
 
 TEST(ApplicationAudioLookupTest, FollowsLatePropertiesAndIgnoresStateOnlyEvents) {
+  EXPECT_EQ(detail::audioProcessId(""), 0);
+  EXPECT_EQ(detail::audioProcessId("42"), 42);
+  EXPECT_EQ(detail::audioProcessId("invalid"), -1);
+  EXPECT_EQ(detail::audioProcessId("0"), -1);
   detail::AudioLookupProperties node;
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"}});
   EXPECT_FALSE(node.matches(0, "fixture", false));
   node.updateInfo(nullptr, false); // First info can be state-only.
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
                       {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"}}, true);
-  EXPECT_TRUE(node.matches(0, "fixture", false));
+  EXPECT_FALSE(node.matches(0, "fixture", false)); // No substring identities.
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
                       {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"},
                       {PW_KEY_APP_PROCESS_ID, "42"}}, true);
@@ -142,7 +152,45 @@ public:
     g.m_incoming.erase(id);
   }
   static void refresh(AppAudioGroup &g) { g.refreshForCapture(20); }
+  static void cleanup(AppAudioGroup &g, int request, int fence) {
+    g.m_cleanupDestroySeqs.insert(request);
+    g.m_cleanupFences.emplace(fence, request);
+  }
+  static void settled(AppAudioGroup &g, int fence) { g.settleCleanup(fence); }
 };
+}
+
+TEST(ApplicationAudioRouteTest,
+     CleanupErrorsRequireExactRequestAndFenceLifetime) {
+  auto group = AppAudioGroupTestPeer::group();
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, 42, -ENOENT));
+  AppAudioGroupTestPeer::cleanup(*group, 42, 43);
+  EXPECT_TRUE(group->handlesCleanupError(PW_ID_CORE, 42, -ENOENT));
+  EXPECT_TRUE(group->handlesCleanupError(PW_ID_CORE,
+                                         SPA_RESULT_RETURN_ASYNC(42), -ENOENT));
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, 44, -ENOENT));
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, -1, -ENOENT));
+  EXPECT_FALSE(group->handlesCleanupError(5, 42, -ENOENT));
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, 42, -EPIPE));
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, 42, -EACCES));
+  AppAudioGroupTestPeer::settled(*group, 44);
+  EXPECT_TRUE(group->handlesCleanupError(PW_ID_CORE, 42, -ENOENT));
+  AppAudioGroupTestPeer::settled(*group, 43);
+  EXPECT_FALSE(group->handlesCleanupError(PW_ID_CORE, 42, -ENOENT));
+}
+
+TEST(ApplicationAudioRouteTest, QuiescedObserverCannotResumeRouting) {
+  auto group = AppAudioGroupTestPeer::group();
+  AppAudioGroupTestPeer::link(*group, 50, 10);
+  AppAudioGroupTestPeer::refresh(*group);
+  ASSERT_TRUE(group->acceptsAudio());
+  group->quiesce();
+  group->quiesce();
+  AppAudioGroupTestPeer::refresh(*group);
+  EXPECT_FALSE(group->acceptsAudio());
+  EXPECT_FALSE(group->targetGone());
+  AppAudioGroupTestPeer::remove(*group, 10);
+  EXPECT_TRUE(group->targetGone());
 }
 
 TEST(ApplicationAudioRouteTest, StrictBinaryDoesNotMatchDisplayNamesOrSubstrings) {
@@ -221,7 +269,7 @@ protected:
     int dequeues = 0, queues = 0;
     QStringList errors;
     int startedSignals = 0, stoppedSignals = 0;
-    std::function<void()> contextGate, startGate;
+    std::function<void()> contextGate, startGate, destroyGate;
     bool call(const char *name) {
       calls.append(QString::fromLatin1(name));
       return failure == QLatin1String(name);
@@ -353,6 +401,8 @@ protected:
         [](pw_stream *) {
           EXPECT_TRUE(active->stream);
           EXPECT_TRUE(active->locked);
+          if (active->destroyGate)
+            active->destroyGate();
           active->call("stream.destroy"); active->stream = false;
           active->events = nullptr; active->userdata = nullptr;
         },
@@ -762,6 +812,39 @@ TEST_F(PipeWireAudioSourceTest, ObjectLocalCoreErrorsAndPausedStateAreNotFatal) 
   EXPECT_TRUE(source.isCapturing());
   EXPECT_TRUE(lifecycle.errors.isEmpty());
   EXPECT_EQ(lifecycle.stoppedSignals, 0);
+}
+
+TEST_F(PipeWireAudioSourceTest, UntrackedCoreMissingResourceRemainsFatal) {
+  ASSERT_TRUE(source.initialize(AudioConfig{}));
+  ASSERT_TRUE(source.start());
+  lifecycle.coreEvents->error(lifecycle.coreUserdata, PW_ID_CORE, 42, -ENOENT,
+                              "unknown resource 46 op:7");
+  EXPECT_FALSE(source.isCapturing());
+  ASSERT_EQ(lifecycle.errors.size(), 1);
+  EXPECT_EQ(lifecycle.errors.first(), "unknown resource 46 op:7");
+}
+
+TEST_F(PipeWireAudioSourceTest, ExplicitStopIgnoresLateNativeTeardownErrors) {
+  ASSERT_TRUE(source.initialize(AudioConfig{}));
+  ASSERT_TRUE(source.start());
+  lifecycle.destroyGate = [&] {
+    lifecycle.events->state_changed(lifecycle.userdata, PW_STREAM_STATE_PAUSED,
+                                    PW_STREAM_STATE_ERROR,
+                                    "defined target not found");
+    lifecycle.coreEvents->error(lifecycle.coreUserdata, PW_ID_CORE, 42, -ENOENT,
+                                "unknown resource 2 op:2");
+  };
+  source.stop();
+  EXPECT_TRUE(lifecycle.errors.isEmpty());
+  EXPECT_EQ(lifecycle.stoppedSignals, 1);
+  EXPECT_TRUE(lifecycle.empty());
+  lifecycle.destroyGate = {};
+  ASSERT_TRUE(source.initialize(AudioConfig{}));
+  ASSERT_TRUE(source.start());
+  lifecycle.coreEvents->error(lifecycle.coreUserdata, PW_ID_CORE, 43, -EPIPE,
+                              "real disconnect");
+  ASSERT_EQ(lifecycle.errors.size(), 1);
+  EXPECT_EQ(lifecycle.errors.first(), "real disconnect");
 }
 
 TEST_F(PipeWireAudioSourceTest, ListenerFailureDuringConnectCannotBeOverwrittenByStart) {

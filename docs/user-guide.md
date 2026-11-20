@@ -10,6 +10,25 @@ With DVR enabled and ready, the clip shortcut saves recent gameplay from the rep
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+### Launcher and window handoffs
+
+If a captured loader/splash window disappears while the **same game instance**
+remains alive and selected, Trophy saves the completed part and retries full
+recording using the saved portal approval. It waits 1.5 seconds after cleanup
+before each attempt; there is no retry-count or total elapsed-time cutoff for
+recoverable window loss or an approved capture that returns no stream yet.
+The game can keep the same PID or hand off to another verified member of the
+same instance.
+
+Continuation is a **new recording file**, not DVR or an automatic merge.
+The gap between parts is not recorded. Stop cancels pending recovery; game exit,
+changed selection, removed approval or blocked capture also prevents another
+attempt. A generic portal rejection, permission loss, startup timeout, or
+service/output failure is not treated as a temporarily absent window. Portal
+backends still control whether the replacement can be restored silently.
+
+### Interrupted-file repair
+
 After an interrupted recording (for example, a crash), Trophy automatically
 rebuilds missing duration and seeking information in the background. This is
 lossless and keeps the same filename, bookmarks and protection. Active recordings
@@ -19,9 +38,11 @@ Recovery temporarily needs approximately one recording's worth of
 free disk space; if it cannot finish safely, the original is left unchanged.
 Content that never reached disk cannot be recovered.
 
+### Frame rate and capture info
+
 **Settings → Frame Rate** limits full recordings and DVR without limiting the game's FPS. Choose **∞ (Uncapped)** to keep every delivered frame instead. Uncapped capture can increase processing load; the actual rate depends on the game, compositor and encoder. Fixed limits skip excess frames without speeding up playback or changing audio timing. Capture Info can therefore show capture FPS above the selected limit while encode FPS stays near it; intentional rate limiting is not a queue-overflow drop.
 
-The compositor sends no frames at all while the screen is still — a loading screen, a menu, or a paused game. Trophy repeats the last frame at the target rate in that case, so recordings stay constant-rate and players never wait on a frame that covers many seconds. A repeated frame compresses to almost nothing. Recordings made before this change can still contain those long frames.
+Some capture backends deliver new frames only when the picture changes, so a loading screen, menu or paused game may stop producing frames. Trophy repeats the last frame at the target rate in that case, keeping the recording timeline moving. A repeated frame compresses to almost nothing. Recordings made before this change can still contain long-duration frames.
 
 The Dashboard shows source connection/mute status, audio levels, approximate replay-buffer fill, and warnings for sustained video-queue drops. Connected does not necessarily mean audible; check the meters and play back a short test recording after changing your setup.
 

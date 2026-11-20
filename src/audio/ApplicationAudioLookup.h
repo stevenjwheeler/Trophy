@@ -42,7 +42,8 @@ struct AudioLookupProperties {
     if (exactBinary) return matchesAudioBinary(get(PW_KEY_APP_PROCESS_BINARY), hint);
     for (const char *key : {PW_KEY_APP_PROCESS_BINARY, PW_KEY_APP_NAME,
                             PW_KEY_NODE_NAME, PW_KEY_APP_ID})
-      if (get(key).contains(hint, Qt::CaseInsensitive)) return true;
+      if (get(key).compare(hint, Qt::CaseInsensitive) == 0)
+        return true;
     return false;
   }
 };

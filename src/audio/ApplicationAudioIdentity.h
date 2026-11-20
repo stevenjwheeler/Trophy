@@ -4,6 +4,13 @@
 #include <QString>
 
 namespace TrophyBackend::detail {
+inline qint64 audioProcessId(const QString &value) {
+  if (value.isEmpty())
+    return 0;
+  bool valid = false;
+  const auto pid = value.toLongLong(&valid);
+  return valid && pid > 0 ? pid : -1; // Present but invalid is a veto.
+}
 
 // Voice selections are saved process binaries, not fuzzy game-name hints.
 inline bool matchesAudioBinary(const QString &binary, const QString &expected) {

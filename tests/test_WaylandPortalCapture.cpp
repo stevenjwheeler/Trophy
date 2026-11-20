@@ -228,12 +228,6 @@ protected:
   static bool watchdogActive(const WaylandPortalCapture &capture) {
     return capture.m_startWatchdog.isActive();
   }
-  static bool restoreWatchdogActive(const WaylandPortalCapture &capture) {
-    return capture.m_restoreWatchdog.isActive();
-  }
-  static void restoreTimeout(WaylandPortalCapture &capture) {
-    capture.onRestoreWatchdogTimeout();
-  }
   static void deliverMetadata(WaylandPortalCapture &capture, quint64 request = 0) {
     capture.applySourceMetadata("Old Game", 1234, true, request);
   }
@@ -700,7 +694,7 @@ TEST_F(WaylandPortalCaptureTest, SelectMethodErrorStopsWatchdogAndAllowsRetry) {
   ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
 }
 
-TEST_F(WaylandPortalCaptureTest, SilentRestoreExpectationArmsOnlyWithSavedToken) {
+TEST_F(WaylandPortalCaptureTest, SlowPortalSelectionDoesNotProveRestoreTokenStale) {
   if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
   {
     // First-ever authorization: no token, so a slow portal picker is the
@@ -711,7 +705,7 @@ TEST_F(WaylandPortalCaptureTest, SilentRestoreExpectationArmsOnlyWithSavedToken)
     const QString create = pendingPath(capture);
     control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
     ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
-    EXPECT_FALSE(restoreWatchdogActive(capture));
+    EXPECT_TRUE(watchdogActive(capture));
     capture.stopCapture();
   }
   {
@@ -723,17 +717,21 @@ TEST_F(WaylandPortalCaptureTest, SilentRestoreExpectationArmsOnlyWithSavedToken)
     const QString create = pendingPath(capture);
     control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
     ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
-    EXPECT_TRUE(restoreWatchdogActive(capture));
-    // A completed restore stops waiting.
+    QTest::qWait(1600);
+    EXPECT_TRUE(starting(capture));
+    EXPECT_TRUE(watchdogActive(capture));
+    EXPECT_EQ(stale.count(), 0); // A slow reply is not proof of a visible picker.
+    const auto select = pendingPath(capture);
     control("Respond", {pendingPath(capture), 0u,
                         QVariantMap{{"restore_token", "fresh-token"}}});
-    ASSERT_TRUE(waitUntil([&] { return !restoreWatchdogActive(capture); }));
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() &&
+                                     pendingPath(capture) != select; }));
     EXPECT_EQ(stale.count(), 0);
     capture.stopCapture();
   }
 }
 
-TEST_F(WaylandPortalCaptureTest, UnhonouredRestoreTokenAbandonsThePickerForReauthorization) {
+TEST_F(WaylandPortalCaptureTest, UnansweredSavedRestoreTimesOutWithoutReauthorization) {
   if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
   WaylandPortalCapture capture;
   restore(capture);
@@ -744,16 +742,14 @@ TEST_F(WaylandPortalCaptureTest, UnhonouredRestoreTokenAbandonsThePickerForReaut
   const QString create = pendingPath(capture);
   control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
   ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
-  // The portal never answers the selection (its picker is up) ...
-  ASSERT_TRUE(restoreWatchdogActive(capture));
-  restoreTimeout(capture);
-  // ... so the attempt is abandoned and the app is asked to re-authorize.
-  ASSERT_TRUE(waitUntil([&] { return stale.count() == 1; }));
-  EXPECT_EQ(stale.first()[0].toString(), "saved-token");
-  EXPECT_EQ(errors.count(), 0);
+  // The portal never answers: terminate at the normal startup deadline, but
+  // do not infer a revoked token (or a visible picker) solely from elapsed time.
+  ASSERT_TRUE(watchdogActive(capture));
+  timeout(capture);
+  ASSERT_TRUE(waitUntil([&] { return errors.count() == 1; }));
+  EXPECT_EQ(stale.count(), 0);
   EXPECT_FALSE(starting(capture));
   EXPECT_FALSE(watchdogActive(capture));
-  EXPECT_FALSE(restoreWatchdogActive(capture));
   EXPECT_TRUE(pendingPath(capture).isEmpty());
   EXPECT_EQ(control("SessionCloseCount", {}).arguments().value(0).toInt(), 1);
 }

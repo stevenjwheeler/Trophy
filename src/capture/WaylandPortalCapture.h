@@ -74,12 +74,6 @@ private slots:
   void onStartCallFinished(QDBusPendingCallWatcher *watcher,
                            quint64 generation);
   void onStartWatchdogTimeout();
-  // A saved restore token normally restores without any portal UI. If the
-  // selection does not come back quickly the portal is almost certainly
-  // showing its own picker (e.g. the stored window no longer matches): abort
-  // that attempt and hand back to the app, which deletes the token and offers
-  // an explicit re-authorization instead.
-  void onRestoreWatchdogTimeout();
   void onPortalSessionClosed(const QVariantMap &details);
   void onPortalOwnerChanged(const QString &service, const QString &oldOwner,
                            const QString &newOwner);
@@ -140,6 +134,8 @@ private:
   spa_hook m_pw_stream_listener;
   spa_hook m_pw_core_listener{};
   pw_registry *m_pw_registry = nullptr;
+  std::atomic<uint32_t> m_coreCookie{0};
+  std::atomic<uint64_t> m_targetSerial{0};
   spa_hook m_pw_registry_listener{};
 
   FrameCallback m_callback;
@@ -207,7 +203,6 @@ private:
   quint64 m_startGeneration = 0;
   quint64 m_attemptGeneration = 0;
   QTimer m_startWatchdog;
-  QTimer m_restoreWatchdog;
   void clearStartGuard();
   // Applies async PipeWire metadata enrichment (identity correction) back
   // on the GUI thread. Portal-provided labels are already usable

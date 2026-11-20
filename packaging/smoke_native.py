@@ -47,6 +47,8 @@ def check_tree(root):
     if len(binaries) != 1:
         raise RuntimeError(f"Expected exactly one bin/trophy, found {len(binaries)}")
     prefix = binaries[0].parent.parent
+    if (prefix / "share/trophy/kwin").exists():
+        raise RuntimeError("Obsolete compositor helper bundled: share/trophy/kwin")
     binary = required(prefix, "bin/trophy", executable=True)
     libraries = list(prefix.glob("lib*/**/libTrophy.so"))
     if len(libraries) != 1:
@@ -55,26 +57,9 @@ def check_tree(root):
     # Shared objects need read access, not filesystem execute bits. Debian's
     # Qt/CMake install policy legitimately installs libraries as 0644.
     elfs = [binary, required(prefix, libdir / "libTrophy.so")]
-    elfs += [required(prefix, libdir / "trophy" / name)
-             for name in ("libtrophy_layer.so", "libtrophy_gl_shim.so")]
-    companion_dir = prefix / "lib/trophy/reporters32"
-    if companion_dir.exists() or companion_dir.is_symlink():
-        if companion_dir.is_symlink() or not companion_dir.is_dir():
-            raise RuntimeError("Invalid i386 companion directory")
-        for name in ("libtrophy_layer.so", "libtrophy_gl_shim.so"):
-            companion = required(prefix, Path("lib/trophy/reporters32") / name)
-            with companion.open("rb") as file:
-                header = file.read(20)
-            if (len(header) != 20 or header[:7] != b"\x7fELF\x01\x01\x01" or
-                    header[16:20] != b"\x03\x00\x03\x00" or companion.is_symlink()):
-                raise RuntimeError(f"Expected regular i386 ET_DYN companion: {companion}")
-            elfs.append(companion)
     for relative in (
         "share/applications/io.github.stevenjwheeler.Trophy.desktop",
         "share/icons/hicolor/scalable/apps/trophy.svg",
-        "share/trophy/vulkan_layer/trophy_layer.json",
-        "share/trophy/kwin/trophy-monitor/metadata.json",
-        "share/trophy/kwin/trophy-monitor/contents/code/main.js",
         "share/licenses/trophy/default-app-icons/LICENSE",
         "share/licenses/trophy/default-app-icons/README.md",
     ):
@@ -85,13 +70,6 @@ def check_tree(root):
     if not any(item.get("type") == "desktop-id" and item.text == expected_launchable
                for item in launchables):
         raise RuntimeError(f"AppStream launchable must name {expected_launchable}")
-    manifest = json.loads((prefix / "share/trophy/vulkan_layer/trophy_layer.json").read_text())
-    layer = manifest.get("layer") if isinstance(manifest, dict) else None
-    library_path = layer.get("library_path") if isinstance(layer, dict) else None
-    if not isinstance(library_path, str) or not library_path.strip():
-        raise RuntimeError("Vulkan manifest lacks library_path")
-    # The manifest is an enrollment template; its build-tree path is rewritten
-    # by explicit enrollment. Do not mistake it for an installed loader path.
     dynamic = command(["readelf", "-d", str(binary)])
     paths = re.findall(r"\((?:RUNPATH|RPATH)\).*?\[(.*?)\]", dynamic)
     expected = f"$ORIGIN/../{libdir}"

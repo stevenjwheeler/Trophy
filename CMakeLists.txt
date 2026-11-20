@@ -116,9 +116,6 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     Widgets
 )
 
-# Find Vulkan (for the detection layer)
-find_package(Vulkan REQUIRED)
-
 qt_standard_project_setup()
 
 # Qt policies
@@ -215,55 +212,16 @@ if(ENABLE_NVENC)
     endif()
 endif()
 
-# KWin monitor script: copy its contents to the build tree for dev runs
-# (KWinBackend looks in <appDir>/kwin-scripts/trophy-monitor); install
-# the same tree for packages.
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
-     DESTINATION "${CMAKE_BINARY_DIR}/kwin-scripts")
-
-# Detection shims (Vulkan layer + OpenGL LD_PRELOAD shim).
-# Both report to /tmp/trophy-detection.sock with the same START/STOP protocol.
-# NOTE: IEncoder has Q_OBJECT, so IEncoder.h (not a .cpp) is listed in test
-# target sources wherever FFmpegEncoder.cpp is compiled — AUTOMOC generates
-# the metaobject from the header. Same for the main Trophy target via
-# ENCODING_HEADERS.
-add_library(trophy_layer SHARED src/vulkan_layer/trophy_layer.cpp)
-target_link_libraries(trophy_layer PRIVATE Vulkan::Vulkan)
+# Process identity is shared by detection and PipeWire worker threads.
+add_library(trophy_processes STATIC
+    src/detection/ProcessCensus.cpp src/detection/ProcessGames.cpp
+    src/detection/GameWhitelist.cpp)
+set_target_properties(trophy_processes PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(trophy_processes PUBLIC Qt6::Core)
+target_include_directories(trophy_processes PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(trophy_layer PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Wno-unused-parameter
-    )
+    target_compile_options(trophy_processes PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-set_target_properties(trophy_layer PROPERTIES
-    OUTPUT_NAME "trophy_layer"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/vulkan_layer"
-)
-
-add_library(trophy_gl_shim SHARED src/gl_shim/trophy_gl_shim.c)
-target_link_libraries(trophy_gl_shim PRIVATE dl)
-set_target_properties(trophy_gl_shim PROPERTIES
-    OUTPUT_NAME "trophy_gl_shim"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/gl_shim"
-    C_STANDARD 11
-)
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(trophy_gl_shim PRIVATE -Wall -Wextra -Wno-unused-parameter)
-endif()
-
-# Generate the implicit-layer JSON next to the built Vulkan layer so
-# Application::ensureVulkanLayerRegistered() finds it in dev builds.
-# NOTE: generator expressions don't expand in configure_file, so use the
-# predictable output path (LIBRARY_OUTPUT_DIRECTORY + OUTPUT_NAME above).
-set(LIBRARY_PATH "${CMAKE_BINARY_DIR}/vulkan_layer/libtrophy_layer.so")
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_layer/trophy_layer.json.in"
-    "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
-    @ONLY
-)
-
 # Source files
 set(CORE_SOURCES
     src/core/DeletionQueue.cpp
@@ -289,7 +247,6 @@ set(CORE_SOURCES
     src/core/UpdateChecker.cpp
     src/core/ReleaseNotes.cpp
     src/core/UpdateInstaller.cpp
-    src/core/WindowService.cpp
     src/core/WindowChrome.cpp
     src/core/FrameDispatcher.cpp
     src/core/CircularFrameBuffer.cpp
@@ -326,11 +283,9 @@ set(MUXING_SOURCES
 set(DETECTION_SOURCES
     src/detection/GameIconProvider.cpp
     src/detection/GameDetectionService.cpp
-    src/detection/GameWhitelist.cpp
 )
 
 
-list(APPEND DETECTION_SOURCES src/detection/WaylandWindowMonitor.cpp src/detection/KWinBackend.cpp src/detection/GlShimEnrollment.cpp src/detection/GnomeBackend.cpp src/detection/HyprlandBackend.cpp src/detection/SwayBackend.cpp src/detection/WindowInfo.cpp src/detection/VulkanLayer.cpp)
 
 set(LIBRARY_SOURCES
     src/library/ShareExportEngine.cpp
@@ -369,7 +324,6 @@ set(CORE_HEADERS
     src/core/UpdateChecker.h
     src/core/ReleaseNotes.h
     src/core/UpdateInstaller.h
-    src/core/WindowService.h
     src/core/WindowChrome.h
 )
 
@@ -406,6 +360,8 @@ set(MUXING_HEADERS
 )
 
 set(DETECTION_HEADERS
+    src/detection/ProcessCensus.h
+    src/detection/ProcessGames.h
     src/detection/DefaultAppCatalog.h
     src/detection/GameIconProvider.h
     src/detection/GameIconSource.h
@@ -415,7 +371,6 @@ set(DETECTION_HEADERS
 )
 
 
-list(APPEND DETECTION_HEADERS src/detection/WaylandWindowMonitor.h src/detection/KWinBackend.h src/detection/WindowInfo.h src/detection/GlShimEnrollment.h src/detection/GnomeBackend.h src/detection/HyprlandBackend.h src/detection/SwayBackend.h src/detection/VulkanLayer.h)
 
 set(LIBRARY_HEADERS
     src/library/ShareExporter.h
@@ -477,7 +432,6 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/styles/Theme.qml
         qml/components/AudioLevelMeter.qml
         qml/components/NavigationRail.qml
-        qml/components/WindowPickerDialog.qml
         qml/components/SetupWizard.qml
         qml/components/ShareExportDialog.qml
         qml/components/OriginalCopyDialog.qml
@@ -566,6 +520,7 @@ endif()
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    trophy_processes
     Qt6::Core
     Qt6::Gui
     Qt6::Qml
@@ -666,54 +621,6 @@ install(FILES resources/icons/default-apps/README.md LICENSE
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
 )
 
-install(TARGETS trophy_layer trophy_gl_shim
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trophy
-)
-
-# Optional separately built i386 companions. No 32-bit toolchain or runtime is
-# required for ordinary builds. Explicitly opting in also opts the packager into
-# the resulting native package's architecture-specific runtime dependencies.
-set(TROPHY_REPORTERS32_DIR "" CACHE PATH "Directory containing optional i386 reporter shared objects")
-if(TROPHY_REPORTERS32_DIR)
-    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
-        message(FATAL_ERROR "i386 reporter companions require an x86_64 application build")
-    endif()
-    foreach(name IN ITEMS libtrophy_layer.so libtrophy_gl_shim.so)
-        set(reporter "${TROPHY_REPORTERS32_DIR}/${name}")
-        if(NOT EXISTS "${reporter}" OR IS_DIRECTORY "${reporter}" OR IS_SYMLINK "${reporter}")
-            message(FATAL_ERROR "Missing or symlinked i386 reporter: ${reporter}")
-        endif()
-        file(SIZE "${reporter}" reporter_size)
-        if(reporter_size LESS 20 OR reporter_size GREATER 16777216)
-            message(FATAL_ERROR "Invalid i386 reporter size: ${reporter}")
-        endif()
-        file(READ "${reporter}" header LIMIT 20 HEX)
-        string(LENGTH "${header}" header_length)
-        if(NOT header_length EQUAL 40 OR NOT header MATCHES "^7f454c46010101")
-            message(FATAL_ERROR "Expected little-endian ELF32 reporter: ${reporter}")
-        endif()
-        string(SUBSTRING "${header}" 32 8 elf_type_machine)
-        if(NOT elf_type_machine STREQUAL "03000300")
-            message(FATAL_ERROR "Expected i386 ET_DYN reporter: ${reporter}")
-        endif()
-    endforeach()
-    add_custom_target(trophy_reporters32 ALL
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/reporters32"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
-            "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
-            "${CMAKE_BINARY_DIR}/reporters32"
-        VERBATIM)
-    install(FILES "${TROPHY_REPORTERS32_DIR}/libtrophy_layer.so"
-                  "${TROPHY_REPORTERS32_DIR}/libtrophy_gl_shim.so"
-        DESTINATION "lib/trophy/reporters32")
-endif()
-install(FILES "${CMAKE_BINARY_DIR}/vulkan_layer/trophy_layer.json"
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/vulkan_layer
-)
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/resources/kwin/"
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/trophy/kwin
-)
 # The installed desktop file now uses the reverse-DNS app id, matching the
 # metainfo's launchable association.
 install(FILES packaging/io.github.stevenjwheeler.Trophy.metainfo.xml

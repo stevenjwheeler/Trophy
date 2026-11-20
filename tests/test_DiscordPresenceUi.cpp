@@ -31,8 +31,9 @@ TEST(DiscordPresenceUiTest, DefaultsEnablementUserIntentAndReset) {
     QQmlEngine engine;
     engine.rootContext()->setContextProperty("settingsManager", &settings);
     engine.rootContext()->setContextProperty("app", &app);
-    for (const auto *name : {"recordingManager", "replayManager", "storageManager",
-                             "audioDeviceEnumerator", "windowMonitor", "globalShortcuts", "hardwareInfo"})
+    for (const auto *name :
+         {"recordingManager", "replayManager", "storageManager",
+          "audioDeviceEnumerator", "globalShortcuts", "hardwareInfo"})
       engine.rootContext()->setContextProperty(name, static_cast<QObject *>(nullptr));
     QStringList errors;
     QObject::connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError> &warnings) {

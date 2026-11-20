@@ -7,11 +7,14 @@
  * notification daemon and is covered by inspection.
  */
 #include "core/Application.h"
+#include "core/RecordingManager.h"
 #include "detection/GameDetectionService.h"
 #include "settings/SettingsManager.h"
 #include <QDir>
-#include <QFile>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <gtest/gtest.h>
@@ -37,29 +40,22 @@ protected:
     app.m_pendingCaptureKey.clear();
     app.m_windowWaitTimer = new QTimer(&app);
     app.m_audioWaitTimer = new QTimer(&app);
-    // The deferred-prompt re-check re-arms this timer, exactly as the
-    // initialized app's 3s debounce does.
     app.m_detectionDebounceTimer = new QTimer(&app);
-    app.m_detectionDebounceTimer->setSingleShot(true);
-    app.m_detectionDebounceTimer->setInterval(3000);
     QObject::connect(app.m_gameDetector.get(), &GameDetectionService::currentGameChanged,
                      &app, &Application::resumePendingCapture);
     setCurrent("Brand New Game");
   }
 
   void TearDown() override {
-    // A deferred prompt re-arms the debounce timer; stop and drop it so a
-    // stale re-check cannot touch the next test's pending state.
-    if (app.m_detectionDebounceTimer) {
-      app.m_detectionDebounceTimer->stop();
-      delete app.m_detectionDebounceTimer;
-      app.m_detectionDebounceTimer = nullptr;
-    }
-    app.m_authorizePromptWaitingFor.clear();
     delete app.m_windowWaitTimer;
     app.m_windowWaitTimer = nullptr;
     delete app.m_audioWaitTimer;
     app.m_audioWaitTimer = nullptr;
+    delete app.m_detectionDebounceTimer;
+    app.m_detectionDebounceTimer = nullptr;
+    ++app.m_audioWaitGeneration;
+    app.m_audioProbeTicket = 0;
+    app.m_audioProbeInflight = false;
     app.m_settingsManager.reset();
     app.m_gameDetector.reset();
     app.m_pendingAutoRecordGame.clear();
@@ -109,8 +105,11 @@ protected:
   bool windowTimerActive() const { return app.m_windowWaitTimer->isActive(); }
   bool windowIsRecord() const { return app.m_pendingWindowIsRecord; }
   bool audioPendingEmpty() const { return app.m_pendingAudioGame.isEmpty(); }
+  bool audioRetryActive() const {
+    return app.m_audioWaitTimer->isActive() || app.m_audioProbeInflight;
+  }
+  bool audioIsRecord() const { return app.m_pendingAudioIsRecord; }
   void fireDebounce() { app.onAuthorizeDebounceFired(); }
-  bool debounceActive() const { return app.m_detectionDebounceTimer->isActive(); }
   void fireWindowTimeout() { app.onWindowWaitTimeout(); }
   void authorize(const QString &game) { app.authorizeGame(game); }
   bool recordPendingEmpty() const {
@@ -118,27 +117,59 @@ protected:
   }
   bool dvrPendingEmpty() const { return app.m_pendingDvrGame.isEmpty(); }
   bool windowPendingEmpty() const { return app.m_pendingWindowGame.isEmpty(); }
-  void captureStartLost(const QString &game, const QString &identity) {
-    app.onCaptureStartLost(game, identity);
+  void finishDuringRecovery() {
+    app.m_recordingManager = std::make_unique<RecordingManager>();
+    app.m_recordingManager->m_captureRecoveryPending = true;
+    // Replay is deliberately null: resuming it here would fail immediately.
+    app.resumeReplayAfterRecording();
+    EXPECT_TRUE(app.m_pendingWindowGame.isEmpty());
+    EXPECT_TRUE(app.m_pendingAudioGame.isEmpty());
+    app.m_recordingManager->m_captureRecoveryPending = false;
+    app.m_recordingManager.reset();
   }
   void clearWindowPending() {
     app.m_pendingWindowGame.clear();
     app.m_windowWaitTimer->stop();
-  }
-  // The retry is deferred so the compositor can publish the replacement
-  // window; pump events until the window wait is armed again.
-  bool waitForWindowRetry(const QString &game, int timeoutMs = 2000) {
-    QElapsedTimer wait;
-    wait.start();
-    while (wait.elapsed() < timeoutMs) {
-      if (app.m_pendingWindowGame == game)
-        return true;
-      QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-    }
-    return app.m_pendingWindowGame == game;
+    app.m_pendingAudioGame.clear();
+    app.m_audioWaitTimer->stop();
+    ++app.m_audioWaitGeneration;
   }
   bool whitelisted(const QString &key) const {
     return app.gameDetector()->whitelist().contains(key);
+  }
+  void approvedDetectionArmsRecord(bool alreadyListed) {
+    const QString name = "Approved Autostart Fixture";
+    const QString key = "steam_app_1973530";
+    auto &detector = *app.m_gameDetector;
+    detector.updateCurrentGame({}, 0);
+    if (alreadyListed)
+      detector.addToWhitelist(key, name);
+    else
+      detector.removeFromWhitelist(key);
+    auto process = ProcessCensus::inspect(QCoreApplication::applicationPid());
+    ASSERT_GT(process.pid, 0);
+    process.steamId = 1973530;
+    detector.m_steam = {
+        {1973530, name, QFileInfo(process.payload()).absolutePath()}};
+    app.m_settingsManager->setAutoRecordEnabled(true);
+    app.m_settingsManager->setInstantReplayEnabled(false);
+    app.m_settingsManager->setRestoreTokenForIdentity(key, name,
+                                                      "approved-token");
+    QSignalSpy detected(&detector, &GameDetectionService::gameDetected);
+    QObject::connect(&detector, &GameDetectionService::gameDetected, &app,
+                     &Application::onGameDetected);
+    // Exercises the real production callback: authorization may reidentify
+    // and destroy the very instance from which gameDetected was emitted.
+    detector.apply({{process.pid, process}});
+    ASSERT_EQ(detected.size(), 1);
+    EXPECT_EQ(app.m_pendingCaptureKey, key);
+    EXPECT_EQ(app.m_pendingAudioGame, name);
+    EXPECT_TRUE(app.m_pendingAudioIsRecord);
+    EXPECT_EQ(detector.currentGameName(), name);
+    EXPECT_TRUE(detector.whitelist().contains(key));
+    EXPECT_FALSE(app.m_detectionDebounceTimer->isActive());
+    EXPECT_EQ(app.m_settingsManager->getRestoreTokenForIdentity(key, name),
+              "approved-token");
   }
 };
 } // namespace TrophyBackend
@@ -146,6 +177,16 @@ protected:
 TEST_F(ApplicationAuthorizePromptTest, FreshGameMayPrompt) {
   EXPECT_TRUE(gate("Brand New Game"));
   EXPECT_FALSE(gate(""));
+}
+
+TEST_F(ApplicationAuthorizePromptTest,
+       ApprovedDetectionArmsRecordAfterWhitelistRebuild) {
+  approvedDetectionArmsRecord(false);
+}
+
+TEST_F(ApplicationAuthorizePromptTest,
+       ApprovedListedDetectionArmsRecordWithoutReapproval) {
+  approvedDetectionArmsRecord(true);
 }
 
 TEST_F(ApplicationAuthorizePromptTest, ApprovedGameNeverPrompts) {
@@ -171,28 +212,13 @@ TEST_F(ApplicationAuthorizePromptTest, DebounceDropsApprovedPending) {
   EXPECT_TRUE(dvrPendingEmpty());
 }
 
-TEST_F(ApplicationAuthorizePromptTest, DebounceRetainsEligibleWindowlessRequestUntilApproved) {
+TEST_F(ApplicationAuthorizePromptTest,
+       ProcessIdentifiedGameNeedsNoWindowForApprovalEligibility) {
   setCurrent("Windowless Game");
   armRecordPending("Windowless Game");
-  fireDebounce();
+  EXPECT_TRUE(gate("Windowless Game"));
   EXPECT_FALSE(recordPendingEmpty());
   setToken("Windowless Game", "new-approval");
-  fireDebounce();
-  EXPECT_TRUE(recordPendingEmpty());
-}
-
-TEST_F(ApplicationAuthorizePromptTest, DeferredPromptReChecksWithoutACompositorPush) {
-  setCurrent("Launching Game");
-  armRecordPending("Launching Game");
-  fireDebounce();
-  // No window row in this fixture (no monitor): the request is retained and
-  // the debounce re-arms, so a compositor snapshot that never changes again
-  // cannot leave a first-run game unprompted forever.
-  EXPECT_FALSE(recordPendingEmpty());
-  EXPECT_TRUE(debounceActive());
-
-  // Approval still retires it on the next re-check.
-  setToken("Launching Game", "token-bytes");
   fireDebounce();
   EXPECT_TRUE(recordPendingEmpty());
 }
@@ -222,24 +248,25 @@ TEST_F(ApplicationAuthorizePromptTest, WindowWaitRetainsApprovedLiveGame) {
   EXPECT_TRUE(dvrPendingEmpty());
 }
 
-TEST_F(ApplicationAuthorizePromptTest, ProcessHandoffRestartsPendingAudioThroughWindowGate) {
+TEST_F(ApplicationAuthorizePromptTest,
+       ProcessHandoffRestartsPendingAudioWithoutWindowGate) {
   setCurrentIdentity("Slow Game", "steam_app_610102", 2147483647);
   armAudioPending("Slow Game", true);
   // Same identity, new live PID: no gameDetected, but the pending start resumes.
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_TRUE(audioPendingEmpty());
-  EXPECT_FALSE(windowPendingEmpty());
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_TRUE(windowIsRecord());
+  EXPECT_FALSE(audioPendingEmpty());
+  EXPECT_TRUE(windowPendingEmpty());
+  EXPECT_TRUE(audioRetryActive());
+  EXPECT_TRUE(audioIsRecord());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, ProcessHandoffPreservesDvrIntent) {
   setCurrentIdentity("Slow Game", "steam_app_610102", 2147483647);
   armWindowPending("Slow Game", false);
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_FALSE(windowPendingEmpty());
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_FALSE(windowIsRecord());
+  EXPECT_FALSE(audioPendingEmpty());
+  EXPECT_TRUE(audioRetryActive());
+  EXPECT_FALSE(audioIsRecord());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, AlreadyExitedLauncherKeepsApprovedStartPending) {
@@ -250,7 +277,7 @@ TEST_F(ApplicationAuthorizePromptTest, AlreadyExitedLauncherKeepsApprovedStartPe
   fireWindowTimeout();
   EXPECT_FALSE(windowPendingEmpty());
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_TRUE(windowTimerActive());
+  EXPECT_TRUE(audioRetryActive());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, HandoffWithoutPendingIntentDoesNotStartCapture) {
@@ -336,34 +363,11 @@ int main(int argc, char **argv) {
   return RUN_ALL_TESTS();
 }
 
-// A launcher's window can be captured and then vanish before anything is
-// recorded. The app must wait for the window that replaces it and try again
-// instead of leaving the game uncaptured.
-TEST_F(ApplicationAuthorizePromptTest, CaptureStartLossReArmsTheWindowWait) {
+// Saving the first part during a window handoff must retain full recording,
+// not resume the background DVR loop.
+TEST_F(ApplicationAuthorizePromptTest, SavedHandoffPartCannotStartDvr) {
   setCurrentIdentity("Launcher Game", "steam_app_777");
   setToken("steam_app_777", "token-bytes");
 
-  captureStartLost("Launcher Game", "steam_app_777");
-  EXPECT_TRUE(waitForWindowRetry("Launcher Game"));
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_TRUE(windowIsRecord());
-  clearWindowPending();
-
-  // A different identity for the same display name is a different game.
-  captureStartLost("Launcher Game", "steam_app_other");
-  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
-  clearWindowPending();
-
-  // Without approval there is nothing to retry silently.
-  clearToken("steam_app_777");
-  captureStartLost("Launcher Game", "steam_app_777");
-  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
-  clearWindowPending();
-
-  // A blocked game is never silently restarted.
-  setToken("steam_app_777", "token-bytes");
-  block("Launcher Game");
-  captureStartLost("Launcher Game", "steam_app_777");
-  EXPECT_FALSE(waitForWindowRetry("Launcher Game", 900));
-  clearWindowPending();
+  finishDuringRecovery();
 }

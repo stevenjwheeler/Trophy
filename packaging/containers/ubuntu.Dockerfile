@@ -9,5 +9,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     qml6-module-qtquick-effects qml6-module-qtmultimedia qml6-module-qtqml-workerscript \
     qt6-svg-plugins libpipewire-0.3-common pipewire-bin \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-    libpipewire-0.3-dev libva-dev libvulkan-dev libdrm-dev libegl-dev libgbm-dev \
+    libpipewire-0.3-dev libva-dev libdrm-dev libegl-dev libgbm-dev \
     dpkg-dev desktop-file-utils appstream

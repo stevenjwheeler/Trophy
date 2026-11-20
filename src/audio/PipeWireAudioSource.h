@@ -82,23 +82,11 @@ public:
    * @param nodeName PW_KEY_NODE_NAME of the node (used as target.object).
    * @param serial   object.serial of the node (preferred by WirePlumber 0.5).
    */
-  static std::unique_ptr<PipeWireAudioSource>
-  createApplicationSource(uint32_t nodeId, const QString &nodeName = {},
-                           const QString &serial = {},
-                           const QString &expectedBinary = {});
+  static std::unique_ptr<PipeWireAudioSource> createApplicationSource(
+      uint32_t nodeId, const QString &nodeName = {}, const QString &serial = {},
+      const QString &expectedBinary = {}, const QString &ownerIdentity = {});
   static std::unique_ptr<PipeWireAudioSource>
    createInputSource(const QString &deviceName, bool deferResolution = false);
-
-  /**
-   * @brief Enumerate PipeWire nodes to find one matching a process name.
-   * @param processName  Name to search for (case-insensitive contains match).
-   * @param outNodeName  Receives PW_KEY_NODE_NAME of the found node.
-   * @param outSerial    Receives object.serial of the found node.
-   * @return PipeWire node ID, or 0xffffffff if not found.
-   */
-  static uint32_t findNodeByProcessName(const QString &processName,
-                                        QString *outNodeName = nullptr,
-                                         QString *outSerial = nullptr);
 
   // Exact, case-insensitive binary identity for a saved Voice app. Never
   // accepts node/app display names (e.g. unrelated Chromium streams).
@@ -115,6 +103,10 @@ public:
    */
   static uint32_t findNodeByPid(uint32_t pid, QString *outNodeName = nullptr,
                                 QString *outSerial = nullptr);
+  static uint32_t findNodeForGame(uint32_t pid, const QStringList &identity,
+                                  QString *outNodeName = nullptr,
+                                  QString *outSerial = nullptr);
+  static QString ownerIdentity(const QStringList &identity);
 
   /**
    * @brief Pick the target.object value for a pinned stream.
@@ -207,6 +199,7 @@ private:
   QString m_targetNodeName; // PW_KEY_NODE_NAME for target.object hint
   QString m_targetSerial;   // object.serial for WirePlumber 0.5 target.object
   QString m_expectedBinary; // Strict Voice identity; empty for game hints.
+  QString m_ownerIdentity;
   AudioConfig m_config;
   // Published on the GUI thread (setCallback), loaded-and-copied on the
   // PipeWire thread before invoking — mirrors

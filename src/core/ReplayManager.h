@@ -179,9 +179,9 @@ private:
                            uint32_t &gamePid, bool &gameFound, int &voiceTrack,
                            bool &voiceFound, int &micTrack,
                            bool createSources);
-  // Pure PipeWire node lookup (no mixer/QObject state): PID first, then
-   // name hints, then voice app. Worker-safe; all registry access runs in
-   // an owned background preparation/cache operation.
+  // Pure PipeWire lookup (no mixer/QObject state): verified game membership,
+  // then configured Voice. Registry access runs in an owned background
+  // preparation/cache operation.
   struct DvrNodeLookup {
     uint32_t gameNodeId = 0xFFFFFFFFu;
     QString gameNodeName;

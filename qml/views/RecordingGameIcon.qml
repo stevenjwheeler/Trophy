@@ -7,6 +7,10 @@ Image {
     property var detector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
     property string gameName: ""
     property int modelRevision: 0
+    // The provider uses a transparent 1x1 image for expected local-artwork
+    // misses, avoiding Qt warnings while preserving the parent's fallback.
+    readonly property bool hasArtwork: status === Image.Ready
+        && implicitWidth > 1 && implicitHeight > 1
     source: {
         // Reading the revision keeps model-reset invalidation in this binding.
         const revision = root.modelRevision;
@@ -18,7 +22,7 @@ Image {
     sourceSize.width: width
     sourceSize.height: height
     fillMode: Image.PreserveAspectFit
-    visible: status === Image.Ready
+    visible: hasArtwork
 
     Connections {
         target: root.detector !== null ? root.detector.gamesModel : null

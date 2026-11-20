@@ -143,7 +143,7 @@ public:
   struct AudioRoutingState {
     int activeTrackCount;
     int voiceTrack;
-    bool gameIsFallback;
+    bool gameAudioPending;
     std::array<bool, AudioMixer::kTrackCount> connected;
     std::array<QString, AudioMixer::kTrackCount> boundSerial;
   };
@@ -151,9 +151,8 @@ public:
   void inheritAudioRouting(const RecordingSession &previous);
 
   // Audio identities to watch for (called by RecordingManager/ReplayManager
-  // during setup). Game takes a PID plus a list of name hints (window
-  // process, portal app-id, detector display name — Proton nodes expose
-  // only the exe basename, e.g. "deadlock.exe", with no PID/binary).
+  // during setup). Game lookup resolves the pinned instance or explicit
+  // manual-process identity; hints do not authorize fuzzy name matching.
   void setGameApps(const QString &processName) {
     ++m_audioLookupGeneration;
     m_gamePid = 0;
@@ -171,9 +170,11 @@ public:
   // Mixer track reserved for voice (-1 when merged mode left it unslotted;
   // the retry adopts the next free slot instead of clobbering the mic).
   void setVoiceTrack(int track) { m_voiceTrack = track; }
-  // Track 0 is on monitor fallback (full mix), not the real app node — the
-  // retry keeps hunting instead of treating it as connected.
-  void setGameIsFallback(bool fallback) { m_gameIsFallback = fallback; noteAudioRouting(); }
+  // An unassigned game track captures desktop audio until association succeeds.
+  void setGameAudioPending(bool pending) {
+    m_gameAudioPending = pending;
+    noteAudioRouting();
+  }
   void setDesktopAudio(bool desktop) { m_desktopAudio = desktop; noteAudioRouting(); }
 
   void setFrameDispatcher(std::shared_ptr<TrophyBackend::FrameDispatcher> d) { m_frameDispatcher = d; }
@@ -289,6 +290,7 @@ private:
   int64_t nowUs() const { return m_clockNowUs(); }
   std::function<int64_t()> m_clockNowUs = [] { return steadyNowMs() * 1000LL; };
   void checkForNewAudioNodes();
+  void ensureGameDesktopFallback();
   void deliverAudioLookups();
   using AudioNodeResult = AudioMixer::NodeLookupResult;
   using AudioNodeLookup = std::function<AudioNodeResult(uint32_t, const QStringList &, bool)>;
@@ -451,17 +453,16 @@ private:
   int64_t m_frameClockOffsetUs = 0;
   void emitStillFrames();
   uint32_t m_gamePid = 0;       // Game audio PID to watch for (0 = unknown)
-  QStringList m_gameHints;      // Game name hints (exe, app-id, display name)
+  QStringList m_gameHints;      // Pinned game-instance identity for retry
   QString m_voiceChatApp;       // Voice chat app name to watch for
   int m_voiceTrack = 1;         // Mixer slot reserved for voice (-1 = none)
   // Per-track bind state: bound serial of the node we're capturing (empty
-  // when unbound). Track 0 additionally remembers monitor-fallback, which
-  // never counts as bound — the retry keeps hunting the real app node.
+  // when unbound). An unassigned game never counts as a bound stream.
   std::array<QString, kAudioTrackCount> m_boundSerial{};
   std::array<bool, kAudioTrackCount> m_sourceConnected{};
   // Session wall start (steady clock).
   int64_t m_sessionStartMs = -1;
-  bool m_gameIsFallback = false;
+  bool m_gameAudioPending = false;
   bool m_desktopAudio = false;
   void noteAudioRouting(); // Owner-thread routing history; audio receipt is atomic.
   // Read on the encoding thread when a persistent rotation snapshots and
@@ -472,14 +473,10 @@ private:
   // Last routing state published by noteAudioRouting (owner thread). The cut
   // seeds the next segment's history from these instead of racing the plain
   // owner-thread routing flags.
-  std::atomic<bool> m_historyFallback{false};
+  std::atomic<bool> m_historyGamePending{false};
   std::atomic<bool> m_historyDesktop{false};
   std::array<std::atomic<bool>, kAudioTrackCount> m_audioReceived{};
   std::atomic<quint64> m_queueDrops{0};
-  // One-shot note when voice capture is suppressed by full-mix fallback
-  // (see checkForNewAudioNodes); re-arms if the game track ever leaves
-  // fallback so a later suppression is still visible in the log.
-  bool m_voiceFallbackNoteArmed = true;
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index
 };
 

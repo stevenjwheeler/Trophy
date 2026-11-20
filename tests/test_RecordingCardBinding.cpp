@@ -8,19 +8,21 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
+#include <QPointer>
+#include <QProcess>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlError>
 #include <QQmlExpression>
 #include <QQmlProperty>
+#include <QQmlPropertyMap>
+#include <QQuickImageProvider>
 #include <QQuickItem>
 #include <QQuickWindow>
-#include <QQuickImageProvider>
-#include <QProcess>
-#include <QPointer>
 #include <QSignalSpy>
-#include <QStandardPaths>
 #include <QStandardItemModel>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QThreadPool>
@@ -1246,6 +1248,50 @@ TEST_F(RecordingCardBindingTest, DashboardActivityDurationIncludesHours) {
     EXPECT_EQ(expression.evaluate().toString(), expected);
     EXPECT_FALSE(expression.hasError());
   }
+}
+
+TEST_F(RecordingCardBindingTest,
+       DashboardReadinessUsesProcessesNotWindowMethods) {
+  for (const auto *name :
+       {"recordingLibrary", "settingsManager", "storageManager",
+        "replayManager", "activityFeed", "audioMixer"})
+    engine.rootContext()->setContextProperty(
+        name, QVariant::fromValue<QObject *>(nullptr));
+  QQmlPropertyMap detector, state;
+  detector.insert("currentGameName", "");
+  detector.insert("isGameRunning", false);
+  state.insert("recordingPhase", "idle");
+  engine.rootContext()->setContextProperty("gameDetector", &detector);
+  engine.rootContext()->setContextProperty("app", &state);
+  const auto url = QUrl::fromLocalFile(CARD_QML_FILE)
+                       .resolved(QUrl("../pages/DashboardPage.qml"));
+  QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+  QQmlComponent component(&engine, url);
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  auto *label = page->findChild<QObject *>("captureStatusLabel");
+  auto *indicator = page->findChild<QObject *>("captureStatusIndicator");
+  ASSERT_NE(label, nullptr);
+  ASSERT_NE(indicator, nullptr);
+  EXPECT_EQ(label->property("text").toString(), "IDLE");
+  const auto idleColor = indicator->property("color");
+  detector.insert("currentGameName", "Limbus Company");
+  detector.insert("isGameRunning", true);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(label->property("text").toString(), "READY");
+  EXPECT_NE(indicator->property("color"), idleColor);
+  state.insert("recordingPhase", "initializing");
+  EXPECT_EQ(label->property("text").toString(), "STARTING");
+  state.insert("recordingPhase", "stopping");
+  EXPECT_EQ(label->property("text").toString(), "SAVING");
+  manager.live = true;
+  emit manager.changed();
+  EXPECT_EQ(label->property("text").toString(), "RECORDING");
+  EXPECT_EQ(indicator->property("color").value<QColor>(), QColor("white"));
+  for (const auto &warning : warnings)
+    for (const auto &error : warning.first().value<QList<QQmlError>>())
+      EXPECT_FALSE(error.description().contains("hasVisibleWindow"));
 }
 
 TEST_F(RecordingCardBindingTest, RecordingPillDurationIncludesHours) {

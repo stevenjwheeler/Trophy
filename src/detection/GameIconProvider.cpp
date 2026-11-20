@@ -9,6 +9,8 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QImageReader>
+#include <QDirIterator>
+#include <QRegularExpression>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -142,6 +144,30 @@ QString sourceCacheFile() {
       QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
   return root.isEmpty() ? QString() : root + "/game-icons-v1.json";
 }
+
+QImage modernSteamIcon(const QString &root, uint appId, int extent,
+                       QString *foundPath) {
+  // Recent Steam versions store the small app icon under its content hash,
+  // alongside directories containing unrelated library/hero artwork.
+  const QString directory =
+      root + QString("/appcache/librarycache/%1").arg(appId);
+  QDirIterator files(directory, {"*.jpg", "*.png"}, QDir::Files | QDir::NoSymLinks);
+  static const QRegularExpression iconName("^[0-9a-fA-F]{40}\\.(jpg|png)$");
+  for (int inspected = 0; files.hasNext() && inspected < 128; ++inspected) {
+    const QString path = files.next();
+    if (!iconName.match(files.fileName()).hasMatch())
+      continue;
+    QImageReader reader(path);
+    const QSize size = reader.size();
+    // Never substitute a portrait capsule, banner or large square artwork.
+    if (size.width() != size.height() || size.width() < 16 || size.width() > 256)
+      continue;
+    auto image = readIcon(path, extent, foundPath);
+    if (!image.isNull())
+      return image;
+  }
+  return {};
+}
 } // namespace
 
 GameIconProvider::GameIconProvider()
@@ -171,7 +197,7 @@ GameIconProvider::GameIconProvider(QStringList dataRoots, QStringList iconRoots,
   }
   // Changes to roots, theme or our built-in alias/artwork catalogue invalidate
   // prior selections. Stable game identities and settings are not modified.
-  QJsonArray context{2, m_theme, QJsonArray::fromStringList(m_dataRoots),
+  QJsonArray context{3, m_theme, QJsonArray::fromStringList(m_dataRoots),
                      QJsonArray::fromStringList(m_iconRoots),
                      QJsonArray::fromStringList(m_steamRoots)};
   for (const auto &app : defaultAppCatalog())
@@ -231,8 +257,19 @@ void GameIconProvider::saveSourceCache() const {
 }
 
 QImage GameIconProvider::requestImage(const QString &id, QSize *size,
-                                     const QSize &requestedSize) {
+                                      const QSize &requestedSize) {
   if (id.size() > 16384) {
+    if (size)
+      *size = {};
+    return {};
+  }
+  const int separator = id.indexOf('/');
+  bool validAppId = false;
+  const uint appId = id.left(separator).toUInt(&validAppId);
+  const auto key = separator < 0 ? QByteArray() : QByteArray::fromBase64(
+      id.mid(separator + 1).toLatin1(), QByteArray::Base64UrlEncoding);
+  if (separator < 0 || !validAppId ||
+      (!appId && key.isEmpty())) {
     if (size)
       *size = {};
     return {};
@@ -281,6 +318,13 @@ QImage GameIconProvider::requestImage(const QString &id, QSize *size,
                          path.isEmpty() ? 0 : file.size(), now});
     saveSourceCache();
   }
+  // A missing local icon is normal, not an image-provider failure. A 1x1
+  // transparent sentinel lets QML retain its existing letter/glyph fallback
+  // without Qt emitting a warning for every recreated recording delegate.
+  if (image.isNull()) {
+    image = QImage(1, 1, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+  }
   if (size)
     *size = image.size();
   m_cache.insert(cacheKey, new ImageEntry{image, now});
@@ -307,6 +351,8 @@ QImage GameIconProvider::loadImage(const QString &id, int extent, QString *found
       for (const QString &root : m_steamRoots) {
         image = readIcon(
             root + QString("/appcache/librarycache/%1_icon.jpg").arg(appId), extent, foundPath);
+        if (image.isNull())
+          image = modernSteamIcon(root, appId, extent, foundPath);
         if (!image.isNull())
           break;
       }

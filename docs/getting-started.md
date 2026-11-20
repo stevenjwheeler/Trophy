@@ -80,16 +80,21 @@ guidance rather than assuming every codec ships with the native package.
 
 ### System requirements
 
-- **A Wayland desktop session.** KDE Plasma (KWin) and GNOME (Mutter) are
-  supported and verified. Hyprland and Sway have window-monitor integrations
-  but less live verification. XWayland games can be captured; a native X11
-  desktop session cannot.
+- **A Wayland desktop session** with a compatible ScreenCast portal backend.
+  Trophy is designed to work across Wayland compositors, without
+  compositor-specific scripts, extensions or IPC. Portal capabilities and
+  driver support still determine capture compatibility; not every combination
+  has been live-tested. XWayland games can be captured; a native X11 desktop
+  session cannot.
 - **xdg-desktop-portal**, with the portal backend for your desktop. This is
-  required, not optional: screen capture, global shortcuts, notifications and
-  native file dialogs all go through it. On KDE Plasma install
+  required for screen capture. Global shortcut binding also uses the portal
+  when its backend implements `GlobalShortcuts`; native command bindings are
+  an alternative when it does not. Native file dialogs use your desktop's
+  available integration. On KDE Plasma install
   `xdg-desktop-portal-kde` (usually pulled in automatically); on GNOME install
-  `xdg-desktop-portal-gnome`. Other desktops need a backend that implements
-  `ScreenCast`, `GlobalShortcuts` and `Notification`.
+  `xdg-desktop-portal-gnome`. These are examples, not a list of supported
+  compositors: other Wayland desktops can use their compatible `ScreenCast`
+  backend.
 - **PipeWire**, which carries the captured video and audio streams.
 - Compatible GPU drivers for hardware encoding: NVIDIA NVENC or AMD/Intel VA-API where supported. Hardware encoding is optional; software H.264 is also supported when the FFmpeg build includes it. Available codecs depend on the GPU, driver and FFmpeg build. VA-API additionally requires a `libva` compatible with the host's VA driver (such as `radeonsi`/`iHD`); the AppImage prefers the host's `libva` over its bundled copy, so a bundled (possibly older) version never shadows a newer host driver. Set `TROPHY_PREFER_BUNDLED_LIBVA=1` to force the bundled copy, or `TROPHY_LIBVA_DIRS=/path[:/path]` to point the launcher at libva installed somewhere unusual.
 - A system tray host is optional. KDE Plasma provides one; on GNOME, install the
@@ -100,11 +105,21 @@ guidance rather than assuming every codec ships with the native package.
 
 ### Supported desktops
 
-| Desktop | Window helper | Global shortcuts | Tray |
-| --- | --- | --- | --- |
-| **KDE Plasma (KWin)** | Bundled `trophy-monitor` KWin script | Portal `GlobalShortcuts` | Built in |
-| **GNOME (Mutter)** | Bundled Trophy Window Helper extension | Portal `GlobalShortcuts` | Needs the AppIndicator extension |
-| **Hyprland / Sway** | Built-in compositor integration | Portal if the backend implements it, otherwise native binds | Compositor-dependent |
+Trophy is not restricted to KDE, GNOME, Hyprland or Sway. Game detection and the
+Add Game process picker are compositor-independent; capture uses the standard
+ScreenCast portal. No Trophy-specific window integration is needed.
+
+| Feature | Desktop requirement |
+| --- | --- |
+| Window/screen capture | Compatible `ScreenCast` portal backend and PipeWire |
+| Global shortcut configuration in Trophy | Backend implementing `GlobalShortcuts` |
+| Shortcut fallback | Native desktop bindings for Trophy's CLI commands |
+| Tray icon | Optional system tray/AppIndicator host |
+
+Saved-approval restoration, window versus screen selection, global shortcut
+availability and DMA-BUF support vary by portal backend and driver. The
+compositor-independent design does not mean every desktop/GPU combination has
+been verified.
 
 Trophy registers a reverse-DNS desktop entry
 (`io.github.stevenjwheeler.Trophy.desktop`) so the portal can identify it.
@@ -124,44 +139,56 @@ The AppImage bundles application libraries, but still depends on compatible host
 
 If the captured window changes size, Trophy keeps the recording's output canvas fixed, fitting the picture with black bars as needed. Supported NVIDIA and VA-API paths perform resize work on the GPU; unsupported DMA-BUF imports can request shared-memory fallback. Software encoding uses shared-memory capture. Synthetic hardware tests do not establish compatibility with every compositor, AMD/Intel driver or sustained recording workload.
 
-Trophy includes window-monitor integrations for KDE/KWin, GNOME, Hyprland, and Sway. KDE Plasma and GNOME are supported and verified end to end, including the window helper, portal global shortcuts and capture. Hyprland and Sway have integrations with less live verification. Hardware encoding support likewise does not guarantee every DMA-BUF capture path works.
+Trophy does not install a compositor script/extension or use compositor IPC.
+Game detection is separate from portal capture compatibility. Hardware encoding
+support likewise does not guarantee every DMA-BUF capture path works.
 
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
 2. With an AppImage, Trophy registers its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — Trophy keeps its own entry for the stable identity and hides it from menus so you are not offered a duplicate.
-3. Explicitly install the required window helper when prompted. Ordinary startup does not install or enable compositor integrations.
-4. Choose whether to enable optional game-detection reporters. Read the cautions below first.
-5. Assign recording and clip/bookmark shortcuts. KDE Plasma and GNOME show the portal approval dialog; if your backend does not support portal shortcuts, bind the commands described under [Keyboard shortcuts](#keyboard-shortcuts) natively.
+3. There are no Trophy window helpers to install. Process-based detection is independent of the compositor; window/screen selection belongs to the system portal.
+4. Add standalone/non-Steam games by exact executable name or path in Games. Steam library metadata supplies identities for installed native and Proton games.
+5. Assign recording and clip/bookmark shortcuts through your desktop's portal approval dialog. If its backend does not support portal shortcuts, bind the commands described under [Keyboard shortcuts](#keyboard-shortcuts) natively.
 6. Start a game and authorize its capture when prompted. Saved approvals can restore capture on later sessions; stale approvals may need authorization again.
 
 Manual recording is also available. When no game is tracked, the Record action opens the system capture picker. When a game is tracked, it targets that game.
 
 ## Game detection
 
-Trophy combines optional Vulkan/OpenGL reporter events with game identity and window context. Detection is conservative: not every launcher, graphics API, or runtime is covered. Use the Games page to manage recognition and blocking rules.
+Trophy polls Linux processes independently of windows, then associates PipeWire
+playback streams with game instances. Native and Proton/Wine executables use
+local Steam metadata and exact user rules. Generic
+launchers and Wine services do not identify games. Use Games to block
+applications, define standalone games, or select among concurrent instances.
 
-Both reporters are opt-in. **Neither is certified compatible with anti-cheat systems.** Leave them disabled for protected games unless the game's policy permits them. Trophy does not bypass anti-cheat software.
+When game audio cannot be captured, Trophy falls back to desktop audio and
+retries game capture every three seconds. This includes other applications
+and Voice; a separate Voice source is suppressed to avoid duplication.
+The microphone remains independent. Capture diagnostics indicate fallback.
+Screen capture still requires portal authorization.
+No game process injection, graphics layer, root access or compositor PID is
+needed. This is not an anti-cheat certification.
 
-The OpenGL option writes **session-wide `LD_PRELOAD` configuration**, which can load its library into unrelated applications too. Enable/disable changes require a fresh login environment; already-running launchers can retain the old environment. Disabling reporting is not the same as preventing a library from loading. Host/Steam-runtime and 32-bit reporter compatibility are not universally established.
+Upgrading removes Trophy's previous graphics enrollment. Already-running
+launchers may retain an old `LD_PRELOAD` environment until a fresh login.
+See [architecture and limitations](game-detection.md).
 
-See [reporter scope and packaging cautions](../packaging/README.md#reporter-scope-and-anti-cheat-caution) for more detail.
+### Adding a standalone game
 
-### KDE Plasma / KWin window helper
+Start the game, open **Games → Add Game**, select its process and choose
+**Watch** or **Block**. The default **Likely applications** view reduces
+background-process noise; enable **Show all processes** if your game is not
+listed. These suggestions are not a list of verified visible windows.
+Rows show the executable/payload path and PID, including
+Wine payloads rather than their loader. **Refresh** reads the latest cached
+census. Trophy checks PID/start identity and payload again before saving a rule,
+so an exited/reused process cannot silently become the wrong definition.
 
-On KDE Plasma Wayland, Trophy uses the bundled **`trophy-monitor` KWin script** to read window identity, focus, fullscreen, and minimized state. The script supplies window context for game detection; screen capture is separately authorized through the portal.
-
-Choose **Install helper** during setup or **Repair** in Settings to install and enable the script. Ordinary startup does not install a missing script or re-enable one you have disabled.
-
-If tracking is unavailable, check the script in **System Settings → Window Management → KWin Scripts**, then use Trophy's Repair action if needed. Setup reports Working only after the script is enabled and Trophy receives a valid window snapshot—not merely because the script is installed.
-
-### GNOME window helper
-
-On GNOME Wayland, Trophy uses the bundled **Trophy Window Helper** extension for read-only window identity, focus, fullscreen, and minimized state. Screen capture is separately authorized through the portal; GNOME unsafe mode is not required.
-
-Choose **Install helper** during setup or **Repair** in Settings. This copies the helper to `$XDG_DATA_HOME/gnome-shell/extensions/trophy-monitor@trophy` (normally under `~/.local/share`) and requests enabling it.
-
-GNOME may require a logout/login before discovering a new extension or loading an update. Enable **Trophy Window Helper** in GNOME Extensions if necessary, then reopen Trophy. Setup reports Working only after receiving a valid window snapshot. If it does not, check for extension errors, unsupported Shell versions, or disabled user extensions. The extension supports GNOME Shell 45–51.
+The previous Trophy KWin script and GNOME Shell extension are no longer used or
+bundled. If an older version installed them in your user account, disable/remove
+`trophy-monitor` in KWin Scripts or **Trophy Window Helper** in GNOME Extensions.
+Trophy does not modify your desktop's helper configuration during startup.
 
 ## Keyboard shortcuts
 
@@ -171,7 +198,7 @@ GNOME may require a logout/login before discovering a new extension or loading a
 | Clip / Bookmark | Bookmark an active full recording; otherwise save a DVR clip when ready |
 
 Trophy registers its global shortcuts through the **xdg-desktop-portal
-GlobalShortcuts** interface. On KDE Plasma and GNOME this is the recommended
+GlobalShortcuts** interface. On desktops with a compatible backend this is the recommended
 path: the desktop owns the key grab, so the keys work while you are in-game,
 and Trophy never installs a global keyboard hook.
 
@@ -221,7 +248,7 @@ Commands contact an already-running Trophy through its user-private control sock
 ## If something does not work
 
 - **Capture unavailable or no picker:** check that you are in Wayland and that PipeWire, `xdg-desktop-portal` and the correct portal backend are running. On KDE Plasma that is `xdg-desktop-portal-kde`; on GNOME, `xdg-desktop-portal-gnome`.
-- **Window helper unavailable:** use the explicit Install/Repair action. On GNOME, check Extensions and try a fresh login.
+- **Game missing from Add Game:** enable **Show all processes**, start the game and refresh. There is no compositor helper or Install/Repair step; detection uses Linux process metadata.
 - **Shortcut does nothing or Configure does nothing:** make sure the reverse-DNS desktop entry is present (**Settings → Desktop Integration**) and restart Trophy after installing or removing it. Then retry **Settings → Keyboard Shortcuts → Configure**; if the desktop's portal backend still rejects it, use the native shortcut commands above. Avoid double-binding the same key through both paths.
 - **Closing Trophy leaves no tray icon (GNOME):** install the AppIndicator/KStatusNotifierItem extension for a tray, or launch Trophy again to raise the hidden window. **Start minimized** and start-on-login use the same hidden background mode. See [Closing and the tray](user-guide.md#closing-and-the-tray).
 - **Capture asks for approval again after an update:** portal approvals are stored per app id. Upgrading from a build that used the old `trophy` id requires one new approval.

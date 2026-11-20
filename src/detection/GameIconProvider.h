@@ -12,6 +12,8 @@ namespace TrophyBackend {
 
 // Local artwork only. Qt owns this provider and runs requests on its image
 // loading thread; no manager/QObject or native game process is consulted.
+// Valid requests without artwork return a transparent 1x1 sentinel. QML tests
+// the implicit image dimensions to retain its normal letter/glyph fallback.
 class GameIconProvider : public QQuickImageProvider {
 public:
   GameIconProvider();

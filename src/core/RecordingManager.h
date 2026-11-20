@@ -25,7 +25,6 @@ namespace TrophyBackend {
 class SettingsManager;
 class StorageManager;
 class AudioMixer;
-class WindowService;
 class RecordingSession;
 class IVideoCaptureSource;
 class GameDetectionService;
@@ -74,12 +73,13 @@ public:
   void setSettingsManager(SettingsManager *settings);
   void setStorageManager(StorageManager *storage);
   void setAudioMixer(AudioMixer *mixer);
-  void setWindowService(WindowService *ws);
   void setGameDetectionService(GameDetectionService *detector);
 
   // State
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
+  bool isRecoveringCapture() const { return m_captureRecoveryPending; }
+  bool lastRecordingFailed() const { return m_recordingFailed; }
   QString currentGameName() const { return m_currentGameName; }
   uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   qint64 recordingDuration() const; // milliseconds
@@ -91,8 +91,7 @@ public:
   void setDetectedEncoderName(const QString &name);
 
   // Recording control
-  Q_INVOKABLE void startRecording(const QString &gameName = QString(),
-                                  unsigned long windowId = 0);
+  Q_INVOKABLE void startRecording(const QString &gameName = QString());
   Q_INVOKABLE void stopRecording();
   Q_INVOKABLE bool addBookmark();
   QVariantMap captureHealth() const;
@@ -123,26 +122,16 @@ signals:
   // Terminal cleanup for every active recording, including failed output.
   // recordingStopped below is the successful-save notification only.
   void recordingFinished();
-  // quiet marks a clip filed because the capture source disappeared while the
-  // game was still visibly running (launcher/splash surface replaced, window
-  // recreated, permission revoked). The app keeps it in the library and
-  // re-arms capture, but stays silent — no completion chime or "saved"
-  // notification. A clip filed after a real game close is not quiet.
+  void captureRecoveryChanged();
+  // Handoff parts are saved quietly; a normal stop/game exit retains feedback.
   void recordingStopped(const QString &filePath, qint64 durationMs,
-                        qint64 sizeBytes, bool quiet);
+                        qint64 sizeBytes, bool quiet = false);
   void recordingError(const QString &error);
   /**
    * The portal rejected our saved restore token. The app deletes it and
    * re-authorizes through the New Game prompt — never a bare picker.
    */
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
-  /**
-   * The captured source vanished and the clip was filed: most often a
-   * launcher/splash surface replaced by the real game window, or a window
-   * recreated mid-session. The app waits for the next window and retries
-   * instead of showing an error.
-   */
-  void captureStartLost(const QString &gameName, const QString &identity = {});
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
   void detectedEncoderNameChanged();
@@ -156,6 +145,7 @@ private slots:
 private:
   friend class ::RecordingManagerTest;
   friend class ApplicationAudioProbeTest;
+  friend class ApplicationAuthorizePromptTest;
 
   // Private injection seam for lifecycle tests; normal starts use CaptureFactory.
   std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
@@ -179,23 +169,19 @@ private:
   void completePipelineAndStart();
   void finishStoppedRecording();
   void onCaptureError(const QString &error);
-  // Re-arming a source that was lost mid-recording. Deliberately separate
-  // from the pre-first-frame startup budget: that one resets when a
-  // recording starts, which would let a repeatedly-captured launcher window
-  // retry forever. Bounded per identity, released when a recording is filed.
-  bool takeCaptureLossRetry(const QString &identity);
+  bool capturedGameHasEnded() const;
   QString m_captureGameName;
   QString m_pendingCaptureError;
-  int m_captureLossRetryCount = 0;
-  QString m_captureLossRetryKey;
-  qint64 m_captureLossRetrySinceMs = 0;
-  // Silent retries for a source that died before the first frame. Bounded per
-  // identity and window so a genuinely broken capture still reports an error.
-  bool m_startupLossRetry = false;
-  QString m_startupRetryKey;
-  int m_startupRetryCount = 0;
-  qint64 m_startupRetrySinceMs = 0;
-  bool takeStartupRetry(const QString &identity);
+  QElapsedTimer m_captureEndGrace;
+  int m_captureEndGraceMs = 5000;
+  // Recovery is lifetime-bound to the pinned instance, not an attempt budget.
+  bool recoveryInstanceIsCurrent() const;
+  void scheduleCaptureRecovery();
+  void cancelCaptureRecovery();
+  bool m_captureRecoveryPending = false;
+  QString m_recoveryGame, m_recoveryKey, m_recoveryInstance;
+  quint64 m_recoveryGeneration = 0;
+  int m_recoveryDelayMs = 1500;
   bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;
@@ -220,7 +206,6 @@ private:
   QString m_currentGameName;
   QVariantMap m_detectedGameInfo;
   QString m_currentFilePath;
-  unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;
   bool m_recordingFailed = false;
   QString m_lastOutputError;
@@ -230,7 +215,6 @@ private:
   SettingsManager *m_settings = nullptr;
   StorageManager *m_storage = nullptr;
   AudioMixer *m_audioMixer = nullptr;
-  WindowService *m_windowService = nullptr;
   GameDetectionService *m_gameDetector = nullptr;
 
   // Pipeline components (owned)

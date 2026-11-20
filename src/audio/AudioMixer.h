@@ -78,6 +78,7 @@ public:
   bool discardedNodeLookupPending(int trackIndex) const;
   // Snapshot source health; isCapturing() must be a nonblocking query.
   bool sourceIsCapturing(int trackIndex) const;
+  bool sourceIsDesktopAudio(int trackIndex) const;
 
   // Track control
   Q_INVOKABLE void setTrackVolume(int trackIndex, float volume);

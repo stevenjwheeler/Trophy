@@ -3,6 +3,9 @@ find_package(GTest REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
+add_executable(detection_probe detection_probe.cpp)
+target_include_directories(detection_probe PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(detection_probe PRIVATE ${PROJECT_NAME} Qt6::Core)
 
 add_executable(test_InstallInfo test_InstallInfo.cpp
     ${CMAKE_SOURCE_DIR}/src/core/InstallInfo.cpp)
@@ -95,8 +98,6 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppImageSmoke.py")
     add_test(NAME NativePackageSmokeTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativePackageSmoke.py")
-    add_test(NAME ReporterRuntimeTest.Harness
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterRuntimes.py")
     add_test(NAME NativeInstallSafetyTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_NativeInstallSafety.py")
     add_test(NAME DraftReleaseTest.Harness
@@ -105,16 +106,6 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_AppRun.py")
     add_test(NAME AppDirPruneTest.Harness
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_PruneAppDir.py")
-    set(multilib_preload_includes)
-    foreach(directory IN LISTS Qt6Core_INCLUDE_DIRS)
-        list(APPEND multilib_preload_includes --qt-include "${directory}")
-    endforeach()
-    add_test(NAME MultilibPreloadTest.NativeLoaders
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_MultilibPreload.py"
-            --qt-library "$<TARGET_FILE:Qt6::Core>" ${multilib_preload_includes})
-    set_tests_properties(MultilibPreloadTest.NativeLoaders PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
-    add_test(NAME ReporterAbiTest.StaticFixtures
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ReporterAbi.py")
 endif()
 
 add_executable(test_PlayerProbe test_PlayerProbe.cpp)
@@ -181,18 +172,6 @@ qt_add_resources(test_RecordingCardBinding "recording_icon_test_resources"
 
 # Optional script API fixture: Node is test tooling only, never a runtime
 # dependency for Trophy or for builds without it.
-find_program(TROPHY_NODE_EXECUTABLE node)
-if(TROPHY_NODE_EXECUTABLE)
-    add_test(NAME GnomeExtensionTest.ReadOnlySnapshots
-        COMMAND "${TROPHY_NODE_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/test_GnomeExtension.js"
-            "${CMAKE_SOURCE_DIR}/resources/gnome/extension.js")
-    add_test(NAME KWinScriptTest.WindowEventsAndFiltering
-        COMMAND "${TROPHY_NODE_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/test_KWinScript.js"
-            "${CMAKE_SOURCE_DIR}/resources/kwin/trophy-monitor/contents/code/main.js")
-endif()
-
 # Common includes and link libraries
 set(TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/src
@@ -420,7 +399,6 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/core/RecordingSession.cpp
     ${CMAKE_SOURCE_DIR}/src/core/ReplayManager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/WindowService.cpp
     ${CMAKE_SOURCE_DIR}/src/core/FrameDispatcher.cpp
     ${CMAKE_SOURCE_DIR}/src/core/CircularFrameBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/core/FrameTypes.cpp
@@ -444,24 +422,12 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
     ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h
-    ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h
-    ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
     ${CMAKE_SOURCE_DIR}/tests/RecordingManagerLinkStubs.cpp
 )
 target_include_directories(test_RecordingBackend PRIVATE ${TEST_INCLUDE_DIRS} ${AVCODEC_INCLUDE_DIRS} ${AVUTIL_INCLUDE_DIRS} ${SWRESAMPLE_INCLUDE_DIRS})
 target_link_libraries(test_RecordingBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Network Qt6::Concurrent PkgConfig::PIPEWIRE ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES} ${SWRESAMPLE_LIBRARIES})
 # Propagate GTest to consumers of this static backend (they use gtest macros).
-target_link_libraries(test_RecordingBackend PUBLIC GTest::GTest GTest::Main)
+target_link_libraries(test_RecordingBackend PUBLIC GTest::GTest GTest::Main trophy_processes)
 if(EGL_FOUND)
     # PUBLIC so executables linking this static lib inherit the EGL dep.
     target_link_libraries(test_RecordingBackend PUBLIC PkgConfig::EGL)
@@ -537,7 +503,7 @@ add_executable(test_PipeWireAudioSource test_PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.h
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h)
 target_include_directories(test_PipeWireAudioSource PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE trophy_processes)
 gtest_discover_tests(test_PipeWireAudioSource)
 
 if(Python3_Interpreter_FOUND)
@@ -553,12 +519,18 @@ if(Python3_Interpreter_FOUND)
     target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
         Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
-    foreach(case IN ITEMS NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit TransientDeliveryStall RenegotiatedStalledCapture)
+    foreach(case IN ITEMS DesktopFallback NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit NativeSameProcessWindowHandoff NativeLongWindowGap TransientDeliveryStall RenegotiatedStalledCapture)
         add_test(NAME RecordingFailureTest.${case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
                 $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
         set_tests_properties(RecordingFailureTest.${case} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     endforeach()
+    # Six format-change cases include real three-second audio reconnection
+    # ticks and encoded-frame/rotation fences. Keep the harness bounded while
+    # allowing the full group to complete under parallel CI load.
+    set_tests_properties(RecordingFailureTest.NativeFormatChanges
+        RecordingFailureTest.DvrNativeFormatChanges PROPERTIES
+        ENVIRONMENT "TROPHY_PRIVATE_AUDIO_TIMEOUT=150" TIMEOUT 180)
 endif()
 
 add_executable(test_ReplayManager test_ReplayManager.cpp)
@@ -577,13 +549,11 @@ target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMA
 target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} Qt6::Concurrent ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${AVCODEC_LIBRARIES})
 gtest_discover_tests(test_Recording)
 
-add_executable(test_GameDetectionService test_GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameDetectionService.cpp ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h ${CMAKE_SOURCE_DIR}/src/detection/GameWhitelist.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp)
+add_executable(test_GameDetectionService test_GameDetectionService.cpp)
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
 target_compile_definitions(test_GameDetectionService PRIVATE TROPHY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_link_libraries(test_GameDetectionService PRIVATE ${TEST_LINK_LIBS} Qt6::Network Qt6::DBus)
-# Every case uses the frozen reporter endpoint. Parallel CTest processes
-# must not mistake another test's listener for the user's live app.
-gtest_discover_tests(test_GameDetectionService PROPERTIES RESOURCE_LOCK trophy_detection_socket)
+target_link_libraries(test_GameDetectionService PRIVATE ${PROJECT_NAME} ${TEST_LINK_LIBS})
+gtest_discover_tests(test_GameDetectionService)
 
 # --- test_EncoderTest (The New Matrix Test) ---
 add_executable(test_EncoderTest
@@ -632,7 +602,7 @@ add_executable(test_AudioMixer test_AudioMixer.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
 )
 target_include_directories(test_AudioMixer PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_AudioMixer PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+target_link_libraries(test_AudioMixer PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE trophy_processes)
 gtest_discover_tests(test_AudioMixer)
 
 # --- PipeWire sync wait (bounded-loop logic, no daemon required) ---
@@ -846,70 +816,9 @@ if(EGL_FOUND)
 endif()
 
 
-# --- WindowMonitor (KWin snapshot parsing + focus + WindowService delegation;
-# no compositor or D-Bus session needed) ---
-add_executable(test_WindowMonitor test_WindowMonitor.cpp
-    ${CMAKE_SOURCE_DIR}/resources/resources.qrc
-    ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/WaylandWindowMonitor.h
-    ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/KWinBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/HyprlandBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/SwayBackend.h
-    ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.h
-    ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/WindowService.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/WindowService.h
-)
-target_include_directories(test_WindowMonitor PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_WindowMonitor PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
-gtest_discover_tests(test_WindowMonitor)
 
-# Never let the fake Shell own a name on the user's real session bus.
-find_program(TROPHY_DBUS_RUN_SESSION dbus-run-session)
-if(TROPHY_DBUS_RUN_SESSION)
-    add_executable(test_GnomeBackend test_GnomeBackend.cpp
-        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.cpp
-        ${CMAKE_SOURCE_DIR}/src/detection/GnomeBackend.h
-        ${CMAKE_SOURCE_DIR}/src/detection/WindowInfo.cpp
-        ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
-    target_include_directories(test_GnomeBackend PRIVATE ${TEST_INCLUDE_DIRS})
-    target_link_libraries(test_GnomeBackend PRIVATE ${TEST_LINK_LIBS} Qt6::DBus)
-    add_test(NAME GnomeBackendTest.PrivateBus
-        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- ${CMAKE_COMMAND} -E env
-            TROPHY_PRIVATE_GNOME_TEST=1 $<TARGET_FILE:test_GnomeBackend>)
-endif()
 
-# --- GlShimEnrollment (conf-file round-trip; hermetic via env overrides) ---
-add_executable(test_GlShimEnrollment test_GlShimEnrollment.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GlShimEnrollment.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/GlShimEnrollment.h
-)
-target_include_directories(test_GlShimEnrollment PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_GlShimEnrollment PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_GlShimEnrollment)
 
-add_executable(test_GlShimReporter test_GlShimReporter.cpp)
-target_link_libraries(test_GlShimReporter PRIVATE ${TEST_LINK_LIBS} Threads::Threads dl)
-gtest_discover_tests(test_GlShimReporter)
-
-add_executable(test_ReporterDlopen test_ReporterDlopen.cpp)
-target_compile_definitions(test_ReporterDlopen PRIVATE TROPHY_GL_SHIM_FILE="$<TARGET_FILE:trophy_gl_shim>")
-target_link_libraries(test_ReporterDlopen PRIVATE GTest::gtest_main dl)
-add_dependencies(test_ReporterDlopen trophy_gl_shim)
-gtest_discover_tests(test_ReporterDlopen)
-
-# --- ShippedLibDirs (prefix-relative lib lookup contract; no env needed) ---
-add_executable(test_ShippedLibDirs test_ShippedLibDirs.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/ShippedLibDirs.h
-)
-target_include_directories(test_ShippedLibDirs PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_ShippedLibDirs PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_ShippedLibDirs)
 
 # --- RuntimeLibraries (bundle/host inventory logged at startup) ---
 add_executable(test_RuntimeLibraries test_RuntimeLibraries.cpp
@@ -920,30 +829,7 @@ target_include_directories(test_RuntimeLibraries PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_RuntimeLibraries PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_RuntimeLibraries)
 
-# --- VulkanLayer (structural manifest writer; hermetic via XDG_DATA_HOME) ---
-add_executable(test_VulkanLayer test_VulkanLayer.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/VulkanLayer.cpp
-    ${CMAKE_SOURCE_DIR}/src/detection/VulkanLayer.h
-)
-target_include_directories(test_VulkanLayer PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_VulkanLayer PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_VulkanLayer)
 
-# Real reporter export, exercised without creating a Vulkan instance.
-find_package(Threads REQUIRED)
-add_library(VulkanReporterNext SHARED VulkanReporterNext.cpp)
-target_include_directories(VulkanReporterNext PRIVATE ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(VulkanReporterNext PRIVATE Threads::Threads)
-add_library(VulkanReporterFixture SHARED VulkanReporterFixture.cpp)
-target_include_directories(VulkanReporterFixture PRIVATE ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(VulkanReporterFixture PRIVATE trophy_layer VulkanReporterNext)
-add_executable(test_VulkanReporter test_VulkanReporter.cpp)
-target_compile_definitions(test_VulkanReporter PRIVATE
-    TROPHY_LAYER_FILE="$<TARGET_FILE:trophy_layer>"
-    VULKAN_REPORTER_FIXTURE_FILE="$<TARGET_FILE:VulkanReporterFixture>")
-target_link_libraries(test_VulkanReporter PRIVATE ${TEST_LINK_LIBS} Vulkan::Vulkan dl)
-add_dependencies(test_VulkanReporter trophy_layer VulkanReporterFixture)
-gtest_discover_tests(test_VulkanReporter)
 
 # --- HardwareInfo (PCI mapping + gather smoke; degrades headless) ---
 add_executable(test_HardwareInfo test_HardwareInfo.cpp

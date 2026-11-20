@@ -85,7 +85,7 @@ public:
   }
 
   int rowCount(const QModelIndex &parent = QModelIndex()) const override {
-    return parent.isValid() ? 0 : m_entries.size();
+    return parent.isValid() ? 0 : static_cast<int>(m_entries.size());
   }
 
   QVariant data(const QModelIndex &index, int role) const override {

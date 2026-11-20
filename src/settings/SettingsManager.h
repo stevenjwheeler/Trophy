@@ -85,10 +85,6 @@ class SettingsManager : public QObject {
                  NOTIFY autoDetectGamesChanged)
   Q_PROPERTY(bool autoRecordEnabled READ autoRecordEnabled WRITE
                  setAutoRecordEnabled NOTIFY autoRecordEnabledChanged)
-  Q_PROPERTY(bool windowTrackingEnabled READ windowTrackingEnabled WRITE
-                 setWindowTrackingEnabled NOTIFY windowTrackingEnabledChanged)
-  Q_PROPERTY(bool vulkanLayerEnabled READ vulkanLayerEnabled WRITE
-                 setVulkanLayerEnabled NOTIFY vulkanLayerEnabledChanged)
   Q_PROPERTY(bool setupCompleted READ setupCompleted WRITE setSetupCompleted
                  NOTIFY setupCompletedChanged)
   Q_PROPERTY(bool minimizeToTray READ minimizeToTray WRITE setMinimizeToTray
@@ -225,11 +221,7 @@ public:
   bool autoRecordEnabled() const { return m_autoRecordEnabled; }
   void setAutoRecordEnabled(bool enabled);
 
-  bool windowTrackingEnabled() const { return m_windowTrackingEnabled; }
-  void setWindowTrackingEnabled(bool enabled);
 
-  bool vulkanLayerEnabled() const { return m_vulkanLayerEnabled; }
-  void setVulkanLayerEnabled(bool enabled);
 
   bool setupCompleted() const { return m_setupCompleted; }
   void setSetupCompleted(bool completed);
@@ -336,8 +328,6 @@ signals:
   // Detection
   void autoDetectGamesChanged();
   void autoRecordEnabledChanged();
-  void windowTrackingEnabledChanged();
-  void vulkanLayerEnabledChanged();
   void setupCompletedChanged();
   void minimizeToTrayChanged();
   void startMinimizedChanged();
@@ -400,12 +390,6 @@ private:
   // Detection settings
   bool m_autoDetectGames = true;
   bool m_autoRecordEnabled = false;
-  // Compositor window tracking (KWin script etc.). Opt-in via the setup
-  // wizard; nothing is installed until the user enables it.
-  bool m_windowTrackingEnabled = false;
-  // Vulkan detection layer. Opt-in via the setup wizard; never
-  // auto-registered.
-  bool m_vulkanLayerEnabled = false;
   bool m_setupCompleted = false;
 
   // System tray behaviour

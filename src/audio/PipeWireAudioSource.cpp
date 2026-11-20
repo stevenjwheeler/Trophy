@@ -9,6 +9,7 @@
 #include "AppAudioGroup.h"
 #include "ApplicationAudioIdentity.h"
 #include "ApplicationAudioLookup.h"
+#include "detection/ProcessGames.h"
 
 #include <QDebug>
 #include <QList>
@@ -63,6 +64,7 @@ struct PipeWireAudioSource::Private {
   // Failed native resources remain owned until stop/reinitialize; never tear
   // them down from a listener (which would invert the lifecycle/loop locks).
   std::atomic<bool> failed{false};
+  std::atomic<bool> stopping{false};
   bool loopStarted = false;
   bool loopLocked = false;
 
@@ -77,14 +79,17 @@ struct PipeWireAudioSource::Private {
   static void onProcess(void *userdata) {
     auto *self = static_cast<Private *>(userdata);
 
-    if (self->failed.load(std::memory_order_acquire))
+    if (self->failed.load(std::memory_order_acquire) ||
+        self->stopping.load(std::memory_order_acquire))
       return;
     if (self->appGroup && !self->appGroup->acceptsAudio()) {
       // Still dequeue/return producer buffers while registry verification is
       // pending. Never deliver unverified PCM to the mixer/encoder.
       if (auto *buffer = self->q->m_operations.dequeueBuffer(self->stream))
         self->q->m_operations.queueBuffer(self->stream, buffer);
-      if (self->appGroup->rejectedRoute())
+      if (self->appGroup->targetGone())
+        self->targetDisappeared();
+      else if (self->appGroup->rejectedRoute())
         self->fail(QStringLiteral("Application audio link does not match the pinned app"));
       return;
     }
@@ -99,22 +104,53 @@ struct PipeWireAudioSource::Private {
   }
 
   void fail(const QString &message) {
+    if (stopping.load(std::memory_order_acquire))
+      return;
     if (failed.exchange(true, std::memory_order_acq_rel))
       return;
+    if (appGroup)
+      appGroup->quiesce();
+    qWarning() << "PipeWire audio capture failed:" << q->m_displayName
+               << message;
     const bool wasCapturing = q->m_capturing.exchange(false);
     q->m_peakLevel.store(0.0f);
     if (wasCapturing)
       emit q->captureStopped();
     emit q->captureError(message);
   }
+  void targetDisappeared() {
+    if (stopping.load(std::memory_order_acquire) ||
+        failed.exchange(true, std::memory_order_acq_rel))
+      return;
+    if (appGroup)
+      appGroup->quiesce();
+    qDebug() << "Application audio target disappeared:" << q->m_displayName;
+    const bool wasCapturing = q->m_capturing.exchange(false);
+    q->m_peakLevel.store(0.0f);
+    if (wasCapturing)
+      emit q->captureStopped();
+    // Ordinary stream disappearance is not a wrong-app/security failure.
+    // The owner still sees inactive capture and retries/falls back if recording
+    // continues, or finalizes normally when the pinned game exits.
+  }
 
-  static void onCoreError(void *userdata, uint32_t id, int /*seq*/, int res,
+  static void onCoreError(void *userdata, uint32_t id, int seq, int res,
                           const char *message) {
     // Object-local errors need not kill an otherwise usable capture core.
     if (id != PW_ID_CORE || res >= 0)
       return;
-    static_cast<Private *>(userdata)->fail(
-        QString::fromUtf8(message ? message : "PipeWire core error"));
+    auto *self = static_cast<Private *>(userdata);
+    if (self->stopping.load(std::memory_order_acquire) ||
+        self->failed.load(std::memory_order_acquire))
+      return; // One terminal cause per source; queued teardown errors add none.
+    if (self->appGroup && self->appGroup->handlesCleanupError(id, seq, res)) {
+      qDebug() << "Application audio: retired link destroy already settled"
+               << "seq" << seq;
+      return;
+    }
+    qWarning() << "PipeWire capture core error:" << "id" << id << "seq" << seq
+               << "result" << res << (message ? message : "unknown error");
+    self->fail(QString::fromUtf8(message ? message : "PipeWire core error"));
   }
 
   static void onStateChanged(void *userdata, enum pw_stream_state /*old*/,
@@ -122,8 +158,15 @@ struct PipeWireAudioSource::Private {
     auto *self = static_cast<Private *>(userdata);
     qDebug() << "PipeWire stream state:" << pw_stream_state_as_string(state)
              << "[" << self->q->m_displayName << "]";
+    if (self->stopping.load(std::memory_order_acquire) ||
+        self->failed.load(std::memory_order_acquire))
+      return;
 
     if (state == PW_STREAM_STATE_ERROR) {
+      if (self->appGroup && self->appGroup->targetGone()) {
+        self->targetDisappeared();
+        return;
+      }
       qWarning() << "PipeWire stream error:" << (error ? error : "unknown");
       self->fail(QString::fromUtf8(error ? error : "PipeWire error"));
     }
@@ -671,6 +714,7 @@ namespace {
 // ---------------------------------------------------------------------------
 
 struct InfoMatchRequest {
+  QString gameInstance;
   QString hintLower;      // product-name hint, lowercased (empty if unused)
   bool exactBinary = false;
   uint32_t pid = 0;       // PID hint (0 if unused)
@@ -729,6 +773,17 @@ static void infoMatchGather(const detail::AudioLookupProperties &props, uint32_t
   app["name"] = display;
   app["binary"] = binary;
   app["nodeId"] = id;
+  app["nodeName"] = nodeName;
+  app["serial"] = props.get(PW_KEY_OBJECT_SERIAL);
+  app["pid"] = props.get(PW_KEY_APP_PROCESS_ID);
+  app["applicationId"] = props.get(PW_KEY_APP_ID);
+  app["gameInstance"] = ProcessGames::associate(
+      detail::audioProcessId(props.get(PW_KEY_APP_PROCESS_ID)), binary,
+      appName);
+  app["associationEvidence"] =
+      app.value("gameInstance").toString().isEmpty() ? "unassigned"
+      : props.get(PW_KEY_APP_PROCESS_ID).isEmpty()   ? "unique-executable"
+                                                     : "process-membership";
   req->apps.append(app);
 }
 
@@ -894,7 +949,7 @@ static void runInfoMatch(InfoMatchRequest &req) {
   // Bind only the owners of candidate playback nodes, not unrelated clients.
   // A changed client.id discovered during phase 2 can be retried next tick;
   // never substitute an unverified announce-only client identity.
-  if (success && !req.gatherAll && !req.exactBinary) {
+  if (success && !req.exactBinary) {
     std::set<uint32_t> owners;
     for (const auto &[id, props] : data.nodes) {
       bool valid = false;
@@ -933,20 +988,30 @@ static void runInfoMatch(InfoMatchRequest &req) {
         if (it == data.nodes.end() || !data.currentNodes.contains(id)) continue;
         const auto &node = it->second;
         if (node.get(PW_KEY_MEDIA_CLASS) != QLatin1String("Stream/Output/Audio")) continue;
-        if (req.gatherAll) {
-          infoMatchGather(node, id, &req);
-          continue;
-        }
         auto identity = node;
-        if (tier == 1) {
+        if (tier == 1 || req.gatherAll || !req.gameInstance.isEmpty()) {
           bool valid = false;
           const auto clientId = node.get(PW_KEY_CLIENT_ID).toUInt(&valid);
           const auto client = data.clients.find(clientId);
-          if (!valid || client == data.clients.end() ||
-              !data.currentClients.contains(clientId)) continue;
-          identity = detail::gameAudioLookupProperties(node, client->second);
+          if (valid && client != data.clients.end() &&
+              data.currentClients.contains(clientId))
+            identity = detail::gameAudioLookupProperties(node, client->second);
+          else if (tier == 1)
+            continue;
         }
-        if (!identity.matches(req.pid, req.hintLower, req.exactBinary)) continue;
+        if (req.gatherAll) {
+          infoMatchGather(identity, id, &req);
+          continue;
+        }
+        if (!req.gameInstance.isEmpty()) {
+          if (!ProcessGames::belongsTo(
+                  req.gameInstance,
+                  detail::audioProcessId(identity.get(PW_KEY_APP_PROCESS_ID)),
+                  identity.get(PW_KEY_APP_PROCESS_BINARY),
+                  identity.get(PW_KEY_APP_NAME)))
+            continue;
+        } else if (!identity.matches(req.pid, req.hintLower, req.exactBinary))
+          continue;
         req.foundId = id;
         req.foundName = node.get(PW_KEY_NODE_NAME);
         req.foundSerial = node.get(PW_KEY_OBJECT_SERIAL);
@@ -979,20 +1044,6 @@ static void runInfoMatch(InfoMatchRequest &req) {
 }
 
 } // namespace
-
-uint32_t PipeWireAudioSource::findNodeByProcessName(const QString &processName,
-                                                    QString *outNodeName,
-                                                    QString *outSerial) {
-  // Read current node info, with owning-client identity as a game fallback.
-  InfoMatchRequest req;
-  req.hintLower = processName.toLower();
-  runInfoMatch(req);
-  if (outNodeName)
-    *outNodeName = req.foundName;
-  if (outSerial)
-    *outSerial = req.foundSerial;
-  return req.foundId;
-}
 
 uint32_t PipeWireAudioSource::findNodeByPid(uint32_t pid, QString *outNodeName,
                                             QString *outSerial) {
@@ -1031,6 +1082,31 @@ uint32_t PipeWireAudioSource::findNodeByBinary(const QString &binary,
 // (App enumeration gathers via the info-match core above, so no
 // separate globals-only enumerator is kept — it could not see
 // post-announce identity props.)
+
+uint32_t PipeWireAudioSource::findNodeForGame(uint32_t pid,
+                                              const QStringList &identity,
+                                              QString *outNodeName,
+                                              QString *outSerial) {
+  InfoMatchRequest req;
+  req.gameInstance = ownerIdentity(identity);
+  if (req.gameInstance.isEmpty())
+    req.gameInstance = ProcessGames::instanceForPid(pid);
+  if (req.gameInstance.isEmpty())
+    return PW_ID_ANY;
+  runInfoMatch(req);
+  if (outNodeName)
+    *outNodeName = req.foundName;
+  if (outSerial)
+    *outSerial = req.foundSerial;
+  return req.foundId;
+}
+
+QString PipeWireAudioSource::ownerIdentity(const QStringList &identity) {
+  for (const auto &key : identity)
+    if (key.startsWith("trophy-instance:"))
+      return key.mid(16);
+  return {};
+}
 
 QVariantList PipeWireAudioSource::enumerateAudioApps() {
   // Gather from current node info, not announce-time globals (identity
@@ -1126,15 +1202,17 @@ void PipeWireAudioSource::resolveDeviceTarget() {
 
 std::unique_ptr<PipeWireAudioSource>
 PipeWireAudioSource::createApplicationSource(uint32_t nodeId,
-                                              const QString &nodeName,
-                                              const QString &serial,
-                                              const QString &expectedBinary) {
+                                             const QString &nodeName,
+                                             const QString &serial,
+                                             const QString &expectedBinary,
+                                             const QString &ownerIdentity) {
   auto src =
       std::make_unique<PipeWireAudioSource>(SourceType::ApplicationAudio);
   src->m_targetNodeId = nodeId;
   src->m_targetNodeName = nodeName;
   src->m_targetSerial = serial;
   src->m_expectedBinary = expectedBinary;
+  src->m_ownerIdentity = ownerIdentity;
   src->m_identifier = nodeName.isEmpty() ? QString::number(nodeId) : nodeName;
   src->m_displayName =
       QString("Application Audio (%1)")
@@ -1222,29 +1300,40 @@ PipeWireAudioSource::Operations PipeWireAudioSource::realOperations() {
       [](pw_thread_loop *loop) {
         return pw_context_new(pw_thread_loop_get_loop(loop), nullptr, 0);
       },
-      pw_thread_loop_start, pw_thread_loop_lock, pw_thread_loop_unlock,
-      pw_thread_loop_stop, pw_thread_loop_destroy,
-      [](pw_context *context) { return pw_context_connect(context, nullptr, 0); },
-      pw_core_disconnect, pw_context_destroy,
+      pw_thread_loop_start,
+      pw_thread_loop_lock,
+      pw_thread_loop_unlock,
+      pw_thread_loop_stop,
+      pw_thread_loop_destroy,
+      [](pw_context *context) {
+        return pw_context_connect(context, nullptr, 0);
+      },
+      pw_core_disconnect,
+      pw_context_destroy,
       [] {
         return pw_properties_new(
             PW_KEY_APP_NAME, "Trophy", PW_KEY_MEDIA_TYPE, "Audio",
             PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen", nullptr);
       },
-      pw_properties_set, pw_properties_free, pw_stream_new, pw_stream_add_listener,
+      pw_properties_set,
+      pw_properties_free,
+      pw_stream_new,
+      pw_stream_add_listener,
       [](pw_stream *stream, uint32_t target, int flags, const spa_pod *param) {
         return pw_stream_connect(stream, PW_DIRECTION_INPUT, target,
                                  static_cast<pw_stream_flags>(flags), &param, 1);
       },
       pw_stream_destroy,
-      [](pw_core *core, spa_hook *hook, const pw_core_events *events, void *data) {
-        pw_core_add_listener(core, hook, events, data);
-      },
-      pw_stream_dequeue_buffer, pw_stream_queue_buffer, pw_stream_get_properties,
+      [](pw_core *core, spa_hook *hook, const pw_core_events *events,
+         void *data) { pw_core_add_listener(core, hook, events, data); },
+      pw_stream_dequeue_buffer,
+      pw_stream_queue_buffer,
+      pw_stream_get_properties,
       [](PipeWireAudioSource *source) {
         source->d->appGroup = std::make_unique<AppAudioGroup>(
-             source->d->core, source->d->stream, source->m_targetNodeId,
-            source->m_targetSerial, source->m_expectedBinary);
+            source->d->core, source->d->stream, source->m_targetNodeId,
+            source->m_targetSerial, source->m_expectedBinary,
+            source->m_ownerIdentity);
       }};
 }
 
@@ -1269,6 +1358,7 @@ bool PipeWireAudioSource::initialize(const AudioConfig &config) {
   };
   m_config = config;
   d->failed.store(false, std::memory_order_release);
+  d->stopping.store(false, std::memory_order_release);
   d->channels.store(config.channels, std::memory_order_relaxed);
   d->sampleRate.store(config.sampleRate, std::memory_order_relaxed);
 
@@ -1519,6 +1609,7 @@ void PipeWireAudioSource::stop() {
 }
 
 bool PipeWireAudioSource::stopLocked() {
+  d->stopping.store(true, std::memory_order_release);
   const bool wasCapturing = m_capturing.exchange(false);
   if (!d->loop)
     return wasCapturing;
@@ -1529,6 +1620,8 @@ bool PipeWireAudioSource::stopLocked() {
       d->loopLocked = true;
     }
 
+    if (d->appGroup)
+      d->appGroup->quiesce();
     d->appGroup.reset();
     if (d->stream) {
       m_operations.destroyStream(d->stream);

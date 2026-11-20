@@ -53,7 +53,7 @@ DMA-BUF capture avoids CPU pixel copies where the compositor, driver, and encode
 
 Recordings use MKV for crash-resilient recording; share exports create separate MP4 files. A clean dark interface, configurable accent colors, and a system tray keep the controls close without getting in the way.
 
-**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. **KDE Plasma (KWin) and GNOME (Mutter) are supported**, and both are verified for capture, global shortcuts, and game detection. Hyprland and Sway have window-monitor integrations but less live verification. All of this depends on **xdg-desktop-portal** plus your compositor's portal backend; see the [system requirements and package compatibility](https://gettrophy.app/docs/getting-started.html#requirements).
+**A Wayland session is required.** Games running through XWayland can be captured; native X11 desktop sessions are not supported. Detection and the Add Game process picker are compositor-independent, with no Trophy desktop scripts/extensions or compositor IPC. Capture and global shortcuts use **xdg-desktop-portal** plus your desktop's compatible portal backend; that dependency remains. Live validation of the rewritten detector does not establish complete recording compatibility on every desktop. See the [system requirements and package compatibility](https://gettrophy.app/docs/getting-started.html#requirements).
 
 ## Get Trophy
 
@@ -66,13 +66,13 @@ Recordings use MKV for crash-resilient recording; share exports create separate 
 
 CI also produces `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
 
-Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and the desktop integration Trophy needs for game detection. Game capture requires your authorization through the system portal.
+Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and shortcuts. Game detection needs no compositor helper or injected graphics layer; capture requires your authorization through the system portal.
 
 The full documentation is on the website at **[gettrophy.app/docs](https://gettrophy.app/docs/)**: [Getting started](https://gettrophy.app/docs/getting-started.html) · [User guide](https://gettrophy.app/docs/user-guide.html) · [Build from source](https://gettrophy.app/docs/development.html)
 
 ## A few things to know
 
-- Game detection's Vulkan and OpenGL reporters are optional. **Anti-cheat compatibility is not guaranteed.** The OpenGL option uses session-wide preload configuration and requires a fresh login environment; [read the setup guidance](https://gettrophy.app/docs/getting-started.html#game-detection) before enabling it.
+- Game detection uses unprivileged Linux process information and PipeWire, independently of the compositor. No injected graphics reporters or desktop extensions are required. See [detection design and verification](docs/game-detection.md).
 - Game audio falls back to the desktop mix when an application-specific source is unavailable. That mix can include other apps; [check your audio setup](https://gettrophy.app/docs/user-guide.html#audio).
 - MP4 export is whole-file and uses software encoding. Snip a clip first to share a shorter range. Size targets are approximate, and HDR-to-SDR conversion is not supported.
 
