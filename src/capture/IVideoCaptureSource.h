@@ -148,9 +148,12 @@ class IVideoCaptureSource : public QObject {
   Q_OBJECT
 
 public:
-  // A missing source/session is ambiguous: the selected window may simply
-  // have closed. Service/native/output failures are not that lifecycle event.
-  enum class CaptureErrorKind { Other, SourceUnavailable };
+  // SourceUnavailable includes visibility/permission loss and is not retryable.
+  // SourceDestroyed requires an independent same-daemon/original-node check.
+  // A portal Session.Closed signal alone cannot establish window destruction.
+  // SourceNotReady is a successful portal grant with no stream to capture yet;
+  // only an already-authorized automatic game capture may retry that condition.
+  enum class CaptureErrorKind { Other, SourceUnavailable, SourceDestroyed, SourceNotReady };
   virtual CaptureErrorKind lastErrorKind() const { return CaptureErrorKind::Other; }
   using FrameCallback = std::function<void(const VideoFrame &frame)>;
 

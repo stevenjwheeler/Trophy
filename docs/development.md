@@ -11,6 +11,19 @@ standard ScreenCast portal, not Trophy-specific desktop integrations.
 Use `detection_probe --benchmark` to measure local census, Steam metadata and
 identification cost; it does not open a compositor connection.
 
+The Add Game list is a process picker, not a visible-window census. There is
+no universally available cross-desktop Wayland API that gives Trophy a
+reliable pre-authorization window-to-PID list. Desktop-entry, environment and
+audio hints may help rank likely applications, but must not be represented
+as proof that a process owns a visible window. See [current tasks](../todo.md)
+and the [detection architecture](game-detection.md).
+
+Add Game defaults to **Likely applications**: known game primaries, Windows
+payloads and executable matches from cached desktop application launchers.
+**Show all processes** restores the other selectable process rows. Desktop
+metadata is refreshed on the census worker alongside local Steam metadata;
+opening/filtering the picker performs no new filesystem enumeration.
+
 ## Dependencies
 
 - CMake 3.21+, a C++20 compiler, and pkg-config.
@@ -168,7 +181,7 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
 - Native audio needs Python, `pipewire`, `wireplumber` 0.5+, `pw-cli`, `pw-dump`
   and `dbus-run-session`; it skips explicitly when these are unavailable. Use
   CTest/the provided launchers, not private-test environment markers on your
-  normal session bus. These suites alone do not use the reporter socket.
+  normal session bus. There is no graphics-reporter socket in the rewritten detector.
 - `RecordingFailureTest` runs synthetic SHM video and a tone through the real
   private PipeWire graph, fake portal, recording/DVR managers and software
   H.264/AAC/MKV pipeline. Merged/separate cases cover portal closure, portal
@@ -176,6 +189,9 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
   handoff. Tests decode retained recordings and recovered recordings/clips,
   check stream timestamps, video dimensions and non-silent decoded PCM, and verify cleanup,
   no false save signal, stale-reply rejection and saved-token preservation.
+  Window-handoff groups replace the real capture node after encoded frames,
+  decode both saved parts, and check retained full-recording intent, repeated
+  approved empty captures, explicit stop and terminal approval rejection.
   Additional recording/DVR groups renegotiate native SHM video dimensions/FPS
   (including odd sizes and restoration), recreate audio playback at 44.1/96/48kHz
   and mono/stereo, and check decoded colors, aspect padding, replacement tones

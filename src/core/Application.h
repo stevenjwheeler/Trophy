@@ -185,6 +185,7 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  void onGameDetected(QString gameName);
   void updateDiscordPresence();
   // Only successful, finalized outputs are warmed (never active recordings or
   // DVR segments). Reuses the player's cache instances and in-flight jobs.
@@ -235,7 +236,7 @@ private:
   void resumePendingCapture();
   // A launcher/boot window was captured and disappeared before anything was
   // recorded: wait for the window that replaces it and try again.
-  void onCaptureStartLost(const QString &game, const QString &identity);
+  void resumeReplayAfterRecording();
   // Audio-settled capture: auto-armed recording/DVR waits for the
   // game's PipeWire node to exist (stable across two polls) before
   // starting, so launch sessions don't open on monitor fallback and

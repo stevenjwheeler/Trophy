@@ -47,6 +47,119 @@ extern "C" {
 
 namespace TrophyBackend {
 
+// A registry removal can also mean that this client's read permission was
+// withdrawn. Never turn that into an automatic new grant. Check through an
+// ordinary, independent connection: only disappearance of the original node
+// on the same daemon is eligible for restoration. Inconclusive probes fail
+// closed. No compositor API or privileged connection is involved.
+static bool captureNodeWasDestroyed(uint32_t cookie, uint32_t node,
+                                    uint64_t serial) {
+  if (!cookie || !serial)
+    return false;
+  struct Probe {
+    uint32_t cookie = 0;
+    uint32_t node;
+    uint64_t serial;
+    bool originalPresent = false, failed = false, done = false;
+    bool defaultReadable = false, targetReadable = true;
+    int sequence = -1;
+  } probe{0, node, serial};
+  auto *loop = pw_main_loop_new(nullptr);
+  if (!loop) return false;
+  auto *context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
+  auto *core = context ? pw_context_connect(context, nullptr, 0) : nullptr;
+  spa_hook coreHook{}, registryHook{}, clientHook{};
+  pw_registry *registry = nullptr;
+  pw_client *client = nullptr;
+  if (core) {
+    static const pw_core_events coreEvents = [] {
+      pw_core_events events{};
+      events.version = PW_VERSION_CORE_EVENTS;
+      events.info = [](void *data, const pw_core_info *info) {
+        static_cast<Probe *>(data)->cookie = info->cookie;
+      };
+      events.error = [](void *data, uint32_t, int, int, const char *) {
+        static_cast<Probe *>(data)->failed = true;
+      };
+      events.done = [](void *data, uint32_t id, int sequence) {
+        auto *p = static_cast<Probe *>(data);
+        if (id == PW_ID_CORE && sequence == p->sequence) p->done = true;
+      };
+      return events;
+    }();
+    pw_core_add_listener(core, &coreHook, &coreEvents, &probe);
+    // Absence from another restricted connection proves nothing. Require
+    // readable default permissions and no target-specific read restriction
+    // on this connection before treating its registry census as evidence.
+    client = pw_core_get_client(core);
+    if (client) {
+      static const pw_client_events clientEvents = [] {
+        pw_client_events events{};
+        events.version = PW_VERSION_CLIENT_EVENTS;
+        events.permissions = [](void *data, uint32_t, uint32_t count,
+                                const pw_permission *permissions) {
+          auto *p = static_cast<Probe *>(data);
+          for (uint32_t i = 0; i < count; ++i) {
+            const auto &permission = permissions[i];
+            if (permission.id == PW_ID_ANY)
+              p->defaultReadable = (permission.permissions & PW_PERM_R) != 0;
+            else if (permission.id == p->node)
+              p->targetReadable = (permission.permissions & PW_PERM_R) != 0;
+          }
+        };
+        return events;
+      }();
+      pw_client_add_listener(client, &clientHook, &clientEvents, &probe);
+      if (pw_client_get_permissions(client, 0, UINT32_MAX) < 0)
+        probe.failed = true;
+    }
+    registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
+    if (registry) {
+      static const pw_registry_events registryEvents = [] {
+        pw_registry_events events{};
+        events.version = PW_VERSION_REGISTRY_EVENTS;
+        events.global = [](void *data, uint32_t id, uint32_t, const char *type,
+                           uint32_t, const spa_dict *props) {
+          auto *p = static_cast<Probe *>(data);
+          if (id != p->node || strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
+            return;
+          const char *value = props ? spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL) : nullptr;
+          // Missing identity is not evidence that the original node is gone.
+          bool valid = false;
+          const auto observed = value ? QString::fromUtf8(value).toULongLong(&valid) : 0;
+          if (!valid || observed == p->serial)
+            p->originalPresent = true;
+        };
+        return events;
+      }();
+      pw_registry_add_listener(registry, &registryHook, &registryEvents, &probe);
+      probe.sequence = pw_core_sync(core, PW_ID_CORE, 0);
+      QElapsedTimer deadline;
+      deadline.start();
+      while (!probe.done && !probe.failed && probe.sequence >= 0 &&
+             deadline.elapsed() < 1000) {
+        if (pw_loop_iterate(pw_main_loop_get_loop(loop), 50) < 0)
+          probe.failed = true;
+      }
+    }
+  }
+  const bool destroyed = registry && probe.done && !probe.failed &&
+                         probe.defaultReadable && probe.targetReadable &&
+                         probe.cookie == cookie && !probe.originalPresent;
+  if (registry) {
+    spa_hook_remove(&registryHook);
+    pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
+  }
+  if (core) {
+    if (client) spa_hook_remove(&clientHook);
+    spa_hook_remove(&coreHook);
+    pw_core_disconnect(core);
+  }
+  if (context) pw_context_destroy(context);
+  pw_main_loop_destroy(loop);
+  return destroyed;
+}
+
 static QString portalRequestPath(const QString &token) {
   QString sender = QDBusConnection::sessionBus().baseService();
   sender.remove(':');
@@ -881,12 +994,19 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
   if (streamsVar.canConvert<QDBusArgument>()) {
     streams =
         qdbus_cast<QList<WaylandStream>>(streamsVar.value<QDBusArgument>());
+  } else if (streamsVar.canConvert<QList<WaylandStream>>()) {
+    streams = streamsVar.value<QList<WaylandStream>>();
+  } else {
+    clearStartGuard();
+    emit captureError("Wayland Portal: Invalid stream list");
+    return;
   }
 
   if (streams.isEmpty()) {
-    qCritical() << "Wayland Portal: Stream list is empty";
+    qDebug() << "Wayland Portal: approved capture has no stream yet";
+    m_lastErrorKind = CaptureErrorKind::SourceNotReady;
     clearStartGuard();
-    emit captureError("Wayland Portal: Stream list is empty");
+    emit captureError("Wayland Portal: approved capture has no stream yet");
     return;
   }
 
@@ -998,6 +1118,8 @@ bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
 
   pw_thread_loop_lock(m_pw_loop);
 
+  m_coreCookie.store(0);
+  m_targetSerial.store(0);
   m_pw_core = pw_context_connect(m_pw_context, nullptr, 0);
   if (!m_pw_core) {
     qCritical() << "Failed to connect to PipeWire core";
@@ -1010,6 +1132,9 @@ bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
     pw_core_events events{};
     events.version = PW_VERSION_CORE_EVENTS;
     events.error = WaylandPortalCapture::on_core_error;
+    events.info = [](void *data, const pw_core_info *info) {
+      static_cast<WaylandPortalCapture *>(data)->m_coreCookie.store(info->cookie);
+    };
     return events;
   }();
   pw_core_add_listener(m_pw_core, &m_pw_core_listener, &coreEvents, this);
@@ -1028,6 +1153,15 @@ bool WaylandPortalCapture::startPipeWireStream(uint32_t nodeId) {
     pw_registry_events events{};
     events.version = PW_VERSION_REGISTRY_EVENTS;
     events.global_remove = WaylandPortalCapture::on_registry_global_remove;
+    events.global = [](void *data, uint32_t id, uint32_t, const char *type,
+                       uint32_t, const spa_dict *props) {
+      auto *self = static_cast<WaylandPortalCapture *>(data);
+      if (id != static_cast<uint32_t>(self->m_pipewireNodeId) ||
+          strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !props)
+        return;
+      const char *serial = spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL);
+      if (serial) self->m_targetSerial.store(QString::fromUtf8(serial).toULongLong());
+    };
     return events;
   }();
   pw_registry_add_listener(m_pw_registry, &m_pw_registry_listener, &registryEvents, this);
@@ -1201,8 +1335,26 @@ void WaylandPortalCapture::on_registry_global_remove(void *data, uint32_t id) {
   auto *self = static_cast<WaylandPortalCapture *>(data);
   if (self->m_nativeEventsEnabled.load() && self->m_pipewireNodeId >= 0 &&
       id == static_cast<uint32_t>(self->m_pipewireNodeId)) {
-    self->postNativeError(QStringLiteral("PipeWire capture source disappeared or access was revoked"),
-                          self->m_nativeGeneration.load(), CaptureErrorKind::SourceUnavailable);
+    const auto generation = self->m_nativeGeneration.load();
+    const auto cookie = self->m_coreCookie.load();
+    const auto serial = self->m_targetSerial.load();
+    QMetaObject::invokeMethod(self, [self, id, generation, cookie, serial] {
+      if (!self->m_nativeEventsEnabled.load() ||
+          generation != self->m_nativeGeneration.load() || self->m_retiring.load())
+        return;
+      auto *watcher = new QFutureWatcher<bool>(self);
+      QObject::connect(watcher, &QFutureWatcher<bool>::finished, self,
+                       [self, watcher, generation] {
+        const bool destroyed = watcher->result();
+        watcher->deleteLater();
+        self->postNativeError(
+            destroyed ? QStringLiteral("PipeWire capture window disappeared")
+                      : QStringLiteral("PipeWire capture source disappeared or access was revoked"),
+            generation, destroyed ? CaptureErrorKind::SourceDestroyed
+                                  : CaptureErrorKind::SourceUnavailable);
+      });
+      watcher->setFuture(QtConcurrent::run(captureNodeWasDestroyed, cookie, id, serial));
+    }, Qt::QueuedConnection);
   }
 }
 

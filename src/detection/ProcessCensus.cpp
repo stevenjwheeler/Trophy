@@ -40,6 +40,44 @@ QString executablePath(const QString &base) {
     path.chop(10);
   return path;
 }
+bool wineLoader(const QString &executable) {
+  const auto loader = basename(executable).toLower();
+  return loader == "wine" || loader == "wine64" || loader == "wine-preloader" ||
+         loader == "wine64-preloader";
+}
+QString wineArgument(const ProcessInfo &p) {
+  if (!wineLoader(p.executable) || p.arguments.isEmpty())
+    return {};
+  auto candidate = p.arguments.first();
+  if (basename(candidate).compare(basename(p.executable),
+                                  Qt::CaseInsensitive) == 0 &&
+      p.arguments.size() > 1)
+    candidate = p.arguments.at(1);
+  if (!candidate.endsWith(".exe", Qt::CaseInsensitive))
+    return {};
+  candidate.replace('\\', '/');
+  return candidate;
+}
+QChar driveLetter(const QString &path) {
+  if (path.size() < 3 || path[1] != ':' || path[2] != '/')
+    return {};
+  const auto letter = path[0].toLower();
+  return letter >= QChar('a') && letter <= QChar('z') ? letter : QChar();
+}
+void resolveWineDrive(ProcessInfo &p) {
+  const auto drive = driveLetter(wineArgument(p));
+  if (drive.isNull() || p.winePrefix.isEmpty())
+    return;
+  const auto link = p.winePrefix + "/dosdevices/" + drive + ":";
+  // Do not enumerate a prefix or follow mappings from payload() on the UI.
+  // Resolve only the drive actually used by this process's payload.
+  if (QFileInfo(link).isSymLink()) {
+    const auto target = readLink(link);
+    p.wineDrives.insert(drive, !target.isEmpty() && QDir(target).exists()
+                                   ? QFileInfo(target).canonicalFilePath()
+                                   : QString());
+  }
+}
 } // namespace
 
 QString ProcessInfo::payload() const {
@@ -58,21 +96,27 @@ QString ProcessInfo::payload() const {
     }
     return {}; // Interpreter without a concrete script/assembly is not a game.
   }
-  if (loader == "wine" || loader == "wine64" || loader == "wine-preloader" ||
-      loader == "wine64-preloader") {
-    if (arguments.isEmpty())
+  if (wineLoader(executable)) {
+    QString candidate = wineArgument(*this);
+    if (candidate.isEmpty())
       return {};
-    QString candidate = arguments.first();
-    if (basename(candidate).toLower() == loader && arguments.size() > 1)
-      candidate = arguments.at(1);
-    if (!candidate.endsWith(".exe", Qt::CaseInsensitive))
-      return {};
-    candidate.replace('\\', '/');
-    if (candidate.startsWith("Z:/", Qt::CaseInsensitive))
-      candidate = candidate.mid(2);
-    else if (candidate.startsWith("C:/", Qt::CaseInsensitive) &&
-             !winePrefix.isEmpty())
-      candidate = winePrefix + "/drive_c/" + candidate.mid(3);
+    const auto drive = driveLetter(candidate);
+    if (!drive.isNull()) {
+      if (wineDrives.contains(drive)) {
+        const auto target = wineDrives.value(drive);
+        if (target.isEmpty())
+          return {};
+        candidate = target + "/" + candidate.mid(3);
+      } else if (drive == QChar('z')) {
+        candidate = candidate.mid(2);
+      } else if (drive == QChar('c') && !winePrefix.isEmpty()) {
+        candidate = winePrefix + "/drive_c/" + candidate.mid(3);
+      } else {
+        return {}; // Unknown drive: never guess from CWD or the Steam App ID.
+      }
+    } else if (candidate.contains(':')) {
+      return {}; // Drive-relative paths need Wine's per-drive CWD, not ours.
+    }
     if (QDir::isRelativePath(candidate) && !candidate.contains(':') &&
         !directory.isEmpty())
       candidate = directory + "/" + candidate;
@@ -122,6 +166,7 @@ ProcessInfo ProcessCensus::inspect(qint64 pid, const QString &root) {
     if (entry.startsWith("WINEPREFIX="))
       p.winePrefix = QString::fromLocal8Bit(entry.mid(11));
   }
+  resolveWineDrive(p);
   ProcessInfo after;
   if (p.executable.isEmpty() || !parseStat(read(base + "/stat", 8192), after) ||
       p.start != after.start || p.executable != executablePath(base))

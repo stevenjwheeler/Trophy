@@ -134,6 +134,8 @@ private:
   spa_hook m_pw_stream_listener;
   spa_hook m_pw_core_listener{};
   pw_registry *m_pw_registry = nullptr;
+  std::atomic<uint32_t> m_coreCookie{0};
+  std::atomic<uint64_t> m_targetSerial{0};
   spa_hook m_pw_registry_listener{};
 
   FrameCallback m_callback;

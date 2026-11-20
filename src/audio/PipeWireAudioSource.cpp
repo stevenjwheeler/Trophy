@@ -64,6 +64,7 @@ struct PipeWireAudioSource::Private {
   // Failed native resources remain owned until stop/reinitialize; never tear
   // them down from a listener (which would invert the lifecycle/loop locks).
   std::atomic<bool> failed{false};
+  std::atomic<bool> stopping{false};
   bool loopStarted = false;
   bool loopLocked = false;
 
@@ -78,14 +79,17 @@ struct PipeWireAudioSource::Private {
   static void onProcess(void *userdata) {
     auto *self = static_cast<Private *>(userdata);
 
-    if (self->failed.load(std::memory_order_acquire))
+    if (self->failed.load(std::memory_order_acquire) ||
+        self->stopping.load(std::memory_order_acquire))
       return;
     if (self->appGroup && !self->appGroup->acceptsAudio()) {
       // Still dequeue/return producer buffers while registry verification is
       // pending. Never deliver unverified PCM to the mixer/encoder.
       if (auto *buffer = self->q->m_operations.dequeueBuffer(self->stream))
         self->q->m_operations.queueBuffer(self->stream, buffer);
-      if (self->appGroup->rejectedRoute())
+      if (self->appGroup->targetGone())
+        self->targetDisappeared();
+      else if (self->appGroup->rejectedRoute())
         self->fail(QStringLiteral("Application audio link does not match the pinned app"));
       return;
     }
@@ -100,22 +104,53 @@ struct PipeWireAudioSource::Private {
   }
 
   void fail(const QString &message) {
+    if (stopping.load(std::memory_order_acquire))
+      return;
     if (failed.exchange(true, std::memory_order_acq_rel))
       return;
+    if (appGroup)
+      appGroup->quiesce();
+    qWarning() << "PipeWire audio capture failed:" << q->m_displayName
+               << message;
     const bool wasCapturing = q->m_capturing.exchange(false);
     q->m_peakLevel.store(0.0f);
     if (wasCapturing)
       emit q->captureStopped();
     emit q->captureError(message);
   }
+  void targetDisappeared() {
+    if (stopping.load(std::memory_order_acquire) ||
+        failed.exchange(true, std::memory_order_acq_rel))
+      return;
+    if (appGroup)
+      appGroup->quiesce();
+    qDebug() << "Application audio target disappeared:" << q->m_displayName;
+    const bool wasCapturing = q->m_capturing.exchange(false);
+    q->m_peakLevel.store(0.0f);
+    if (wasCapturing)
+      emit q->captureStopped();
+    // Ordinary stream disappearance is not a wrong-app/security failure.
+    // The owner still sees inactive capture and retries/falls back if recording
+    // continues, or finalizes normally when the pinned game exits.
+  }
 
-  static void onCoreError(void *userdata, uint32_t id, int /*seq*/, int res,
+  static void onCoreError(void *userdata, uint32_t id, int seq, int res,
                           const char *message) {
     // Object-local errors need not kill an otherwise usable capture core.
     if (id != PW_ID_CORE || res >= 0)
       return;
-    static_cast<Private *>(userdata)->fail(
-        QString::fromUtf8(message ? message : "PipeWire core error"));
+    auto *self = static_cast<Private *>(userdata);
+    if (self->stopping.load(std::memory_order_acquire) ||
+        self->failed.load(std::memory_order_acquire))
+      return; // One terminal cause per source; queued teardown errors add none.
+    if (self->appGroup && self->appGroup->handlesCleanupError(id, seq, res)) {
+      qDebug() << "Application audio: retired link destroy already settled"
+               << "seq" << seq;
+      return;
+    }
+    qWarning() << "PipeWire capture core error:" << "id" << id << "seq" << seq
+               << "result" << res << (message ? message : "unknown error");
+    self->fail(QString::fromUtf8(message ? message : "PipeWire core error"));
   }
 
   static void onStateChanged(void *userdata, enum pw_stream_state /*old*/,
@@ -123,8 +158,15 @@ struct PipeWireAudioSource::Private {
     auto *self = static_cast<Private *>(userdata);
     qDebug() << "PipeWire stream state:" << pw_stream_state_as_string(state)
              << "[" << self->q->m_displayName << "]";
+    if (self->stopping.load(std::memory_order_acquire) ||
+        self->failed.load(std::memory_order_acquire))
+      return;
 
     if (state == PW_STREAM_STATE_ERROR) {
+      if (self->appGroup && self->appGroup->targetGone()) {
+        self->targetDisappeared();
+        return;
+      }
       qWarning() << "PipeWire stream error:" << (error ? error : "unknown");
       self->fail(QString::fromUtf8(error ? error : "PipeWire error"));
     }
@@ -1316,6 +1358,7 @@ bool PipeWireAudioSource::initialize(const AudioConfig &config) {
   };
   m_config = config;
   d->failed.store(false, std::memory_order_release);
+  d->stopping.store(false, std::memory_order_release);
   d->channels.store(config.channels, std::memory_order_relaxed);
   d->sampleRate.store(config.sampleRate, std::memory_order_relaxed);
 
@@ -1566,6 +1609,7 @@ void PipeWireAudioSource::stop() {
 }
 
 bool PipeWireAudioSource::stopLocked() {
+  d->stopping.store(true, std::memory_order_release);
   const bool wasCapturing = m_capturing.exchange(false);
   if (!d->loop)
     return wasCapturing;
@@ -1576,6 +1620,8 @@ bool PipeWireAudioSource::stopLocked() {
       d->loopLocked = true;
     }
 
+    if (d->appGroup)
+      d->appGroup->quiesce();
     d->appGroup.reset();
     if (d->stream) {
       m_operations.destroyStream(d->stream);

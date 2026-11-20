@@ -23,6 +23,7 @@
 #include <QTest>
 #include <QSignalSpy>
 #include <QPointer>
+#include <QJSValue>
 #include <gtest/gtest.h>
 #include <functional>
 #include <memory>
@@ -70,7 +71,8 @@ protected:
     QSize size;
     const auto image = provider.requestImage(id(key, appId), &size, {40, 40});
     EXPECT_EQ(size, image.size());
-    return image;
+    // The provider's transparent miss sentinel preserves UI fallback state.
+    return image.size() == QSize(1, 1) ? QImage() : image;
   }
   QString cacheFile() const { return root() + "/cache/game-icons.json"; }
   void expireSources() {
@@ -105,6 +107,67 @@ TEST_F(GameIconTest, LegacySteamCacheAndCorruptThemeFallback) {
   icon("steam/appcache/librarycache/42_icon.jpg");
   GameIconProvider provider({root()}, {}, "", {root() + "/steam"});
   EXPECT_FALSE(load(provider, "steam_app_42", 42).isNull());
+}
+
+TEST_F(GameIconTest, HashedPerAppSteamIconIsFoundAndCached) {
+  const QString artwork = "steam/appcache/librarycache/1659040/" +
+      QString(40, 'a') + ".jpg";
+  icon(artwork, Qt::cyan);
+  {
+    GameIconProvider provider({root()}, {}, "", {root() + "/steam"}, cacheFile());
+    const auto image = load(provider, "steam_app_1659040", 1659040);
+    ASSERT_FALSE(image.isNull());
+    EXPECT_GT(image.pixelColor(20, 20).green(), 240);
+    EXPECT_GT(image.pixelColor(20, 20).blue(), 240);
+  }
+  QFile cache(cacheFile());
+  ASSERT_TRUE(cache.open(QIODevice::ReadOnly));
+  const auto entries = QJsonDocument::fromJson(cache.readAll()).object()["entries"].toObject();
+  EXPECT_EQ(entries.value(id("steam_app_1659040", 1659040)).toObject()["path"].toString(),
+            root() + "/" + artwork);
+  GameIconProvider reopened({root()}, {}, "", {root() + "/steam"}, cacheFile());
+  EXPECT_FALSE(load(reopened, "steam_app_1659040", 1659040).isNull());
+}
+
+TEST_F(GameIconTest, ModernSteamLookupDoesNotUseCapsulesOrOtherAppArtwork) {
+  icon("steam/appcache/librarycache/43/" + QString(40, 'a') + ".png");
+  icon("steam/appcache/librarycache/42/" + QString(40, 'b') + "/icon.png");
+  write("steam/appcache/librarycache/42/" + QString(40, 'c') + ".jpg", "corrupt");
+  QImage banner(256, 128, QImage::Format_RGB32);
+  banner.fill(Qt::red);
+  ASSERT_TRUE(banner.save(root() + "/steam/appcache/librarycache/42/" + QString(40, 'd') + ".png"));
+  GameIconProvider provider({root()}, {}, "", {root() + "/steam"});
+  EXPECT_TRUE(load(provider, "steam_app_42", 42).isNull());
+}
+
+TEST_F(GameIconTest, OldPolicyCachedSteamMissDoesNotHideModernIcon) {
+  icon("steam/appcache/librarycache/42/" + QString(40, 'a') + ".png");
+  QJsonArray context{2, "", QJsonArray{root()},
+                     QJsonArray{root() + "/icons", root() + "/pixmaps"},
+                     QJsonArray{root() + "/steam"}};
+  for (const auto &app : defaultAppCatalog())
+    context.append(QJsonArray{app.key, app.artwork,
+                             QJsonArray::fromStringList(app.aliases),
+                             QJsonArray::fromStringList(app.icons)});
+  const auto fingerprint = QString::fromLatin1(QCryptographicHash::hash(
+      QJsonDocument(context).toJson(QJsonDocument::Compact),
+      QCryptographicHash::Sha256).toHex());
+  write("cache/game-icons.json", QJsonDocument(QJsonObject{
+      {"fingerprint", fingerprint},
+      {"entries", QJsonObject{{id("steam_app_42", 42), QJsonObject{
+          {"path", ""}, {"discovered", QString::number(QDateTime::currentMSecsSinceEpoch())}}}}}
+  }).toJson());
+  GameIconProvider provider({root()}, {}, "", {root() + "/steam"}, cacheFile());
+  EXPECT_FALSE(load(provider, "steam_app_42", 42).isNull());
+}
+
+TEST_F(GameIconTest, MissingValidIconReturnsTransparentSentinel) {
+  GameIconProvider provider({root()}, {}, "", {});
+  QSize size;
+  const auto image = provider.requestImage(id("steam_app_42", 42), &size, {40, 40});
+  ASSERT_FALSE(image.isNull());
+  EXPECT_EQ(size, QSize(1, 1));
+  EXPECT_EQ(image.pixelColor(0, 0).alpha(), 0);
 }
 
 TEST_F(GameIconTest, DesktopIdAndWindowClassUseLocalTheme) {
@@ -387,6 +450,24 @@ TEST_F(GameIconTest, QmlImageLoadsThroughRegisteredProvider) {
   EXPECT_EQ(object->property("sourceSize").toSize(), QSize(40, 40));
 }
 
+TEST_F(GameIconTest, RecordingMissingArtworkIsQuietAndKeepsFallbackVisible) {
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  QSignalSpy warnings(&engine, &QQmlEngine::warnings);
+  const auto path = QFileInfo(QString::fromUtf8(GAMES_QML_FILE)).dir()
+      .absoluteFilePath("../views/RecordingGameIcon.qml");
+  QQmlComponent component(&engine, QUrl::fromLocalFile(path));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  object->setProperty("width", 40);
+  object->setProperty("height", 40);
+  object->setProperty("source", QUrl("image://gameicon/" + id("steam_app_42", 42)));
+  ASSERT_TRUE(waitUntil([&] { return object->property("status").toInt() == 1; }));
+  EXPECT_FALSE(object->property("hasArtwork").toBool());
+  EXPECT_FALSE(object->property("visible").toBool());
+  EXPECT_TRUE(warnings.isEmpty());
+}
+
 TEST_F(GameIconTest, WindowIconSourcesNormalizeAndEncodeWithoutChangingIdentity) {
   EXPECT_EQ(gameIconSource("  FIREFOX.EXE  "), gameIconSource("firefox"));
   EXPECT_EQ(gameIconSource("steam_app_42"), gameIconSource("steam_app_42", 42));
@@ -420,10 +501,12 @@ TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
   QTest::qWait(100);
   const QVariantList processes{
       QVariantMap{{"title", "Firefox process"},
+                   {"likelyApplication", true},
                   {"path", "/usr/bin/firefox"},
                   {"pid", 10},
                   {"iconSource", gameIconSource("firefox")}},
       QVariantMap{{"title", "Missing program"},
+                   {"likelyApplication", true},
                   {"path", "/games/missing-app"},
                   {"pid", 20},
                   {"iconSource", gameIconSource("missing-app")}}};
@@ -442,7 +525,7 @@ TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
     letters.clear();
     collect(content);
     if (images.size() == 2 && images[0]->property("status").toInt() == 1 &&
-        images[1]->property("status").toInt() == 3)
+        images[1]->property("status").toInt() == 1)
       break;
   }
   ASSERT_EQ(images.size(), 2);
@@ -452,6 +535,98 @@ TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
   EXPECT_FALSE(images[1]->isVisible());
   EXPECT_TRUE(letters[1]->isVisible());
   EXPECT_EQ(letters[1]->property("text").toString(), "M");
+}
+
+TEST_F(GameIconTest, AddGameDefaultsToApplicationsAndAllModeRetainsUnknownProcesses) {
+  GameListModel model;
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  QQmlComponent fake(&engine);
+  fake.setData(R"(import QtQml
+QtObject {
+  property var gamesModel
+  property string gameFilterText: ""
+  property bool showDefaultExclusions: false
+  property var processes: []
+  property var lastAdded: []
+  property int refreshes: 0
+  function runningProcesses() { refreshes++; return processes }
+  function addProcessGame(pid, identity, display, block) {
+    lastAdded = [pid, identity, display, block]; return true
+  }
+})", QUrl());
+  const QVariantMap app{{"pid", 10}, {"identity", "10:100"}, {"title", "Game"},
+                        {"path", "/games/game"}, {"likelyApplication", true}};
+  const QVariantMap unknown{{"pid", 99}, {"identity", "99:200"}, {"title", "Unknown native"},
+                            {"path", "/games/unlisted"}, {"likelyApplication", false}};
+  const QVariantMap service{{"pid", 12}, {"identity", "12:300"}, {"title", "rclone"},
+                            {"path", "/usr/bin/rclone"}, {"likelyApplication", false}};
+  std::unique_ptr<QObject> detector(fake.createWithInitialProperties({
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))},
+      {"processes", QVariantList{app, service, unknown}}}));
+  ASSERT_NE(detector, nullptr) << fake.errorString().toStdString();
+  engine.rootContext()->setContextProperty("gameDetector", detector.get());
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  page->setParentItem(window.contentItem());
+  window.resize(1113, 700);
+  page->setSize({1113, 700});
+  window.show();
+  auto *dialog = object->findChild<QObject *>("addGameDialog");
+  ASSERT_NE(dialog, nullptr);
+  const auto list = [](const QVariant &value) {
+    return value.metaType() == QMetaType::fromType<QJSValue>()
+        ? value.value<QJSValue>().toVariant().toList() : value.toList();
+  };
+  const auto shown = [&] { return list(dialog->property("shownProcesses")); };
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  ASSERT_TRUE(waitUntil([&] { return dialog->property("opened").toBool(); }));
+  EXPECT_FALSE(dialog->property("showAllProcesses").toBool());
+  ASSERT_EQ(shown().size(), 1);
+  EXPECT_EQ(shown()[0].toMap()["pid"].toInt(), 10);
+  auto *toggle = object->findChild<QObject *>("showAllProcessesSwitch");
+  ASSERT_NE(toggle, nullptr);
+  toggle->setProperty("checked", true);
+  ASSERT_TRUE(QMetaObject::invokeMethod(toggle, "toggled"));
+  EXPECT_TRUE(dialog->property("showAllProcesses").toBool());
+  EXPECT_EQ(shown().size(), 3);
+  dialog->setProperty("searchQuery", "99");
+  ASSERT_EQ(shown().size(), 1);
+  EXPECT_EQ(shown()[0].toMap()["identity"].toString(), "99:200");
+  dialog->setProperty("pickedProcess", shown()[0]);
+  dialog->setProperty("showAllProcesses", false);
+  EXPECT_TRUE(shown().isEmpty());
+  EXPECT_TRUE(dialog->property("pickedProcess").isNull());
+  dialog->setProperty("searchQuery", "/games/game");
+  ASSERT_EQ(shown().size(), 1);
+  dialog->setProperty("pickedProcess", shown()[0]);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "addPicked"));
+  const auto added = list(detector->property("lastAdded"));
+  ASSERT_EQ(added.size(), 4);
+  EXPECT_EQ(added[0].toInt(), 10);
+  EXPECT_EQ(added[1].toString(), "10:100");
+  EXPECT_FALSE(added[3].toBool()); // Watch retains its existing routing.
+  ASSERT_TRUE(waitUntil([&] { return !dialog->property("visible").toBool(); }));
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
+  ASSERT_TRUE(waitUntil([&] { return dialog->property("opened").toBool(); }));
+  EXPECT_FALSE(dialog->property("showAllProcesses").toBool());
+  dialog->setProperty("showAllProcesses", true);
+  dialog->setProperty("searchQuery", "unlisted");
+  ASSERT_EQ(shown().size(), 1);
+  dialog->setProperty("pickedProcess", shown()[0]);
+  auto *block = object->findChild<QObject *>("blockProcessRadio");
+  ASSERT_NE(block, nullptr);
+  block->setProperty("checked", true);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "addPicked"));
+  const auto blocked = list(detector->property("lastAdded"));
+  EXPECT_EQ(blocked[0].toInt(), 99);
+  EXPECT_EQ(blocked[1].toString(), "99:200");
+  EXPECT_TRUE(blocked[3].toBool());
+  EXPECT_GE(detector->property("refreshes").toInt(), 2);
 }
 
 TEST_F(GameIconTest, RealGamesPageShowsIconAndKeepsMissingLetterTile) {
@@ -505,7 +680,7 @@ TEST_F(GameIconTest, RealGamesPageShowsIconAndKeepsMissingLetterTile) {
     subtitles.clear();
     collect(page);
     if (images.size() == 4 && images[0]->property("status").toInt() == 1 &&
-        images[1]->property("status").toInt() == 3 &&
+        images[1]->property("status").toInt() == 1 &&
         images[2]->property("status").toInt() == 1 &&
         images[3]->property("status").toInt() == 1)
       break;
@@ -515,7 +690,7 @@ TEST_F(GameIconTest, RealGamesPageShowsIconAndKeepsMissingLetterTile) {
   EXPECT_EQ(images[0]->property("status").toInt(), 1);
   EXPECT_TRUE(images[0]->isVisible());
   EXPECT_FALSE(letters[0]->isVisible());
-  EXPECT_EQ(images[1]->property("status").toInt(), 3); // Image.Error
+  EXPECT_EQ(images[1]->property("status").toInt(), 1); // Ready, but no artwork.
   EXPECT_FALSE(images[1]->isVisible());
   EXPECT_TRUE(letters[1]->isVisible());
   EXPECT_EQ(letters[1]->property("text").toString(), "M");
@@ -569,9 +744,9 @@ TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
   };
   const QVariantList processes{
       QVariantMap{
-          {"title", "First process"}, {"path", "/games/first"}, {"pid", 10}},
+          {"title", "First process"}, {"path", "/games/first"}, {"pid", 10}, {"likelyApplication", true}},
       QVariantMap{
-          {"title", "Second process"}, {"path", "/games/second"}, {"pid", 20}}};
+          {"title", "Second process"}, {"path", "/games/second"}, {"pid", 20}, {"likelyApplication", true}}};
   for (const QSize &size : {QSize(1113, 700), QSize(800, 650), QSize(1280, 800)}) {
     window.resize(size);
     page->setSize(size);

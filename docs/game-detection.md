@@ -2,7 +2,7 @@
 
 ## Architecture
 
-The implementation on `main` used Vulkan/OpenGL injected reporters and a
+Before the process-based rewrite, Trophy used Vulkan/OpenGL injected reporters and a
 fixed local socket, fused with KWin scripts, GNOME extensions and
 Hyprland/Sway window snapshots. Audio used PID queries, substring name
 hints and automatic desktop-monitor fallback. It could miss games already
@@ -51,6 +51,8 @@ At one census per second this is about 1.4% of **one CPU core**, not 1.4% of the
 whole machine; metadata contributes about 0.013% of one core averaged over
 30 seconds. These numbers exclude PipeWire/audio/video work and are not a
 worst-case or battery-life guarantee. Reproduce with `detection_probe --benchmark`.
+They predate the desktop-launcher hint index used by the filtered Add Game
+picker; that additional periodic worker cost has not yet been benchmarked.
 
 Detection generally takes one to two ticks. Very short processes can exist
 entirely between samples and are intentionally not guaranteed observable.
@@ -73,7 +75,13 @@ identity keys, not the identity of a particular running instance.
 
 Native Linux payloads are ordinary executable paths. Wine loader argv is
 interpreted only at the payload position, not by searching arbitrary
-arguments for `.exe`. CWD-relative paths and Wine Z:/C: paths are resolved.
+arguments for `.exe`. CWD-relative paths and Wine drive paths are resolved.
+The census worker resolves the relevant `<WINEPREFIX>/dosdevices/<letter>:`
+symlink, including custom Steam library drives such as S: and relative targets.
+This mapping is stored in the process snapshot; identification and picker
+rendering do not perform filesystem lookups. Explicit mappings override C:/Z:
+defaults. Broken mappings and unknown/drive-relative paths are rejected rather
+than inferred from CWD or an inherited Steam App ID.
 Wine services/installers/crash handlers and generic launchers are excluded.
 Unknown non-Steam games need exact user definitions; a generic executable
 named `Game.exe` is not automatically a game.
@@ -137,17 +145,68 @@ remains independent. Session audio checks run every three seconds and retry
 game capture, replacing the monitor when owned audio becomes available.
 Diagnostics expose `desktopFallback`, Voice inclusion and System audio history.
 Fallback does not assign unrelated desktop streams to a game.
+
+PipeWire registry observers retire node/client proxies on global removal and
+free them locally after the proxy's server-removal notification. This avoids
+destroying already-removed resources during short-lived lookup-client churn.
+For owned sibling links, an `ENOENT` core error is nonfatal only when its
+request sequence matches a destroy issued by this capture, and only until the
+following sync fence completes. Untracked errors, disconnects, permission
+failures and rejected routes retain their failure/fallback behavior.
+Capture failures log the source and reason; core failures include ID, sequence
+and result. Error text alone never authorizes ignoring a failure.
+An observed audio-target removal retires that capture quietly rather than
+calling it a wrong-app route. It still stops PCM and reports capture stopped;
+the owner falls back/retries if recording continues, or finalizes when the
+game exits. Terminal captures quiesce registry observers immediately. Explicit
+stop and an already-reported terminal cause do not produce additional warnings
+from queued native teardown events.
+
 Manual application capture can pin an explicitly selected portal process
 by PID/start identity without classifying it as a game; absent metadata
 is not repaired by borrowing the current game.
 Desktop-only audio remains an explicit recording setting. Existing audio mixer,
 encoding, muxing, clip/DVR and portal lifecycles are retained.
 
+### Captured-window handoff
+
+When a captured window disappears while its exact pinned game instance remains
+alive, full recording saves the completed part and retries the existing portal
+approval after 1.5 seconds. A PID change is not required. The saved part remains
+in the library; continuation uses a new output file, not DVR. Recovery has no
+attempt-count or elapsed-time cutoff while that exact game instance is alive.
+Each attempt is delayed by 1.5 seconds after teardown; requests never overlap.
+A successful portal grant with an empty stream list is also retryable for an
+approved automatic game capture, allowing the main window to appear later.
+Explicit stop, game exit, a different selected
+instance, removed approval, blocked capture, and output/finalization failure
+cancel recovery.
+
+PipeWire registry removal alone is ambiguous. An asynchronous ordinary
+connection checks the daemon cookie and original node serial. If the original
+node still exists, the independent connection lacks readable default/target
+permissions, or the check is inconclusive, capture stops rather than
+attempting restoration. An external portal session closure or service failure
+also stops recovery. No new Trophy continuation dialog is added, and no
+permission is bypassed: the portal backend still controls whether a saved
+approval can restore the replacement window without a picker.
+Generic portal rejection, user cancellation, request timeout and service
+failures remain terminal rather than being assumed to mean "window not ready."
+
 All Trophy-specific compositor integrations have been removed: KWin scripts,
 GNOME Shell extensions, Hyprland/Sway IPC, window enumeration and helper setup.
 Add Game lists cached process payloads/paths/PIDs and revalidates PID/start and
 payload before saving an exact executable/Wine-prefix rule. No window class is
-used. Manual recording uses the standard ScreenCast portal; detected-game
+used. The picker defaults to **Likely applications** (known game primaries,
+Windows payloads and exact cached desktop-launcher executable matches).
+**Show all processes** exposes the remaining selectable rows, including
+unknown native games. Filtering is presentation only: it does not detect
+additional games, prove window visibility, change stored rules or authorize
+capture. Desktop launcher metadata refreshes on the census worker with the
+local Steam catalogue; no filesystem enumeration is done when the picker
+opens. Hidden/non-displayed/terminal launchers are not application hints, and
+higher-priority XDG desktop entries mask lower-priority ones.
+Manual recording uses the standard ScreenCast portal; detected-game
 recording retains its pinned instance. Manual titles/live title updates are not
 available unless the portal supplies a usable label. Without a portal PID,
 manual capture falls back to desktop audio rather than guessing application

@@ -842,8 +842,7 @@ ApplicationWindow {
         confirmText: qsTr("OK")
         cancelText: ""
         onClosed: {
-            if (!trackingRepairDialog.visible)
-                notificationService.clearAttention();
+            notificationService.clearAttention();
         }
     }
 

@@ -414,6 +414,8 @@ public slots:
       const uint response = mode == "cancel-start" ? 1 :
           (mode == "deny-start" && !tokens.last().isEmpty() ? 2 : 0);
       auto results = streams();
+      if (mode == "empty-start")
+        results["streams"] = QVariant::fromValue(QList<FixtureStream>{});
       if (mode == "grant-new-token") results["restore_token"] = "fixture-new-token";
       QTimer::singleShot(0, this, [this, path, results, response] { respond(path, results, response); });
     }
@@ -1023,6 +1025,125 @@ protected:
     checkMedia(path, {videoChanges, audioChanges});
   }
 
+  void nativeWindowHandoff() {
+    const auto [separate, boundary] = GetParam();
+    SettingsManager settings;
+    AudioMixer mixer(48000, 2);
+    StorageManager storage(root.path());
+    RecordingManager recorder;
+    configure(settings, recorder, mixer, storage, separate);
+    recorder.m_recoveryDelayMs = 250;
+    recorder.m_captureEndGraceMs = 100;
+    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    int fullRecordingHandoffs = 0;
+    QObject::connect(&recorder, &RecordingManager::recordingFinished, &recorder, [&] {
+      if (recorder.isRecoveringCapture()) ++fullRecordingHandoffs;
+    });
+    recorder.startRecording("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    awaitAudibleRecording(recorder, mixer);
+    const auto partial = recorder.currentFilePath();
+    if (boundary == 2) {
+      auto *capture = qobject_cast<WaylandPortalCapture *>(recorder.m_captureSource.get());
+      ASSERT_NE(capture, nullptr);
+      ASSERT_GE(TrophyBackend::WaylandPortalCaptureTest::revokeNodeRead(*capture, media->node()), 0);
+      ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
+      EXPECT_FALSE(recorder.isRecoveringCapture());
+      EXPECT_EQ(errors.size(), 1);
+      QTest::qWait(400);
+      EXPECT_EQ(started.size(), 1);
+      checkMedia(partial);
+      return;
+    }
+    auto replacement = std::make_unique<SyntheticMedia>();
+    ASSERT_TRUE(replacement->start());
+    ASSERT_EQ(control("Configure", {replacement->node(), QString()}).type(), QDBusMessage::ReplyMessage);
+    media->closeVideo(); // Same game PID/instance; only the captured window dies.
+    ASSERT_TRUE(waitFor([&] {
+      return recorder.state() == RecordingManager::RecordingState::Idle &&
+             recorder.isRecoveringCapture();
+    }));
+    EXPECT_EQ(saved.size(), 1);
+    EXPECT_EQ(fullRecordingHandoffs, 1);
+    EXPECT_EQ(errors.size(), 0);
+    if (boundary == 1) {
+      recorder.stopRecording();
+      QTest::qWait(400);
+      EXPECT_EQ(started.size(), 1);
+      EXPECT_FALSE(recorder.isRecoveringCapture());
+      checkMedia(partial);
+      return;
+    }
+    checkMedia(partial);
+    ASSERT_TRUE(waitFor([&] {
+      return started.size() == 2 && recorder.m_session &&
+             recorder.m_session->frameCount() >= 15;
+    }));
+    const auto continued = recorder.currentFilePath();
+    EXPECT_NE(continued, partial);
+    recorder.stopRecording();
+    ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
+    EXPECT_EQ(saved.size(), 2);
+    EXPECT_EQ(errors.size(), 0);
+    checkMedia(continued);
+  }
+
+  void nativeLongWindowGap() {
+    const auto [separate, boundary] = GetParam();
+    SettingsManager settings;
+    AudioMixer mixer(48000, 2);
+    StorageManager storage(root.path());
+    RecordingManager recorder;
+    configure(settings, recorder, mixer, storage, separate);
+    recorder.m_recoveryDelayMs = 50;
+    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
+    recorder.startRecording("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    awaitAudibleRecording(recorder, mixer);
+    const auto partial = recorder.currentFilePath();
+    ASSERT_EQ(control("Configure", {media->node(), "empty-start"}).type(), QDBusMessage::ReplyMessage);
+    media->closeVideo();
+    ASSERT_TRUE(waitFor([&] {
+      return qdbus_cast<QStringList>(control("Tokens").arguments().value(0)).size() >= 7;
+    }));
+    EXPECT_EQ(saved.size(), 1);
+    EXPECT_EQ(started.size(), 1);
+    EXPECT_EQ(errors.size(), 0);
+    EXPECT_EQ(authorization.size(), 0);
+    ASSERT_TRUE(waitFor([&] { return recorder.isRecoveringCapture(); }));
+    if (boundary == 1) {
+      recorder.stopRecording();
+      ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
+    } else if (boundary == 2) {
+      ASSERT_EQ(control("Configure", {0u, "deny-start"}).type(), QDBusMessage::ReplyMessage);
+      ASSERT_TRUE(waitFor([&] { return authorization.size() == 1; }));
+    } else {
+      auto replacement = std::make_unique<SyntheticMedia>();
+      ASSERT_TRUE(replacement->start());
+      ASSERT_EQ(control("Configure", {replacement->node(), QString()}).type(), QDBusMessage::ReplyMessage);
+      ASSERT_TRUE(waitFor([&] {
+        return started.size() == 2 && recorder.m_session && recorder.m_session->frameCount() >= 15;
+      }));
+      const auto continued = recorder.currentFilePath();
+      recorder.stopRecording();
+      ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
+      EXPECT_EQ(saved.size(), 2);
+      checkMedia(continued);
+    }
+    EXPECT_FALSE(recorder.isRecoveringCapture());
+    const auto tokens = qdbus_cast<QStringList>(control("Tokens").arguments().value(0));
+    for (const auto &token : tokens) EXPECT_EQ(token, "fixture-saved-token");
+    QTest::qWait(150);
+    EXPECT_EQ(qdbus_cast<QStringList>(control("Tokens").arguments().value(0)), tokens);
+    EXPECT_EQ(errors.size(), 0);
+    checkMedia(partial);
+  }
+
   void permissionRevocation() {
     const auto [separate, boundary] = GetParam();
     SettingsManager settings;
@@ -1384,6 +1505,8 @@ TEST_P(RecordingManagerTest, StartupServiceLossRejectsLateReplyAndFreshRecording
 TEST_P(RecordingManagerTest, DvrHandoffServiceLossCleansCacheAndFreshClipWorks) { dvrFailure(); }
 TEST_P(RecordingManagerTest, NativeFormatChangesPreserveCanvasAndDecodedAudio) { nativeFormatChanges(); }
 TEST_P(RecordingManagerTest, PermissionRevocationStopsAndRequiresExplicitRetry) { permissionRevocation(); }
+TEST_P(RecordingManagerTest, NativeSameProcessWindowHandoffPreservesRecordingIntent) { nativeWindowHandoff(); }
+TEST_P(RecordingManagerTest, NativeLongWindowGapRetriesUntilReadyOrStopped) { nativeLongWindowGap(); }
 TEST_P(RecordingManagerTest, NativeGameExitSavesButLiveGameRevocationFails) { nativeGameExit(); }
 TEST_P(RecordingManagerTest, TransientDeliveryStallResumesWithoutRetiringCapture) { transientDeliveryStall(); }
 TEST_P(RecordingManagerTest, RenegotiatedStalledCaptureSettlesStopFailureAndDestruction) { formatStallTeardown(); }

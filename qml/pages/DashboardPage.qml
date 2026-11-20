@@ -1083,7 +1083,8 @@ Page {
                             Rectangle {
                                 width: 10; height: 10; radius: 5
                                 Layout.alignment: Qt.AlignVCenter
-                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? Theme.successColor : Theme.warningColor) : Theme.textMutedColor)
+                                objectName: "captureStatusIndicator"
+                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.isGameRunning) ? Theme.successColor : Theme.textMutedColor)
                                 SequentialAnimation on opacity {
                                     running: (recordingManager && recordingManager.isRecording)
                                     loops: Animation.Infinite
@@ -1092,10 +1093,11 @@ Page {
                                 }
                             }
                             Label {
+                                objectName: "captureStatusLabel"
                                 text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
                                       : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
                                       : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
-                                      : ((gameDetector && gameDetector.currentGameName) ? ((gameDetector.hasVisibleWindow()) ? qsTr("READY") : qsTr("WAITING FOR GAME")) : qsTr("IDLE"))
+                                      : ((gameDetector && gameDetector.isGameRunning) ? qsTr("READY") : qsTr("IDLE"))
                                 font.pixelSize: 10; font.weight: Font.Black
                                 color: (recordingManager && recordingManager.isRecording) ? "white" : Theme.textSecondaryColor
                             }
@@ -1130,19 +1132,22 @@ Page {
                     Button {
                         id: recordBtn
                         objectName: "recordButton"
-                        enabled: (recordingManager && recordingManager.isRecording)
+                        readonly property bool canStop: !!recordingManager
+                            && (recordingManager.isRecording
+                                || (app && app.recordingPhase === "initializing"))
+                        enabled: canStop
                                  || (app && app.canStartRecording)
                         Layout.preferredWidth: 44; Layout.preferredHeight: 44
                         Layout.alignment: Qt.AlignVCenter
-                        icon.source: (recordingManager && recordingManager.isRecording) ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
+                        icon.source: canStop ? "qrc:/icons/stop.svg" : "qrc:/icons/record.svg"
                         icon.width: 24; icon.height: 24
-                        icon.color: (recordingManager && recordingManager.isRecording) ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
+                        icon.color: canStop ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
                         flat: true
-                        onClicked: (recordingManager && recordingManager.isRecording) ? recordingManager.stopRecording() : window.openWindowPicker()
+                        onClicked: canStop ? recordingManager.stopRecording() : window.openWindowPicker()
                         background: Rectangle {
                             radius: 22
-                            color: recordBtn.hovered ? ((recordingManager && recordingManager.isRecording) ? "#40FFFFFF" : Theme.primaryColor) : ((recordingManager && recordingManager.isRecording) ? "#20FFFFFF" : "transparent")
-                            border.color: ((recordingManager && recordingManager.isRecording) ? "white" : Theme.primaryColor)
+                            color: recordBtn.hovered ? (recordBtn.canStop ? "#40FFFFFF" : Theme.primaryColor) : (recordBtn.canStop ? "#20FFFFFF" : "transparent")
+                            border.color: (recordBtn.canStop ? "white" : Theme.primaryColor)
                             border.width: 2
                         }
                     }

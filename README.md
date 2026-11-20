@@ -66,7 +66,7 @@ Recordings use MKV for crash-resilient recording; share exports create separate 
 
 CI also produces `.tar.xz`, `.deb` (amd64), and `.rpm` (x86_64) packages. Check the release assets for available downloads and see the [installation guide](https://gettrophy.app/docs/getting-started.html) and [packaging notes](https://gettrophy.app/docs/development.html#packaging-and-diagnostics) for details.
 
-Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and the desktop integration Trophy needs for game detection. Game capture requires your authorization through the system portal.
+Replace `<version>` with the downloaded version. The setup wizard walks you through storage, audio, and shortcuts. Game detection needs no compositor helper or injected graphics layer; capture requires your authorization through the system portal.
 
 The full documentation is on the website at **[gettrophy.app/docs](https://gettrophy.app/docs/)**: [Getting started](https://gettrophy.app/docs/getting-started.html) · [User guide](https://gettrophy.app/docs/user-guide.html) · [Build from source](https://gettrophy.app/docs/development.html)
 

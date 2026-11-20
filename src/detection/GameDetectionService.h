@@ -91,16 +91,18 @@ private:
   friend class ::RecordingManagerTest;
   void poll();
   void apply(const ProcessCensus::Snapshot &snapshot);
-  void updateCurrentGame(const QString &name, qint64 pid,
-                         const QString &key = {});
+  // Values must outlive synchronous slots that rebuild the instance list.
+  void updateCurrentGame(QString name, qint64 pid, QString key = {});
   void rebuildModels();
   void rulesChanged();
+  static QSet<QString> desktopApplicationExecutables(const QStringList &dataRoots);
   QString getSteamAppName(uint id) const;
   bool m_running = false;
   QTimer m_timer;
   struct ScanResult {
     ProcessCensus::Snapshot processes;
     QList<SteamGame> catalogue;
+    QSet<QString> applicationExecutables;
     bool catalogueUpdated = false;
   };
   std::future<ScanResult> m_scan;
@@ -109,6 +111,7 @@ private:
   QVariantList m_audioStreams;
   ProcessCensus::Snapshot m_processes;
   QList<SteamGame> m_steam;
+  QSet<QString> m_applicationExecutables;
   QList<GameInstance> m_instances;
   QString m_selectedId;
   QString m_currentGameName, m_currentGameKey;

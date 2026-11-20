@@ -537,6 +537,82 @@ TEST(AppAudioGroupTest, ManualProcessCaptureNeedsNoGameRegistration) {
   capture->stop();
 }
 
+TEST(AppAudioGroupTest, ClientNodeAndSiblingLinkChurnKeepsGameCaptureAlive) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-churn-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  ProcessGames::publish({});
+  const auto pid = QCoreApplication::applicationPid();
+  const auto owner = ProcessGames::pinProcess(pid);
+  const auto binary =
+      QFileInfo(QCoreApplication::applicationFilePath()).fileName().toUtf8();
+  PlaybackClient game;
+  game.add(0.15f, "churn-game", binary.constData());
+  QString nameHint, serial;
+  uint32_t node = PW_ID_ANY;
+  ASSERT_TRUE(waitFor([&] {
+    node = PipeWireAudioSource::findNodeForGame(
+        pid, {"trophy-instance:" + owner}, &nameHint, &serial);
+    return node != PW_ID_ANY;
+  }));
+  auto capture = PipeWireAudioSource::createApplicationSource(
+      node, nameHint, serial, {}, owner);
+  std::atomic<float> latest{-1};
+  std::atomic<quint64> frames{0};
+  std::atomic<int> errors{0};
+  std::atomic<bool> leakedUnrelated{false};
+  QObject::connect(
+      capture.get(), &IAudioSource::captureError, &application,
+      [&](const QString &error) {
+        ++errors;
+        qWarning() << "Capture failed during graph churn:" << error;
+      },
+      Qt::DirectConnection);
+  capture->setCallback([&](const AudioFrame &frame) {
+    latest = frame.samples[0];
+    frames += frame.frameCount;
+    if (frame.samples[0] > 0.4f)
+      leakedUnrelated = true;
+  });
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(
+      waitFor([&] { return std::abs(latest.load() - 0.15f) < 0.001f; }));
+  for (int i = 0; i < 20; ++i) {
+    // Census/node lookups create very short-lived clients, often gone before
+    // the observer's registry-bind request reaches the server.
+    for (int query = 0; query < 4; ++query) {
+      PipeWireAudioSource::enumerateAudioApps();
+      PlaybackClient shortLived;
+    }
+    auto other = std::make_unique<PlaybackClient>("org.trophy.ChurnFixture");
+    auto *stream = other->add(0.7f, "unrelated-churn", "other-binary");
+    QTest::qWait(30); // Let the observer bind the unrelated node/client.
+    other->remove(stream);
+    other.reset();
+    ASSERT_EQ(errors.load(), 0);
+    ASSERT_TRUE(capture->isCapturing());
+    if (i % 4 == 0) {
+      auto *sibling = game.add(0.1f, "churn-game", binary.constData());
+      ASSERT_TRUE(
+          waitFor([&] { return std::abs(latest.load() - 0.25f) < 0.001f; }));
+      game.remove(sibling);
+    }
+    const auto before = frames.load();
+    ASSERT_TRUE(waitFor([&] {
+      return frames.load() >= before + 1024 &&
+             std::abs(latest.load() - 0.15f) < 0.001f;
+    }));
+    ASSERT_TRUE(capture->isCapturing());
+    ASSERT_EQ(errors.load(), 0);
+  }
+  EXPECT_FALSE(leakedUnrelated.load());
+  capture->stop();
+}
+
 TEST(AppAudioGroupTest, VoiceUsesExactBinaryAndNeverGroupsUnrelatedChromium) {
   if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
     GTEST_SKIP() << "Requires the private PipeWire launcher";
@@ -668,7 +744,13 @@ TEST(AppAudioGroupTest, RemovedPrimaryCannotAdoptReplacementWithoutFreshIdentity
   const auto id = PipeWireAudioSource::findNodeByBinary("replacement-fixture", &nodeName, &serial);
   ASSERT_NE(id, PW_ID_ANY);
   auto capture = PipeWireAudioSource::createApplicationSource(id, nodeName, serial, "replacement-fixture");
-  std::atomic<int> callbacks{0};
+  std::atomic<int> callbacks{0}, errors{0}, stoppedSignals{0};
+  QObject::connect(
+      capture.get(), &IAudioSource::captureError, capture.get(),
+      [&](const QString &) { ++errors; }, Qt::DirectConnection);
+  QObject::connect(
+      capture.get(), &IAudioSource::captureStopped, capture.get(),
+      [&] { ++stoppedSignals; }, Qt::DirectConnection);
   std::atomic<bool> replacementLeaked{false};
   capture->setCallback([&](const AudioFrame &frame) {
     ++callbacks;
@@ -679,8 +761,11 @@ TEST(AppAudioGroupTest, RemovedPrimaryCannotAdoptReplacementWithoutFreshIdentity
   ASSERT_TRUE(waitFor([&] { return callbacks.load() > 0; }));
   playback.remove(original);
   playback.add(0.4f, "Replacement fixture", "replacement-fixture");
-  QTest::qWait(200);
+  ASSERT_TRUE(waitFor([&] { return !capture->isCapturing(); }));
+  EXPECT_EQ(errors.load(), 0);
+  EXPECT_EQ(stoppedSignals.load(), 1);
   capture->stop();
+  EXPECT_EQ(stoppedSignals.load(), 1);
   const auto stopped = callbacks.load();
   QTest::qWait(100);
   EXPECT_EQ(callbacks.load(), stopped);
@@ -696,6 +781,44 @@ TEST(AppAudioGroupTest, RemovedPrimaryCannotAdoptReplacementWithoutFreshIdentity
   ASSERT_TRUE(recovered->start());
   ASSERT_TRUE(waitFor([&] { return std::abs(latest.load() - 0.4f) < 0.001f; }));
   recovered->stop();
+}
+
+TEST(AppAudioGroupTest, PlaybackClientExitRetiresTargetWithoutCaptureError) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "quiet-game-exit-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  auto playback = std::make_unique<PlaybackClient>();
+  playback->add(0.15f, "Exit fixture", "exit-fixture");
+  QString nodeName, serial;
+  const auto id =
+      PipeWireAudioSource::findNodeByBinary("exit-fixture", &nodeName, &serial);
+  ASSERT_NE(id, PW_ID_ANY);
+  auto capture = PipeWireAudioSource::createApplicationSource(
+      id, nodeName, serial, "exit-fixture");
+  std::atomic<int> callbacks{0}, errors{0}, stops{0};
+  capture->setCallback([&](const AudioFrame &) { ++callbacks; });
+  QObject::connect(
+      capture.get(), &IAudioSource::captureError, capture.get(),
+      [&](const QString &) { ++errors; }, Qt::DirectConnection);
+  QObject::connect(
+      capture.get(), &IAudioSource::captureStopped, capture.get(),
+      [&] { ++stops; }, Qt::DirectConnection);
+  ASSERT_TRUE(capture->initialize({}));
+  ASSERT_TRUE(capture->start());
+  ASSERT_TRUE(waitFor([&] { return callbacks.load() > 0; }));
+  playback.reset();
+  ASSERT_TRUE(waitFor([&] { return !capture->isCapturing(); }));
+  EXPECT_EQ(errors.load(), 0);
+  EXPECT_EQ(stops.load(), 1);
+  const auto before = callbacks.load();
+  QTest::qWait(100);
+  EXPECT_EQ(callbacks.load(), before);
+  capture->stop();
+  EXPECT_EQ(errors.load(), 0);
+  EXPECT_EQ(stops.load(), 1);
 }
 
 TEST(AppAudioGroupTest, PrivateDaemonExitRetiresCaptureAndFreshDaemonCanCaptureAgain) {

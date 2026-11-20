@@ -129,6 +129,7 @@ void RecordingManager::startRecording(const QString &gameName) {
     qWarning() << "Cannot start recording: not in Idle state";
     return;
   }
+  cancelCaptureRecovery();
 
   qDebug() << "startRecording called. gameName:" << gameName;
 
@@ -143,7 +144,6 @@ void RecordingManager::startRecording(const QString &gameName) {
   m_stopNativeSettled = false;
   m_captureReadyForPipeline = false;
   m_cancelInitializing = false;
-  m_startupLossRetry = false;
   m_pendingRestoreAuthorization.clear();
   m_pendingRestoreIdentity.clear();
   m_detectedGameInfo.clear();
@@ -491,8 +491,6 @@ void RecordingManager::completePipelineAndStart() {
   m_recordingTimer.start();
   m_progressTimer->start();
 
-  m_startupRetryCount = 0;
-  m_startupRetryKey.clear();
   setState(RecordingState::Recording);
   emit recordingStarted(m_currentFilePath);
 
@@ -500,6 +498,13 @@ void RecordingManager::completePipelineAndStart() {
 }
 
 void RecordingManager::stopRecording() {
+  const bool wasRecovering = m_captureRecoveryPending;
+  cancelCaptureRecovery();
+  if (wasRecovering) {
+    m_pendingCaptureError.clear();
+    if (m_state == RecordingState::Idle || m_state == RecordingState::Stopping)
+      return;
+  }
   if (m_state == RecordingState::Initializing) {
     qInfo() << "Cancelling recording initialization for" << m_currentGameName;
     m_cancelInitializing = true;
@@ -567,6 +572,10 @@ void RecordingManager::finishStoppedRecording() {
     if (capturedGameHasEnded()) {
       qInfo() << "Captured game ended; completing recording normally";
       m_pendingCaptureError.clear();
+    } else if (m_captureRecoveryPending && recoveryInstanceIsCurrent()) {
+      // A proven destroyed window with a surviving pinned instance is a
+      // handoff, not a failed recording. Save this part before reopening.
+      m_pendingCaptureError.clear();
     } else if (!m_shuttingDown && m_captureEndGrace.elapsed() < m_captureEndGraceMs) {
       // Native consumers have already drained. Give the detector/process exit
       // a bounded chance to confirm window shutdown before publishing Saved
@@ -588,12 +597,10 @@ void RecordingManager::finishStoppedRecording() {
 
   // Finalize and teardown pipeline
   const bool finalized = teardownPipeline() && m_stopFinalizationSucceeded;
+  if (!finalized || m_recordingFailed || !recoveryInstanceIsCurrent())
+    cancelCaptureRecovery();
   if (m_cancelInitializing) {
     if (m_storage) m_storage->clearExcludedRecordingPath();
-    const QString lostGame = m_currentGameName;
-    const QString lostIdentity =
-        m_detectedGameInfo.value("detectedGameKey").toString();
-    const bool retry = std::exchange(m_startupLossRetry, false);
     m_currentFilePath.clear();
     m_currentGameName.clear();
     m_cancelInitializing = false;
@@ -603,12 +610,13 @@ void RecordingManager::finishStoppedRecording() {
     setState(RecordingState::Idle);
     emit currentGameNameChanged();
     if (!authorize.isEmpty()) emit restoreAuthNeeded(authorize, authorizeIdentity);
-    if (retry && !lostGame.isEmpty())
-      emit captureStartLost(lostGame, lostIdentity);
+    if (m_captureRecoveryPending)
+      scheduleCaptureRecovery();
     return;
   }
   const bool pipelineFailed = m_recordingFailed;
   const bool saved = finalized && !pipelineFailed;
+  m_recordingFailed = !saved;
 
   if (m_storage) {
     m_storage->clearExcludedRecordingPath();
@@ -640,6 +648,8 @@ void RecordingManager::finishStoppedRecording() {
   emit currentGameNameChanged();
 
   qInfo() << "Recording stopped:" << filePath;
+  if (m_captureRecoveryPending)
+    scheduleCaptureRecovery();
 }
 
 void RecordingManager::setState(RecordingState newState) {
@@ -663,8 +673,8 @@ bool RecordingManager::buildPipeline() {
     qCritical() << "Failed to create video encoder";
     return false;
   }
-  qInfo() << "Video encoder: setting" << requestedEncoder << "resolved to"
-          << m_videoEncoder->name();
+  qDebug() << "Video encoder: setting" << requestedEncoder << "resolved to"
+           << m_videoEncoder->name();
 
   // Create muxer
   m_muxer = std::make_unique<FFmpegMuxer>();
@@ -1173,14 +1183,36 @@ bool RecordingManager::capturedGameHasEnded() const {
   return !instance.isEmpty() && !m_gameDetector->instanceAlive(instance);
 }
 
-bool RecordingManager::takeStartupRetry(const QString &identity) {
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
-  if (m_startupRetryKey != identity || now - m_startupRetrySinceMs > 180000) {
-    m_startupRetryKey = identity;
-    m_startupRetrySinceMs = now;
-    m_startupRetryCount = 0;
-  }
-  return ++m_startupRetryCount <= 3;
+bool RecordingManager::recoveryInstanceIsCurrent() const {
+  return !m_shuttingDown && m_gameDetector && m_settings &&
+         !m_recoveryInstance.isEmpty() &&
+         m_gameDetector->instanceAlive(m_recoveryInstance) &&
+         m_gameDetector->captureIdentityInfo(m_recoveryGame).value("detectedGameInstance").toString() == m_recoveryInstance &&
+         m_gameDetector->currentGameKey() == m_recoveryKey &&
+         !m_gameDetector->isBlocked(m_recoveryKey) &&
+         !m_settings->getRestoreTokenForIdentity(m_recoveryKey, m_recoveryGame).isEmpty();
+}
+
+void RecordingManager::cancelCaptureRecovery() {
+  ++m_recoveryGeneration;
+  if (!m_captureRecoveryPending) return;
+  m_captureRecoveryPending = false;
+  emit captureRecoveryChanged();
+}
+
+void RecordingManager::scheduleCaptureRecovery() {
+  const auto generation = ++m_recoveryGeneration;
+  qInfo() << "Captured window closed; retrying full recording for" << m_recoveryGame;
+  QTimer::singleShot(m_recoveryDelayMs, this, [this, generation] {
+    if (generation != m_recoveryGeneration || !m_captureRecoveryPending)
+      return;
+    if (m_state != RecordingState::Idle || !recoveryInstanceIsCurrent()) {
+      cancelCaptureRecovery();
+      return;
+    }
+    const QString game = m_recoveryGame;
+    startRecording(game);
+  });
 }
 
 void RecordingManager::onCaptureError(const QString &error) {
@@ -1188,34 +1220,28 @@ void RecordingManager::onCaptureError(const QString &error) {
   // failures still use onEncodingError and cannot be hidden by this guard.
   if (m_state == RecordingState::Stopping || m_state == RecordingState::Idle)
     return;
-  // Launching a game with a launcher frequently captures the launch/boot
-  // window first: it is the window the portal restores, and it closes as soon
-  // as the real game window exists. Nothing has been recorded at that point,
-  // so this is a transient startup condition — cancel quietly and let the app
-  // retry against the next window. A capture that dies after recording began,
-  // or one that keeps failing, still reports the error below.
-  if (m_state == RecordingState::Initializing && m_captureSource &&
-      m_captureSource->lastErrorKind() ==
-          IVideoCaptureSource::CaptureErrorKind::SourceUnavailable &&
-      !m_isManualRecording && m_gameDetector &&
-      m_captureGameName == m_currentGameName &&
-      m_gameDetector->currentGamePid() !=
-          m_detectedGameInfo.value("detectedGamePid").toLongLong()) {
-    const QString identity =
-        m_detectedGameInfo.value("detectedGameKey").toString();
-    // Only while the game is still tracked: a game that exited mid-launch is
-    // not a transient window, it is a genuine failed start.
-    if (!identity.isEmpty() && m_gameDetector->currentGameKey() == identity &&
-        takeStartupRetry(identity)) {
-      qInfo() << "Capture source lost before recording started; retrying for"
-              << m_currentGameName;
-      m_startupLossRetry = true;
+  if (m_captureSource &&
+      (m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceDestroyed ||
+       (m_state == RecordingState::Initializing &&
+        m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceNotReady)) &&
+      !m_isManualRecording && m_gameDetector && m_captureGameName == m_currentGameName) {
+    m_recoveryGame = m_currentGameName;
+    m_recoveryKey = m_detectedGameInfo.value("detectedGameKey").toString();
+    m_recoveryInstance = m_detectedGameInfo.value("detectedGameInstance").toString();
+    if (recoveryInstanceIsCurrent()) {
+      if (m_state == RecordingState::Recording) {
+        m_pendingCaptureError = error;
+        m_captureEndGrace.start();
+      }
       stopRecording();
+      m_captureRecoveryPending = true;
+      emit captureRecoveryChanged();
       return;
     }
   }
   if (m_state == RecordingState::Recording && m_captureSource &&
-      m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceUnavailable &&
+      (m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceUnavailable ||
+       m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceDestroyed) &&
       !m_isManualRecording && m_gameDetector && m_captureGameName == m_currentGameName &&
       !m_detectedGameInfo.value("detectedGameKey").toString().isEmpty() &&
       m_detectedGameInfo.value("detectedGamePid").toLongLong() > 0) {

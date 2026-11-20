@@ -3,7 +3,10 @@
 #include "detection/GameWhitelist.h"
 #include "detection/LegacyDetectionCleanup.h"
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QProcess>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -43,7 +46,106 @@ protected:
                      const QString &name) {
     service.m_whitelist->addToWhitelist(key, name);
   }
+  static QSet<QString> desktopApplications(const QStringList &roots) {
+    return GameDetectionService::desktopApplicationExecutables(roots);
+  }
+  static void setApplications(GameDetectionService &service, const QSet<QString> &apps) {
+    service.m_applicationExecutables = apps;
+  }
+  static void writeFile(const QString &path, const QByteArray &bytes) {
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    ASSERT_EQ(file.write(bytes), bytes.size());
+  }
+  static ProcessInfo inspectWine(const QString &root, const QString &prefix,
+                                 const QStringList &arguments) {
+    const auto base = root + "/proc/31";
+    EXPECT_TRUE(QDir().mkpath(base));
+    writeFile(root + "/wine64-preloader", "fixture");
+    if (!QFileInfo(base + "/exe").isSymLink()) {
+      EXPECT_TRUE(QFile::link(root + "/wine64-preloader", base + "/exe"));
+      EXPECT_TRUE(QFile::link(root, base + "/cwd"));
+    }
+    QStringList fields{"S", "1"};
+    while (fields.size() < 20)
+      fields.append("0");
+    fields[19] = "310";
+    writeFile(base + "/stat",
+              ("31 (wine64-preloader) " + fields.join(' ')).toUtf8());
+    writeFile(base + "/cmdline",
+              arguments.join(QChar('\0')).toLocal8Bit() + '\0');
+    writeFile(base + "/environ", ("WINEPREFIX=" + prefix).toLocal8Bit() + '\0' +
+                                     "SteamAppId=1973530" + '\0');
+    return ProcessCensus::inspect(31, root + "/proc");
+  }
 };
+
+TEST_F(GameDetectionServiceTest,
+       WineCustomDriveAndZDriveIdentifySameSteamGame) {
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto prefix = root.path() + "/pfx";
+  const auto library = root.path() + "/SteamLibrary";
+  const auto directory = library + "/steamapps/common/Limbus Company";
+  ASSERT_TRUE(QDir().mkpath(prefix + "/dosdevices"));
+  ASSERT_TRUE(QDir().mkpath(directory));
+  ASSERT_TRUE(QFile::link("../../SteamLibrary", prefix + "/dosdevices/s:"));
+  ASSERT_TRUE(QFile::link("/", prefix + "/dosdevices/z:"));
+  const auto executable = directory + "/LimbusCompany.exe";
+  writeFile(executable, "fixture");
+  for (const auto &argument :
+       QStringList{"S:\\steamapps\\common\\Limbus Company\\LimbusCompany.exe",
+                   "s:/steamapps/common/Limbus Company/LimbusCompany.exe",
+                   "Z:" + executable}) {
+    const auto p = inspectWine(root.path(), prefix, {argument});
+    ASSERT_EQ(p.pid, 31);
+    EXPECT_EQ(p.payload(), executable);
+    const auto games = ProcessGames::identify(
+        {{p.pid, p}}, {{1973530, "Limbus Company", directory}}, {}, {});
+    ASSERT_EQ(games.size(), 1);
+    EXPECT_EQ(games[0].key, "steam_app_1973530");
+    EXPECT_EQ(games[0].primaryPid, p.pid);
+  }
+  const auto p =
+      inspectWine(root.path(), prefix,
+                  {root.path() + "/wine64-preloader",
+                   "S:\\steamapps\\common\\Limbus Company\\LimbusCompany.exe"});
+  EXPECT_EQ(p.payload(), executable);
+  ASSERT_TRUE(QFile::remove(prefix + "/dosdevices/s:"));
+  EXPECT_EQ(p.payload(), executable); // Existing snapshot stays immutable.
+  const auto missing = inspectWine(root.path(), prefix, p.arguments);
+  EXPECT_TRUE(missing.payload().isEmpty());
+}
+
+TEST_F(GameDetectionServiceTest,
+       WineDriveOverridesArePrefixSpecificAndFailSafe) {
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto first = root.path() + "/first";
+  const auto second = root.path() + "/second";
+  const auto games = root.path() + "/games";
+  ASSERT_TRUE(QDir().mkpath(first + "/dosdevices"));
+  ASSERT_TRUE(QDir().mkpath(second + "/dosdevices"));
+  ASSERT_TRUE(QDir().mkpath(games));
+  for (const auto drive : {"c:", "z:", "s:"}) {
+    ASSERT_TRUE(QFile::link(games, first + "/dosdevices/" + drive));
+    ASSERT_TRUE(QFile::link("../../missing", second + "/dosdevices/" + drive));
+    const QString argument = QString(drive).toUpper() + "\\Game.exe";
+    const auto mapped = inspectWine(root.path(), first, {argument});
+    EXPECT_EQ(mapped.payload(), games + "/Game.exe");
+    const auto broken = inspectWine(root.path(), second, {argument});
+    EXPECT_TRUE(
+        broken.payload().isEmpty()); // No C:/Z: fallback over a bad map.
+  }
+  for (const auto &argument : {"R:\\Game.exe", "S:Game.exe"}) {
+    const auto p = inspectWine(root.path(), first, {argument});
+    EXPECT_TRUE(p.payload().isEmpty()); // Never borrow the process's CWD.
+    EXPECT_TRUE(ProcessGames::identify({{p.pid, p}},
+                                       {{1973530, "Wrong game", root.path()}},
+                                       {}, {})
+                    .isEmpty());
+  }
+}
 
 TEST_F(GameDetectionServiceTest,
        ProcessPickerListsPayloadsAndRejectsStaleRules) {
@@ -60,6 +162,7 @@ TEST_F(GameDetectionServiceTest,
   EXPECT_EQ(rows[0].toMap()["pid"].toLongLong(), p.pid);
   EXPECT_EQ(rows[0].toMap()["path"].toString(), p.payload());
   EXPECT_EQ(rows[0].toMap()["identity"].toString(), p.identity());
+  EXPECT_FALSE(rows[0].toMap()["likelyApplication"].toBool());
   EXPECT_FALSE(
       service.addProcessGame(p.pid, p.identity() + "0", "Fixture", false));
   ASSERT_TRUE(service.addProcessGame(p.pid, p.identity(), "Fixture", false));
@@ -78,6 +181,98 @@ TEST_F(GameDetectionServiceTest,
   child.kill();
   ASSERT_TRUE(child.waitForFinished());
   EXPECT_FALSE(service.addProcessGame(p.pid, p.identity(), "Exited", false));
+}
+
+TEST_F(GameDetectionServiceTest, PickerLikelihoodDoesNotHideUnknownsOrChangeDetection) {
+  GameDetectionService service;
+  auto wine = process(20, "/usr/bin/wine64-preloader");
+  wine.arguments = {"C:\\Games\\Unknown.exe"};
+  wine.winePrefix = "/prefix";
+  define(service, "exe:/games/known", "Known");
+  setApplications(service, {"/opt/desktop-app/app"});
+  apply(service, {{20, wine},
+                  {21, process(21, "/usr/bin/rclone")},
+                  {22, process(22, "/opt/desktop-app/app")},
+                  {23, process(23, "/games/unknown-native")},
+                  {24, process(24, "/games/known")},
+                  {25, process(25, "/opt/desktop-app/app")}});
+  const auto games = service.games();
+  const auto rows = service.runningProcesses();
+  ASSERT_EQ(rows.size(), 6); // All selectable processes remain available.
+  const QList<bool> expected{true, false, true, false, true, true};
+  for (int i = 0; i < rows.size(); ++i) {
+    const auto row = rows[i].toMap();
+    EXPECT_EQ(row["likelyApplication"].toBool(), expected[i]);
+    EXPECT_EQ(row["pid"].toLongLong(), 20 + i);
+    EXPECT_FALSE(row["identity"].toString().isEmpty());
+  }
+  EXPECT_EQ(service.games().size(), games.size());
+  ASSERT_EQ(service.games().size(), 1); // Desktop/Wine hints do not detect games.
+  EXPECT_EQ(service.games().first().key, "exe:/games/known");
+}
+
+TEST_F(GameDetectionServiceTest, PickerDesktopHintsRespectExecAndHiddenOverrides) {
+  QTemporaryDir root;
+  const auto user = root.path() + "/user";
+  const auto system = root.path() + "/system";
+  ASSERT_TRUE(QDir().mkpath(user + "/applications"));
+  ASSERT_TRUE(QDir().mkpath(system + "/applications"));
+  writeFile(user + "/applications/gui.desktop",
+      "[Desktop Entry]\nType=Application\nExec=\"/games/A Game/game\" --play %U\n");
+  writeFile(user + "/applications/env.desktop",
+      "[Desktop Entry]\nType=Application\nExec=env KEY=value /games/env-game %U\n");
+  writeFile(user + "/applications/hidden.desktop",
+      "[Desktop Entry]\nType=Application\nHidden=true\nExec=/games/hidden\n");
+  writeFile(system + "/applications/hidden.desktop",
+      "[Desktop Entry]\nType=Application\nExec=/games/hidden\n");
+  writeFile(user + "/applications/terminal.desktop",
+      "[Desktop Entry]\nType=Application\nTerminal=true\nExec=/usr/bin/rclone\n");
+  writeFile(user + "/applications/helper.desktop",
+      "[Desktop Entry]\nType=Application\nNoDisplay=true\nExec=/games/helper\n");
+  writeFile(user + "/applications/action.desktop",
+      "[Desktop Entry]\nType=Link\nExec=/games/not-an-app\n"
+      "[Desktop Action Fake]\nType=Application\nExec=/games/action\n");
+  const auto apps = desktopApplications({user, system});
+  EXPECT_EQ(apps, (QSet<QString>{"/games/A Game/game", "/games/env-game"}));
+}
+
+TEST_F(GameDetectionServiceTest,
+       DetectedIdentitySurvivesSynchronousRuleRebuild) {
+  GameDetectionService service;
+  const QString key = "exe:/games/reentrant/game";
+  define(service, key, "Reentrant Game");
+  service.removeFromWhitelist("exe:/games/another/game");
+  QString first, afterRebuild, second;
+  QObject::connect(&service, &GameDetectionService::gameDetected,
+                   [&](const QString &name, qint64) {
+                     first = name;
+                     // Force a real rebuild without changing the current game.
+                     service.addToWhitelist("exe:/games/another/game",
+                                            "Another");
+                     afterRebuild = name;
+                   });
+  QObject::connect(&service, &GameDetectionService::gameDetected,
+                   [&](const QString &name, qint64) { second = name; });
+  apply(service, {{30, process(30, "/games/reentrant/game")}});
+  EXPECT_EQ(first, "Reentrant Game");
+  EXPECT_EQ(afterRebuild, first);
+  EXPECT_EQ(second, first);
+  EXPECT_EQ(service.currentGameKey(), key);
+}
+
+TEST_F(GameDetectionServiceTest,
+       IdenticalWhitelistDefinitionDoesNotReidentify) {
+  GameDetectionService service;
+  service.removeFromWhitelist("exe:/games/noop/game");
+  ASSERT_TRUE(service.addToWhitelist("exe:/games/noop/game", "Noop"));
+  apply(service, {{30, process(30, "/games/noop/game")}});
+  const auto id = service.games().first().id;
+  QSignalSpy instances(&service, &GameDetectionService::instancesChanged);
+  QSignalSpy whitelist(&service, &GameDetectionService::whitelistChanged);
+  EXPECT_FALSE(service.addToWhitelist("exe:/games/noop/game", " Noop "));
+  EXPECT_TRUE(instances.isEmpty());
+  EXPECT_TRUE(whitelist.isEmpty());
+  EXPECT_EQ(service.games().first().id, id);
 }
 
 TEST_F(GameDetectionServiceTest, ProcessPickerExposesWinePayloadNotLoader) {

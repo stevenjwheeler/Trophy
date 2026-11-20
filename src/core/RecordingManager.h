@@ -78,6 +78,8 @@ public:
   // State
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
+  bool isRecoveringCapture() const { return m_captureRecoveryPending; }
+  bool lastRecordingFailed() const { return m_recordingFailed; }
   QString currentGameName() const { return m_currentGameName; }
   uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
   qint64 recordingDuration() const; // milliseconds
@@ -120,6 +122,7 @@ signals:
   // Terminal cleanup for every active recording, including failed output.
   // recordingStopped below is the successful-save notification only.
   void recordingFinished();
+  void captureRecoveryChanged();
   void recordingStopped(const QString &filePath, qint64 durationMs,
                         qint64 sizeBytes);
   void recordingError(const QString &error);
@@ -128,13 +131,6 @@ signals:
    * re-authorizes through the New Game prompt — never a bare picker.
    */
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
-  /**
-   * The captured source vanished before anything was recorded — typically a
-   * launcher, boot or splash window that closed as the real game window
-   * appeared. The app waits for the next window and retries instead of
-   * showing an error for a recording that never started.
-   */
-  void captureStartLost(const QString &gameName, const QString &identity = {});
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
   void detectedEncoderNameChanged();
@@ -148,6 +144,7 @@ private slots:
 private:
   friend class ::RecordingManagerTest;
   friend class ApplicationAudioProbeTest;
+  friend class ApplicationAuthorizePromptTest;
 
   // Private injection seam for lifecycle tests; normal starts use CaptureFactory.
   std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
@@ -176,13 +173,14 @@ private:
   QString m_pendingCaptureError;
   QElapsedTimer m_captureEndGrace;
   int m_captureEndGraceMs = 5000;
-  // Silent retries for a source that died before the first frame. Bounded per
-  // identity and window so a genuinely broken capture still reports an error.
-  bool m_startupLossRetry = false;
-  QString m_startupRetryKey;
-  int m_startupRetryCount = 0;
-  qint64 m_startupRetrySinceMs = 0;
-  bool takeStartupRetry(const QString &identity);
+  // Recovery is lifetime-bound to the pinned instance, not an attempt budget.
+  bool recoveryInstanceIsCurrent() const;
+  void scheduleCaptureRecovery();
+  void cancelCaptureRecovery();
+  bool m_captureRecoveryPending = false;
+  QString m_recoveryGame, m_recoveryKey, m_recoveryInstance;
+  quint64 m_recoveryGeneration = 0;
+  int m_recoveryDelayMs = 1500;
   bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;

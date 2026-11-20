@@ -645,6 +645,12 @@ void Application::connectSignals() {
   updateDiscordPresence();
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
+  connect(m_recordingManager.get(), &RecordingManager::captureRecoveryChanged, this, [this] {
+    emit recordingAvailabilityChanged();
+    if (!m_recordingManager->isRecoveringCapture() &&
+        m_recordingManager->state() == RecordingManager::RecordingState::Idle)
+      m_replayManager->setPaused(false);
+  });
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {
             m_recordingLibrary->setActiveRecordingPath(filePath);
             // The background replay loop pauses while recording.
@@ -652,44 +658,11 @@ void Application::connectSignals() {
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingFinished, this, [this]() {
             m_recordingLibrary->setActiveRecordingPath("");
-            m_recordingLibrary->refresh();
-            // Resume the replay loop if the game is still running.
-            m_replayManager->setPaused(false);
-            const QString game = m_gameDetector ? m_gameDetector->currentGameName() : QString();
-            if (isCurrentCaptureGame(game) && !restoreTokenForGame(game).isEmpty()) {
-              startWhenWindowReady(game, false);
-            }
+             m_recordingLibrary->refresh();
+             resumeReplayAfterRecording();
           });
-  connect(m_gameDetector.get(), &GameDetectionService::gameDetected, this, [this](const QString &gameName, qint64 pid) {
-            qCInfo(appLog) << "Game detected:" << gameName;
-            emit currentGameChanged();
-            if (m_settingsManager->autoRecordEnabled()) {
-              QString token = restoreTokenForGame(gameName);
-              if (!token.isEmpty()) {
-                m_detectionDebounceTimer->stop();
-                m_pendingAutoRecordGame.clear();
-                authorizeGame(gameName);
-                startWhenWindowReady(gameName, true);
-              } else if (m_pendingAutoRecordGame != gameName ||
-                         !m_detectionDebounceTimer->isActive()) {
-                m_pendingAutoRecordGame = gameName;
-                m_detectionDebounceTimer->start();
-              }
-            } else if (m_settingsManager->instantReplayEnabled()) {
-              // Silent when a restore token exists (no portal popup);
-              // otherwise arm through the same authorize-click channel
-              // as recording — never a surprise picker at launch.
-              if (!restoreTokenForGame(gameName).isEmpty()) {
-                m_pendingDvrGame.clear();
-                authorizeGame(gameName);
-                startWhenWindowReady(gameName, false);
-              } else if (m_pendingDvrGame != gameName ||
-                         !m_detectionDebounceTimer->isActive()) {
-                m_pendingDvrGame = gameName;
-                m_detectionDebounceTimer->start();
-              }
-            }
-          });
+  connect(m_gameDetector.get(), &GameDetectionService::gameDetected, this,
+          &Application::onGameDetected);
   // Approval is derived from portal restore tokens: whenever the token
   // map changes, push the holding games to the detector so the Games
   // page's Ready section stays truthful.
@@ -773,8 +746,6 @@ void Application::connectSignals() {
                           }
                         });
   });
-  connect(m_recordingManager.get(), &RecordingManager::captureStartLost, this,
-          &Application::onCaptureStartLost);
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
             if (!isCurrentCaptureGame(game) || identity != m_gameDetector->currentGameKey())
               return;
@@ -1233,6 +1204,36 @@ void Application::connectSignals() {
           this, [this]() { syncAutostartFile(); });
 }
 
+void Application::onGameDetected(QString gameName) {
+  // Authorization may synchronously rebuild the detector's instances. Own
+  // the name throughout this callback rather than borrowing a signal argument.
+  qCInfo(appLog) << "Game detected:" << gameName;
+  emit currentGameChanged();
+  if (m_settingsManager->autoRecordEnabled()) {
+    const auto token = restoreTokenForGame(gameName);
+    if (!token.isEmpty()) {
+      m_detectionDebounceTimer->stop();
+      m_pendingAutoRecordGame.clear();
+      authorizeGame(gameName);
+      startWhenWindowReady(gameName, true);
+    } else if (m_pendingAutoRecordGame != gameName ||
+               !m_detectionDebounceTimer->isActive()) {
+      m_pendingAutoRecordGame = gameName;
+      m_detectionDebounceTimer->start();
+    }
+  } else if (m_settingsManager->instantReplayEnabled()) {
+    if (!restoreTokenForGame(gameName).isEmpty()) {
+      m_pendingDvrGame.clear();
+      authorizeGame(gameName);
+      startWhenWindowReady(gameName, false);
+    } else if (m_pendingDvrGame != gameName ||
+               !m_detectionDebounceTimer->isActive()) {
+      m_pendingDvrGame = gameName;
+      m_detectionDebounceTimer->start();
+    }
+  }
+}
+
 bool Application::isRecording() const { return m_recordingManager && m_recordingManager->isRecording(); }
 QString Application::currentGameName() const { return m_gameDetector ? m_gameDetector->currentGameName() : QString(); }
 
@@ -1472,29 +1473,15 @@ bool Application::isGameBlocked(const QString &game) const {
   return m_gameDetector->isBlocked(game);
 }
 
-void Application::onCaptureStartLost(const QString &game,
-                                     const QString &identity) {
-  if (!m_gameDetector || game.isEmpty() ||
-      m_gameDetector->currentGameName() != game)
-    return;
-  if (!identity.isEmpty() && m_gameDetector->currentGameKey() != identity)
-    return;
-  if (isGameBlocked(game) || restoreTokenForGame(game).isEmpty())
-    return;
-  qCInfo(appLog) << "Capture source for" << game
-                 << "closed before recording started - retrying on the next window";
-  // Let the compositor publish the replacement window before asking the
-  // portal again; the retry is bounded in RecordingManager, so a game that
-  // never produces a usable window still reports the error eventually.
-  QTimer::singleShot(750, this, [this, game, identity]() {
-    if (!m_gameDetector || m_gameDetector->currentGameName() != game)
-      return;
-    if (!identity.isEmpty() && m_gameDetector->currentGameKey() != identity)
-      return;
-    if (isGameBlocked(game) || restoreTokenForGame(game).isEmpty())
-      return;
-    startWhenWindowReady(game, true);
-  });
+void Application::resumeReplayAfterRecording() {
+  if (m_recordingManager->isRecoveringCapture())
+    return; // Saving a part must not turn a full-recording handoff into DVR.
+  m_replayManager->setPaused(false);
+  if (m_recordingManager->lastRecordingFailed())
+    return; // A terminal capture failure must not silently retry through DVR.
+  const QString game = m_gameDetector ? m_gameDetector->currentGameName() : QString();
+  if (isCurrentCaptureGame(game) && !restoreTokenForGame(game).isEmpty())
+    startWhenWindowReady(game, false);
 }
 
 void Application::startWhenWindowReady(const QString &game, bool isRecord) {
@@ -1541,12 +1528,15 @@ bool Application::isWayland() const { return CaptureFactory::detectDisplayServer
 
 bool Application::canStartRecording() const {
   return m_captureAvailable && m_recordingManager &&
+         !m_recordingManager->isRecoveringCapture() &&
          m_recordingManager->state() == RecordingManager::RecordingState::Idle;
 }
 
 QString Application::recordingPhase() const {
   if (!m_recordingManager)
     return QStringLiteral("idle");
+  if (m_recordingManager->isRecoveringCapture())
+    return QStringLiteral("initializing");
   switch (m_recordingManager->state()) {
   case RecordingManager::RecordingState::Initializing: return QStringLiteral("initializing");
   case RecordingManager::RecordingState::Recording: return QStringLiteral("recording");
@@ -1939,7 +1929,7 @@ float Application::trackLevel(int trackIndex) const {
 void Application::requestToggleRecording() {  if (!m_recordingManager) {
     return;
   }
-  if (m_recordingManager->isRecording()) {
+  if (m_recordingManager->isRecording() || m_recordingManager->isRecoveringCapture()) {
     m_recordingManager->stopRecording();
     return;
   }

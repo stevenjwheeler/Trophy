@@ -209,12 +209,19 @@ Page {
         property string searchQuery: ""
         property var pickedProcess: null
         property string errorMessage: ""
+        property bool showAllProcesses: false
         readonly property var shownProcesses: allProcesses.filter(function(w) {
+            if (!showAllProcesses && w.likelyApplication !== true)
+                return false
             if (searchQuery === "")
                 return true
             const q = searchQuery.toLowerCase()
             return ((w.title || "").toLowerCase().indexOf(q) !== -1) || ((w.path || "").toLowerCase().indexOf(q) !== -1) || String(w.pid).indexOf(q) !== -1
         })
+        onShownProcessesChanged: {
+            if (pickedProcess !== null && shownProcesses.indexOf(pickedProcess) === -1)
+                pickedProcess = null
+        }
 
         function refreshProcesses() {
             if (typeof gameDetector !== "undefined" && gameDetector && typeof gameDetector.runningProcesses === "function")
@@ -245,6 +252,7 @@ Page {
             errorMessage = ""
             pickedProcess = null
             searchQuery = ""
+            showAllProcesses = false
             processSearch.text = ""
             displayField.text = ""
             whitelistRadio.checked = true
@@ -301,6 +309,35 @@ Page {
 
             }
 
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingLarge
+                Layout.rightMargin: Theme.spacingLarge
+                Layout.bottomMargin: Theme.spacingSmall
+                spacing: Theme.spacingSmall
+
+                Label {
+                    Layout.fillWidth: true
+                    text: addGameDialog.showAllProcesses ? qsTr("All processes") : qsTr("Likely applications")
+                    color: Theme.textMutedColor
+                    font.pixelSize: Theme.fontSizeSmall
+                }
+                Label {
+                    text: qsTr("Show all processes")
+                    color: Theme.textColor
+                    font.pixelSize: Theme.fontSizeSmall
+                }
+                TrophySwitch {
+                    objectName: "showAllProcessesSwitch"
+                    checked: addGameDialog.showAllProcesses
+                    Accessible.name: qsTr("Show all processes")
+                    onToggled: addGameDialog.showAllProcesses = checked
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Suggestions are not a window list. Show all processes to find unrecognized apps and games.")
+                    ToolTip.delay: 600
+                }
+            }
+
             // Divider
             Rectangle {
                 objectName: "gamePickerTopDivider"
@@ -349,7 +386,7 @@ Page {
                             Label {
                                 anchors.centerIn: parent
                                 objectName: "pickerIconFallback"
-                                visible: pickerIcon.status !== Image.Ready
+                                visible: !pickerIcon.hasArtwork
                                 text: (modelData.title || "?").charAt(0).toUpperCase()
                                 font.pixelSize: Theme.fontSizeNormal
                                 color: Theme.primaryColor
@@ -357,6 +394,8 @@ Page {
 
                             Image {
                                 id: pickerIcon
+                                readonly property bool hasArtwork: status === Image.Ready
+                                    && implicitWidth > 1 && implicitHeight > 1
                                 objectName: "pickerIcon"
                                 anchors.fill: parent
                                 anchors.margins: 2
@@ -364,7 +403,7 @@ Page {
                                 sourceSize: Qt.size(36, 36)
                                 fillMode: Image.PreserveAspectFit
                                 asynchronous: true
-                                visible: status === Image.Ready
+                                visible: hasArtwork
                             }
 
                         }
@@ -410,7 +449,9 @@ Page {
                 Layout.fillWidth: true
                 Layout.margins: Theme.spacingLarge
                 visible: processList.count === 0
-                text: qsTr("No matching processes found. Start the game and refresh.")
+                text: addGameDialog.showAllProcesses
+                    ? qsTr("No matching processes found. Start the game and refresh.")
+                    : qsTr("No likely applications found. Try Show all processes, or start the game and refresh.")
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
                 wrapMode: Text.WordWrap
@@ -445,6 +486,7 @@ Page {
 
                     TrophyRadioButton {
                         id: whitelistRadio
+                        objectName: "watchProcessRadio"
 
                         text: qsTr("Watch")
                         checked: true
@@ -456,6 +498,7 @@ Page {
 
                     TrophyRadioButton {
                         id: blacklistRadio
+                        objectName: "blockProcessRadio"
 
                         text: qsTr("Block")
                         checked: false
@@ -634,13 +677,15 @@ Page {
                     anchors.centerIn: parent
                     text: gameItem.entryDisplay.charAt(0).toUpperCase()
                     objectName: "gameIconFallback"
-                    visible: gameIcon.status !== Image.Ready
+                    visible: !gameIcon.hasArtwork
                     font.pixelSize: Theme.fontSizeLarge
                     color: gameItem.entryRunning ? Theme.successColor : Theme.primaryColor
                 }
 
                 Image {
                     id: gameIcon
+                    readonly property bool hasArtwork: status === Image.Ready
+                        && implicitWidth > 1 && implicitHeight > 1
                     objectName: "gameIcon"
                     anchors.fill: parent
                     anchors.margins: 2
@@ -648,7 +693,7 @@ Page {
                     sourceSize: Qt.size(40, 40)
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
-                    visible: status === Image.Ready
+                    visible: hasArtwork
                 }
 
             }

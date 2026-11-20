@@ -171,11 +171,12 @@ QList<GameInstance> ProcessGames::identify(
       while (ps.contains(anchor.parent) && !visited.contains(anchor.parent)) {
         const auto parent = ps.value(anchor.parent);
         const auto parentPayload = normalized(base(parent.payload()));
-        if (QStringList{"steam", "steamwebhelper", "wineserver", "services",
+        if (parentPayload.isEmpty() ||
+            QStringList{"steam", "steamwebhelper", "wineserver", "services",
                         "explorer", "winedevice", "firefox", "discord",
                         "chrome", "chromium"}
                 .contains(parentPayload))
-          break; // Shared brokers are not a per-game launch context.
+          break; // Unresolved parents/shared brokers cannot prove a launch.
         if (parent.start > anchor.start || parent.steamId != p.steamId ||
             normalized(base(parent.executable)) == "steam")
           break;

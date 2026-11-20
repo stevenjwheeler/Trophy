@@ -15,6 +15,9 @@ struct ProcessInfo {
   QStringList arguments;
   uint steamId = 0;
   QString winePrefix;
+  // Relevant drive mapping, resolved on the census worker. An empty value
+  // means the mapping exists but is unusable; payload() never performs I/O.
+  QMap<QChar, QString> wineDrives;
   QString identity() const {
     return QString::number(pid) + ":" + QString::number(start);
   }
