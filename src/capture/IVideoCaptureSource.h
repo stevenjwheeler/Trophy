@@ -115,7 +115,6 @@ struct QueuedFrame : public VideoFrame {
  * @brief Configuration for video capture
  */
 struct CaptureConfig {
-  uint64_t windowId = 0; // 0 = capture whole screen/default
   int targetFps = 60;
   int maxWidth = 0;  // 0 = native resolution
   int maxHeight = 0; // 0 = native resolution

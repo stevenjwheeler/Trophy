@@ -17,17 +17,17 @@
 #include <thread>
 #include <gtest/gtest.h>
 
-#include "core/ReplayManager.h"
-#include "library/RecordingAnnotations.h"
-#include "core/RecordingSession.h"
-#include "capture/IVideoCaptureSource.h"
+#include "DetectionFixture.h"
 #include "audio/AudioMixer.h"
+#include "capture/IVideoCaptureSource.h"
+#include "core/RecordingSession.h"
+#include "core/ReplayManager.h"
 #include "core/StorageManager.h"
-#include "settings/SettingsManager.h"
-#include "encoding/IEncoder.h"
 #include "detection/GameDetectionService.h"
-#include "detection/WaylandWindowMonitor.h"
+#include "encoding/IEncoder.h"
+#include "library/RecordingAnnotations.h"
 #include "muxing/IMuxer.h"
+#include "settings/SettingsManager.h"
 
 using namespace TrophyBackend;
 
@@ -223,15 +223,10 @@ protected:
     SettingsManager settings;
     settings.setAudioMode("game");
     settings.setVoiceChatApp("");
-    WaylandWindowMonitor monitor;
     GameDetectionService detector;
-    detector.setWindowMonitor(&monitor);
     detector.addToWhitelist("steam_app_1086940", "Baldur's Gate 3");
     detector.addToWhitelist("steam_app_999", "Baldur's Gate 3");
-    WindowInfo window;
-    window.pid = 61010; window.appId = "steam_app_1086940";
-    window.focused = window.fullscreen = true;
-    monitor.ingestSnapshot({window});
+    DetectionFixture::publish(detector, 61010, "steam_app_1086940");
     ASSERT_EQ(detector.currentGamePid(), 61010);
     ReplayManager mgr;
     mgr.m_settings = &settings;
@@ -244,10 +239,9 @@ protected:
     };
     ASSERT_TRUE(mgr.beginCapture());
     detector.addToBlacklist("steam_app_1086940");
-    window.pid = 61011; window.appId = "steam_app_999";
-    monitor.ingestSnapshot({window});
+    DetectionFixture::publish(detector, 61011, "steam_app_999");
     ASSERT_EQ(detector.currentGamePid(), 61011);
-    const uint32_t expected = scenario == 1 ? 62020 : scenario == 2 ? 0 : 61010;
+    const uint32_t expected = scenario == 2 ? 0 : 61010;
     mgr.m_nodeLookup = [expected](uint32_t pid, const QStringList &, const QString &) {
       EXPECT_EQ(pid, expected);
       ReplayManager::DvrNodeLookup result;
@@ -638,7 +632,7 @@ protected:
     mgr.m_session->setVoiceTrack(2);
     mgr.m_session->markSourceConnected(0);
     mgr.m_session->markSourceConnected(2);
-    mgr.m_session->setGameIsFallback(false);
+    mgr.m_session->setGameAudioPending(false);
     mgr.m_micTrack = 1;
     mgr.m_voiceTrack = -1; // manager's original layout predates late adoption
     mgr.m_lookupCacheValid = true;
@@ -867,10 +861,10 @@ protected:
     mgr.setupAudioSources(count, hints, pid, gameFound, voiceTrack, voiceFound,
                           micTrack, false);
     EXPECT_FALSE(gameFound);
-    EXPECT_FALSE(voiceFound); // Voice is already present in the desktop mix.
+    EXPECT_FALSE(voiceFound); // Voice is already included in desktop fallback.
     EXPECT_EQ(voiceTrack, separate ? 1 : -1);
     EXPECT_EQ(micTrack, separate ? 2 : 1);
-    EXPECT_EQ(count, 2); // Fallback + mic; separate stream count is set by session.
+    EXPECT_EQ(count, 2);
     EXPECT_EQ(mgr.m_settings->separateAudioTracks(), separate);
   }
   void addLateVoiceSource(ReplayManager &mgr, bool &destroyed) {
@@ -931,20 +925,17 @@ static QList<Seg> threeSegments() {
 }
 
 TEST_F(ReplayManagerTest, GenericPortalRetainsGamePidAcrossAudioLookupAndRotation) { audioPidHandoff(0); }
-TEST_F(ReplayManagerTest, PortalAudioPidTakesPriorityOverDetectedPid) { audioPidHandoff(1); }
+TEST_F(ReplayManagerTest, PinnedInstanceTakesPriorityOverPortalPid) {
+  audioPidHandoff(1);
+}
 TEST_F(ReplayManagerTest, AudioLookupWithoutMatchingDetectionDoesNotBorrowCurrentGame) { audioPidHandoff(2); }
 
 TEST_F(ReplayManagerTest, DiagnosticIdentitySurvivesANamesakeDetectionChange) {
   SettingsManager settings;
-  WaylandWindowMonitor monitor;
   GameDetectionService detector;
-  detector.setWindowMonitor(&monitor);
   detector.addToWhitelist("steam_app_1422450", "Deadlock");
   detector.addToWhitelist("steam_app_999", "Deadlock");
-  WindowInfo window;
-  window.pid = 61010; window.appId = "steam_app_1422450";
-  window.focused = window.fullscreen = true;
-  monitor.ingestSnapshot({window});
+  DetectionFixture::publish(detector, 61010, "steam_app_1422450");
   ASSERT_EQ(detector.currentGameName(), "Deadlock");
   ReplayManager mgr;
   beginDiagnosticCapture(mgr, settings, detector);
@@ -953,8 +944,7 @@ TEST_F(ReplayManagerTest, DiagnosticIdentitySurvivesANamesakeDetectionChange) {
   EXPECT_EQ(first["detectedGamePid"].toLongLong(), 61010);
   EXPECT_FALSE(first.contains("sourcePid"));
   detector.addToBlacklist("steam_app_1422450");
-  window.pid = 61011; window.appId = "steam_app_999";
-  monitor.ingestSnapshot({window});
+  DetectionFixture::publish(detector, 61011, "steam_app_999");
   ASSERT_EQ(detector.currentGameKey(), "steam_app_999");
   EXPECT_EQ(mgr.captureHealth()["detectedGameKey"], first["detectedGameKey"]);
   EXPECT_EQ(mgr.captureHealth()["detectedGamePid"], first["detectedGamePid"]);
@@ -1295,7 +1285,7 @@ TEST_F(ReplayManagerTest, RotationKeepsLateVoiceAndMicSlotsDespiteCachedAvailabi
     qputenv("XDG_CONFIG_HOME", oldConfig);
 }
 
-TEST_F(ReplayManagerTest, MissingGameKeepsDesktopFallbackWithoutDoublingVoice) {
+TEST_F(ReplayManagerTest, MissingGameFallsBackToDesktopWithoutDoublingVoice) {
   QTemporaryDir config;
   ASSERT_TRUE(config.isValid());
   const QByteArray oldConfig = qgetenv("XDG_CONFIG_HOME");

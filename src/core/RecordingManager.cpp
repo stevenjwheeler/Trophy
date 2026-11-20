@@ -10,7 +10,6 @@
 #include "RecordingSession.h"
 #include "CallbackSink.h"
 #include "StorageManager.h"
-#include "WindowService.h"
 #include "audio/AudioMixer.h"
 #include <QDateTime>
 #include <QMap>
@@ -93,9 +92,6 @@ void RecordingManager::setAudioMixer(AudioMixer *mixer) {
   m_audioMixer = mixer;
 }
 
-void RecordingManager::setWindowService(WindowService *ws) {
-  m_windowService = ws;
-}
 
 void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
   m_gameDetector = detector;
@@ -128,17 +124,13 @@ bool RecordingManager::sourceLabelsAgree(const QString &a,
   return al.contains(bl) || bl.contains(al);
 }
 
-void RecordingManager::startRecording(const QString &gameName,
-                                      unsigned long windowId /*= 0*/) {
+void RecordingManager::startRecording(const QString &gameName) {
   if (m_state != RecordingState::Idle) {
     qWarning() << "Cannot start recording: not in Idle state";
     return;
   }
 
-  qDebug() << "startRecording called. gameName:" << gameName
-           << "windowId:" << windowId;
-
-  m_manualWindowId = windowId;
+  qDebug() << "startRecording called. gameName:" << gameName;
 
   if (!m_settings || !m_storage) {
     emit recordingError("Recording manager not properly initialized");
@@ -158,15 +150,8 @@ void RecordingManager::startRecording(const QString &gameName,
   ++m_pipelineGeneration;
   m_recordingFailed = false;
 
-  if (m_isManualRecording && m_manualWindowId != 0 && m_windowService) {
-    m_currentGameName = m_windowService->getWindowTitle(m_manualWindowId);
-    if (m_currentGameName.isEmpty()) {
-      m_currentGameName = QStringLiteral("Manual Recording");
-    }
-  } else {
-    m_currentGameName =
-        gameName.isEmpty() ? QStringLiteral("Manual Recording") : gameName;
-  }
+  m_currentGameName =
+      gameName.isEmpty() ? QStringLiteral("Manual Recording") : gameName;
   emit currentGameNameChanged();
 
   setState(RecordingState::Initializing);
@@ -228,12 +213,6 @@ void RecordingManager::startRecording(const QString &gameName,
                                : m_currentGameName;
   if (!m_isManualRecording && m_gameDetector) {
     m_detectedGameInfo = m_gameDetector->captureIdentityInfo(m_currentGameName);
-    for (const auto pid : m_gameDetector->gameplayWindowPids(tokenKey)) {
-      if (GameDetectionService::processExists(pid)) {
-        m_detectedGameInfo.insert("capturedWindowPid", pid);
-        break;
-      }
-    }
   }
   connect(m_captureSource.get(), &IVideoCaptureSource::ready, this,
           [this, attemptSource, attemptGeneration]() {
@@ -286,7 +265,6 @@ void RecordingManager::startRecording(const QString &gameName,
 
   CaptureConfig capConfig;
   capConfig.targetFps = m_settings->fps();
-  capConfig.windowId = m_manualWindowId;
   capConfig.useDmaBuf = m_settings->useDmaBuf();
   // Game-targeted (non-manual) recordings get a windows-only picker;
   // manual recordings keep the full monitor + window choice.
@@ -360,10 +338,6 @@ void RecordingManager::finishPipelineAndStart() {
       QString manualName;
       if (!label.isEmpty() && !isGenericSourceLabel(label)) {
         manualName = label;
-      } else if (m_manualWindowId != 0 && m_windowService) {
-        // Fallback for manual capture where capture source provides a
-        // generic label (or none): the picked window's title.
-        manualName = m_windowService->getWindowTitle(m_manualWindowId);
       }
       if (manualName.isEmpty()) {
         manualName = QStringLiteral("Manual Recording");
@@ -410,10 +384,7 @@ RecordingManager::AudioPreparation RecordingManager::snapshotAudioPreparation() 
   input.micDevice = m_settings->microphoneDevice();
   input.voiceApp = m_settings->voiceChatApp().trimmed();
   input.separate = m_settings->separateAudioTracks();
-  if (m_manualWindowId && m_windowService) {
-    const QString process = m_windowService->getProcessNameForWindow(m_manualWindowId);
-    if (!process.isEmpty()) input.hints << process;
-  } else if (m_captureSource) {
+  if (m_captureSource) {
     input.pid = m_captureSource->sourcePid();
   }
   if (m_captureSource) {
@@ -424,12 +395,15 @@ RecordingManager::AudioPreparation RecordingManager::snapshotAudioPreparation() 
     // Generic portal metadata (e.g. KWin PID 0) must not discard the game PID
     // that the readiness check used. This identity was pinned at startRecording;
     // a later detection, even a same-named game, cannot retarget this capture.
-    if (!input.pid)
-      input.pid = m_detectedGameInfo.value("detectedGamePid").toUInt();
+    input.pid = m_detectedGameInfo.value("detectedGamePid").toUInt();
+    input.hints = {"trophy-instance:" +
+                   m_detectedGameInfo.value("detectedGameInstance").toString()};
     const QString hint = m_captureGameName;
     if (!hint.isEmpty() && !input.hints.contains(hint, Qt::CaseInsensitive))
       input.hints << hint;
   }
+  if (m_isManualRecording && input.pid)
+    input.hints = {"trophy-instance:" + ProcessGames::pinProcess(input.pid)};
   return input;
 }
 
@@ -437,15 +411,8 @@ RecordingManager::AudioPreparation
 RecordingManager::lookupAudioPreparation(AudioPreparation input) {
 #ifdef HAVE_PIPEWIRE
   if (input.mode != "desktop") {
-    if (input.pid)
-      input.gameNode = PipeWireAudioSource::findNodeByPid(
-          input.pid, &input.gameNodeName, &input.gameSerial);
-    for (const auto &hint : input.hints) {
-      if (input.gameNode != 0xffffffffu) break;
-      if (!hint.isEmpty())
-        input.gameNode = PipeWireAudioSource::findNodeByProcessName(
-            hint, &input.gameNodeName, &input.gameSerial);
-    }
+    input.gameNode = PipeWireAudioSource::findNodeForGame(
+        input.pid, input.hints, &input.gameNodeName, &input.gameSerial);
     if (!input.voiceApp.isEmpty())
       input.voiceNode = PipeWireAudioSource::findNodeByBinary(
           input.voiceApp, &input.voiceNodeName, &input.voiceSerial);
@@ -629,7 +596,6 @@ void RecordingManager::finishStoppedRecording() {
     const bool retry = std::exchange(m_startupLossRetry, false);
     m_currentFilePath.clear();
     m_currentGameName.clear();
-    m_manualWindowId = 0;
     m_cancelInitializing = false;
     const QString authorize = std::exchange(m_pendingRestoreAuthorization, {});
     const QString authorizeIdentity = std::exchange(m_pendingRestoreIdentity, {});
@@ -651,7 +617,6 @@ void RecordingManager::finishStoppedRecording() {
   QString filePath = m_currentFilePath;
   m_currentFilePath.clear();
   m_currentGameName.clear();
-  m_manualWindowId = 0; // Reset manual window ID
 
   setState(RecordingState::Idle);
   if (m_storage) {
@@ -759,7 +724,7 @@ bool RecordingManager::buildPipeline() {
   int activeAudioTrackCount = 0;
   QString vcApp;
   bool gameSourceAdded = false;
-  bool gameIsFallback = false;
+  bool gameAudioPending = false;
   bool vcSourceAdded = false;
   int voiceTrack = -1;
   uint32_t gameTargetPid = 0;
@@ -812,35 +777,33 @@ bool RecordingManager::buildPipeline() {
 
         if (nodeId != 0xFFFFFFFFu) {
           auto gameSrc = PipeWireAudioSource::createApplicationSource(
-              nodeId, nodeName, nodeSerial);
+              nodeId, nodeName, nodeSerial, {},
+              PipeWireAudioSource::ownerIdentity(gameHints));
           gameSrc->setStreamName(QStringLiteral("trophy-game"));
           m_audioMixer->addSourceAsync(std::move(gameSrc), gameTrack);
           activeSources++;
           gameSourceAdded = true;
         } else {
-          // Preserve some audio while the game stream is unavailable. This
-          // full-system fallback is not a game bind: retries keep looking.
-          qDebug() << "Game audio: no specific node found, falling back to "
-                        "default monitor for track"
-                     << gameTrack;
-          m_audioMixer->addSourceAsync(
-              PipeWireAudioSource::createMonitorSource(QString(), true), gameTrack);
-          gameIsFallback = true;
+          qInfo() << "Game audio unavailable; capturing desktop audio on track"
+                  << gameTrack;
+          auto fallback = PipeWireAudioSource::createMonitorSource({}, true);
+          fallback->setStreamName(QStringLiteral("trophy-game"));
+          m_audioMixer->addSourceAsync(std::move(fallback), gameTrack);
+          gameAudioPending = true;
           activeSources++;
         }
       }
 
       // === Voice chat (track 1 in separate; next contiguous slot in merged)
       // ===
-      // The desktop fallback already includes voice. Avoid doubling it until
-      // the game binds; separate mode reserves Voice for the later upgrade.
+      // Desktop fallback already includes Voice; avoid recording it twice.
       vcApp = m_preparedAudio.voiceApp;
       voiceTrack = -1;
       if (!vcApp.isEmpty()) {
         const QString vcNodeName = m_preparedAudio.voiceNodeName;
         const QString vcSerial = m_preparedAudio.voiceSerial;
         const uint32_t nodeId = m_preparedAudio.voiceNode;
-        if (nodeId != 0xFFFFFFFF && !gameIsFallback) {
+        if (nodeId != 0xFFFFFFFF && !gameAudioPending) {
           voiceTrack = isSeparate ? 1 : nextContiguous++;
           auto voiceSrc = PipeWireAudioSource::createApplicationSource(
               nodeId, vcNodeName, vcSerial, vcApp);
@@ -849,15 +812,8 @@ bool RecordingManager::buildPipeline() {
           activeSources++;
           vcSourceAdded = true;
         } else {
-          if (gameIsFallback) {
-            qDebug() << "Voice chat capture suppressed while game audio "
-                        "is full-mix fallback (voice is already in the "
-                        "mix):"
-                     << vcApp;
-          } else {
-            qDebug() << "No PipeWire node for voice chat app:" << vcApp
-                     << "- retry will bind it when the stream appears";
-          }
+          qDebug() << "No PipeWire node for voice chat app:" << vcApp
+                   << "- retry will bind it when the stream appears";
           // Separate mode reserves the slot so the retry has somewhere to
           // bind. Merged mode can't reserve (an empty slot would stall the
           // mix gate), so the retry skips voice instead of clobbering mic.
@@ -970,7 +926,7 @@ bool RecordingManager::buildPipeline() {
   m_session->setGameAudioHints(gameTargetPid, gameHints);
   m_session->setVoiceChatApp(vcApp);
   m_session->setVoiceTrack(voiceTrack);
-  m_session->setGameIsFallback(gameIsFallback);
+  m_session->setGameAudioPending(gameAudioPending);
   m_session->setDesktopAudio(m_preparedAudio.mode == "desktop");
 
 #ifdef HAVE_PIPEWIRE
@@ -1195,17 +1151,6 @@ void RecordingManager::setDetectedEncoderName(const QString &name) {
 }
 
 void RecordingManager::updateProgress() {
-  // Follow proven gameplay-window handoffs while capture is live, not a
-  // launcher gaining focus after the captured game has already exited.
-  if (m_state == RecordingState::Recording && !m_isManualRecording && m_gameDetector) {
-    for (const auto pid : m_gameDetector->gameplayWindowPids(
-             m_detectedGameInfo.value("detectedGameKey").toString())) {
-      if (GameDetectionService::processExists(pid)) {
-        m_detectedGameInfo.insert("capturedWindowPid", pid);
-        break;
-      }
-    }
-  }
   // Read the atomic latch on the owner thread, never tear down from a
   // muxer/audio/video callback. stop() still drains before inspecting it.
   if (m_state == RecordingState::Recording && m_session &&
@@ -1216,14 +1161,6 @@ void RecordingManager::updateProgress() {
                         : reason);
     return;
   }
-  // Poll for window title changes during manual-window recordings
-  if (m_manualWindowId != 0 && m_windowService) {
-    QString newTitle = m_windowService->getWindowTitle(m_manualWindowId);
-    if (!newTitle.isEmpty() && newTitle != m_currentGameName) {
-      m_currentGameName = newTitle;
-      emit currentGameNameChanged();
-    }
-  }
 
   emit progressUpdated(recordingDuration(), recordingSize());
 }
@@ -1231,25 +1168,9 @@ void RecordingManager::updateProgress() {
 bool RecordingManager::capturedGameHasEnded() const {
   if (!m_gameDetector || m_isManualRecording || m_captureGameName != m_currentGameName)
     return false;
-  const auto key = m_detectedGameInfo.value("detectedGameKey").toString();
-  if (key.isEmpty() || m_detectedGameInfo.value("detectedGamePid").toLongLong() <= 0)
-    return false;
-  if (m_gameDetector->currentGameKey() != key)
-    return true; // The detector has already retired this pinned identity.
-  const auto windowPid = m_detectedGameInfo.value("capturedWindowPid").toLongLong();
-  if (windowPid > 0 && !GameDetectionService::processExists(windowPid)) {
-    // Launchers can share the Steam identity and survive their game child.
-    // Require actual death of the pinned gameplay process, not merely a
-    // missing/minimized window. A live gameplay successor still wins.
-    for (const auto successor : m_gameDetector->gameplayWindowPids(key)) {
-      if (GameDetectionService::processExists(successor))
-        return false;
-    }
-    return true;
-  }
-  // Same-identity PID handoff must not mistake a dead launcher for game exit.
-  const auto pid = m_gameDetector->currentGamePid();
-  return pid > 0 && !GameDetectionService::processExists(pid);
+  const auto instance =
+      m_detectedGameInfo.value("detectedGameInstance").toString();
+  return !instance.isEmpty() && !m_gameDetector->instanceAlive(instance);
 }
 
 bool RecordingManager::takeStartupRetry(const QString &identity) {
@@ -1277,7 +1198,9 @@ void RecordingManager::onCaptureError(const QString &error) {
       m_captureSource->lastErrorKind() ==
           IVideoCaptureSource::CaptureErrorKind::SourceUnavailable &&
       !m_isManualRecording && m_gameDetector &&
-      m_captureGameName == m_currentGameName) {
+      m_captureGameName == m_currentGameName &&
+      m_gameDetector->currentGamePid() !=
+          m_detectedGameInfo.value("detectedGamePid").toLongLong()) {
     const QString identity =
         m_detectedGameInfo.value("detectedGameKey").toString();
     // Only while the game is still tracked: a game that exited mid-launch is

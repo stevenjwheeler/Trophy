@@ -95,7 +95,7 @@ int64_t RecordingSession::steadyNowMs() {
 }
 
 RecordingSession::AudioRoutingState RecordingSession::audioRoutingState() const {
-  return {m_activeTrackCount.load(), m_voiceTrack, m_gameIsFallback,
+  return {m_activeTrackCount.load(), m_voiceTrack, m_gameAudioPending,
           m_sourceConnected, m_boundSerial};
 }
 
@@ -103,7 +103,7 @@ void RecordingSession::inheritAudioRouting(const RecordingSession &previous) {
   const auto routing = previous.audioRoutingState();
   m_activeTrackCount.store(routing.activeTrackCount);
   m_voiceTrack = routing.voiceTrack;
-  m_gameIsFallback = routing.gameIsFallback;
+  m_gameAudioPending = routing.gameAudioPending;
   m_sourceConnected = routing.connected;
   m_boundSerial = routing.boundSerial;
 }
@@ -167,7 +167,7 @@ bool RecordingSession::start() {
   m_audioHistoryStarted.store(false);
   m_usedSystemAudio.store(false);
   m_usedGameAudio.store(false);
-  m_historyFallback.store(false);
+  m_historyGamePending.store(false);
   m_historyDesktop.store(false);
   for (auto &received : m_audioReceived) received.store(false);
   m_queueDrops = 0;
@@ -540,11 +540,12 @@ bool RecordingSession::start() {
 
 void RecordingSession::noteAudioRouting() {
   if (!m_running || !m_audioHistoryStarted.load()) return;
-  const bool fallback = m_gameIsFallback;
+  const bool fallback = m_gameAudioPending;
   const bool desktop = m_desktopAudio;
-  m_historyFallback.store(fallback);
+  m_historyGamePending.store(fallback);
   m_historyDesktop.store(desktop);
-  if (desktop || fallback) m_usedSystemAudio.store(true);
+  if (desktop || fallback)
+    m_usedSystemAudio.store(true);
   if (!desktop && !fallback) m_usedGameAudio.store(true);
 }
 
@@ -574,11 +575,13 @@ QJsonObject RecordingSession::audioHistory() const {
 
 QVariantMap RecordingSession::captureHealth() const {
   const auto now = nowUs();
-  QVariantMap result{{"session", m_outputPath},
-                     {"hasVideo", m_videoStartWallUs.load() >= 0},
-                     {"queueDrops", QVariant::fromValue(m_queueDrops.load())},
-                     {"desktopFallback", !m_desktopAudio && m_gameIsFallback},
-                     {"desktopAudio", m_desktopAudio}};
+  QVariantMap result{
+      {"session", m_outputPath},
+      {"hasVideo", m_videoStartWallUs.load() >= 0},
+      {"queueDrops", QVariant::fromValue(m_queueDrops.load())},
+      {"desktopFallback", !m_desktopAudio && m_gameAudioPending},
+      {"gameAudioPending", !m_desktopAudio && m_gameAudioPending},
+      {"desktopAudio", m_desktopAudio}};
   result["deliveredFrames"] = m_deliveredFrames.load();
   result["dmaBufFrames"] = m_dmaBufDelivered.load();
   // Deliberate FPS-cap filtering, not transport loss. Capture Info can now
@@ -656,7 +659,7 @@ QVariantMap RecordingSession::captureHealth() const {
       }
     }
     if (role == 1 && !m_voiceChatApp.isEmpty() &&
-        (m_desktopAudio || m_gameIsFallback)) {
+        (m_desktopAudio || m_gameAudioPending)) {
       status = m_audioMixer && m_audioMixer->sourceIsCapturing(0)
                    ? QStringLiteral("included-in-desktop")
                    : QStringLiteral("desktop-mix-unavailable");
@@ -667,8 +670,9 @@ QVariantMap RecordingSession::captureHealth() const {
     result[QStringLiteral("audio%1Name").arg(role)] = sourceName;
     // A suppressed Voice source is part of System, not a separately
     // measurable signal. Never relabel Mic's physical slot as Voice.
-    const bool separateSignal = role != 1 ||
-        (!m_voiceChatApp.isEmpty() && !m_desktopAudio && !m_gameIsFallback);
+    const bool separateSignal =
+        role != 1 ||
+        (!m_voiceChatApp.isEmpty() && !m_desktopAudio && !m_gameAudioPending);
     result[QStringLiteral("audio%1Signal").arg(role)] = m_audioMixer && separateSignal
         ? m_audioMixer->semanticAudioDiagnostics(role) : QVariantMap{};
   }
@@ -1403,7 +1407,7 @@ bool RecordingSession::rotationFenceSatisfiedLocked() const {
 }
 
 void RecordingSession::resetAudioHistoryForSegment() {
-  const bool fallback = m_historyFallback.load();
+  const bool fallback = m_historyGamePending.load();
   const bool desktop = m_historyDesktop.load();
   m_usedSystemAudio.store(desktop || fallback);
   m_usedGameAudio.store(!desktop && !fallback);
@@ -1846,20 +1850,19 @@ RecordingSession::AudioNodeResult
 RecordingSession::lookupAudioNode(uint32_t pid, const QStringList &hints,
                                   bool exactBinary) {
 
-  // Fresh lookup: PID first (exact), then name hints in order.
+  // Resolve verified game/manual membership, or exact configured Voice binary.
   uint32_t nodeId = PW_ID_ANY;
   QString nodeName, nodeSerial;
 #ifdef HAVE_PIPEWIRE
-  if (pid != 0) {
-    nodeId = PipeWireAudioSource::findNodeByPid(pid, &nodeName, &nodeSerial);
-  }
-  if (nodeId == PW_ID_ANY) {
+  if (!exactBinary) {
+    nodeId = PipeWireAudioSource::findNodeForGame(pid, hints, &nodeName,
+                                                  &nodeSerial);
+  } else {
     for (const QString &hint : hints) {
       if (hint.isEmpty())
         continue;
-      nodeId = exactBinary
-                   ? PipeWireAudioSource::findNodeByBinary(hint, &nodeName, &nodeSerial)
-                   : PipeWireAudioSource::findNodeByProcessName(hint, &nodeName, &nodeSerial);
+      nodeId =
+          PipeWireAudioSource::findNodeByBinary(hint, &nodeName, &nodeSerial);
       if (nodeId != PW_ID_ANY)
         break;
     }
@@ -1888,7 +1891,7 @@ void RecordingSession::deliverAudioLookups() {
     if (!m_running || operation.generation != m_audioLookupGeneration)
       continue;
     applyAppTrackNode(track, result.id, result.name, result.serial,
-                      operation.game ? &m_gameIsFallback : nullptr);
+                      operation.game ? &m_gameAudioPending : nullptr);
     if (!operation.game && m_voiceTrack < 0 && !m_separateAudioTracks &&
         m_sourceConnected[track]) {
       m_voiceTrack = track;
@@ -1900,19 +1903,52 @@ void RecordingSession::deliverAudioLookups() {
     m_audioLookupTimer->stop();
 }
 
+void RecordingSession::ensureGameDesktopFallback() {
+  if (!m_audioMixer || m_desktopAudio)
+    return;
+  m_gameAudioPending = true;
+  m_sourceConnected[0] = false;
+  m_boundSerial[0].clear();
+  if (!m_audioMixer->sourceIsDesktopAudio(0)) {
+    auto source = PipeWireAudioSource::createMonitorSource({}, true);
+    source->setStreamName(QStringLiteral("trophy-game"));
+    m_audioMixer->addSourceAsync(std::move(source), 0);
+    m_trackOffsetApplied[0].store(false);
+    qInfo()
+        << "Game audio unavailable; capturing desktop audio until it returns";
+  }
+  if (!m_voiceChatApp.isEmpty() && m_voiceTrack > 0 &&
+      m_voiceTrack < kAudioTrackCount) {
+    m_audioMixer->removeSourceAsync(m_voiceTrack);
+    m_sourceConnected[m_voiceTrack] = false;
+    m_boundSerial[m_voiceTrack].clear();
+  }
+  noteAudioRouting();
+}
+
 void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
                                          const QString &nodeName,
                                          const QString &nodeSerial,
                                          bool *isFallback) {
   if (track < 0 || track >= kAudioTrackCount || !m_audioMixer)
     return;
+  if (!isFallback && (m_gameAudioPending || m_desktopAudio)) {
+    // A stale Voice lookup must not double audio already in the desktop mix.
+    m_audioMixer->removeSourceAsync(track);
+    m_sourceConnected[track] = false;
+    m_boundSerial[track].clear();
+    return;
+  }
   if (nodeId == PW_ID_ANY) {
+    if (isFallback) {
+      ensureGameDesktopFallback();
+      return;
+    }
     // Missing Voice must be silent, including an in-flight start or a source
     // already marked disconnected by a previous query. Unpublish immediately;
     // the mixer's owned worker drains callbacks and native resources. Keep
     // Game's intentional desktop fallback / existing recovery policy intact.
-    if (!isFallback)
-      m_audioMixer->removeSourceAsync(track);
+    m_audioMixer->removeSourceAsync(track);
     if (m_sourceConnected[track]) {
       qDebug() << "Audio node vanished for track" << track
                << "- will re-bind on return";
@@ -1932,13 +1968,14 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   const bool replacement = !m_boundSerial[track].isEmpty() &&
                            !nodeSerial.isEmpty() &&
                            nodeSerial != m_boundSerial[track];
-  if (m_audioMixer->sourceOperationPending(track) && !replacement)
+  if (m_audioMixer->sourceOperationPending(track) && !replacement &&
+      (!isFallback || !*isFallback))
     return;
   if (m_sourceConnected[track] && !m_audioMixer->sourceIsCapturing(track)) {
     m_sourceConnected[track] = false;
     m_boundSerial[track].clear();
   }
-  if (m_sourceConnected[track]) {
+  if (m_sourceConnected[track] && (!isFallback || !*isFallback)) {
     if (m_boundSerial[track].isEmpty()) {
       if (nodeSerial.isEmpty())
         return; // serial-less node we can't churn-check; leave it alone
@@ -1959,7 +1996,8 @@ void RecordingSession::applyAppTrackNode(int track, uint32_t nodeId,
   // Startup skew is handled downstream instead (audio gate + encoder
   // start offsets), so binds happen the moment a node is usable.
   auto source = PipeWireAudioSource::createApplicationSource(
-      nodeId, nodeName, nodeSerial, isFallback ? QString() : m_voiceChatApp);
+      nodeId, nodeName, nodeSerial, isFallback ? QString() : m_voiceChatApp,
+      isFallback ? PipeWireAudioSource::ownerIdentity(m_gameHints) : QString());
   source->setStreamName(isFallback ? QStringLiteral("trophy-game")
                                    : QStringLiteral("trophy-voice"));
   m_audioMixer->addSourceAsync(std::move(source), track);
@@ -1983,13 +2021,19 @@ void RecordingSession::checkForNewAudioNodes() {
   // Terminal errors clear isCapturing even when a desktop/mic target remains
   // present. Retry retained inactive sources once per owner-thread timer tick;
   // healthy sources stay untouched, and idle/teardown exits above never retry.
+  const bool failedGame = !m_desktopAudio && !m_gameAudioPending &&
+                          m_sourceConnected[0] &&
+                          !m_audioMixer->sourceOperationPending(0) &&
+                          !m_audioMixer->sourceIsCapturing(0);
+  if (failedGame)
+    ensureGameDesktopFallback();
   m_audioMixer->ensureSourcesStartedAsync();
 
   // Game track: PID + hints; monitor fallback never counts as bound.
-  if (m_gamePid != 0 || !m_gameHints.isEmpty())
-    reconcileAppTrack(0, m_gamePid, m_gameHints, &m_gameIsFallback);
+  if (!failedGame && (m_gamePid != 0 || !m_gameHints.isEmpty()))
+    reconcileAppTrack(0, m_gamePid, m_gameHints, &m_gameAudioPending);
 
-  if (!m_voiceChatApp.isEmpty() && !m_gameIsFallback) {
+  if (!m_voiceChatApp.isEmpty() && !m_desktopAudio && !m_gameAudioPending) {
     if (m_voiceTrack >= 0 && m_voiceTrack < kAudioTrackCount) {
       // Reserved slot (separate mode always reserves it at build).
       reconcileAppTrack(m_voiceTrack, 0, {m_voiceChatApp}, nullptr);
@@ -2010,17 +2054,6 @@ void RecordingSession::checkForNewAudioNodes() {
       }
     }
     // (merged + unslotted + absent: skip — binding there would evict mic)
-    m_voiceFallbackNoteArmed = true;
-  } else if (m_gameIsFallback && !m_voiceChatApp.isEmpty() &&
-             m_voiceFallbackNoteArmed) {
-    // Track 0 is the whole-system monitor: it already carries voice, so
-    // a separate voice leg would record every call twice (once in each
-    // track). Keep voice unbound (silence) until the game track upgrades
-    // past fallback to a real app node.
-    m_voiceFallbackNoteArmed = false;
-    qDebug() << "Voice chat capture suppressed while game audio is "
-                "full-mix fallback (voice is already in the mix):"
-             << m_voiceChatApp;
   }
 
   // The timer intentionally runs for the whole session: app streams churn

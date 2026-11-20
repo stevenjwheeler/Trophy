@@ -168,7 +168,11 @@ public:
   }
   static void missingNode(RecordingSession &session, int track, bool game) {
     session.applyAppTrackNode(track, 0xffffffffu, {}, {},
-                              game ? &session.m_gameIsFallback : nullptr);
+                              game ? &session.m_gameAudioPending : nullptr);
+  }
+  static void deliverNode(RecordingSession &session, int track, bool game) {
+    session.applyAppTrackNode(track, 23, "game-node", "123",
+                              game ? &session.m_gameAudioPending : nullptr);
   }
   static void checkNodes(RecordingSession &session) {
     session.checkForNewAudioNodes();
@@ -180,7 +184,8 @@ public:
     };
   }
   static void requestLookup(RecordingSession &session) {
-    session.reconcileAppTrack(0, 17, {"fake-game"}, &session.m_gameIsFallback);
+    session.reconcileAppTrack(0, 17, {"fake-game"},
+                              &session.m_gameAudioPending);
   }
   static bool lookupPending(RecordingSession &session) {
     return session.m_audioLookups[0].worker.valid();
@@ -237,7 +242,7 @@ public:
   }
   static void publishRoutingHistory(RecordingSession &session, bool fallback,
                                     bool desktop) {
-    session.m_historyFallback.store(fallback);
+    session.m_historyGamePending.store(fallback);
     session.m_historyDesktop.store(desktop);
   }
   // Make audioHistory() report a known separate primary track.
@@ -336,6 +341,7 @@ TEST(CpuFramePoolTest, IdleCacheIsBoundedAndResizeReplacesObsoleteBuffers) {
 class RecordingSessionTestEnvironment : public ::testing::Environment {
 public:
   void SetUp() override {
+    qputenv("PIPEWIRE_REMOTE", "trophy-unit-tests-no-audio-server");
     if (!QCoreApplication::instance()) {
       static int argc = 1;
       static char arg0[] = "test";
@@ -662,7 +668,7 @@ TEST(RecordingSessionTest, DmaBufRateLimitPrecedesDispatchAndReleasesProducerLea
   }
 }
 
-TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
+TEST(RecordingSessionHealthTest, DesktopFallbackMuteAndVideoOriginAreTruthful) {
   AudioMixer mixer(48000, 2);
   FakeCapture capture;
   FakeVideoEncoder encoder;
@@ -677,17 +683,17 @@ TEST(RecordingSessionHealthTest, FallbackMuteAndVideoOriginAreTruthful) {
   EXPECT_EQ(session.captureHealth()["queueDrops"].toULongLong(), 1);
   EXPECT_EQ(session.captureHealth()["queueDepth"].toInt(), 30);
   EXPECT_EQ(session.captureHealth()["peakQueueDepth"].toInt(), 30);
-  session.setGameIsFallback(true);
+  session.setGameAudioPending(true);
   session.setVoiceChatApp("Discord");
   EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
+  EXPECT_TRUE(session.captureHealth()["gameAudioPending"].toBool());
   EXPECT_EQ(session.captureHealth()["audio1"].toString(), "desktop-mix-unavailable");
-  EXPECT_TRUE(session.captureHealth()["audio1Signal"].toMap().isEmpty());
   // Capture health names the bound identity, not just a generic "connected".
   EXPECT_EQ(session.captureHealth()["audio1Name"].toString(), "Discord");
   mixer.setSemanticTrackMuted(2, true);
   EXPECT_EQ(session.captureHealth()["audio2"].toString(), "muted");
   EXPECT_TRUE(session.captureHealth()["audio2Signal"].toMap()["muted"].toBool());
-  session.setGameIsFallback(false);
+  session.setGameAudioPending(false);
   EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
   // Marking a node bound is not proof the source is actually capturing.
   RecordingSessionTestPeer::bindKnownNode(session);
@@ -958,7 +964,8 @@ private:
   std::atomic<int> m_starts{0};
 };
 
-TEST(RecordingSessionHealthTest, HistoryKeepsFallbackAndLaterSeparateVoice) {
+TEST(RecordingSessionHealthTest,
+     HistoryRetainsDesktopFallbackAndLaterGameAudio) {
   if (!avcodec_find_encoder(AV_CODEC_ID_AAC)) GTEST_SKIP() << "AAC unavailable";
   FakeCapture capture;
   FakeVideoEncoder encoder;
@@ -966,16 +973,18 @@ TEST(RecordingSessionHealthTest, HistoryKeepsFallbackAndLaterSeparateVoice) {
   AudioMixer mixer(48000, 2);
   mixer.addSource(std::make_unique<FakeAudioSource>(), 0);
   RecordingSession session("unused-history.mkv", &capture, &encoder, &muxer, &mixer, true, 128, 3);
-  session.setGameIsFallback(true);
+  session.setGameAudioPending(true);
   ASSERT_TRUE(session.start());
   ASSERT_TRUE(settleMixerSources(mixer));
   VideoFrame video{}; video.timestamp = 0;
   capture.fire(video);
   auto history = AudioRoutingInfo::fromJson(session.audioHistory());
   ASSERT_TRUE(history.known);
-  EXPECT_TRUE(history.system); EXPECT_FALSE(history.game); EXPECT_FALSE(history.voice);
+  EXPECT_TRUE(history.system);
+  EXPECT_FALSE(history.game);
+  EXPECT_FALSE(history.voice);
   EXPECT_EQ(history.primary, 0); EXPECT_EQ(history.voiceTrack, 1); EXPECT_EQ(history.micTrack, 2);
-  session.setGameIsFallback(false);
+  session.setGameAudioPending(false);
   auto voice = std::make_unique<FakeAudioSource>();
   auto *source = voice.get();
   mixer.addSource(std::move(voice), 1);
@@ -983,7 +992,9 @@ TEST(RecordingSessionHealthTest, HistoryKeepsFallbackAndLaterSeparateVoice) {
   source->fire(samples.data(), 2048);
   session.stop();
   history = AudioRoutingInfo::fromJson(session.audioHistory());
-  EXPECT_TRUE(history.system); EXPECT_TRUE(history.game); EXPECT_TRUE(history.voice);
+  EXPECT_TRUE(history.system);
+  EXPECT_TRUE(history.game);
+  EXPECT_TRUE(history.voice);
 }
 
 // The encoding worker is parked at a controlled video encode boundary while
@@ -1672,28 +1683,45 @@ TEST(RecordingSessionTest, IdleChecksNeverRestartFailedDesktopOrMicrophone) {
   EXPECT_FALSE(raw->isCapturing());
 }
 
-TEST(RecordingSessionTest, VoiceBindSuppressedWhileGameTrackIsFullMixFallback) {
-  // Manual recordings leave track 0 on the whole-system monitor, which
-  // already carries voice: binding a separate voice leg records every
-  // call twice (once per track). The retry must not hunt voice while
-  // fallback holds, and must resume once the game track upgrades to a
-  // real app node.
+TEST(RecordingSessionTest, GameStreamLossFallsBackAndRecoveryReplacesDesktop) {
+  AudioMixer mixer(48000, 2);
+  RecordingSession session("unused.mkv", nullptr, nullptr, nullptr, &mixer,
+                           true, 128, 3);
+  session.setVoiceChatApp("Discord");
+  session.setVoiceTrack(1);
+  RecordingSessionTestPeer::missingNode(session, 0, true);
+  EXPECT_TRUE(mixer.sourceIsDesktopAudio(0));
+  EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
+  EXPECT_FALSE(session.audioRoutingState().connected[0]);
+  RecordingSessionTestPeer::deliverNode(session, 1,
+                                        false); // Stale Voice result.
+  EXPECT_FALSE(session.audioRoutingState().connected[1]);
+  RecordingSessionTestPeer::deliverNode(session, 0, true);
+  EXPECT_FALSE(mixer.sourceIsDesktopAudio(0));
+  EXPECT_FALSE(session.captureHealth()["desktopFallback"].toBool());
+  EXPECT_TRUE(session.audioRoutingState().connected[0]);
+  RecordingSessionTestPeer::missingNode(session, 0, true);
+  EXPECT_TRUE(mixer.sourceIsDesktopAudio(0));
+  EXPECT_TRUE(session.captureHealth()["desktopFallback"].toBool());
+  RecordingSessionTestPeer::missingNode(session, 0, true); // Idempotent retry.
+  EXPECT_TRUE(mixer.sourceIsDesktopAudio(0));
+}
+
+TEST(RecordingSessionTest, VoiceIsIncludedInFallbackUntilGameAudioBinds) {
   FakeCapture capture;
   FakeVideoEncoder encoder;
   FakeMuxer muxer;
   AudioMixer mixer(48000, 2);
   RecordingSession session("unused.mkv", &capture, &encoder, &muxer,
                            &mixer, true, 128, 3, {});
-  int calls = 0;
-  RecordingSessionTestPeer::setLookup(session, [&] { ++calls; return 23u; });
+  RecordingSessionTestPeer::setLookup(session, [] { return 23u; });
   session.setVoiceChatApp("Discord");
   session.setVoiceTrack(1);
-  session.setGameIsFallback(true);
+  session.setGameAudioPending(true);
   ASSERT_TRUE(session.start());
   RecordingSessionTestPeer::checkNodes(session);
   EXPECT_FALSE(RecordingSessionTestPeer::lookupPendingTrack(session, 1));
-  EXPECT_EQ(calls, 0);
-  session.setGameIsFallback(false);
+  session.setGameAudioPending(false);
   RecordingSessionTestPeer::checkNodes(session);
   EXPECT_TRUE(RecordingSessionTestPeer::lookupPendingTrack(session, 1));
   session.stop();
@@ -1857,7 +1885,7 @@ TEST(RecordingSessionTest, HandoffInheritsBindingsAndLateVoiceLayout) {
                             false, 128, 3, {});
   previous.setVoiceTrack(2);
   previous.markSourceConnected(2);
-  previous.setGameIsFallback(false);
+  previous.setGameAudioPending(false);
   RecordingSessionTestPeer::bindKnownNode(previous);
   RecordingSession next("unused.mkv", nullptr, nullptr, nullptr, nullptr,
                         false, 128, 2, {});
@@ -1865,7 +1893,7 @@ TEST(RecordingSessionTest, HandoffInheritsBindingsAndLateVoiceLayout) {
   const auto state = next.audioRoutingState();
   EXPECT_EQ(state.activeTrackCount, 3);
   EXPECT_EQ(state.voiceTrack, 2);
-  EXPECT_FALSE(state.gameIsFallback);
+  EXPECT_FALSE(state.gameAudioPending);
   EXPECT_TRUE(state.connected[0]);
   EXPECT_TRUE(state.connected[2]);
   EXPECT_EQ(state.boundSerial[0], "123");

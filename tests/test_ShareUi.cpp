@@ -259,25 +259,6 @@ TEST_F(SharingUiTest, ComboPopupAppearanceTracksVisibilityWithoutChangingSelecti
   }
 }
 
-TEST_F(SharingUiTest, WindowPickerDividersKeepImplicitSizeAcrossResizeAndReopen) {
-  create("WindowPickerDialog.qml", {});
-  ASSERT_TRUE(object);
-  for (const QSize &size : {QSize(500, 600), QSize(620, 680), QSize(500, 600)}) {
-    object->setProperty("width", size.width());
-    object->setProperty("height", size.height());
-    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "open"));
-    ASSERT_TRUE(wait([&] { return object->property("opened").toBool(); }));
-    for (const auto *name : {"windowPickerTopDivider", "windowPickerBottomDivider"}) {
-      auto *divider = object->findChild<QQuickItem *>(name);
-      ASSERT_NE(divider, nullptr);
-      EXPECT_EQ(divider->implicitHeight(), 1);
-      ASSERT_TRUE(wait([&] { return divider->height() == 1 && divider->width() > 400; }));
-    }
-    ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "close"));
-    ASSERT_TRUE(wait([&] { return !object->property("visible").toBool(); }));
-  }
-}
-
 TEST_F(SharingUiTest, VoiceAppSurvivesOfflineStartupRefreshAndLateLaunch) {
   create("../controls/VoiceAppComboBox.qml", {{"savedApp", "Discord"}});
   ASSERT_TRUE(object);

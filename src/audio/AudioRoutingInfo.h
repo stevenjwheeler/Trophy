@@ -27,11 +27,14 @@ struct AudioRoutingInfo {
     result.voice = object.value("voice").toBool(); result.separate = object.value("separate").toBool();
     result.primary = object.value("primary").toInt(); result.voiceTrack = object.value("voiceTrack").toInt();
     result.micTrack = object.value("micTrack").toInt();
-    if ((!result.system && !result.game) ||
-        (result.primary < 0 && result.voiceTrack < 0 && result.micTrack < 0) ||
-        (!result.separate && (result.voiceTrack >= 0 || result.micTrack >= 0)) ||
-        (result.primary >= 0 && (result.primary == result.voiceTrack || result.primary == result.micTrack)) ||
-        (result.voiceTrack >= 0 && result.voiceTrack == result.micTrack)) return {};
+    // A known game track may have stayed silent while attribution was pending.
+    if ((result.primary < 0 && result.voiceTrack < 0 && result.micTrack < 0) ||
+        (!result.separate &&
+         (result.voiceTrack >= 0 || result.micTrack >= 0)) ||
+        (result.primary >= 0 && (result.primary == result.voiceTrack ||
+                                 result.primary == result.micTrack)) ||
+        (result.voiceTrack >= 0 && result.voiceTrack == result.micTrack))
+      return {};
     result.known = true;
     return result;
   }

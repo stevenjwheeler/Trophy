@@ -81,7 +81,10 @@ with tempfile.TemporaryDirectory(prefix="trophy-audio-group-") as root:
     try:
         start_services()
         child = subprocess.Popen(sys.argv[1:], env=env)
-        deadline = time.monotonic() + 90
+        timeout = int(os.environ.get("TROPHY_PRIVATE_AUDIO_TIMEOUT", "90"))
+        if not 1 <= timeout <= 300:
+            raise RuntimeError("private audio timeout must be within 1..300 seconds")
+        deadline = time.monotonic() + timeout
         while child.poll() is None:
             if time.monotonic() > deadline:
                 raise RuntimeError("private audio test timed out")

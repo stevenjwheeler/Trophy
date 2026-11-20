@@ -31,11 +31,8 @@ class NativePackageSmokeTest(unittest.TestCase):
         self.libdir = libdir
         for relative in (
             "bin/trophy", f"{libdir}/libTrophy.so",
-            f"{libdir}/trophy/libtrophy_layer.so", f"{libdir}/trophy/libtrophy_gl_shim.so",
             "share/applications/io.github.stevenjwheeler.Trophy.desktop",
             "share/icons/hicolor/scalable/apps/trophy.svg",
-            "share/trophy/kwin/trophy-monitor/metadata.json",
-            "share/trophy/kwin/trophy-monitor/contents/code/main.js",
             "share/licenses/trophy/default-app-icons/LICENSE",
             "share/licenses/trophy/default-app-icons/README.md",
         ):
@@ -43,9 +40,6 @@ class NativePackageSmokeTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture")
             path.chmod(0o755 if relative.startswith(("bin/", "lib")) else 0o644)
-        path = self.prefix / "share/trophy/vulkan_layer/trophy_layer.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"layer": {"library_path": "/build/template.so"}}))
         path = self.prefix / "share/metainfo/io.github.stevenjwheeler.Trophy.metainfo.xml"
         path.parent.mkdir(parents=True)
         path.write_text('<component><launchable type="desktop-id">'
@@ -68,33 +62,10 @@ class NativePackageSmokeTest(unittest.TestCase):
         self.payload("lib/x86_64-linux-gnu")
         self.assertEqual(self.check(), self.prefix)
 
-    def companions(self):
-        directory = self.prefix / "lib/trophy/reporters32"
-        directory.mkdir(parents=True)
-        for name in ("libtrophy_layer.so", "libtrophy_gl_shim.so"):
-            header = bytearray(20)
-            header[:7] = b"\x7fELF\x01\x01\x01"
-            header[16:20] = b"\x03\x00\x03\x00"
-            (directory / name).write_bytes(header)
-        return directory
-
-    def test_optional_i386_companions_are_checked(self):
+    def test_obsolete_compositor_helper_is_rejected(self):
         self.payload()
-        self.companions()
-        self.assertEqual(self.check(), self.prefix)
-
-    def test_partial_i386_companions_are_not_a_complete_package(self):
-        self.payload()
-        directory = self.companions()
-        (directory / "libtrophy_layer.so").unlink()
-        with self.assertRaisesRegex(RuntimeError, "Payload missing"):
-            self.check()
-
-    def test_mislabeled_i386_companion_is_rejected(self):
-        self.payload()
-        directory = self.companions()
-        (directory / "libtrophy_gl_shim.so").write_bytes(b"not an i386 shared object")
-        with self.assertRaisesRegex(RuntimeError, "i386 ET_DYN"):
+        (self.prefix / "share/trophy/kwin").mkdir(parents=True)
+        with self.assertRaisesRegex(RuntimeError, "Obsolete compositor helper"):
             self.check()
 
     def test_missing_payload_members(self):
@@ -115,9 +86,9 @@ class NativePackageSmokeTest(unittest.TestCase):
             library.chmod(0o644)
         self.assertEqual(self.check(), self.prefix)
 
-    def test_unreadable_reporter(self):
+    def test_unreadable_library(self):
         self.payload()
-        (self.prefix / "lib/trophy/libtrophy_gl_shim.so").chmod(0o000)
+        (self.prefix / "lib/libTrophy.so").chmod(0o000)
         with self.assertRaisesRegex(RuntimeError, "permissions"):
             self.check()
 
@@ -147,16 +118,6 @@ class NativePackageSmokeTest(unittest.TestCase):
         with patch.object(native, "command", return_value=" (RUNPATH) Library runpath: [/build]"):
             with self.assertRaisesRegex(RuntimeError, "relocatable RUNPATH"):
                 native.check_tree(self.root)
-
-    def test_malformed_manifest(self):
-        self.payload()
-        path = self.prefix / "share/trophy/vulkan_layer/trophy_layer.json"
-        for manifest in ([], {"layer": []}, {"layer": {"library_path": {}}},
-                         {"layer": {"library_path": " "}}):
-            with self.subTest(manifest=manifest):
-                path.write_text(json.dumps(manifest))
-                with self.assertRaisesRegex(RuntimeError, "library_path"):
-                    self.check()
 
     def test_host_library_cannot_mask_missing_local_resolution(self):
         self.payload()

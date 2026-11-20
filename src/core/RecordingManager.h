@@ -25,7 +25,6 @@ namespace TrophyBackend {
 class SettingsManager;
 class StorageManager;
 class AudioMixer;
-class WindowService;
 class RecordingSession;
 class IVideoCaptureSource;
 class GameDetectionService;
@@ -74,7 +73,6 @@ public:
   void setSettingsManager(SettingsManager *settings);
   void setStorageManager(StorageManager *storage);
   void setAudioMixer(AudioMixer *mixer);
-  void setWindowService(WindowService *ws);
   void setGameDetectionService(GameDetectionService *detector);
 
   // State
@@ -91,8 +89,7 @@ public:
   void setDetectedEncoderName(const QString &name);
 
   // Recording control
-  Q_INVOKABLE void startRecording(const QString &gameName = QString(),
-                                  unsigned long windowId = 0);
+  Q_INVOKABLE void startRecording(const QString &gameName = QString());
   Q_INVOKABLE void stopRecording();
   Q_INVOKABLE bool addBookmark();
   QVariantMap captureHealth() const;
@@ -210,7 +207,6 @@ private:
   QString m_currentGameName;
   QVariantMap m_detectedGameInfo;
   QString m_currentFilePath;
-  unsigned long m_manualWindowId = 0;
   bool m_isManualRecording = false;
   bool m_recordingFailed = false;
   QString m_lastOutputError;
@@ -220,7 +216,6 @@ private:
   SettingsManager *m_settings = nullptr;
   StorageManager *m_storage = nullptr;
   AudioMixer *m_audioMixer = nullptr;
-  WindowService *m_windowService = nullptr;
   GameDetectionService *m_gameDetector = nullptr;
 
   // Pipeline components (owned)

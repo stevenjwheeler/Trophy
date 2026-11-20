@@ -59,6 +59,32 @@ Page {
 
         }
 
+        RowLayout {
+            visible: root.detector && root.detector.instances && root.detector.instances.length > 1
+            Layout.fillWidth: true
+            Label {
+                text: qsTr("Capture target")
+                color: Theme.textSecondaryColor
+            }
+            TrophyComboBox {
+                Layout.fillWidth: true
+                model: root.detector && root.detector.instances ? root.detector.instances : []
+                textRole: "label"
+                currentIndex: {
+                    if (!root.detector || !root.detector.instances)
+                        return -1
+                    for (let i = 0; i < root.detector.instances.length; ++i)
+                        if (root.detector.instances[i].selected)
+                            return i
+                    return -1
+                }
+                onActivated: function(index) {
+                    if (root.detector)
+                        root.detector.selectInstance(root.detector.instances[index].id)
+                }
+            }
+        }
+
         // List options: count + default-exclusions toggle
         RowLayout {
             Layout.fillWidth: true
@@ -174,43 +200,40 @@ Page {
 
     }
 
-    // Add game: pick a running window (themed like WindowPickerDialog)
+    // Add game: use the cached /proc census, independent of window systems.
     Dialog {
         id: addGameDialog
         objectName: "addGameDialog"
 
-        property var allWindows: []
+        property var allProcesses: []
         property string searchQuery: ""
-        property var pickedWindow: null
+        property var pickedProcess: null
         property string errorMessage: ""
-        readonly property var shownWindows: allWindows.filter(function(w) {
+        readonly property var shownProcesses: allProcesses.filter(function(w) {
             if (searchQuery === "")
                 return true
             const q = searchQuery.toLowerCase()
-            return ((w.title || "").toLowerCase().indexOf(q) !== -1) || ((w.class || "").toLowerCase().indexOf(q) !== -1)
+            return ((w.title || "").toLowerCase().indexOf(q) !== -1) || ((w.path || "").toLowerCase().indexOf(q) !== -1) || String(w.pid).indexOf(q) !== -1
         })
 
-        function refreshWindows() {
-            if (typeof windowService !== "undefined" && windowService)
-                allWindows = windowService.getVisibleWindows()
+        function refreshProcesses() {
+            if (typeof gameDetector !== "undefined" && gameDetector && typeof gameDetector.runningProcesses === "function")
+                allProcesses = gameDetector.runningProcesses()
             else
-                allWindows = []
+                allProcesses = []
         }
 
         function addPicked() {
-            if (pickedWindow === null)
+            if (pickedProcess === null)
                 return
-            const key = ((pickedWindow.class || pickedWindow.title) || "").trim()
-            if (key === "") {
-                errorMessage = qsTr("That window has no usable key.")
-                return
-            }
-            const display = displayField.text.trim() || pickedWindow.title || key
-            const ok = blacklistRadio.checked ? gameDetector.addCustomGame(key, display, true) : gameDetector.addCustomGame(key, display, false)
+            const display = displayField.text.trim()
+            const ok = gameDetector.addProcessGame(pickedProcess.pid, pickedProcess.identity, display || pickedProcess.title, blacklistRadio.checked)
             if (ok) {
                 addGameDialog.close()
             } else {
-                errorMessage = qsTr("That game is already listed.")
+                errorMessage = qsTr("That process exited, changed, or is already listed. Refresh and try again.")
+                refreshProcesses()
+                pickedProcess = null
             }
         }
 
@@ -220,13 +243,13 @@ Page {
         anchors.centerIn: Overlay.overlay
         onOpened: {
             errorMessage = ""
-            pickedWindow = null
+            pickedProcess = null
             searchQuery = ""
             processSearch.text = ""
             displayField.text = ""
             whitelistRadio.checked = true
             blacklistRadio.checked = false
-            refreshWindows()
+            refreshProcesses()
         }
 
         background: Rectangle {
@@ -294,7 +317,7 @@ Page {
                 Layout.fillHeight: true
                 Layout.margins: Theme.spacingSmall
                 clip: true
-                model: addGameDialog.shownWindows
+                model: addGameDialog.shownProcesses
                 spacing: 2
 
                 delegate: ItemDelegate {
@@ -303,10 +326,10 @@ Page {
                     width: processList.width
                     height: 50
                     padding: 0
-                    highlighted: addGameDialog.pickedWindow !== null && modelData === addGameDialog.pickedWindow
+                    highlighted: addGameDialog.pickedProcess !== null && modelData === addGameDialog.pickedProcess
                     onClicked: {
-                        addGameDialog.pickedWindow = modelData
-                        displayField.text = modelData.title || modelData.class || ""
+                        addGameDialog.pickedProcess = modelData
+                        displayField.text = modelData.title || ""
                     }
 
                     contentItem: RowLayout {
@@ -327,7 +350,7 @@ Page {
                                 anchors.centerIn: parent
                                 objectName: "pickerIconFallback"
                                 visible: pickerIcon.status !== Image.Ready
-                                text: ((modelData.title || modelData.class) || "?").charAt(0).toUpperCase()
+                                text: (modelData.title || "?").charAt(0).toUpperCase()
                                 font.pixelSize: Theme.fontSizeNormal
                                 color: Theme.primaryColor
                             }
@@ -352,7 +375,7 @@ Page {
                             spacing: 2
 
                             Label {
-                                text: modelData.title || qsTr("Untitled Window")
+                                text: modelData.title || qsTr("Unknown process")
                                 color: Theme.textColor
                                 font.weight: Font.Medium
                                 elide: Text.ElideRight
@@ -360,7 +383,7 @@ Page {
                             }
 
                             Label {
-                                text: modelData.class || ""
+                                text: qsTr("PID %1 · %2").arg(modelData.pid).arg(modelData.path || "")
                                 color: Theme.textMutedColor
                                 font.pixelSize: Theme.fontSizeSmall
                                 elide: Text.ElideRight
@@ -387,7 +410,7 @@ Page {
                 Layout.fillWidth: true
                 Layout.margins: Theme.spacingLarge
                 visible: processList.count === 0
-                text: (typeof windowService !== "undefined" && windowService) ? qsTr("No running windows found.") : qsTr("The Game Window Helper is unavailable — check its status in Settings.")
+                text: qsTr("No matching processes found. Start the game and refresh.")
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
                 wrapMode: Text.WordWrap
@@ -447,13 +470,21 @@ Page {
                     }
 
                     TrophyButton {
+                        text: qsTr("Refresh")
+                        onClicked: {
+                            addGameDialog.pickedProcess = null
+                            addGameDialog.refreshProcesses()
+                        }
+                    }
+
+                    TrophyButton {
                         text: qsTr("Cancel")
                         onClicked: addGameDialog.close()
                     }
 
                     TrophyButton {
                         text: qsTr("Add")
-                        enabled: addGameDialog.pickedWindow !== null
+                        enabled: addGameDialog.pickedProcess !== null
                         onClicked: addGameDialog.addPicked()
                     }
 

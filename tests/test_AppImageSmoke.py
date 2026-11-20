@@ -27,8 +27,6 @@ class AppImagePayloadTest(unittest.TestCase):
         for relative in (
             "usr/bin/qt.conf",
             "usr/lib/libTrophy.so",
-            "usr/lib/trophy/libtrophy_layer.so",
-            "usr/lib/trophy/libtrophy_gl_shim.so",
             "usr/plugins/platforms/libqwayland-generic.so",
             "usr/plugins/platforms/libqoffscreen.so",
             "usr/plugins/wayland-shell-integration/libxdg-shell.so",
@@ -36,8 +34,6 @@ class AppImagePayloadTest(unittest.TestCase):
             "usr/plugins/multimedia/libffmpegmediaplugin.so",
             "usr/qml/QtQuick/Dialogs/FolderDialog.qml",
             "usr/share/applications/io.github.stevenjwheeler.Trophy.desktop",
-            "usr/share/trophy/vulkan_layer/trophy_layer.json",
-            "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",
             "usr/share/metainfo/io.github.stevenjwheeler.Trophy.metainfo.xml",
         ):
             path = root / relative

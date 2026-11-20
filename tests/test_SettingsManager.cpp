@@ -407,49 +407,6 @@ TEST_F(SettingsManagerTest, SetSameEncoderNoSignal) {
   EXPECT_EQ(spy.count(), 0);
 }
 
-TEST_F(SettingsManagerTest, DefaultWindowTrackingDisabled) {
-  // Opt-in: nothing is installed until the user enables it in the wizard.
-  EXPECT_FALSE(mgr->windowTrackingEnabled());
-}
-
-TEST_F(SettingsManagerTest, SetWindowTrackingEmitsSignal) {
-  QSignalSpy spy(mgr.get(), &SettingsManager::windowTrackingEnabledChanged);
-  mgr->setWindowTrackingEnabled(true);
-  EXPECT_TRUE(mgr->windowTrackingEnabled());
-  EXPECT_EQ(spy.count(), 1);
-  mgr->setWindowTrackingEnabled(true);
-  EXPECT_EQ(spy.count(), 1); // same value: no repeat signal
-}
-
-TEST_F(SettingsManagerTest, WindowTrackingPersistsRoundTrip) {
-  mgr->setWindowTrackingEnabled(true);
-  mgr->save();
-
-  auto mgr2 = std::make_unique<SettingsManager>();
-  mgr2->load();
-  EXPECT_TRUE(mgr2->windowTrackingEnabled());
-}
-
-TEST_F(SettingsManagerTest, DefaultVulkanLayerDisabled) {
-  EXPECT_FALSE(mgr->vulkanLayerEnabled());
-}
-
-TEST_F(SettingsManagerTest, SetVulkanLayerEmitsSignal) {
-  QSignalSpy spy(mgr.get(), &SettingsManager::vulkanLayerEnabledChanged);
-  mgr->setVulkanLayerEnabled(true);
-  EXPECT_TRUE(mgr->vulkanLayerEnabled());
-  EXPECT_EQ(spy.count(), 1);
-}
-
-TEST_F(SettingsManagerTest, VulkanLayerPersistsRoundTrip) {
-  mgr->setVulkanLayerEnabled(true);
-  mgr->save();
-
-  auto mgr2 = std::make_unique<SettingsManager>();
-  mgr2->load();
-  EXPECT_TRUE(mgr2->vulkanLayerEnabled());
-}
-
 TEST_F(SettingsManagerTest, DefaultTrayBehaviour) {
   EXPECT_TRUE(mgr->minimizeToTray());
   EXPECT_FALSE(mgr->startMinimized());

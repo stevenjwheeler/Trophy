@@ -360,7 +360,7 @@ jobs:
           retention-days: 7
 
   verify-packages:
-    needs: [build, test, package-appimage, package-native, reporters-multilib]
+    needs: [build, test, package-appimage, package-native]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.build.outputs.version }}
@@ -385,59 +385,6 @@ jobs:
           name: Trophy-${{ env.VERSION }}-checksums
           path: SHA256SUMS
           retention-days: 14
-
-  reporters-multilib:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        bits: [32, 64]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install reporter build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build g++-multilib libvulkan-dev libgtest-dev
-      - name: Build architecture-matched reporter fixtures
-        env:
-          BITS: ${{ matrix.bits }}
-        run: |
-          set -euo pipefail
-          options=()
-          if [[ "$BITS" == 32 ]]; then
-            cmake -S /usr/src/googletest -B "$RUNNER_TEMP/gtest32-build" -GNinja \
-              -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DBUILD_GMOCK=OFF \
-              -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gtest32"
-            cmake --build "$RUNNER_TEMP/gtest32-build" --parallel 2
-            cmake --install "$RUNNER_TEMP/gtest32-build"
-            options+=("-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/reporters/i686-linux.cmake"
-                      "-DCMAKE_PREFIX_PATH=$RUNNER_TEMP/gtest32")
-          fi
-          cmake -S reporters -B "$RUNNER_TEMP/reporters$BITS" -GNinja \
-            -DCMAKE_BUILD_TYPE=Release "${options[@]}"
-          cmake --build "$RUNNER_TEMP/reporters$BITS" --parallel 2
-          ctest --test-dir "$RUNNER_TEMP/reporters$BITS" --output-on-failure \
-            --timeout 60 --output-junit "$RUNNER_TEMP/reporters$BITS.xml"
-      - name: Check reporter ABI and disabled host runtime loading
-        env:
-          BITS: ${{ matrix.bits }}
-        run: |
-          python3 packaging/check_reporter_runtimes.py \
-            "$RUNNER_TEMP/reporters$BITS/libtrophy_layer.so" \
-            "$RUNNER_TEMP/reporters$BITS/libtrophy_gl_shim.so" \
-            --execute-trusted-fixtures --require-host-pass \
-            --output "$RUNNER_TEMP/reporters$BITS-runtime.json"
-      - name: Upload reporter test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trophy-reporters-${{ matrix.bits }}-diagnostics
-          path: |
-            ${{ runner.temp }}/reporters${{ matrix.bits }}.xml
-            ${{ runner.temp }}/reporters${{ matrix.bits }}-runtime.json
-            ${{ runner.temp }}/reporters${{ matrix.bits }}/Testing/Temporary/LastTest.log
-          if-no-files-found: ignore
-          retention-days: 7
 
   draft-release:
     needs: [build, verify-packages]

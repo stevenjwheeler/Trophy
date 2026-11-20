@@ -220,22 +220,12 @@ ApplicationWindow {
     }
 
     function openWindowPicker() {
-        console.log("openWindowPicker called. app.isWayland:", window.app.isWayland);
-        if (window.app.isWayland) {
-            // A detected game records directly (same as the hotkey/tray
-            // paths); the picker is only for idle manual capture. The
-            // portal reports every KWin source as generic "kwin_wayland"
-            // and never names the picked item, so manual captures keep
-            // the "Manual Recording" display name instead.
-            if (window.gameDetector && window.gameDetector.currentGameName !== "")
-                window.recordingManager.startRecording(window.gameDetector.currentGameName);
-            else
-                // On Wayland, the system portal handles window/screen selection.
-                window.recordingManager.startRecording();
-        } else {
-            console.log("Opening windowPicker dialog.");
-            windowPicker.open();
-        }
+        // The system portal owns window/screen selection. A detected game
+        // keeps its pinned process identity even if portal labels are generic.
+        if (window.gameDetector && window.gameDetector.currentGameName !== "")
+            window.recordingManager.startRecording(window.gameDetector.currentGameName);
+        else
+            window.recordingManager.startRecording();
     }
 
     function openFolder(path) {
@@ -372,7 +362,6 @@ ApplicationWindow {
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
             { name: "Discord Rich Presence", section: "Discord Rich Presence", keywords: ["discord", "rich presence", "activity", "profile", "privacy", "game names", "idle"] },
             { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
-            { name: "Detection Helpers", section: "Detection Helpers", keywords: ["helpers", "integration", "status", "enrolled", "game window helper", "window tracking", "vulkan", "opengl", "shim", "repair"] },
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
         ];
@@ -858,12 +847,6 @@ ApplicationWindow {
         }
     }
 
-    WindowPickerDialog {
-        id: windowPicker
-        onWindowSelected: function(windowId, title) {
-            window.recordingManager.startRecording(title, windowId);
-        }
-    }
 
     TrophyDialog {
         id: deleteDialog
@@ -1054,50 +1037,6 @@ ApplicationWindow {
         }
     }
 
-    // One warning per failure, re-armed once tracking works again. First-run
-    // setup handles its own check; allow initialization/repair time to finish.
-    QtObject {
-        id: trackingStartupCheck
-        property bool prompted: false
-        function check() {
-            if (!windowMonitor)
-                return;
-            if (windowMonitor.trackingReady) {
-                prompted = false;
-                return;
-            }
-            if (prompted || windowMonitor.trackingChecking || !window.settingsManager ||
-                !window.settingsManager.setupCompleted)
-                return;
-            prompted = true;
-            trackingRepairDialog.open();
-            window.requestAttention(qsTr("The Game Window Helper needs repair. Open Trophy when you're ready."));
-        }
-        Component.onCompleted: Qt.callLater(check)
-    }
-
-    Connections {
-        target: windowMonitor
-        function onWindowsChanged() {
-            trackingStartupCheck.check();
-            if (windowMonitor.trackingReady)
-                trackingRepairDialog.close();
-        }
-    }
-
-    TrophyDialog {
-        id: trackingRepairDialog
-        title: qsTr("Game Window Helper Needs Attention")
-        message: qsTr("The Game Window Helper is not responding. Trophy needs window identity, focus and fullscreen information to identify games and restore capture to the correct window. Repair will reinstall or restart the compositor integration. Your recordings are still available.")
-                 + (windowMonitor && windowMonitor.compositorName === "gnome" ? "\n\n" + windowMonitor.gnomeHelperStatus : "")
-        confirmText: qsTr("Repair")
-        cancelText: qsTr("Later")
-        onAccepted: if (windowMonitor) windowMonitor.repairTracking()
-        onClosed: {
-            if (!errorDialog.visible)
-                notificationService.clearAttention();
-        }
-    }
 
     SetupWizard {
         id: setupWizard

@@ -20,7 +20,7 @@ docker run --rm --cpus 2 --memory 4g --cap-drop ALL \
     trophy-appimage-ubuntu24 bash /source/packaging/containers/appimage.sh
 ```
 
-The script builds the application/reporters and the focused source-free unit/GPU
+The script builds the application and the focused source-free unit/GPU
 test executables, stages only under `/work`, and checks startup. It does not
 build a diagnostic AppImage kit or run the full CI suite. No host home/runtime,
 services, GPU devices or detection socket are mounted into the builder.

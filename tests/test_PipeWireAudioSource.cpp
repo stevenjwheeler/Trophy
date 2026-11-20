@@ -28,13 +28,17 @@ void lookupUpdate(detail::AudioLookupProperties &props,
 }
 
 TEST(ApplicationAudioLookupTest, FollowsLatePropertiesAndIgnoresStateOnlyEvents) {
+  EXPECT_EQ(detail::audioProcessId(""), 0);
+  EXPECT_EQ(detail::audioProcessId("42"), 42);
+  EXPECT_EQ(detail::audioProcessId("invalid"), -1);
+  EXPECT_EQ(detail::audioProcessId("0"), -1);
   detail::AudioLookupProperties node;
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"}});
   EXPECT_FALSE(node.matches(0, "fixture", false));
   node.updateInfo(nullptr, false); // First info can be state-only.
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
                       {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"}}, true);
-  EXPECT_TRUE(node.matches(0, "fixture", false));
+  EXPECT_FALSE(node.matches(0, "fixture", false)); // No substring identities.
   lookupUpdate(node, {{PW_KEY_NODE_NAME, "engine"}, {PW_KEY_OBJECT_SERIAL, "123"},
                       {PW_KEY_APP_PROCESS_BINARY, "fixture.exe"},
                       {PW_KEY_APP_PROCESS_ID, "42"}}, true);

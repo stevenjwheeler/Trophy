@@ -103,10 +103,10 @@ def check_payload(payload):
     Kept separate from the process checks so the packaging harness can be
     tested against fake trees.
     """
+    if (payload / "usr/share/trophy/kwin").exists():
+        raise RuntimeError("Obsolete compositor helper bundled: usr/share/trophy/kwin")
     for pattern in (
         "usr/bin/qt.conf", "usr/lib/libTrophy.so",
-        "usr/lib/**/trophy/libtrophy_layer.so",
-        "usr/lib/**/trophy/libtrophy_gl_shim.so",
         "usr/plugins/platforms/libqwayland*.so",
         "usr/plugins/platforms/libqoffscreen.so",
         "usr/plugins/wayland-shell-integration/*.so",
@@ -116,8 +116,6 @@ def check_payload(payload):
         # picker, which only exists in the QML payload.
         "usr/qml/**/FolderDialog.qml",
         "usr/share/applications/io.github.stevenjwheeler.Trophy.desktop",
-        "usr/share/trophy/vulkan_layer/trophy_layer.json",
-        "usr/share/trophy/kwin/trophy-monitor/contents/code/main.js",
         "usr/share/metainfo/*.metainfo.xml",
     ):
         if not any(payload.glob(pattern)):
@@ -200,8 +198,7 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
         (config / "settings.json").write_text(json.dumps({
             "version": 1,
             "storage": {"recordingsPath": str(root / "recordings"), "autoDelete": False},
-            "detection": {"autoDetect": False, "autoRecord": False,
-                          "windowTracking": False, "vulkanLayer": False},
+            "detection": {"autoDetect": False, "autoRecord": False},
             "general": {"updateCheck": False, "globalShortcuts": False,
                         "instantReplay": False, "startOnLogin": False},
         }))

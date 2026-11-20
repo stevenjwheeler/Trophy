@@ -404,7 +404,6 @@ TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
   engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
       {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))},
       {"gameFilterText", ""}, {"showDefaultExclusions", false}});
-  engine.rootContext()->setContextProperty("windowService", QVariant::fromValue<QObject *>(nullptr));
   QQuickWindow window;
   QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
   std::unique_ptr<QObject> object(component.create());
@@ -419,12 +418,16 @@ TEST_F(GameIconTest, AddGameDialogShowsProgramIconsAndRetainsLetterFallback) {
   ASSERT_NE(dialog, nullptr);
   ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
   QTest::qWait(100);
-  const QVariantList windows{
-      QVariantMap{{"title", "Firefox window"}, {"class", "firefox"},
+  const QVariantList processes{
+      QVariantMap{{"title", "Firefox process"},
+                  {"path", "/usr/bin/firefox"},
+                  {"pid", 10},
                   {"iconSource", gameIconSource("firefox")}},
-      QVariantMap{{"title", "Missing program"}, {"class", "missing-app"},
+      QVariantMap{{"title", "Missing program"},
+                  {"path", "/games/missing-app"},
+                  {"pid", 20},
                   {"iconSource", gameIconSource("missing-app")}}};
-  ASSERT_TRUE(dialog->setProperty("allWindows", windows));
+  ASSERT_TRUE(dialog->setProperty("allProcesses", processes));
   auto *content = dialog->property("contentItem").value<QQuickItem *>();
   ASSERT_NE(content, nullptr);
   QList<QQuickItem *> images, letters;
@@ -535,7 +538,6 @@ TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
   engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
       {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&model))},
       {"gameFilterText", ""}, {"showDefaultExclusions", false}});
-  engine.rootContext()->setContextProperty("windowService", QVariant::fromValue<QObject *>(nullptr));
   QQuickWindow window;
   QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
   std::unique_ptr<QObject> object(component.create());
@@ -565,9 +567,11 @@ TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
       EXPECT_TRUE(waitUntil([&] { return tile->width() == size && tile->height() == size; }));
     }
   };
-  const QVariantList windows{
-      QVariantMap{{"title", "First window"}, {"class", "first"}},
-      QVariantMap{{"title", "Second window"}, {"class", "second"}}};
+  const QVariantList processes{
+      QVariantMap{
+          {"title", "First process"}, {"path", "/games/first"}, {"pid", 10}},
+      QVariantMap{
+          {"title", "Second process"}, {"path", "/games/second"}, {"pid", 20}}};
   for (const QSize &size : {QSize(1113, 700), QSize(800, 650), QSize(1280, 800)}) {
     window.resize(size);
     page->setSize(size);
@@ -575,17 +579,17 @@ TEST_F(GameIconTest, GamesAndPickerLayoutOwnIconAndDividerSizesAcrossResize) {
     dialog->setProperty("width", size.width() > 1000 ? 620 : 520);
     ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "open"));
     ASSERT_TRUE(waitUntil([&] { return dialog->property("opened").toBool(); }));
-    // Opening with no native window service leaves an empty model safely.
-    EXPECT_TRUE(dialog->property("allWindows").toList().isEmpty());
+    // A host without a census service leaves an empty model safely.
+    EXPECT_TRUE(dialog->property("allProcesses").toList().isEmpty());
     for (const auto *name : {"gamePickerTopDivider", "gamePickerBottomDivider"}) {
       auto *divider = object->findChild<QQuickItem *>(name);
       ASSERT_NE(divider, nullptr);
       EXPECT_EQ(divider->implicitHeight(), 1);
       EXPECT_TRUE(waitUntil([&] { return divider->height() == 1 && divider->width() > 400; }));
     }
-    ASSERT_TRUE(dialog->setProperty("allWindows", windows));
+    ASSERT_TRUE(dialog->setProperty("allProcesses", processes));
     checkTiles(content, "pickerIconTile", 36);
-    ASSERT_TRUE(dialog->setProperty("allWindows", QVariantList{}));
+    ASSERT_TRUE(dialog->setProperty("allProcesses", QVariantList{}));
     ASSERT_TRUE(waitUntil([&] { return items(content, "pickerIconTile").isEmpty(); }));
     ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
     ASSERT_TRUE(waitUntil([&] { return !dialog->property("visible").toBool(); }));

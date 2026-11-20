@@ -13,21 +13,26 @@
 
 #include <QMessageBox>
 
+#include "AppRestart.h"
 #include "Application.h"
 #include "AutostartManager.h"
 #include "BugReport.h"
-#include "CrashHandler.h"
 #include "ControlServer.h"
+#include "CrashHandler.h"
+#include "DeletionQueue.h"
+#include "DesktopIntegration.h"
 #include "DiscordPresence.h"
 #include "GlobalShortcutManager.h"
-#include "NotificationService.h"
-#include "ReplayManager.h"
 #include "HardwareInfo.h"
+#include "InstallInfo.h"
+#include "NotificationService.h"
 #include "RecordingManager.h"
+#include "ReplayManager.h"
 #include "RuntimeLibraries.h"
 #include "StorageManager.h"
 #include "SystemTrayManager.h"
-#include "WindowService.h"
+#include "UpdateChecker.h"
+#include "UpdateInstaller.h"
 #include "audio/AudioDeviceEnumerator.h"
 #include "audio/AudioMixer.h"
 #include "audio/PipeWireAudioSource.h"
@@ -35,23 +40,15 @@
 #include "detection/GameDetectionService.h"
 #include "detection/GameIconProvider.h"
 #include "detection/GameWhitelist.h"
-#include "detection/GlShimEnrollment.h"
-#include "detection/VulkanLayer.h"
-#include "detection/WaylandWindowMonitor.h"
+#include "detection/LegacyDetectionCleanup.h"
 #include "encoding/EncoderFactory.h"
 #include "library/ActivityFeed.h"
-#include "library/ShareExporter.h"
-#include "DeletionQueue.h"
-#include "library/RecordingLibrary.h"
-#include "library/WaveformCache.h"
 #include "library/FilmstripCache.h"
 #include "library/PreviewCache.h"
+#include "library/RecordingLibrary.h"
+#include "library/ShareExporter.h"
+#include "library/WaveformCache.h"
 #include "settings/SettingsManager.h"
-#include "InstallInfo.h"
-#include "AppRestart.h"
-#include "DesktopIntegration.h"
-#include "UpdateChecker.h"
-#include "UpdateInstaller.h"
 
 #include <QDateTime>
 #include <QDBusServiceWatcher>
@@ -267,19 +264,8 @@ bool Application::initialize() {
     qCCritical(appLog) << "Another Trophy instance is running; exiting.";
     return false;
   }
-  // The Vulkan layer is optional: only (re)register when enabled. A user
-  // who opted out keeps no layer JSON behind.
-  if (m_settingsManager->vulkanLayerEnabled()) {
-    m_vulkanLayerRegistered = ensureVulkanLayerRegistered();
-  } else {
-    removeVulkanLayerRegistration();
-    m_vulkanLayerRegistered = false;
-  }
-  // A portable bundle's old mount path may have vanished. Refresh only a
-  // previously opted-in GL enrollment; default-off installs remain untouched.
-  if (!GlShimEnrollment::refreshEnrolledBundle())
-    qCWarning(appLog) << "Could not refresh the opted-in GL shim enrollment";
-  emit detectionStatusChanged();
+  // One-way migration away from injected graphics detection.
+  removeLegacyDetectionEnrollment();
   registerQmlTypes();
 
   m_engine = std::make_unique<QQmlApplicationEngine>();
@@ -432,22 +418,6 @@ void Application::initializeServices() {
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
-  m_windowService = std::make_unique<WindowService>(this);
-  m_windowMonitor = std::make_unique<WaylandWindowMonitor>(this);
-  m_windowService->setWindowMonitor(m_windowMonitor.get());
-  m_gameDetector->setWindowMonitor(m_windowMonitor.get());
-  // Required infrastructure: migrate the former opt-in without removing an
-  // existing script, including when upgrading from an opted-out installation.
-  m_settingsManager->setWindowTrackingEnabled(true);
-  // All launches, including first run, check without installing/enabling.
-  // Installation needs the wizard's Install action or an explicit Repair.
-  m_windowMonitor->startMonitoring(false);
-  connect(m_settingsManager.get(),
-          &SettingsManager::windowTrackingEnabledChanged, this, [this]() {
-            // Reset-to-defaults/legacy clients must not uninstall a required
-            // component. Keep the persisted compatibility flag enabled.
-            m_settingsManager->setWindowTrackingEnabled(true);
-          });
   m_recordingManager = std::make_unique<RecordingManager>(this);
   
   m_recordingManager->setSettingsManager(m_settingsManager.get());
@@ -467,7 +437,6 @@ void Application::initializeServices() {
   }));
   m_recordingManager->setStorageManager(m_storageManager.get());
   m_recordingManager->setAudioMixer(m_audioMixer.get());
-  m_recordingManager->setWindowService(m_windowService.get());
   m_recordingManager->setGameDetectionService(m_gameDetector.get());
 
   m_detectionDebounceTimer = new QTimer(this);
@@ -624,8 +593,6 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());
   context->setContextProperty("audioMixer", m_audioMixer.get());
-  context->setContextProperty("windowService", m_windowService.get());
-  context->setContextProperty("windowMonitor", m_windowMonitor.get());
   context->setContextProperty("audioDeviceEnumerator", m_audioDeviceEnumerator.get());
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());
   context->setContextProperty("replayManager", m_replayManager.get());
@@ -737,29 +704,6 @@ void Application::connectSignals() {
     m_gameDetector->setTokenGames(
         m_settingsManager->waylandRestoreTokens().keys());
   }
-  connect(m_windowMonitor.get(), &WaylandWindowMonitor::windowsChanged, this, [this]() {
-            // If an authorize prompt was deferred because only a transient
-            // window (mod loader / splash) was visible, re-trigger it now
-            // that a real game window may have appeared.
-            const QString pendingAuth = !m_pendingAutoRecordGame.isEmpty()
-                                            ? m_pendingAutoRecordGame
-                                            : m_pendingDvrGame;
-            if (!pendingAuth.isEmpty() && m_gameDetector &&
-                m_gameDetector->hasVisibleWindow() &&
-                m_gameDetector->currentGameName() == pendingAuth) {
-              m_detectionDebounceTimer->start();
-            }
-            if (!isCurrentCaptureGame(m_pendingWindowGame) ||
-                !m_gameDetector->hasVisibleWindow())
-              return;
-            const QString game = m_pendingWindowGame;
-            const bool isRecord = m_pendingWindowIsRecord;
-            m_pendingWindowGame.clear();
-            m_windowWaitTimer->stop();
-            qCDebug(appLog) << "Window appeared for" << game
-                            << "- waiting for settled game audio";
-            startWhenAudioSettled(game, isRecord);
-          });
   // A launcher can exit before the window/audio wait completes. Tracking
   // deliberately keeps the same identity (no gameDetected on PID handoff),
   // but its pending capture must be retried against the surviving process.
@@ -1084,7 +1028,7 @@ void Application::connectSignals() {
             m_notificationService->showCaptureSelectionHint(game);
             // Don't start capturing a transient window (mod loader / splash).
             // Defer until a real game window appears.
-            if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+            if (m_gameDetector && !m_gameDetector->isGameRunning()) {
               qCInfo(appLog) << "Deferring capture for" << game
                              << "(no visible game window yet)";
               m_pendingWindowGame = game;
@@ -1295,16 +1239,9 @@ QString Application::currentGameName() const { return m_gameDetector ? m_gameDet
 bool Application::gameAudioNodePresent(const QString &game, qint64 pid) {
   // PW_ID_ANY without pulling pipewire headers into Application.
   constexpr uint32_t kNoNode = 0xFFFFFFFFu;
-  if (pid > 0 &&
-      PipeWireAudioSource::findNodeByPid(static_cast<uint32_t>(pid)) !=
-          kNoNode) {
-    return true;
-  }
-  if (!game.isEmpty() &&
-      PipeWireAudioSource::findNodeByProcessName(game) != kNoNode) {
-    return true;
-  }
-  return false;
+  Q_UNUSED(game);
+  return pid > 0 && PipeWireAudioSource::findNodeForGame(
+                        static_cast<uint32_t>(pid), {}) != kNoNode;
 }
 
 void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
@@ -1337,7 +1274,7 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
     }
     // Node not there yet (launching game): wait for it to appear and look
     // stable across two polls; the timeout starts anyway with today's
-    // monitor-fallback behavior so a silent game never blocks capture.
+    // silent-wait behavior so a game without audio never blocks video capture.
     qCDebug(appLog) << "Deferring capture for" << game
                     << "until its audio node settles";
     m_audioWaitTimer->start();
@@ -1472,7 +1409,7 @@ void Application::onAuthorizeDebounceFired() {
   // Retain only an eligible request while waiting for a real game
   // window. Approval, blocking, exit or replacement must retire it even
   // when the compositor has not published a visible window yet.
-  if (m_gameDetector && !m_gameDetector->hasVisibleWindow()) {
+  if (m_gameDetector && !m_gameDetector->isGameRunning()) {
     qCDebug(appLog) << "Deferring authorize prompt for" << pending
                     << "(no visible game window yet)";
     return;
@@ -1565,8 +1502,8 @@ void Application::startWhenWindowReady(const QString &game, bool isRecord) {
       m_gameDetector->currentGameName() != game || isGameBlocked(game))
     return;
   m_pendingCaptureKey = m_gameDetector->currentGameKey();
-  if (isCurrentCaptureGame(game) && m_gameDetector->hasVisibleWindow()) {
-    qCDebug(appLog) << "Window present for" << game
+  if (isCurrentCaptureGame(game) && m_gameDetector->isGameRunning()) {
+    qCDebug(appLog) << "Game process present for" << game
                     << "- waiting for settled game audio";
     startWhenAudioSettled(game, isRecord);
     return;
@@ -2039,64 +1976,6 @@ void Application::syncAutostartFile() {
           QString::fromUtf8(qgetenv("APPIMAGE")))) {
     qCWarning(appLog) << "Failed to sync autostart entry";
   }
-}
-
-bool Application::glShimAvailable() const {
-  return !GlShimEnrollment::libraryPath().isEmpty();
-}
-
-bool Application::glShimEnrolled() const {
-  return GlShimEnrollment::isEnrolled();
-}
-
-bool Application::glShimActive() const {
-  return GlShimEnrollment::isActiveInCurrentSession();
-}
-
-bool Application::setGlShimEnrolled(bool enrolled) {
-  const bool ok = GlShimEnrollment::setEnrolled(enrolled);
-  emit detectionStatusChanged();
-  return ok;
-}
-
-int Application::glHelperVersion() const {
-  return GlShimEnrollment::helperVersion();
-}
-
-int Application::glBundledHelperVersion() const {
-  return GlShimEnrollment::bundledHelperVersion();
-}
-
-int Application::vulkanBundledHelperVersion() const {
-  return VulkanLayer::bundledHelperVersion();
-}
-
-int Application::vulkanHelperVersion() const {
-  return VulkanLayer::helperVersion();
-}
-
-bool Application::setVulkanLayerEnabled(bool enabled) {
-  m_settingsManager->setVulkanLayerEnabled(enabled);
-  bool ok;
-  if (enabled) {
-    m_vulkanLayerRegistered = ensureVulkanLayerRegistered(true);
-    ok = m_vulkanLayerRegistered;
-  } else {
-    ok = removeVulkanLayerRegistration();
-    m_vulkanLayerRegistered = false;
-  }
-  emit detectionStatusChanged();
-  return ok;
-}
-
-bool Application::removeVulkanLayerRegistration() {
-  // Opt-out removes our JSON so the loader stops loading the layer.
-  // Absence counts as success: nothing registered is the desired state.
-  return VulkanLayer::removeRegistration();
-}
-
-bool Application::ensureVulkanLayerRegistered(bool allow32BitMigration) {
-  return VulkanLayer::ensureRegistered(allow32BitMigration);
 }
 
 } // namespace TrophyBackend

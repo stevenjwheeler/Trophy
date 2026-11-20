@@ -128,6 +128,13 @@ QString AudioMixer::semanticSourceName(int role) const {
   return source ? source->displayName() : QString();
 }
 
+bool AudioMixer::sourceIsDesktopAudio(int index) const {
+  std::lock_guard lock(m_mutex);
+  return index >= 0 && index < kTrackCount && m_tracks[index].source &&
+         m_tracks[index].source->sourceType() ==
+             IAudioSource::SourceType::DesktopAudio;
+}
+
 QVariantMap AudioMixer::semanticAudioDiagnostics(int role) const {
   if (role < 0 || role >= kTrackCount) return {};
   SourceCallbackHandle callback;

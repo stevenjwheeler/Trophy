@@ -96,6 +96,10 @@ protected:
   bool windowTimerActive() const { return app.m_windowWaitTimer->isActive(); }
   bool windowIsRecord() const { return app.m_pendingWindowIsRecord; }
   bool audioPendingEmpty() const { return app.m_pendingAudioGame.isEmpty(); }
+  bool audioRetryActive() const {
+    return app.m_audioWaitTimer->isActive() || app.m_audioProbeInflight;
+  }
+  bool audioIsRecord() const { return app.m_pendingAudioIsRecord; }
   void fireDebounce() { app.onAuthorizeDebounceFired(); }
   void fireWindowTimeout() { app.onWindowWaitTimeout(); }
   void authorize(const QString &game) { app.authorizeGame(game); }
@@ -110,6 +114,9 @@ protected:
   void clearWindowPending() {
     app.m_pendingWindowGame.clear();
     app.m_windowWaitTimer->stop();
+    app.m_pendingAudioGame.clear();
+    app.m_audioWaitTimer->stop();
+    ++app.m_audioWaitGeneration;
   }
   // The retry is deferred so the compositor can publish the replacement
   // window; pump events until the window wait is armed again.
@@ -117,11 +124,11 @@ protected:
     QElapsedTimer wait;
     wait.start();
     while (wait.elapsed() < timeoutMs) {
-      if (app.m_pendingWindowGame == game)
+      if (app.m_pendingAudioGame == game)
         return true;
       QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     }
-    return app.m_pendingWindowGame == game;
+    return app.m_pendingAudioGame == game;
   }
   bool whitelisted(const QString &key) const {
     return app.gameDetector()->whitelist().contains(key);
@@ -157,10 +164,11 @@ TEST_F(ApplicationAuthorizePromptTest, DebounceDropsApprovedPending) {
   EXPECT_TRUE(dvrPendingEmpty());
 }
 
-TEST_F(ApplicationAuthorizePromptTest, DebounceRetainsEligibleWindowlessRequestUntilApproved) {
+TEST_F(ApplicationAuthorizePromptTest,
+       ProcessIdentifiedGameNeedsNoWindowForApprovalEligibility) {
   setCurrent("Windowless Game");
   armRecordPending("Windowless Game");
-  fireDebounce();
+  EXPECT_TRUE(gate("Windowless Game"));
   EXPECT_FALSE(recordPendingEmpty());
   setToken("Windowless Game", "new-approval");
   fireDebounce();
@@ -192,24 +200,25 @@ TEST_F(ApplicationAuthorizePromptTest, WindowWaitRetainsApprovedLiveGame) {
   EXPECT_TRUE(dvrPendingEmpty());
 }
 
-TEST_F(ApplicationAuthorizePromptTest, ProcessHandoffRestartsPendingAudioThroughWindowGate) {
+TEST_F(ApplicationAuthorizePromptTest,
+       ProcessHandoffRestartsPendingAudioWithoutWindowGate) {
   setCurrentIdentity("Slow Game", "steam_app_610102", 2147483647);
   armAudioPending("Slow Game", true);
   // Same identity, new live PID: no gameDetected, but the pending start resumes.
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_TRUE(audioPendingEmpty());
-  EXPECT_FALSE(windowPendingEmpty());
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_TRUE(windowIsRecord());
+  EXPECT_FALSE(audioPendingEmpty());
+  EXPECT_TRUE(windowPendingEmpty());
+  EXPECT_TRUE(audioRetryActive());
+  EXPECT_TRUE(audioIsRecord());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, ProcessHandoffPreservesDvrIntent) {
   setCurrentIdentity("Slow Game", "steam_app_610102", 2147483647);
   armWindowPending("Slow Game", false);
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_FALSE(windowPendingEmpty());
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_FALSE(windowIsRecord());
+  EXPECT_FALSE(audioPendingEmpty());
+  EXPECT_TRUE(audioRetryActive());
+  EXPECT_FALSE(audioIsRecord());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, AlreadyExitedLauncherKeepsApprovedStartPending) {
@@ -220,7 +229,7 @@ TEST_F(ApplicationAuthorizePromptTest, AlreadyExitedLauncherKeepsApprovedStartPe
   fireWindowTimeout();
   EXPECT_FALSE(windowPendingEmpty());
   setCurrentIdentity("Slow Game", "steam_app_610102");
-  EXPECT_TRUE(windowTimerActive());
+  EXPECT_TRUE(audioRetryActive());
 }
 
 TEST_F(ApplicationAuthorizePromptTest, HandoffWithoutPendingIntentDoesNotStartCapture) {
@@ -309,14 +318,14 @@ int main(int argc, char **argv) {
 // A launcher's window can be captured and then vanish before anything is
 // recorded. The app must wait for the window that replaces it and try again
 // instead of leaving the game uncaptured.
-TEST_F(ApplicationAuthorizePromptTest, CaptureStartLossReArmsTheWindowWait) {
+TEST_F(ApplicationAuthorizePromptTest,
+       CaptureStartLossRetriesWithoutCompositorWindowGate) {
   setCurrentIdentity("Launcher Game", "steam_app_777");
   setToken("steam_app_777", "token-bytes");
 
   captureStartLost("Launcher Game", "steam_app_777");
   EXPECT_TRUE(waitForWindowRetry("Launcher Game"));
-  EXPECT_TRUE(windowTimerActive());
-  EXPECT_TRUE(windowIsRecord());
+  EXPECT_TRUE(audioRetryActive());
   clearWindowPending();
 
   // A different identity for the same display name is a different game.

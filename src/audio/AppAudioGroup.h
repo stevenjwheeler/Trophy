@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include <pipewire/pipewire.h>
+#include "ApplicationAudioIdentity.h"
+#include "detection/ProcessGames.h"
 #include <QDebug>
 #include <QString>
 #include <map>
 #include <memory>
+#include <pipewire/pipewire.h>
 #include <set>
 #include <utility>
-#include "ApplicationAudioIdentity.h"
 
 namespace TrophyBackend {
 
@@ -20,9 +21,10 @@ namespace TrophyBackend {
 class AppAudioGroup {
 public:
   AppAudioGroup(pw_core *core, pw_stream *capture, uint32_t target,
-                const QString &serial, const QString &expectedBinary = {})
+                const QString &serial, const QString &expectedBinary = {},
+                const QString &ownerIdentity = {})
       : m_core(core), m_capture(capture), m_target(target), m_serial(serial),
-        m_expectedBinary(expectedBinary) {
+        m_expectedBinary(expectedBinary), m_gameInstance(ownerIdentity) {
     m_registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
     if (m_registry) {
       static const pw_registry_events events = [] {
@@ -39,6 +41,11 @@ public:
         e.done = [](void *data, uint32_t id, int seq) {
           auto *self = static_cast<AppAudioGroup *>(data);
           if (id == PW_ID_CORE && seq == self->m_sync) {
+            if (!self->m_boundSync) {
+              self->m_boundSync = true;
+              self->m_sync = pw_core_sync(self->m_core, PW_ID_CORE, seq);
+              return; // Flush info for clients/nodes bound during enumeration.
+            }
             self->m_ready = true;
             self->refresh();
           }
@@ -54,6 +61,11 @@ public:
   }
 
   ~AppAudioGroup() {
+    for (auto &[id, client] : m_boundClients) {
+      Q_UNUSED(id);
+      spa_hook_remove(&client->listener);
+      pw_proxy_destroy(reinterpret_cast<pw_proxy *>(client->proxy));
+    }
     if (m_registry) {
       spa_hook_remove(&m_coreListener);
       spa_hook_remove(&m_listener);
@@ -81,11 +93,52 @@ private:
   void refreshForCapture(uint32_t capture) {
     std::set<std::pair<uint32_t, uint32_t>> desired;
     const auto target = m_nodes.find(m_target);
+    const auto effective = [&](Node node) {
+      const auto owner = m_clients.find(node.client.toUInt());
+      if (owner == m_clients.end() || !owner->second.current)
+        return node;
+      const auto &client = owner->second;
+      if ((!node.pid.isEmpty() && !client.pid.isEmpty() &&
+           node.pid != client.pid) ||
+          (!node.binary.isEmpty() && !client.binary.isEmpty() &&
+           node.binary.compare(client.binary, Qt::CaseInsensitive) != 0))
+        return node;
+      if (node.pid.isEmpty())
+        node.pid = client.pid;
+      if (node.binary.isEmpty())
+        node.binary = client.binary;
+      if (node.app.isEmpty())
+        node.app = client.app;
+      return node;
+    };
+    const auto instance = [&](const Node &node) {
+      const auto identity = effective(node);
+      return ProcessGames::associate(detail::audioProcessId(identity.pid),
+                                     identity.binary, identity.app);
+    };
+    const auto belongs = [&](const Node &node) {
+      const auto identity = effective(node);
+      return ProcessGames::belongsTo(m_gameInstance,
+                                     detail::audioProcessId(identity.pid),
+                                     identity.binary, identity.app);
+    };
+    const bool game = m_expectedBinary.isEmpty();
+    if (game && m_gameInstance.isEmpty() && target != m_nodes.end())
+      m_gameInstance = instance(target->second);
+    const auto siblingMatches = [&](const Node &node) {
+      return game ? node.current && node.playback && belongs(node)
+                  : detail::verifiedAudioSibling(target->second, node,
+                                                 m_expectedBinary);
+    };
     const bool verified = target != m_nodes.end() &&
-        detail::verifiedAudioTarget(target->second, m_serial, m_expectedBinary);
+                          detail::verifiedAudioTarget(target->second, m_serial,
+                                                      m_expectedBinary) &&
+                          (!game || belongs(target->second));
     m_acceptAudio = false;
     m_rejected = m_ready && (target == m_nodes.end() ||
-        (target->second.current && !verified));
+                             (target->second.current &&
+                              !detail::verifiedAudioTarget(
+                                  target->second, m_serial, m_expectedBinary)));
     bool incoming = false;
     if (verified && capture != PW_ID_ANY) {
       // Inspect actual native incoming links. Requested target properties do
@@ -98,8 +151,7 @@ private:
           m_acceptAudio = false;
           return; // Registry/node-info publication still pending: fail closed.
         }
-        if (link.first != m_target && !detail::verifiedAudioSibling(
-                target->second, source->second, m_expectedBinary)) {
+        if (link.first != m_target && !siblingMatches(source->second)) {
           if (!m_rejected)
             qWarning() << "Rejecting application audio route from node" << link.first
                        << "to capture" << capture << "pinned target" << m_target
@@ -112,8 +164,7 @@ private:
       for (const auto &[outId, out] : m_ports) {
         const auto node = m_nodes.find(out.node);
         if (!out.output || out.monitor || out.node == m_target ||
-            node == m_nodes.end() || !detail::verifiedAudioSibling(
-                target->second, node->second, m_expectedBinary))
+            node == m_nodes.end() || !siblingMatches(node->second))
           continue;
         for (const auto &[inId, in] : m_ports) {
           if (in.node != capture || in.output || in.monitor)
@@ -183,6 +234,12 @@ private:
     pw_node *proxy = nullptr;
     spa_hook listener{};
   };
+  struct BoundClient {
+    AppAudioGroup *owner = nullptr;
+    uint32_t id = PW_ID_ANY;
+    pw_client *proxy = nullptr;
+    spa_hook listener{};
+  };
   struct Link {
     pw_proxy *proxy = nullptr;
     spa_hook listener{};
@@ -193,7 +250,7 @@ private:
     bool output = false, monitor = false;
   };
   static QString property(const spa_dict *props, const char *key) {
-    const char *value = spa_dict_lookup(props, key);
+    const char *value = props ? spa_dict_lookup(props, key) : nullptr;
     return value ? QString::fromUtf8(value) : QString();
   }
   static void global(void *data, uint32_t id, uint32_t, const char *type,
@@ -201,7 +258,35 @@ private:
     auto *self = static_cast<AppAudioGroup *>(data);
     if (!props)
       return;
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+    if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+      auto bound = std::make_unique<BoundClient>();
+      bound->owner = self;
+      bound->id = id;
+      bound->proxy = static_cast<pw_client *>(
+          pw_registry_bind(self->m_registry, id, PW_TYPE_INTERFACE_Client,
+                           PW_VERSION_CLIENT, 0));
+      if (!bound->proxy)
+        return;
+      static const pw_client_events events = [] {
+        pw_client_events e{};
+        e.version = PW_VERSION_CLIENT_EVENTS;
+        e.info = [](void *data, const pw_client_info *info) {
+          auto *bound = static_cast<BoundClient *>(data);
+          if (!info || !(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS))
+            return;
+          auto &identity = bound->owner->m_clients[bound->id];
+          identity.app = property(info->props, PW_KEY_APP_NAME);
+          identity.binary = property(info->props, PW_KEY_APP_PROCESS_BINARY);
+          identity.pid = property(info->props, PW_KEY_APP_PROCESS_ID);
+          identity.current = true;
+          bound->owner->refresh();
+        };
+        return e;
+      }();
+      pw_client_add_listener(bound->proxy, &bound->listener, &events,
+                             bound.get());
+      self->m_boundClients.emplace(id, std::move(bound));
+    } else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
       self->m_nodes[id] = {property(props, PW_KEY_CLIENT_ID),
                             property(props, PW_KEY_APP_NAME),
                             property(props, PW_KEY_OBJECT_SERIAL),
@@ -222,17 +307,19 @@ private:
             e.version = PW_VERSION_NODE_EVENTS;
             e.info = [](void *data, const pw_node_info *info) {
               auto *bound = static_cast<BoundNode *>(data);
-              if (!info || !info->props) return;
+              if (!info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
+                return;
               auto &node = bound->owner->m_nodes.at(bound->id);
               const auto update = [&](QString &field, const char *key) {
-                if (const char *value = spa_dict_lookup(info->props, key))
-                  field = QString::fromUtf8(value);
+                field = property(info->props, key);
               };
               update(node.client, PW_KEY_CLIENT_ID);
               update(node.app, PW_KEY_APP_NAME);
               update(node.serial, PW_KEY_OBJECT_SERIAL);
               update(node.binary, PW_KEY_APP_PROCESS_BINARY);
               update(node.pid, PW_KEY_APP_PROCESS_ID);
+              node.playback = property(info->props, PW_KEY_MEDIA_CLASS) ==
+                              QLatin1String("Stream/Output/Audio");
               node.current = true;
               bound->owner->refresh();
             };
@@ -267,6 +354,13 @@ private:
   }
   static void removed(void *data, uint32_t id) {
     auto *self = static_cast<AppAudioGroup *>(data);
+    if (auto it = self->m_boundClients.find(id);
+        it != self->m_boundClients.end()) {
+      spa_hook_remove(&it->second->listener);
+      pw_proxy_destroy(reinterpret_cast<pw_proxy *>(it->second->proxy));
+      self->m_boundClients.erase(it);
+    }
+    self->m_clients.erase(id);
     if (auto it = self->m_boundNodes.find(id); it != self->m_boundNodes.end()) {
       spa_hook_remove(&it->second->listener);
       pw_proxy_destroy(reinterpret_cast<pw_proxy *>(it->second->proxy));
@@ -289,12 +383,16 @@ private:
   uint32_t m_target = PW_ID_ANY;
   QString m_serial;
   QString m_expectedBinary;
+  QString m_gameInstance;
   pw_registry *m_registry = nullptr;
   spa_hook m_listener{};
   spa_hook m_coreListener{};
   int m_sync = 0;
+  bool m_boundSync = false;
   bool m_ready = false, m_acceptAudio = false, m_rejected = false;
   std::map<uint32_t, Node> m_nodes;
+  std::map<uint32_t, Node> m_clients;
+  std::map<uint32_t, std::unique_ptr<BoundClient>> m_boundClients;
   std::map<uint32_t, std::unique_ptr<BoundNode>> m_boundNodes;
   std::map<uint32_t, std::pair<uint32_t, uint32_t>> m_incoming;
   std::map<uint32_t, Port> m_ports;

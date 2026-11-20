@@ -668,7 +668,7 @@ bool ReplayManager::switchSegment() {
   newSession->setGameAudioHints(gamePid, gameHints);
   newSession->setVoiceChatApp(m_settings->voiceChatApp().trimmed());
   newSession->setVoiceTrack(voiceTrack);
-  newSession->setGameIsFallback(!gameFound);
+  newSession->setGameAudioPending(!gameFound);
   newSession->setDesktopAudio(m_settings->audioMode() == "desktop");
   if (gameFound)
     newSession->markSourceConnected(0, m_lookupCache.gameNodeSerial);
@@ -792,16 +792,8 @@ ReplayManager::DvrNodeLookup
 ReplayManager::lookupDvrNodes(uint32_t gamePid, const QStringList &gameHints,
                               const QString &voiceApp) {
   DvrNodeLookup out;
-  if (gamePid != 0) {
-    out.gameNodeId = PipeWireAudioSource::findNodeByPid(
-        gamePid, &out.gameNodeName, &out.gameNodeSerial);
-  }
-  for (const QString &hint : gameHints) {
-    if (out.gameNodeId != 0xFFFFFFFFu || hint.isEmpty())
-      break;
-    out.gameNodeId = PipeWireAudioSource::findNodeByProcessName(
-        hint, &out.gameNodeName, &out.gameNodeSerial);
-  }
+  out.gameNodeId = PipeWireAudioSource::findNodeForGame(
+      gamePid, gameHints, &out.gameNodeName, &out.gameNodeSerial);
   out.gameFound = (out.gameNodeId != 0xFFFFFFFFu);
   if (!voiceApp.isEmpty()) {
     out.voiceNodeId = PipeWireAudioSource::findNodeByBinary(
@@ -815,7 +807,8 @@ uint32_t ReplayManager::gameAudioPid() const {
   const uint32_t sourcePid = m_capture ? m_capture->sourcePid() : 0;
   // Snapshot the targeted detection at beginCapture, never whichever game is
   // current when a lookup or segment rotation happens to run.
-  return sourcePid ? sourcePid : m_detectedGameInfo.value("detectedGamePid").toUInt();
+  const auto detected = m_detectedGameInfo.value("detectedGamePid").toUInt();
+  return detected ? detected : sourcePid;
 }
 
 void ReplayManager::refreshLookupCacheAsync() {
@@ -824,6 +817,8 @@ void ReplayManager::refreshLookupCacheAsync() {
   // Snapshot inputs on the GUI thread; the worker runs pure lookups only.
   const uint32_t pid = gameAudioPid();
   QStringList hints;
+  hints << "trophy-instance:" +
+               m_detectedGameInfo.value("detectedGameInstance").toString();
   if (m_capture) {
     const QString hint = m_capture->sourceProcessName();
     if (!hint.isEmpty())
@@ -909,10 +904,12 @@ void ReplayManager::setupAudioSources(int &trackCount,
     micTrack = 1;
     return;
   }
-  // Game mode: game node (PID first, name hints, monitor fallback), voice,
+  // Game mode: verified game instance (desktop fallback if unavailable), voice,
   // mic. Proton nodes expose only the exe basename, so the DVR game name
   // (detector display name) is a first-class hint.
   gamePid = gameAudioPid();
+  gameHints << "trophy-instance:" +
+                   m_detectedGameInfo.value("detectedGameInstance").toString();
   if (m_capture) {
     const QString hint = m_capture->sourceProcessName();
     if (!hint.isEmpty())
@@ -930,7 +927,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
     trackCount = routing.activeTrackCount;
     voiceTrack = routing.voiceTrack;
     micTrack = retainedMicTrack;
-    gameFound = routing.connected[0] && !routing.gameIsFallback;
+    gameFound = routing.connected[0] && !routing.gameAudioPending;
     voiceFound = voiceTrack >= 0 && voiceTrack < AudioMixer::kTrackCount &&
                  routing.connected[voiceTrack];
     return;
@@ -950,14 +947,15 @@ void ReplayManager::setupAudioSources(int &trackCount,
     const uint32_t nodeId = lookup.gameNodeId;
     if (nodeId == 0xFFFFFFFFu) {
       if (createSources) {
-        auto fallbackSrc = PipeWireAudioSource::createMonitorSource(QString(), true);
-        fallbackSrc->setStreamName(QStringLiteral("trophy-game"));
-        m_audioMixer->addSourceAsync(std::move(fallbackSrc), gameTrack);
+        auto fallback = PipeWireAudioSource::createMonitorSource({}, true);
+        fallback->setStreamName(QStringLiteral("trophy-game"));
+        m_audioMixer->addSourceAsync(std::move(fallback), gameTrack);
       }
     } else {
       if (createSources) {
         auto gameSrc = PipeWireAudioSource::createApplicationSource(
-            nodeId, lookup.gameNodeName, lookup.gameNodeSerial);
+            nodeId, lookup.gameNodeName, lookup.gameNodeSerial, {},
+            PipeWireAudioSource::ownerIdentity(gameHints));
         gameSrc->setStreamName(QStringLiteral("trophy-game"));
         m_audioMixer->addSourceAsync(std::move(gameSrc), gameTrack);
       }
@@ -978,13 +976,7 @@ void ReplayManager::setupAudioSources(int &trackCount,
       trackCount++;
       voiceFound = true;
     } else {
-      // The full-mix fallback already includes voice. Reserve its named slot
-      // in separate mode; merged mode adopts a free slot after game upgrade.
-      if (!gameFound && lookup.voiceNodeId != 0xFFFFFFFFu) {
-        qDebug() << "DVR voice chat capture suppressed while game audio "
-                    "is full-mix fallback (voice is already in the mix):"
-                 << vcApp;
-      }
+      // Reserve a named slot for a selected Voice stream that appears later.
       if (isSeparate) {
         voiceTrack = 1;
       }
