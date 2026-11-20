@@ -212,6 +212,17 @@ TEST_F(GameDetectionServiceTest, PickerLikelihoodDoesNotHideUnknownsOrChangeDete
   EXPECT_EQ(service.games().first().key, "exe:/games/known");
 }
 
+TEST_F(GameDetectionServiceTest, UnlistedNativeGameRequiresAnExplicitRule) {
+  GameDetectionService service;
+  const auto p = process(5000, "/games/unlisted/terraria.bin.x86_64");
+  apply(service, {{p.pid, p}});
+  EXPECT_TRUE(service.games().isEmpty());
+  define(service, "exe:" + p.payload(), "My standalone game");
+  apply(service, {{p.pid, p}});
+  ASSERT_EQ(service.games().size(), 1);
+  EXPECT_EQ(service.games().first().name, "My standalone game");
+}
+
 TEST_F(GameDetectionServiceTest, PickerDesktopHintsRespectExecAndHiddenOverrides) {
   QTemporaryDir root;
   const auto user = root.path() + "/user";

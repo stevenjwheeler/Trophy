@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "GameDetectionService.h"
-#include "GameDefinitions.h"
 #include "GameIconSource.h"
 #include "GameWhitelist.h"
 #include "audio/PipeWireAudioSource.h"
@@ -195,7 +194,7 @@ void GameDetectionService::poll() {
 }
 void GameDetectionService::apply(const ProcessCensus::Snapshot &snapshot) {
   m_processes = snapshot;
-  auto definitions = trophyGameDefinitions();
+  QMap<QString, QString> definitions;
   for (const auto &key : m_whitelist->whitelistEntries())
     definitions[key] = m_whitelist->getWhitelistName(key);
   m_instances =

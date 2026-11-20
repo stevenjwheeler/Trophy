@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "audio/PipeWireAudioSource.h"
-#include "detection/GameDefinitions.h"
 #include "detection/ProcessGames.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -45,7 +44,7 @@ int main(int argc, char **argv) {
             [&] { steam = TrophyBackend::ProcessGames::steamLibrary(); });
     measure("identify", [&] {
       TrophyBackend::ProcessGames::identify(
-          snapshot, steam, TrophyBackend::trophyGameDefinitions(), {});
+          snapshot, steam, {}, {});
     });
     output["processes"] = snapshot.size();
     output["steamGames"] = steam.size();

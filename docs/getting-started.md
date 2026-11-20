@@ -158,7 +158,7 @@ Manual recording is also available. When no game is tracked, the Record action o
 
 Trophy polls Linux processes independently of windows, then associates PipeWire
 playback streams with game instances. Native and Proton/Wine executables use
-Steam metadata, original Trophy definitions and exact user rules. Generic
+local Steam metadata and exact user rules. Generic
 launchers and Wine services do not identify games. Use Games to block
 applications, define standalone games, or select among concurrent instances.
 

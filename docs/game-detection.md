@@ -86,9 +86,8 @@ Wine services/installers/crash handlers and generic launchers are excluded.
 Unknown non-Steam games need exact user definitions; a generic executable
 named `Game.exe` is not automatically a game.
 
-`GameDefinitions.h` contains original, locally verified Trophy definitions.
-The existing Games allow-list supplies user definitions, overriding those
-names; it accepts exact executable basenames, paths, `exe:/path`,
+The Games allow-list supplies user definitions and display names; it accepts
+exact executable basenames, paths, `exe:/path`,
 `wine:<prefix>:<payload-path>` or `steam_app_<id>`. Existing blacklist and
 portal-token settings remain authoritative. No fuzzy executable matching,
 network catalogue dependency, factory registry or catalogue plugin API is
