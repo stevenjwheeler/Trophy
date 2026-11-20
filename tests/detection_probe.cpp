@@ -88,8 +88,10 @@ int main(int argc, char **argv) {
       source->setCallback([&](const TrophyBackend::AudioFrame &frame) {
         double sum = 0;
         const int n = frame.frameCount * frame.channels;
-        for (int i = 0; i < n; ++i)
-          sum += frame.samples[i] * frame.samples[i];
+        for (int i = 0; i < n; ++i) {
+          const double sample = frame.samples[i];
+          sum += sample * sample;
+        }
         energy.fetch_add(sum);
         count.fetch_add(n);
       });

@@ -1,11 +1,13 @@
-"""ELF version-needs parser and fail-closed baseline fixtures."""
+"""ELF version-needs parser and pinned SDK/baseline fixtures."""
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import re
 import shutil
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -16,6 +18,57 @@ spec.loader.exec_module(abi)
 
 
 class AppImageAbiTest(unittest.TestCase):
+    def run_sdk_dependency_checks(self, **overrides):
+        root = Path(__file__).resolve().parents[1]
+        action = (root / ".github/actions/setup-sdk/action.yml").read_text()
+        block = re.search(r"(?ms)^      run: \|\n(.*?)(?=^    - name:)", action)
+        self.assertIsNotNone(block)
+        script = textwrap.dedent(block.group(1))
+        self.assertNotIn("vulkan.h", script)
+        self.assertNotIn("libvulkan-dev", script)
+        self.assertNotIn("multilib", script)
+        self.assertIn(". /etc/os-release", script)
+        script = script.replace(". /etc/os-release", '. "$SDK_TEST_OS_RELEASE"')
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            tools = directory / "bin"
+            tools.mkdir()
+            os_release = directory / "os-release"
+            os_release.write_text("ID=ubuntu\nVERSION_ID=24.04\n")
+            log = directory / "apt.log"
+            stubs = {
+                "sudo": 'printf "%s\\n" "$*" >> "$SDK_TEST_APT_LOG"\nexit 0\n',
+                "pkg-config": 'exit "${SDK_TEST_PKG_STATUS:-0}"\n',
+                "ffmpeg": 'printf "%s\\n" "${SDK_TEST_ENCODER:-V libx264}"\n',
+            }
+            for tool in ("ffprobe", "pipewire", "wireplumber", "pw-cli",
+                         "pw-dump", "dbus-run-session", "zstd"):
+                stubs[tool] = "exit 0\n"
+            for name, body in stubs.items():
+                path = tools / name
+                path.write_text("#!/bin/sh\n" + body)
+                path.chmod(0o755)
+            environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.defpath,
+                               RUNNER_TEMP=str(directory),
+                               SDK_TEST_OS_RELEASE=str(os_release),
+                               SDK_TEST_APT_LOG=str(log), **overrides)
+            result = subprocess.run(["bash", "-c", script], env=environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertIn("apt-get install", log.read_text())
+            return result
+
+    def test_sdk_dependency_setup_does_not_require_removed_reporters(self):
+        result = self.run_sdk_dependency_checks()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_sdk_dependency_checks_still_reject_missing_pipewire(self):
+        self.assertNotEqual(
+            self.run_sdk_dependency_checks(SDK_TEST_PKG_STATUS="1").returncode, 0)
+
+    def test_sdk_dependency_checks_still_require_software_h264(self):
+        self.assertNotEqual(
+            self.run_sdk_dependency_checks(SDK_TEST_ENCODER="No encoder").returncode, 0)
+
     def test_all_sdk_handoff_jobs_share_the_pinned_runner(self):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/ci.yml").read_text()

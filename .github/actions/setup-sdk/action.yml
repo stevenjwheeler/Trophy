@@ -17,7 +17,7 @@ runs:
         # packaging/ffmpeg/build-ffmpeg.sh installs below (also what Qt's
         # Multimedia plugin loads), so distributing FFmpeg 6 headers here could
         # only make the build silently link the wrong generation.
-        packages=(build-essential g++-multilib cmake ninja-build ccache libfuse2t64 wget zstd
+        packages=(build-essential cmake ninja-build ccache libfuse2t64 wget zstd
           libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev
           libxcb-shm0-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0
           libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber
@@ -31,7 +31,8 @@ runs:
           [[ "$attempt" != 3 ]] || exit 1
           sleep 10
         done
-        test -f /usr/include/vulkan/vulkan.h
+        # Process detection has no injected Vulkan/OpenGL reporters or 32-bit
+        # companions. Verify the dependencies actually used by this SDK.
         pkg-config --exists libpipewire-0.3
         for tool in ffmpeg ffprobe pipewire wireplumber pw-cli pw-dump dbus-run-session zstd; do
           command -v "$tool" >/dev/null || { echo "ERROR: required tool $tool missing"; exit 1; }
