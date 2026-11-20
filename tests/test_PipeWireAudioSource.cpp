@@ -5,7 +5,13 @@
  */
 
 #include "audio/PipeWireAudioSource.h"
+#include <pipewire/pipewire.h>
+// Keep this header buildable without newer SPA convenience macros, even
+// when the developer's installed PipeWire is newer than the CI baseline.
+#pragma push_macro("spa_api_method_r")
+#undef spa_api_method_r
 #include "audio/AppAudioGroup.h"
+#pragma pop_macro("spa_api_method_r")
 #include "audio/ApplicationAudioLookup.h"
 #include <gtest/gtest.h>
 #include <spa/buffer/buffer.h>

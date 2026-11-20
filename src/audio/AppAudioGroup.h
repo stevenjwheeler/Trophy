@@ -334,9 +334,11 @@ private:
     // pw_core_destroy() discards the protocol request sequence. Call the same
     // public method retaining its result so only this teardown's ENOENT can
     // be classified as harmless (never an arbitrary core error).
-    const int seq = spa_api_method_r(int, -EIO, pw_core,
-                                     reinterpret_cast<spa_interface *>(m_core),
-                                     destroy, 0, link->proxy);
+    int seq = -EIO;
+    // Use the longstanding interface dispatcher, not spa_api_method_r,
+    // which is unavailable in the Ubuntu 24.04 PipeWire/SPA headers.
+    spa_interface_call_res(reinterpret_cast<spa_interface *>(m_core),
+                           struct pw_core_methods, seq, destroy, 0, link->proxy);
     if (seq >= 0) {
       const int request = SPA_RESULT_ASYNC_SEQ(seq);
       m_cleanupDestroySeqs.insert(request);
