@@ -14,6 +14,7 @@
 #include <QThread>
 #include <gtest/gtest.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 namespace TrophyBackend {
 class GameDetectionServiceTest : public ::testing::Test {
@@ -453,8 +454,26 @@ TEST_F(GameDetectionServiceTest, StatParserHandlesSpacesParenthesesAndZombie) {
   ASSERT_TRUE(ProcessCensus::parseStat(stat, p));
   EXPECT_EQ(p.parent, 42);
   EXPECT_EQ(p.start, 123456);
+  for (const char state : {'Z', 'X', 'x'}) {
+    auto dead = stat;
+    dead[dead.lastIndexOf(')') + 2] = state;
+    EXPECT_FALSE(ProcessCensus::parseStat(dead, p));
+  }
   EXPECT_FALSE(ProcessCensus::parseStat("123 (gone) Z 1", p));
   EXPECT_FALSE(ProcessCensus::parseStat("truncated", p));
+}
+TEST_F(GameDetectionServiceTest, UnreapedZombieIsNotALiveGameProcess) {
+  const auto pid = ::fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0)
+    ::_exit(0);
+  siginfo_t info{};
+  const auto waited = ::waitid(P_PID, pid, &info, WEXITED | WNOWAIT);
+  EXPECT_EQ(waited, 0);
+  if (waited == 0)
+    EXPECT_FALSE(GameDetectionService::processExists(pid));
+  int status = 0;
+  EXPECT_EQ(::waitpid(pid, &status, 0), pid);
 }
 TEST_F(GameDetectionServiceTest, RealProcEnumerationAndExitRace) {
   QProcess child;

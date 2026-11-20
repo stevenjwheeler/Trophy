@@ -694,6 +694,66 @@ TEST_F(WaylandPortalCaptureTest, SelectMethodErrorStopsWatchdogAndAllowsRetry) {
   ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
 }
 
+TEST_F(WaylandPortalCaptureTest, SlowPortalSelectionDoesNotProveRestoreTokenStale) {
+  if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
+  {
+    // First-ever authorization: no token, so a slow portal picker is the
+    // user's own action and must not be mistaken for an invalid token.
+    WaylandPortalCapture capture;
+    capture.requestScreenShare();
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+    const QString create = pendingPath(capture);
+    control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
+    EXPECT_TRUE(watchdogActive(capture));
+    capture.stopCapture();
+  }
+  {
+    WaylandPortalCapture capture;
+    restore(capture);
+    QSignalSpy stale(&capture, &IVideoCaptureSource::restoreTokenStale);
+    capture.requestScreenShare();
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+    const QString create = pendingPath(capture);
+    control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
+    QTest::qWait(1600);
+    EXPECT_TRUE(starting(capture));
+    EXPECT_TRUE(watchdogActive(capture));
+    EXPECT_EQ(stale.count(), 0); // A slow reply is not proof of a visible picker.
+    const auto select = pendingPath(capture);
+    control("Respond", {pendingPath(capture), 0u,
+                        QVariantMap{{"restore_token", "fresh-token"}}});
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() &&
+                                     pendingPath(capture) != select; }));
+    EXPECT_EQ(stale.count(), 0);
+    capture.stopCapture();
+  }
+}
+
+TEST_F(WaylandPortalCaptureTest, UnansweredSavedRestoreTimesOutWithoutReauthorization) {
+  if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
+  WaylandPortalCapture capture;
+  restore(capture);
+  QSignalSpy stale(&capture, &IVideoCaptureSource::restoreTokenStale);
+  QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+  capture.requestScreenShare();
+  ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+  const QString create = pendingPath(capture);
+  control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
+  ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
+  // The portal never answers: terminate at the normal startup deadline, but
+  // do not infer a revoked token (or a visible picker) solely from elapsed time.
+  ASSERT_TRUE(watchdogActive(capture));
+  timeout(capture);
+  ASSERT_TRUE(waitUntil([&] { return errors.count() == 1; }));
+  EXPECT_EQ(stale.count(), 0);
+  EXPECT_FALSE(starting(capture));
+  EXPECT_FALSE(watchdogActive(capture));
+  EXPECT_TRUE(pendingPath(capture).isEmpty());
+  EXPECT_EQ(control("SessionCloseCount", {}).arguments().value(0).toInt(), 1);
+}
+
 TEST_F(WaylandPortalCaptureTest, SavedTokenRejectionEmitsStaleInsteadOfPickerRetry) {
   if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
   WaylandPortalCapture capture;

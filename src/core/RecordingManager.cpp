@@ -615,14 +615,21 @@ void RecordingManager::finishStoppedRecording() {
     return;
   }
   const bool pipelineFailed = m_recordingFailed;
-  const bool saved = finalized && !pipelineFailed;
-  m_recordingFailed = !saved;
+  const bool quietFiling = m_captureRecoveryPending && recoveryInstanceIsCurrent();
+  const bool emptyCapture = quietFiling && finalized && !pipelineFailed &&
+                            settledSizeBytes <= 0;
+  const bool saved = finalized && !pipelineFailed && !emptyCapture;
+  m_recordingFailed = !finalized || pipelineFailed;
 
   if (m_storage) {
     m_storage->clearExcludedRecordingPath();
   }
 
   QString filePath = m_currentFilePath;
+  if (emptyCapture && m_storage && !filePath.isEmpty()) {
+    if (!m_storage->deleteRecording(filePath))
+      qWarning() << "Could not discard empty handoff capture:" << filePath;
+  }
   m_currentFilePath.clear();
   m_currentGameName.clear();
 
@@ -637,8 +644,8 @@ void RecordingManager::finishStoppedRecording() {
   const qint64 sizeBytes = settledSizeBytes;
   emit recordingFinished();
   if (saved) {
-    emit recordingStopped(filePath, durationMs, sizeBytes);
-  } else if (!pipelineFailed) {
+    emit recordingStopped(filePath, durationMs, sizeBytes, quietFiling);
+  } else if (!pipelineFailed && !emptyCapture) {
     // Prefer the concrete reason (e.g. a stalled encoder) over the generic
     // finalize wording.
     emit recordingError(m_lastOutputError.isEmpty()

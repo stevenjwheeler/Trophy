@@ -123,8 +123,9 @@ signals:
   // recordingStopped below is the successful-save notification only.
   void recordingFinished();
   void captureRecoveryChanged();
+  // Handoff parts are saved quietly; a normal stop/game exit retains feedback.
   void recordingStopped(const QString &filePath, qint64 durationMs,
-                        qint64 sizeBytes);
+                        qint64 sizeBytes, bool quiet = false);
   void recordingError(const QString &error);
   /**
    * The portal rejected our saved restore token. The app deletes it and

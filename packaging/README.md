@@ -217,6 +217,7 @@ No graphics reporter libraries, Vulkan manifests, preload enrollment or
 32-bit companions are built or shipped. Detection uses `/proc` and PipeWire.
 Old per-user graphics enrollment is removed on upgrade; already-running
 launchers that inherited a preload need a fresh login environment.
-Optional manual window-picker integrations remain separate from detection.
-See [architecture](../docs/game-detection.md) and
-[verification](../docs/game-detection-verification.md).
+Window selection and authorization use the standard ScreenCast portal; no
+Trophy window-picker integrations are shipped. See the
+[architecture](../docs/game-detection.md) and
+[development/testing instructions](../docs/development.md).

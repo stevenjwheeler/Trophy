@@ -212,10 +212,10 @@ available unless the portal supplies a usable label. Without a portal PID,
 manual capture falls back to desktop audio rather than guessing application
 ownership. Portal authorization and backend compatibility are still required.
 
-## Verification and boundaries
+## Limitations and testing
 
-See [verification record](game-detection-verification.md) for commands,
-observations and unverified scenarios. In particular:
+See the [development guide](development.md#development-and-tests) for testing
+instructions. Important boundaries:
 
 * Polling cannot guarantee detection of a process that lives less than a tick.
 * Sandboxing/hidepid, inaccessible environments/executables or PID namespaces

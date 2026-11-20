@@ -757,6 +757,7 @@ void Application::connectSignals() {
             m_settingsManager->removeRestoreToken(game);
             m_settingsManager->removeRestoreToken(m_gameDetector->captureKeyForGame(game));
             m_pendingAutoRecordGame = game;
+            m_authorizePromptTokenInvalid = true;
             m_detectionDebounceTimer->start();
           });
   connect(m_replayManager.get(), &ReplayManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
@@ -767,6 +768,7 @@ void Application::connectSignals() {
             m_settingsManager->removeRestoreToken(game);
             m_settingsManager->removeRestoreToken(m_gameDetector->captureKeyForGame(game));
             m_pendingDvrGame = game;
+            m_authorizePromptTokenInvalid = true;
             m_detectionDebounceTimer->start();
           });
   // Unblocking the live game re-arms its prompt: the debounce dropped it
@@ -789,6 +791,7 @@ void Application::connectSignals() {
             m_detectionDebounceTimer->start();
           });
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed, this, [this](const QString &gameName) {
+            m_authorizePromptTokenInvalid = false;
             emit currentGameChanged();
             // A resident authorize prompt for the closing game must not
             // linger: it would show a dead name, and clicks on it hit
@@ -971,6 +974,7 @@ void Application::connectSignals() {
             // start nothing. The game stays on Prompt and re-prompts on
             // its next launch.
             if (action != QStringLiteral("authorize") && action != QStringLiteral("block")) {
+              m_authorizePromptTokenInvalid = false;
               m_pendingAutoRecordGame.clear();
               m_pendingDvrGame.clear();
               m_detectionDebounceTimer->stop();
@@ -1069,9 +1073,11 @@ void Application::connectSignals() {
                   m_recordingManager->currentGameName());
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
-          [this](const QString &filePath, qint64 durationMs, qint64 sizeBytes) {
+          [this](const QString &filePath, qint64 durationMs, qint64 sizeBytes, bool quiet) {
             m_recordingLibrary->refreshAnnotations(filePath);
             preparePlayerCaches(filePath);
+            if (quiet)
+              return;
             playRecordingStoppedPing(false);
             if (!m_settingsManager->notifyRecordings())
               return;
@@ -1399,6 +1405,7 @@ void Application::onAuthorizeDebounceFired() {
   if (pending.isEmpty())
     return;
   if (!shouldShowAuthorizePrompt(pending)) {
+    m_authorizePromptTokenInvalid = false;
     qCInfo(appLog) << "Skipping authorize prompt for" << pending
                    << "(blocked or already approved)";
     if (m_pendingAutoRecordGame == pending)
@@ -1407,18 +1414,19 @@ void Application::onAuthorizeDebounceFired() {
       m_pendingDvrGame.clear();
     return;
   }
-  // Retain only an eligible request while waiting for a real game
-  // window. Approval, blocking, exit or replacement must retire it even
-  // when the compositor has not published a visible window yet.
+  // Process liveness, not compositor window geometry, gates authorization.
   if (m_gameDetector && !m_gameDetector->isGameRunning()) {
     qCDebug(appLog) << "Deferring authorize prompt for" << pending
-                    << "(no visible game window yet)";
+                    << "(game process not available yet)";
     return;
   }
   qCInfo(appLog) << "Showing authorize prompt for" << pending;
   m_notificationService->showNotification(
       "New Game: " + pending,
-      "Click to authorize Wayland capture for this game, or Block it.",
+      std::exchange(m_authorizePromptTokenInvalid, false)
+          ? "Authorization is no longer valid — click to authorize Wayland "
+            "capture for this game again, or Block it."
+          : "Click to authorize Wayland capture for this game, or Block it.",
       "trophy", 0, 2, true);
 }
 

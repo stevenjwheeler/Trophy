@@ -15,8 +15,8 @@ The Add Game list is a process picker, not a visible-window census. There is
 no universally available cross-desktop Wayland API that gives Trophy a
 reliable pre-authorization window-to-PID list. Desktop-entry, environment and
 audio hints may help rank likely applications, but must not be represented
-as proof that a process owns a visible window. See [current tasks](../todo.md)
-and the [detection architecture](game-detection.md).
+as proof that a process owns a visible window. See the
+[detection architecture](game-detection.md).
 
 Add Game defaults to **Likely applications**: known game primaries, Windows
 payloads and executable matches from cached desktop application launchers.
@@ -237,8 +237,7 @@ separate integration and hardware/session checks.
 
 ### Process detection
 
-See [design](game-detection.md), [verification](game-detection-verification.md)
-and [Discord catalogue research](discord-detectables.md). `detection_probe`
+See the [detection design and limitations](game-detection.md). `detection_probe`
 is a read-only developer executable that prints current game/process/audio
 snapshots without opening a compositor connection or starting recording.
 

@@ -132,7 +132,8 @@ bool ProcessCensus::parseStat(const QByteArray &stat, ProcessInfo &process) {
   if (end < 0)
     return false;
   const auto fields = stat.mid(end + 2).simplified().split(' ');
-  if (fields.size() < 20 || fields[0] == "Z" || fields[0] == "X")
+  if (fields.size() < 20 || fields[0] == "Z" || fields[0] == "X" ||
+      fields[0] == "x")
     return false;
   bool parentOk = false, startOk = false;
   process.parent = fields[1].toLongLong(&parentOk);

@@ -87,19 +87,20 @@ public:
 
 class FinalizationMuxer : public IMuxer {
 public:
-  explicit FinalizationMuxer(bool succeeds, bool writesSucceed = true)
-      : m_succeeds(succeeds), m_writesSucceed(writesSucceed) {}
+  explicit FinalizationMuxer(bool succeeds, bool writesSucceed = true, qint64 bytes = 0)
+      : m_succeeds(succeeds), m_writesSucceed(writesSucceed), m_bytes(bytes) {}
   bool initialize(const QString &) override { return true; }
   int addStream(const StreamInfo &) override { return 0; }
   bool writeHeader() override { return true; }
   bool writePacket(const EncodedPacket &) override { return m_writesSucceed; }
   bool finalize() override { return m_succeeds; }
   QString outputPath() const override { return {}; }
-  int64_t bytesWritten() const override { return 0; }
+  int64_t bytesWritten() const override { return m_bytes; }
   QString formatName() const override { return "fake"; }
 private:
   bool m_succeeds;
   bool m_writesSucceed;
+  qint64 m_bytes;
 };
 
 struct ManagerOperationGate {
@@ -526,7 +527,8 @@ protected:
     ASSERT_TRUE(game.waitForStarted());
     SettingsManager settings;
     settings.setRecordingsPath(tempDir.path());
-    settings.setRestoreTokenForIdentity("steam_app_42424242", "Exit fixture", "approved-token");
+    if (scenario != 11)
+      settings.setRestoreTokenForIdentity("steam_app_42424242", "Exit fixture", "approved-token");
     StorageManager storage(tempDir.path());
     GameDetectionService detector;
     detector.addToWhitelist("steam_app_42424242", "Exit fixture");
@@ -540,7 +542,8 @@ protected:
     QPointer<PendingCapture> capture;
     installPendingCapture(recorder, capture);
     recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 5);
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(
+          scenario != 5, true, scenario == 10 ? 0 : 8192);
       return true;
     };
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
@@ -558,19 +561,22 @@ protected:
     const auto firstPath = recorder.currentFilePath();
     QFile first(firstPath);
     ASSERT_TRUE(first.open(QIODevice::WriteOnly));
-    first.write("preserved first part");
+    if (scenario != 10) first.write("preserved first part");
     first.close();
     capture->errorKind = scenario == 6 ? IVideoCaptureSource::CaptureErrorKind::SourceUnavailable
                                        : IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
     emit capture->captureError("window closed");
     ASSERT_TRUE(waitForIdle(recorder));
-    if (scenario == 5 || scenario == 6) {
+    if (scenario == 5 || scenario == 6 || scenario == 11) {
       EXPECT_FALSE(recorder.isRecoveringCapture());
       EXPECT_EQ(errors.size(), 1);
     } else {
       ASSERT_TRUE(recorder.isRecoveringCapture());
       EXPECT_EQ(finishesWithIntent, scenario == 8 ? 0 : 1); // No DVR takeover.
-      EXPECT_EQ(saved.size(), scenario == 8 ? 0 : 1);
+      EXPECT_EQ(saved.size(), scenario == 8 || scenario == 10 ? 0 : 1);
+      if (!saved.isEmpty())
+        EXPECT_TRUE(saved.first().at(3).toBool()); // No session-end chime on a handoff.
+      if (scenario == 10) EXPECT_FALSE(QFileInfo::exists(firstPath));
       if (scenario == 1) recorder.stopRecording(); // Explicit stop during retry delay.
       if (scenario == 2) {
         game.terminate();
@@ -588,7 +594,7 @@ protected:
         ASSERT_TRUE(namesake.waitForFinished());
       }
       QTest::qWait(100);
-      if (scenario == 0 || scenario == 7 || scenario == 8 || scenario == 9) {
+      if (scenario == 0 || scenario == 7 || scenario == 8 || scenario == 9 || scenario == 10) {
         ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
         EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
         EXPECT_EQ(recorder.snapshotAudioPreparation().pid, game.processId());
@@ -608,7 +614,7 @@ protected:
         }
         recorder.completePipelineAndStart();
         ASSERT_TRUE(recorder.isRecording());
-        EXPECT_NE(recorder.currentFilePath(), firstPath);
+        if (scenario != 10) EXPECT_NE(recorder.currentFilePath(), firstPath);
         EXPECT_EQ(started.size(), scenario == 8 ? 1 : 2);
         if (scenario == 7) {
           // Recovery remains available beyond the former three-attempt cap.
@@ -627,7 +633,9 @@ protected:
         } else {
           recorder.stopRecording();
           ASSERT_TRUE(waitForIdle(recorder));
-          EXPECT_EQ(saved.size(), scenario == 8 ? 1 : 2);
+          EXPECT_EQ(saved.size(), scenario == 8 || scenario == 10 ? 1 : 2);
+          ASSERT_FALSE(saved.isEmpty());
+          EXPECT_FALSE(saved.last().at(3).toBool()); // Normal stop keeps feedback.
         }
       } else {
         EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
@@ -636,8 +644,10 @@ protected:
       }
       EXPECT_EQ(errors.size(), 0);
     }
-    ASSERT_TRUE(first.open(QIODevice::ReadOnly));
-    EXPECT_EQ(first.readAll(), "preserved first part");
+    if (scenario != 10) {
+      ASSERT_TRUE(first.open(QIODevice::ReadOnly));
+      EXPECT_EQ(first.readAll(), "preserved first part");
+    }
     if (game.state() != QProcess::NotRunning) {
       game.terminate();
       ASSERT_TRUE(game.waitForFinished());
@@ -1077,6 +1087,8 @@ TEST_F(RecordingManagerTest, FinalizationFailureCancelsWindowRecovery) { windowH
 TEST_F(RecordingManagerTest, AmbiguousPermissionLossDoesNotRetryWindow) { windowHandoff(6); }
 TEST_F(RecordingManagerTest, LiveInstanceWindowRecoveryDoesNotExhaustAttemptBudget) { windowHandoff(7); }
 TEST_F(RecordingManagerTest, LongWindowGapRetriesApprovedEmptyCaptureUntilReady) { windowHandoff(9); }
+TEST_F(RecordingManagerTest, EmptyHandoffCaptureIsDiscardedWithoutSaveNotification) { windowHandoff(10); }
+TEST_F(RecordingManagerTest, DestroyedWindowWithoutApprovalDoesNotRearm) { windowHandoff(11); }
 TEST_F(RecordingManagerTest, CaptureServiceFailureIsNotHiddenByGameExit) { captureEndRace(3); }
 TEST_F(RecordingManagerTest, CaptureGameExitDoesNotHideFinalizationFailure) { captureEndRace(4); }
 TEST_F(RecordingManagerTest, ManualCaptureSourceLossDoesNotBorrowDetectedGameExit) { captureEndRace(5); }
