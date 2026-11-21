@@ -1,1629 +1,223 @@
-/*
- * Trophy - Unit Tests
- * Test suite for RecordingManager storage enforcement behavior
- */
-
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "core/RecordingManager.h"
+#include "core/StorageManager.h"
+#include "settings/SettingsManager.h"
+#include "library/RecordingAnnotations.h"
 #include <QCoreApplication>
-#include <QDateTime>
-#include <QDir>
-#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
-#include <QPointer>
-#include <QProcess>
 #include <QSignalSpy>
 #include <QTemporaryDir>
-#include <QTimer>
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <future>
-#include <mutex>
-#include <thread>
 #include <gtest/gtest.h>
-#include <QTest>
 
-#include "audio/AudioMixer.h"
-#include "audio/IAudioSource.h"
-#include "capture/IVideoCaptureSource.h"
-#include "core/RecordingManager.h"
-#include "core/RecordingSession.h"
-#include "core/StorageManager.h"
-#include "detection/GameDetectionService.h"
-#include "detection/GameWhitelist.h"
-#include "encoding/IEncoder.h"
-#include "library/RecordingAnnotations.h"
-#include "muxing/IMuxer.h"
-#include "settings/SettingsManager.h"
-
-using namespace TrophyBackend;
-
-class RecordingManagerTestEnvironment : public ::testing::Environment {
-public:
+namespace TrophyBackend {
+// Manager policy only. Native capture and encoder tests belong to the engine;
+// real file-output/packet regressions live in test_EncodedOutputs.cpp.
+class RecordingManagerTest : public ::testing::Test {
+protected:
+  QTemporaryDir root;
+  QByteArray previousConfig;
   void SetUp() override {
     if (!QCoreApplication::instance()) {
       static int argc = 1;
-      static char arg0[] = "test";
-      static char *argv[] = {arg0, nullptr};
+      static char name[] = "recording-policy-tests";
+      static char *argv[] = {name, nullptr};
       new QCoreApplication(argc, argv);
     }
+    ASSERT_TRUE(root.isValid());
+    previousConfig = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", root.path().toUtf8());
   }
-};
-
-static auto *env =
-    testing::AddGlobalTestEnvironment(new RecordingManagerTestEnvironment);
-
-// No portal or encoder is involved: capture waits until the test emits a real
-// IVideoCaptureSource signal, using the manager's production connections.
-class PendingCapture : public IVideoCaptureSource {
-public:
-  uint32_t pid = 0;
-  uint32_t sourcePid() const override { return pid; }
-  CaptureErrorKind errorKind = CaptureErrorKind::Other;
-  CaptureErrorKind lastErrorKind() const override { return errorKind; }
-  CaptureConfig config;
-  mutable int resolutionQueries = 0;
-  bool initialize(const CaptureConfig &value) override {
-    config = value;
-    return true;
-  }
-  void setFrameCallback(FrameCallback) override {}
-  bool startCapture() override { return true; }
-  void stopCapture() override {}
-  bool isCapturing() const override { return true; }
-  CaptureCapabilities capabilities() const override { return {}; }
-  QSize nativeResolution() const override {
-    ++resolutionQueries;
-    return {};
-  }
-  QString name() const override { return QStringLiteral("Pending capture"); }
-};
-
-class BookmarkCapture : public PendingCapture {
-public:
-  FrameCallback callback;
-  void setFrameCallback(FrameCallback value) override { callback = std::move(value); }
-};
-
-class FinalizationMuxer : public IMuxer {
-public:
-  explicit FinalizationMuxer(bool succeeds, bool writesSucceed = true, qint64 bytes = 0)
-      : m_succeeds(succeeds), m_writesSucceed(writesSucceed), m_bytes(bytes) {}
-  bool initialize(const QString &) override { return true; }
-  int addStream(const StreamInfo &) override { return 0; }
-  bool writeHeader() override { return true; }
-  bool writePacket(const EncodedPacket &) override { return m_writesSucceed; }
-  bool finalize() override { return m_succeeds; }
-  QString outputPath() const override { return {}; }
-  int64_t bytesWritten() const override { return m_bytes; }
-  QString formatName() const override { return "fake"; }
-private:
-  bool m_succeeds;
-  bool m_writesSucceed;
-  qint64 m_bytes;
-};
-
-struct ManagerOperationGate {
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool entered = false, released = false;
-  std::atomic<int> destructions{0};
-  std::atomic<int> lookupCalls{0};
-  QString firstVoice;
-  void block() {
-    std::unique_lock lock(mutex);
-    entered = true;
-    cv.notify_all();
-    EXPECT_TRUE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return released; }));
-  }
-  bool waitForEntry() {
-    std::unique_lock lock(mutex);
-    return cv.wait_for(lock, std::chrono::seconds(3), [&] { return entered; });
-  }
-  void release() {
-    std::lock_guard lock(mutex);
-    released = true;
-    cv.notify_all();
-  }
-};
-
-class GatedManagerMuxer : public FinalizationMuxer {
-public:
-  GatedManagerMuxer(std::shared_ptr<ManagerOperationGate> gate, bool succeeds)
-      : FinalizationMuxer(succeeds), m_gate(std::move(gate)) {}
-  ~GatedManagerMuxer() override { ++m_gate->destructions; }
-  bool finalize() override {
-    if (!m_finalized) {
-      m_gate->block();
-      m_finalized = true;
-    }
-    return FinalizationMuxer::finalize();
-  }
-private:
-  std::shared_ptr<ManagerOperationGate> m_gate;
-  bool m_finalized = false;
-};
-
-class ManagerOutputEncoder : public IEncoder {
-public:
-  bool initialize(const EncoderConfig &) override { return true; }
-  bool encodeFrame(const VideoFrame &, EncodedPacket &) override { return false; }
-  int flush(std::vector<EncodedPacket> &packets) override {
-    EncodedPacket packet;
-    packet.data = {1};
-    packets.push_back(packet);
-    return 1;
-  }
-  EncoderConfig config() const override { return {}; }
-  EncoderType type() const override { return EncoderType::Software_x264; }
-  QString name() const override { return "fake"; }
-  bool isHardwareEncoder() const override { return false; }
-  std::vector<uint8_t> extraData() const override { return {}; }
-  int codecId() const override { return 27; }
-  int encodedPixelFormat() const override { return 0; }
-};
-
-class ManagerRoleSource : public IAudioSource {
-public:
-  ManagerRoleSource(SourceType type, bool &destroyed) : m_type(type), m_destroyed(destroyed) {}
-  ~ManagerRoleSource() override { m_destroyed = true; }
-  bool initialize(const AudioConfig &) override { return true; }
-  void setCallback(AudioCallback) override {}
-  bool start() override { m_capturing = true; return true; }
-  void stop() override { m_capturing = false; }
-  bool isCapturing() const override { return m_capturing; }
-  SourceType sourceType() const override { return m_type; }
-  QString displayName() const override { return "role-source"; }
-  QString identifier() const override { return "role-source"; }
-  float peakLevel() const override { return 0; }
-  void setVolume(float) override {}
-  float volume() const override { return 1; }
-private:
-  SourceType m_type;
-  bool &m_destroyed;
-  std::atomic<bool> m_capturing{true};
-};
-
-class RecordingManagerTest : public ::testing::Test {
-protected:
-  // NOTE: declared first so it outlives everything that reads config paths.
-  QTemporaryDir configHome;
-  QByteArray oldXdgConfigHome;
-  QTemporaryDir tempDir;
-
-  void SetUp() override {
-    ASSERT_TRUE(tempDir.isValid());
-    ASSERT_TRUE(configHome.isValid());
-    // Isolate from the user's real ~/.config/trophy config: SettingsManager
-    // saves on destruction, which must never touch the real config dir.
-    oldXdgConfigHome = qgetenv("XDG_CONFIG_HOME");
-    qputenv("XDG_CONFIG_HOME", configHome.path().toUtf8());
-  }
-
   void TearDown() override {
-    if (oldXdgConfigHome.isNull())
-      qunsetenv("XDG_CONFIG_HOME");
-    else
-      qputenv("XDG_CONFIG_HOME", oldXdgConfigHome);
+    if (previousConfig.isNull()) qunsetenv("XDG_CONFIG_HOME");
+    else qputenv("XDG_CONFIG_HOME", previousConfig);
   }
-
-  void createDummyFile(const QString &name, qint64 size) {
-    QFile f(tempDir.path() + "/" + name);
-    ASSERT_TRUE(f.open(QIODevice::WriteOnly));
-    f.write(QByteArray(size, 'x'));
-    f.close();
+  QString file(const QString &name, int bytes = 64) {
+    const auto path = root.filePath(name);
+    QFile output(path);
+    EXPECT_TRUE(output.open(QIODevice::WriteOnly));
+    EXPECT_EQ(output.write(QByteArray(bytes, 'x')), bytes);
+    return path;
   }
-
-  QVariantMap diagnosticHealth(RecordingManager &recorder) {
-    // Exercise the real snapshot publication without constructing a codec.
-    const auto state = recorder.m_state;
-    recorder.m_session = std::make_unique<RecordingSession>(
-        "unused.mkv", recorder.m_captureSource.get(), nullptr, nullptr, nullptr, false, 128, 0);
-    recorder.m_state = RecordingManager::RecordingState::Recording;
-    const auto result = recorder.captureHealth();
-    recorder.m_state = state;
-    recorder.m_session.reset();
-    return result;
+  static quint64 id(const RecordingManager &manager) { return manager.m_id; }
+  static void mediaPosition(RecordingManager &manager, qint64 position) {
+    manager.m_output->m_position.store(position);
   }
-
-  void bookmarkLifecycle() {
-    createDummyFile("bookmarked.mkv", 64);
-    const QString path = tempDir.filePath("bookmarked.mkv");
-    StorageManager storage(tempDir.path());
-    RecordingManager recorder;
-    recorder.setStorageManager(&storage);
-    EXPECT_FALSE(recorder.addBookmark());
-    recorder.m_currentFilePath = path;
-    auto capture = std::make_unique<BookmarkCapture>();
-    auto *source = capture.get();
-    recorder.m_captureSource = std::move(capture);
-    recorder.m_videoEncoder = std::make_unique<ManagerOutputEncoder>();
-    recorder.m_muxer = std::make_unique<FinalizationMuxer>(true);
-    recorder.m_session = std::make_unique<RecordingSession>(
-        path, source, recorder.m_videoEncoder.get(), recorder.m_muxer.get(),
-        nullptr, true, 128, 0);
-    ASSERT_TRUE(recorder.m_session->start());
-    recorder.m_recordingTimer.start();
-    recorder.setState(RecordingManager::RecordingState::Recording);
-    EXPECT_FALSE(recorder.addBookmark()); // No media origin yet.
-    ASSERT_TRUE(bool(source->callback));
-    VideoFrame frame{};
-    frame.timestamp = 90000000;
-    source->callback(frame);
-    ASSERT_TRUE(recorder.addBookmark());
-    const auto marks = RecordingAnnotations::bookmarks(path);
-    ASSERT_EQ(marks.size(), 1);
-    EXPECT_EQ(marks[0].toMap()["positionMs"].toLongLong(), 0);
-    recorder.stopRecording();
-    EXPECT_FALSE(recorder.addBookmark());
-    ASSERT_TRUE(waitForIdle(recorder));
-    EXPECT_EQ(RecordingAnnotations::bookmarks(path).size(), 1);
-  }
-
-  bool waitForIdle(RecordingManager &recorder) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (recorder.state() != RecordingManager::RecordingState::Idle &&
-           std::chrono::steady_clock::now() < deadline) {
-      QCoreApplication::processEvents();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return recorder.state() == RecordingManager::RecordingState::Idle;
-  }
-
-  void gatedStop(bool succeeds) {
-    const QString path = tempDir.path() + "/retained.mkv";
-    createDummyFile("retained.mkv", 64);
-    StorageManager storage(tempDir.path());
-    RecordingManager recorder;
-    recorder.setStorageManager(&storage);
-    recorder.m_currentFilePath = path;
-    recorder.m_currentGameName = "Retained Game";
-    storage.setExcludedRecordingPath(path);
-    recorder.m_captureSource = std::make_unique<PendingCapture>();
-    QPointer<IVideoCaptureSource> capture(recorder.m_captureSource.get());
-    recorder.m_videoEncoder = std::make_unique<ManagerOutputEncoder>();
-    auto gate = std::make_shared<ManagerOperationGate>();
-    recorder.m_muxer = std::make_unique<GatedManagerMuxer>(gate, succeeds);
-    recorder.m_session = std::make_unique<RecordingSession>(
-        path, recorder.m_captureSource.get(), recorder.m_videoEncoder.get(),
-        recorder.m_muxer.get(), nullptr, true, 128, 0);
-    ASSERT_TRUE(recorder.m_session->start());
-    recorder.m_recordingTimer.start();
-    recorder.setState(RecordingManager::RecordingState::Recording);
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    recorder.stopRecording();
-    ASSERT_TRUE(gate->waitForEntry());
-    const qint64 stoppedDuration = recorder.recordingDuration();
-    const qint64 stoppedSize = recorder.recordingSize();
-    bool heartbeat = false;
-    QTimer::singleShot(0, [&] { heartbeat = true; });
-    QCoreApplication::processEvents();
-    EXPECT_TRUE(heartbeat);
-    EXPECT_EQ(recorder.recordingDuration(), stoppedDuration);
-    EXPECT_EQ(recorder.recordingSize(), stoppedSize);
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Stopping);
-    EXPECT_EQ(recorder.currentFilePath(), path);
-    EXPECT_FALSE(capture.isNull());
-    EXPECT_EQ(gate->destructions, 0);
-    EXPECT_EQ(finished.count(), 0);
-    recorder.startRecording("Cannot reuse pipeline");
-    recorder.stopRecording();
-    EXPECT_EQ(recorder.currentFilePath(), path);
-    EXPECT_EQ(errors.count(), 0);
-    gate->release();
-    ASSERT_TRUE(waitForIdle(recorder));
-    EXPECT_TRUE(capture.isNull());
-    EXPECT_EQ(gate->destructions, 1);
-    EXPECT_EQ(saved.count(), succeeds ? 1 : 0);
-    if (succeeds) {
-      EXPECT_EQ(saved.at(0).at(1).toLongLong(), stoppedDuration);
-    }
-    EXPECT_EQ(errors.count(), succeeds ? 0 : 1);
-    EXPECT_EQ(finished.count(), 1);
-    EXPECT_TRUE(QFileInfo::exists(path)); // Partial outputs are preserved too.
-    QCoreApplication::processEvents();
-    EXPECT_EQ(finished.count(), 1);
-  }
-
-  void gatedStartupLookup(bool cancel = true) {
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    settings.setVoiceChatApp("Old voice");
-    settings.setAudioMode("game");
-    StorageManager storage(tempDir.path());
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    auto gate = std::make_shared<ManagerOperationGate>();
-    recorder.m_audioPreparationLookup = [gate](auto input) {
-      if (++gate->lookupCalls == 1) {
-        gate->firstVoice = input.voiceApp;
-        gate->block();
-      }
-      return input;
-    };
-    int builds = 0;
-    recorder.m_pipelineBuilder = [&] {
-      ++builds;
-      EXPECT_EQ(recorder.m_preparedAudio.voiceApp, "New voice");
-      EXPECT_EQ(recorder.m_preparedAudio.micDevice, "new-mic");
-      EXPECT_FALSE(recorder.m_preparedAudio.separate);
-      return true;
-    };
-    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    recorder.startRecording("Old game");
-    recorder.finishPipelineAndStart();
-    ASSERT_TRUE(gate->waitForEntry());
-    EXPECT_EQ(gate->firstVoice, "Old voice");
-    bool heartbeat = false;
-    QTimer::singleShot(0, [&] { heartbeat = true; });
-    QCoreApplication::processEvents();
-    EXPECT_TRUE(heartbeat);
-    EXPECT_EQ(builds, 0);
-    if (cancel) {
-      recorder.stopRecording();
-      ASSERT_TRUE(waitForIdle(recorder));
-    }
-    settings.setVoiceChatApp("New voice");
-    settings.setMicrophoneDevice("new-mic");
-    settings.setSeparateAudioTracks(false);
-    if (cancel) {
-      recorder.startRecording("Replacement game");
-      recorder.finishPipelineAndStart();
-    }
-    EXPECT_EQ(gate->lookupCalls, 1); // Old lookup retains the single preparation slot.
-    gate->release();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (recorder.state() == RecordingManager::RecordingState::Initializing &&
-           std::chrono::steady_clock::now() < deadline) {
-      QCoreApplication::processEvents();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Recording);
-    EXPECT_EQ(recorder.currentGameName(), cancel ? "Replacement game" : "Old game");
-    EXPECT_EQ(gate->lookupCalls, 2);
-    EXPECT_EQ(builds, 1);
-    EXPECT_EQ(started.count(), 1);
-    recorder.stopRecording();
-    EXPECT_TRUE(waitForIdle(recorder));
-  }
-
-  void disableLateAdoptedVoice() {
-    SettingsManager settings;
-    settings.setAudioMode("game");
-    settings.setSeparateAudioTracks(false);
-    settings.setVoiceChatApp("");
-    bool micDestroyed = false, voiceDestroyed = false;
-    AudioMixer mixer(48000, 2);
-    mixer.addSource(std::make_unique<ManagerRoleSource>(
-        IAudioSource::SourceType::Microphone, micDestroyed), 1);
-    mixer.addSource(std::make_unique<ManagerRoleSource>(
-        IAudioSource::SourceType::ApplicationAudio, voiceDestroyed), 2);
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setAudioMixer(&mixer);
-    recorder.m_session = std::make_unique<RecordingSession>(
-        "unused.mkv", nullptr, nullptr, nullptr, &mixer, false, 128, 3);
-    recorder.m_session->setVoiceTrack(2);
-    recorder.m_session->markSourceConnected(2);
-    recorder.m_voiceTrack = -1; // Initial layout predates the late adoption.
-    recorder.setState(RecordingManager::RecordingState::Recording);
-    recorder.applyVoiceChatApp();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (mixer.sourceOperationPending(2) && std::chrono::steady_clock::now() < deadline) {
-      QCoreApplication::processEvents();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_FALSE(mixer.sourceOperationPending(2));
-    EXPECT_TRUE(voiceDestroyed);
-    EXPECT_FALSE(micDestroyed);
-    EXPECT_TRUE(mixer.sourceIsCapturing(1));
-    EXPECT_EQ(recorder.m_voiceTrack, 2);
-  }
-
-  void installPendingCapture(RecordingManager &recorder,
-                             QPointer<PendingCapture> &capture) {
-    recorder.m_captureFactory = [&capture]() {
-      auto source = std::make_unique<PendingCapture>();
-      capture = source.get();
-      return source;
-    };
-  }
-
-  void publishGame(GameDetectionService &detector, qint64 pid,
-                   const QString &key) {
-    auto p = ProcessCensus::inspect(pid);
-    if (!p.pid) {
-      p.pid = pid;
-      p.start = 1;
-    }
-    const auto name = detector.m_whitelist->getWhitelistName(key);
-    detector.m_selectedId = key + "@" + p.identity();
-    detector.m_instances = {
-        {detector.m_selectedId, key, name, pid, {{pid, p}}}};
-    detector.updateCurrentGame(name, pid, key);
-  }
-  void simulatePrimaryHandoff(RecordingManager &recorder) {
-    recorder.m_detectedGameInfo["detectedGamePid"] = 2147483647;
-  }
-
-  void audioPidHandoff(int scenario) {
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    settings.setAudioMode("game");
-    settings.setVoiceChatApp("");
-    StorageManager storage(tempDir.path());
-    GameDetectionService detector;
-    detector.addToWhitelist("steam_app_1086940", "Baldur's Gate 3");
-    detector.addToWhitelist("steam_app_999", scenario == 3 ? "Another game" : "Baldur's Gate 3");
-    publishGame(detector, 61010, "steam_app_1086940");
-    ASSERT_EQ(detector.currentGamePid(), 61010);
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    recorder.setGameDetectionService(&detector);
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    const QString target = scenario == 4 ? QString() :
-                           scenario == 5 ? "Other target" : "Baldur's Gate 3";
-    recorder.startRecording(target);
-    ASSERT_FALSE(capture.isNull());
-    if (scenario == 1) capture->pid = 62020;
-    if (scenario == 2 || scenario == 3) {
-      detector.addToBlacklist("steam_app_1086940");
-      publishGame(detector, 61011, "steam_app_999");
-      ASSERT_EQ(detector.currentGamePid(), 61011);
-    }
-    const uint32_t expected = (scenario == 4 || scenario == 5) ? 0 : 61010;
-    std::atomic<int> lookups{0};
-    recorder.m_audioPreparationLookup = [&](auto input) {
-      EXPECT_EQ(input.pid, expected);
-      if (scenario == 4) EXPECT_TRUE(input.hints.isEmpty());
-      else EXPECT_TRUE(input.hints.contains(target));
-      if (scenario == 3) EXPECT_FALSE(input.hints.contains("Another game"));
-      if (scenario == 5) EXPECT_FALSE(input.hints.contains("Baldur's Gate 3"));
-      // Wwise has no title match: only the retained game PID finds its node.
-      if (input.pid == 61010) {
-        input.gameNode = 120;
-        input.gameNodeName = "Wwise";
-        input.gameSerial = "1200";
-      }
-      ++lookups;
-      return input;
-    };
-    recorder.m_pipelineBuilder = [&] {
-      EXPECT_EQ(recorder.m_preparedAudio.pid, expected);
-      if (expected == 61010) {
-        EXPECT_EQ(recorder.m_preparedAudio.gameNode, 120u);
-        EXPECT_EQ(recorder.m_preparedAudio.gameNodeName, "Wwise");
-      }
-      return true; // No native encoder, portal or audio source needed.
-    };
-    emit capture->ready();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!recorder.isRecording() && std::chrono::steady_clock::now() < deadline) {
-      QCoreApplication::processEvents();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_TRUE(recorder.isRecording());
-    EXPECT_GE(lookups.load(), 1);
-    EXPECT_EQ(recorder.snapshotAudioPreparation().pid, expected); // Same retry input.
-    recorder.stopRecording();
-    ASSERT_TRUE(waitForIdle(recorder));
-    recorder.startRecording(""); // A new manual capture must not inherit the old PID.
-    EXPECT_EQ(recorder.snapshotAudioPreparation().pid, 0u);
-    EXPECT_TRUE(recorder.snapshotAudioPreparation().hints.isEmpty());
-    recorder.stopRecording();
-    ASSERT_TRUE(waitForIdle(recorder));
-  }
-
-  void windowHandoff(int scenario) {
-    QProcess game;
-    game.start("sleep", {"30"});
-    ASSERT_TRUE(game.waitForStarted());
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    if (scenario != 11)
-      settings.setRestoreTokenForIdentity("steam_app_42424242", "Exit fixture", "approved-token");
-    StorageManager storage(tempDir.path());
-    GameDetectionService detector;
-    detector.addToWhitelist("steam_app_42424242", "Exit fixture");
-    publishGame(detector, game.processId(), "steam_app_42424242");
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    recorder.setGameDetectionService(&detector);
-    recorder.m_recoveryDelayMs = 50;
-    recorder.m_captureEndGraceMs = 10;
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(
-          scenario != 5, true, scenario == 10 ? 0 : 8192);
-      return true;
-    };
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy completion(&recorder, &RecordingManager::recordingCompletionReady);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    int finishesWithIntent = 0;
-    QObject::connect(&recorder, &RecordingManager::recordingFinished, &recorder, [&] {
-      if (recorder.isRecoveringCapture()) ++finishesWithIntent;
-    });
-    recorder.startRecording("Exit fixture");
-    if (scenario != 8) {
-      recorder.completePipelineAndStart();
-      ASSERT_TRUE(recorder.isRecording());
-    }
-    const auto firstPath = recorder.currentFilePath();
-    QFile first(firstPath);
-    ASSERT_TRUE(first.open(QIODevice::WriteOnly));
-    if (scenario != 10) first.write("preserved first part");
-    first.close();
-    capture->errorKind = scenario == 6 ? IVideoCaptureSource::CaptureErrorKind::SourceUnavailable
-                                       : IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
-    emit capture->captureError("window closed");
-    ASSERT_TRUE(waitForIdle(recorder));
-    if (scenario == 5 || scenario == 6 || scenario == 11) {
-      EXPECT_FALSE(recorder.isRecoveringCapture());
-      EXPECT_EQ(errors.size(), 1);
-    } else {
-      ASSERT_TRUE(recorder.isRecoveringCapture());
-      EXPECT_EQ(finishesWithIntent, scenario == 8 ? 0 : 1); // No DVR takeover.
-      EXPECT_EQ(saved.size(), scenario == 8 || scenario == 10 ? 0 : 1);
-      if (!saved.isEmpty())
-        EXPECT_TRUE(saved.first().at(3).toBool()); // No session-end chime on a handoff.
-      EXPECT_EQ(completion.size(), 0); // Filing a part does not finish the intent.
-      if (scenario == 10) EXPECT_FALSE(QFileInfo::exists(firstPath));
-      if (scenario == 1) recorder.stopRecording(); // Explicit stop during retry delay.
-      if (scenario == 2) {
-        game.terminate();
-        ASSERT_TRUE(game.waitForFinished());
-      }
-      if (scenario == 3) settings.removeRestoreToken("steam_app_42424242");
-      if (scenario == 4) {
-        // A replacement same-name instance must not inherit this attempt.
-        QProcess namesake;
-        namesake.start("sleep", {"30"});
-        ASSERT_TRUE(namesake.waitForStarted());
-        publishGame(detector, namesake.processId(), "steam_app_42424242");
-        QTest::qWait(100);
-        namesake.terminate();
-        ASSERT_TRUE(namesake.waitForFinished());
-      }
-      QTest::qWait(100);
-      if (scenario == 0 || scenario == 7 || scenario == 8 || scenario == 9 || scenario == 10) {
-        ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-        EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
-        EXPECT_EQ(recorder.snapshotAudioPreparation().pid, game.processId());
-        if (scenario == 9) {
-          // A long gap can yield repeated authorized starts with no stream.
-          // Do not require a new window-loss event or exhaust a retry budget.
-          for (int attempt = 0; attempt < 6; ++attempt) {
-            capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SourceNotReady;
-            emit capture->captureError("approved window not ready yet");
-            ASSERT_TRUE(waitForIdle(recorder));
-            ASSERT_TRUE(recorder.isRecoveringCapture());
-            QTest::qWait(100);
-            ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-            EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
-            EXPECT_EQ(errors.size(), 0);
-            EXPECT_EQ(completion.size(), 0); // Empty retries must remain quiet.
-          }
-        }
-        recorder.completePipelineAndStart();
-        ASSERT_TRUE(recorder.isRecording());
-        EXPECT_EQ(completion.size(), 0); // A real successor consumes deferred feedback.
-        if (scenario != 10) EXPECT_NE(recorder.currentFilePath(), firstPath);
-        EXPECT_EQ(started.size(), scenario == 8 ? 1 : 2);
-        if (scenario == 7) {
-          // Recovery remains available beyond the former three-attempt cap.
-          for (int attempt = 0; attempt < 6; ++attempt) {
-            capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
-            emit capture->captureError("another transient window closed");
-            ASSERT_TRUE(waitForIdle(recorder));
-            QTest::qWait(100);
-            ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-            recorder.completePipelineAndStart();
-            EXPECT_EQ(errors.size(), 0);
-          }
-          recorder.stopRecording();
-          ASSERT_TRUE(waitForIdle(recorder));
-          EXPECT_FALSE(recorder.isRecoveringCapture());
-        } else {
-          recorder.stopRecording();
-          ASSERT_TRUE(waitForIdle(recorder));
-          EXPECT_EQ(saved.size(), scenario == 8 || scenario == 10 ? 1 : 2);
-          ASSERT_FALSE(saved.isEmpty());
-          EXPECT_FALSE(saved.last().at(3).toBool()); // Normal stop keeps feedback.
-        }
-      } else {
-        EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-        EXPECT_FALSE(recorder.isRecoveringCapture());
-        EXPECT_EQ(started.size(), 1);
-      }
-      EXPECT_EQ(errors.size(), 0);
-    }
-    if (scenario == 5 || scenario == 6 || scenario == 11) {
-      EXPECT_TRUE(completion.isEmpty()); // Failed outputs never announce success.
-    } else {
-      ASSERT_EQ(completion.size(), 1);
-      EXPECT_EQ(completion.first().at(0).toString(),
-                scenario >= 1 && scenario <= 4 ? firstPath
-                                               : saved.last().at(0).toString());
-      EXPECT_EQ(completion.first().at(2).toLongLong(), scenario == 10 ? 0 : 8192);
-      // Repeated cancellation/Stop cannot replay feedback for a saved part.
-      recorder.cancelCaptureRecovery();
-      EXPECT_EQ(completion.size(), 1);
-    }
-    if (scenario != 10) {
-      ASSERT_TRUE(first.open(QIODevice::ReadOnly));
-      EXPECT_EQ(first.readAll(), "preserved first part");
-    }
-    if (game.state() != QProcess::NotRunning) {
-      game.terminate();
-      ASSERT_TRUE(game.waitForFinished());
-    }
-  }
-
-  void captureEndRace(int scenario) {
-    QProcess game;
-    game.start("sleep", {"30"});
-    ASSERT_TRUE(game.waitForStarted());
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    StorageManager storage(tempDir.path());
-    GameDetectionService detector;
-    detector.addToWhitelist("steam_app_42424242", "Exit fixture");
-    publishGame(detector, game.processId(), "steam_app_42424242");
-    ASSERT_EQ(detector.currentGameKey(), "steam_app_42424242");
-    ASSERT_EQ(detector.currentGameName(), "Exit fixture");
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    recorder.setGameDetectionService(&detector);
-    recorder.m_captureEndGraceMs = 200;
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(scenario != 4);
-      return true;
-    };
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
-    recorder.startRecording(scenario == 5 ? QString() : QString("Exit fixture"));
-    ASSERT_FALSE(capture.isNull());
-    recorder.completePipelineAndStart();
-    ASSERT_TRUE(recorder.isRecording());
-    capture->errorKind = scenario == 3 ? IVideoCaptureSource::CaptureErrorKind::Other
-                                     : IVideoCaptureSource::CaptureErrorKind::SourceUnavailable;
-    if (scenario == 2) {
-      EXPECT_TRUE(
-          detector.isGameRunning()); // Window state is not process exit.
-    }
-    if (scenario == 0 || scenario == 3 || scenario == 4 || scenario == 5) {
-      game.terminate();
-      ASSERT_TRUE(game.waitForFinished());
-    }
-    if (scenario == 6) recorder.stopRecording();
-    emit capture->captureError("source vanished");
-    if (scenario == 7) {
-      QCoreApplication::processEvents();
-      recorder.onEncodingError("output write failed during stop");
-    }
-    if (scenario == 1)
-      QTimer::singleShot(30, &game, [&] { game.terminate(); });
-    ASSERT_TRUE(waitForIdle(recorder));
-    const bool normal = scenario == 0 || scenario == 1 || scenario == 6;
-    EXPECT_EQ(saved.size(), normal ? 1 : 0);
-    EXPECT_EQ(errors.size(), normal ? 0 : 1);
-    EXPECT_EQ(finished.size(), 1);
-    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
-    if (game.state() != QProcess::NotRunning) {
-      game.terminate();
-      ASSERT_TRUE(game.waitForFinished());
-    }
-  }
-
-  void censusHandoffRace(int scenario) {
-    QProcess bootstrap, runtime, successor;
-    for (auto *process : {&bootstrap, &runtime, &successor}) {
-      process->start("sleep", {"30"});
-      ASSERT_TRUE(process->waitForStarted());
-    }
-    const auto bootstrapPid = bootstrap.processId();
-    const auto successorPid = successor.processId();
-    const QString key = "steam_app_42424242", name = "Exit fixture";
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    settings.setRestoreTokenForIdentity(key, name, "approved-token");
-    StorageManager storage(tempDir.path());
-    GameDetectionService detector;
-    detector.addToWhitelist(key, name);
-    publishGame(detector, bootstrapPid, key);
-    auto &instance = detector.m_instances.first();
-    instance.launchContext = {
-        QFileInfo(ProcessCensus::inspect(bootstrapPid).payload()).absolutePath(),
-        {}, ProcessCensus::inspect(runtime.processId())};
-    const auto originalId = instance.id;
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    recorder.setGameDetectionService(&detector);
-    recorder.m_captureEndGraceMs = 1; // Must not be a handoff/retry deadline.
-    recorder.m_recoveryDelayMs = 50;
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(true, true, 8192);
-      return true;
-    };
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    recorder.startRecording(name);
-    recorder.completePipelineAndStart();
-    ASSERT_TRUE(recorder.isRecording());
-    const auto firstPath = recorder.currentFilePath();
-    {
-      QFile file(firstPath);
-      ASSERT_TRUE(file.open(QIODevice::WriteOnly));
-      file.write("saved launcher footage");
-    }
-    bootstrap.terminate();
-    ASSERT_TRUE(bootstrap.waitForFinished());
-    EXPECT_FALSE(detector.instanceAlive(originalId));
-    EXPECT_TRUE(detector.instanceLaunchContextAlive(originalId));
-    capture->errorKind = scenario == 4
-                            ? IVideoCaptureSource::CaptureErrorKind::SourceUnavailable
-                            : IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
-    emit capture->captureError("window disappeared before next census");
-    if (scenario != 4) {
-      QTest::qWait(40); // Longer than the ordinary error-classification grace.
-      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Stopping);
-      EXPECT_TRUE(recorder.isRecoveringCapture());
-      EXPECT_EQ(saved.size(), 0);
-      EXPECT_EQ(errors.size(), 0);
-      if (scenario == 0) {
-        auto &game = detector.m_instances.first();
-        const auto process = ProcessCensus::inspect(successorPid);
-        game.primaryPid = successorPid;
-        game.processes = {{successorPid, process}};
-        detector.updateCurrentGame(name, successorPid, key);
-      } else if (scenario == 1) {
-        // The authoritative census found no payload, even though the runtime
-        // remains alive. A helper must not keep recovery alive.
-        detector.m_instances.clear();
-        detector.m_selectedId.clear();
-        detector.updateCurrentGame({}, 0);
-      } else if (scenario == 2) {
-        recorder.stopRecording();
-      } else if (scenario == 3) {
-        settings.removeRestoreToken(key);
-      } else if (scenario == 5) {
-        publishGame(detector, successorPid, key); // Namesake, not same instance.
-      } else if (scenario == 6) {
-        runtime.terminate();
-        ASSERT_TRUE(runtime.waitForFinished());
-      }
-    }
-    ASSERT_TRUE(waitForIdle(recorder));
-    ASSERT_EQ(saved.size(), 1);
-    EXPECT_EQ(errors.size(), 0);
-    if (scenario == 0) {
-      EXPECT_TRUE(saved.first().at(3).toBool());
-      ASSERT_TRUE(recorder.isRecoveringCapture());
-      QTest::qWait(100);
-      ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-      EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
-      EXPECT_EQ(recorder.snapshotAudioPreparation().pid, successorPid);
-      EXPECT_EQ(detector.games().first().id, originalId);
-      recorder.completePipelineAndStart();
-      EXPECT_TRUE(recorder.isRecording());
-      recorder.stopRecording();
-      ASSERT_TRUE(waitForIdle(recorder));
-    } else {
-      QTest::qWait(100);
-      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-      EXPECT_FALSE(recorder.isRecoveringCapture());
-    }
-    QFile file(firstPath);
-    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
-    EXPECT_EQ(file.readAll(), "saved launcher footage");
-    for (auto *process : {&runtime, &successor})
-      if (process->state() != QProcess::NotRunning) {
-        process->terminate();
-        ASSERT_TRUE(process->waitForFinished());
-      }
-  }
-
-  void portalClosureResume(int scenario) {
-    QProcess bootstrap, runtime, successor;
-    for (auto *process : {&bootstrap, &runtime, &successor}) {
-      process->start("sleep", {"30"});
-      ASSERT_TRUE(process->waitForStarted());
-    }
-    const auto successorPid = successor.processId();
-    const QString key = "steam_app_42424242", name = "Exit fixture";
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    settings.setRestoreTokenForIdentity(key, name, "existing-token");
-    StorageManager storage(tempDir.path());
-    GameDetectionService detector;
-    detector.addToWhitelist(key, name);
-    publishGame(detector, bootstrap.processId(), key);
-    detector.m_instances.first().launchContext = {
-        QFileInfo(ProcessCensus::inspect(bootstrap.processId()).payload()).absolutePath(),
-        {}, ProcessCensus::inspect(runtime.processId())};
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    recorder.setGameDetectionService(&detector);
-    recorder.m_recoveryDelayMs = 20;
-    recorder.m_captureEndGraceMs = 1;
-    recorder.m_audioPreparationLookup = [](auto input) { return input; };
-    QPointer<PendingCapture> capture;
-    installPendingCapture(recorder, capture);
-    recorder.m_pipelineBuilder = [&] {
-      recorder.m_muxer = std::make_unique<FinalizationMuxer>(true, true, 8192);
-      return true;
-    };
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    QSignalSpy offered(&recorder, &RecordingManager::captureResumeOffered);
-    recorder.startRecording(scenario == 6 ? QString() : name);
-    recorder.completePipelineAndStart();
-    const auto firstPath = recorder.currentFilePath();
-    {
-      QFile file(firstPath);
-      ASSERT_TRUE(file.open(QIODevice::WriteOnly));
-      file.write("preserved portal-closed footage");
-    }
-    if (scenario != 5 && scenario != 6) {
-      bootstrap.terminate();
-      ASSERT_TRUE(bootstrap.waitForFinished());
-    }
-    capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SessionClosed;
-    emit capture->captureError("sharing session closed");
-    if (scenario != 5 && scenario != 6) {
-      QTest::qWait(40);
-      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Stopping);
-      EXPECT_EQ(saved.size(), 0);
-      EXPECT_FALSE(recorder.isRecoveringCapture());
-      if (scenario == 1) {
-        detector.m_instances.clear();
-        detector.m_selectedId.clear();
-        detector.updateCurrentGame({}, 0);
-      } else {
-        auto &game = detector.m_instances.first();
-        const auto process = ProcessCensus::inspect(successorPid);
-        game.primaryPid = successorPid;
-        game.processes = {{successorPid, process}};
-        detector.updateCurrentGame(name, successorPid, key);
-      }
-    }
-    ASSERT_TRUE(waitForIdle(recorder));
-    ASSERT_EQ(saved.size(), 1);
-    EXPECT_EQ(errors.size(), 0);
-    EXPECT_FALSE(recorder.isRecoveringCapture());
-    if (scenario == 1 || scenario == 6) {
-      EXPECT_FALSE(recorder.captureResumeRequired());
-      EXPECT_FALSE(recorder.requiresCaptureSelection());
-      EXPECT_EQ(offered.size(), 0);
-    } else {
-      EXPECT_TRUE(recorder.captureResumeRequired());
-      EXPECT_TRUE(recorder.requiresCaptureSelection());
-      EXPECT_TRUE(saved.first().at(3).toBool());
-      EXPECT_EQ(offered.size(), 1);
-      QTest::qWait(100);
-      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-      EXPECT_EQ(started.size(), 1); // No automatic grant reacquisition.
-      recorder.startRecording(name);
-      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-      EXPECT_EQ(settings.getRestoreTokenForIdentity(key, name), "existing-token");
-      if (scenario == 7) {
-        const auto original = detector.m_instances.first();
-        const auto otherProcess = ProcessCensus::inspect(runtime.processId());
-        detector.m_instances.append({"other-instance", "exe:/other", "Other Game",
-            otherProcess.pid, {{otherProcess.pid, otherProcess}}});
-        detector.m_selectedId = "other-instance";
-        detector.updateCurrentGame("Other Game", otherProcess.pid, "exe:/other");
-        EXPECT_FALSE(recorder.requiresCaptureSelection());
-        detector.m_selectedId = original.id;
-        detector.updateCurrentGame(name, original.primaryPid, key);
-        EXPECT_TRUE(recorder.requiresCaptureSelection());
-      }
-      if (scenario == 2) {
-        recorder.stopRecording();
-        EXPECT_FALSE(recorder.captureResumeRequired());
-        EXPECT_TRUE(recorder.requiresCaptureSelection()); // Auto-start fence remains.
-        recorder.startRecording(name);
-        EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-      } else if (scenario == 3) {
-        publishGame(detector, successorPid, key); // A new namesake identity.
-        EXPECT_FALSE(recorder.resumeCapture());
-      } else {
-        ASSERT_TRUE(recorder.resumeCapture());
-        EXPECT_TRUE(recorder.requiresCaptureSelection());
-        ASSERT_FALSE(capture.isNull());
-        EXPECT_TRUE(capture->config.windowOnly);
-        EXPECT_TRUE(capture->config.waylandRestoreToken.isEmpty());
-        if (scenario == 4 || scenario == 8) {
-          capture->errorKind = scenario == 4
-                                  ? IVideoCaptureSource::CaptureErrorKind::Other
-                                  : IVideoCaptureSource::CaptureErrorKind::SourceNotReady;
-          emit capture->captureError(scenario == 4
-                                        ? "user cancelled portal selection"
-                                        : "fresh selection returned no stream");
-          ASSERT_TRUE(waitForIdle(recorder));
-          EXPECT_TRUE(recorder.requiresCaptureSelection());
-          QTest::qWait(100);
-          EXPECT_EQ(started.size(), 1);
-        } else {
-          recorder.finishPipelineAndStart();
-          const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-          while (!recorder.isRecording() && std::chrono::steady_clock::now() < until) {
-            QCoreApplication::processEvents();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
-          EXPECT_TRUE(recorder.isRecording());
-          EXPECT_FALSE(recorder.requiresCaptureSelection());
-          EXPECT_FALSE(recorder.captureResumeRequired());
-          EXPECT_EQ(started.size(), 2);
-          recorder.stopRecording();
-          ASSERT_TRUE(waitForIdle(recorder));
-        }
-      }
-    }
-    QFile first(firstPath);
-    ASSERT_TRUE(first.open(QIODevice::ReadOnly));
-    EXPECT_EQ(first.readAll(), "preserved portal-closed footage");
-    for (auto *process : {&bootstrap, &runtime, &successor})
-      if (process->state() != QProcess::NotRunning) {
-        process->terminate();
-        ASSERT_TRUE(process->waitForFinished());
-      }
-  }
-
-  QString outputPath(RecordingManager &recorder, const QString &game) {
-    recorder.m_currentGameName = game;
-    return recorder.generateOutputPath();
-  }
-
-  void stopWithFinalization(bool succeeds, bool pipelineError) {
-    StorageManager storage(tempDir.path());
-    RecordingManager recorder;
-    recorder.setStorageManager(&storage);
-    recorder.m_muxer = std::make_unique<FinalizationMuxer>(succeeds);
-    recorder.m_currentFilePath = tempDir.path() + "/Game.mkv";
-    recorder.m_currentGameName = "Game";
-    storage.setExcludedRecordingPath(recorder.m_currentFilePath);
-    recorder.setState(RecordingManager::RecordingState::Recording);
-    QSignalSpy stopped(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    if (pipelineError)
-      recorder.onEncodingError("Packet write failed");
-    else
-      recorder.stopRecording();
-    ASSERT_TRUE(waitForIdle(recorder));
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
-    EXPECT_TRUE(recorder.currentGameName().isEmpty());
-    EXPECT_EQ(stopped.count(), succeeds && !pipelineError ? 1 : 0);
-    EXPECT_EQ(finished.count(), 1);
-    EXPECT_EQ(errors.count(), succeeds && !pipelineError ? 0 : 1);
-  }
-
-  void preserveFailedSessionOutput(bool writesSucceed, bool finalizeSucceeds) {
-    const QString path = tempDir.path() + "/partial.mkv";
-    createDummyFile("partial.mkv", 64);
-    StorageManager storage(tempDir.path());
-    RecordingManager recorder;
-    recorder.setStorageManager(&storage);
-    recorder.m_currentFilePath = path;
-    recorder.m_currentGameName = "Game";
-    storage.setExcludedRecordingPath(path);
-    recorder.m_captureSource = std::make_unique<PendingCapture>();
-    recorder.m_videoEncoder = std::make_unique<ManagerOutputEncoder>();
-    recorder.m_muxer = std::make_unique<FinalizationMuxer>(finalizeSucceeds, writesSucceed);
-    recorder.m_session = std::make_unique<RecordingSession>(
-        path, recorder.m_captureSource.get(), recorder.m_videoEncoder.get(),
-        recorder.m_muxer.get(), nullptr, true, 128, 0);
-    ASSERT_TRUE(recorder.m_session->start());
-    recorder.setState(RecordingManager::RecordingState::Recording);
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    recorder.stopRecording();
-    ASSERT_TRUE(waitForIdle(recorder));
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-    EXPECT_EQ(saved.count(), 0);
-    EXPECT_EQ(finished.count(), 1);
-    EXPECT_EQ(errors.count(), 1);
-    EXPECT_FALSE(recorder.m_session);
-    EXPECT_FALSE(recorder.m_muxer);
-    QFile partial(path);
-    ASSERT_TRUE(partial.open(QIODevice::ReadOnly));
-    EXPECT_EQ(partial.readAll(), QByteArray(64, 'x'));
-  }
-
-  void queuedOldAttemptCannotAffectReplacement(bool queueError) {
-    SettingsManager settings;
-    settings.setRecordingsPath(tempDir.path());
-    settings.setVideoResolution("Native");
-    StorageManager storage(tempDir.path());
-    QPointer<PendingCapture> capture;
-    RecordingManager recorder;
-    recorder.setSettingsManager(&settings);
-    recorder.setStorageManager(&storage);
-    installPendingCapture(recorder, capture);
-    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    QSignalSpy stopped(&recorder, &RecordingManager::recordingStopped);
-    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-    QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
-    QSignalSpy states(&recorder, &RecordingManager::stateChanged);
-    QSignalSpy selection(&recorder, &RecordingManager::captureSelectionFinished);
-    QSignalSpy names(&recorder, &RecordingManager::currentGameNameChanged);
-
-    recorder.startRecording("Old Game");
-    ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-    ASSERT_FALSE(capture.isNull());
-    QPointer<PendingCapture> oldSource = capture;
-    if (queueError)
-      emit capture->captureError("Old attempt failed late");
-    else
-      emit capture->ready();
-    // Do not process any events until the replacement owns the manager.
-    recorder.stopRecording();
-    ASSERT_TRUE(waitForIdle(recorder));
-    ASSERT_TRUE(oldSource.isNull());
-    recorder.startRecording("Replacement Game");
-    ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-    ASSERT_FALSE(capture.isNull());
-    const QPointer<PendingCapture> replacementSource = capture;
-    const QString replacementPath = recorder.currentFilePath();
-    ASSERT_FALSE(replacementPath.isEmpty());
-    ASSERT_FALSE(recorder.m_session);
-    const int stateCount = states.count();
-    const int nameCount = names.count();
-
-    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
-
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-    ASSERT_FALSE(replacementSource.isNull());
-    EXPECT_EQ(capture.data(), replacementSource.data());
-    EXPECT_EQ(recorder.m_captureSource.get(), replacementSource.data());
-    EXPECT_FALSE(recorder.m_session); // Old ready cannot build a new session.
-    EXPECT_EQ(selection.count(), 0); // Nor dismiss the replacement's guidance.
-    EXPECT_EQ(replacementSource->resolutionQueries, 0);
-    EXPECT_EQ(recorder.currentGameName(), "Replacement Game");
-    EXPECT_EQ(recorder.currentFilePath(), replacementPath);
-    EXPECT_EQ(states.count(), stateCount);
-    EXPECT_EQ(names.count(), nameCount);
-    EXPECT_EQ(started.count(), 0);
-    EXPECT_EQ(stopped.count(), 0);
-    EXPECT_EQ(errors.count(), 0);
-    EXPECT_EQ(auth.count(), 0);
-    EXPECT_FALSE(QFileInfo::exists(replacementPath));
-    recorder.stopRecording();
+  static void completedPart(RecordingManager &manager, const QString &path,
+                            bool succeeded, bool quiet) {
+    manager.m_output->m_parts.append({1, path, 1000, 64, succeeded, {}});
+    emit manager.m_engine->generationEnded(manager.m_id, succeeded, quiet,
+        quiet ? RecordingEngine::EndReason::Handoff : RecordingEngine::EndReason::Stopped);
   }
 };
 
-TEST_F(RecordingManagerTest,
-       StartRecordingAbortsWhenStorageLimitReachedAndAutoCleanupDisabled) {
-  createDummyFile("old.mkv", 5000);
-  createDummyFile("new.mkv", 5000);
-
-  StorageManager storage(tempDir.path());
+TEST_F(RecordingManagerTest, StorageFullRejectsEveryPressWithoutPublishingAnOutput) {
+  file("first.mkv", 5000);
+  file("second.mkv", 5000);
+  SettingsManager settings;
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
   storage.setMaxSize(6000);
   storage.setAutoDeleteOldest(false);
-
-  SettingsManager settings;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-
-  QSignalSpy startedSpy(&recorder, &RecordingManager::recordingStarted);
-  QSignalSpy stateSpy(&recorder, &RecordingManager::stateChanged);
-
-  recorder.startRecording();
-
-  EXPECT_FALSE(recorder.isRecording());
-  EXPECT_EQ(startedSpy.count(), 0);
-  ASSERT_GE(stateSpy.count(), 1);
-  EXPECT_EQ(stateSpy.last()[0].toInt(),
-            static_cast<int>(RecordingManager::RecordingState::Idle));
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy errors(&manager, &RecordingManager::recordingError);
+  QSignalSpy prepared(&manager, &RecordingManager::recordingPathPrepared);
+  QSignalSpy cannotCleanup(&storage, &StorageManager::storageLimitCannotCleanup);
+  for (int i = 0; i < 3; ++i) manager.startRecording("Fixture");
+  EXPECT_EQ(errors.size(), 3);
+  EXPECT_EQ(cannotCleanup.size(), 3);
+  EXPECT_TRUE(prepared.isEmpty());
+  EXPECT_FALSE(engine->hasDemand());
+  EXPECT_EQ(manager.state(), RecordingManager::RecordingState::Idle);
 }
 
-TEST_F(RecordingManagerTest,
-       StartRecordingAbortsWhenAutoCleanupKeepsOnlyCurrentRecording) {
-  createDummyFile("current.mkv", 7000);
-  createDummyFile("old.mkv", 5000);
-
-  StorageManager storage(tempDir.path());
-  storage.setExcludedRecordingPath(tempDir.path() + "/current.mkv");
+TEST_F(RecordingManagerTest, AutoCleanupDoesNotDeleteAnExcludedRecording) {
+  const auto current = file("current.mkv", 7000);
+  file("old.mkv", 5000);
+  SettingsManager settings;
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  storage.setExcludedRecordingPath(current);
   storage.setMaxSize(6000);
   storage.setAutoDeleteOldest(true);
-
-  SettingsManager settings;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-
-  QSignalSpy startedSpy(&recorder, &RecordingManager::recordingStarted);
-  QSignalSpy stateSpy(&recorder, &RecordingManager::stateChanged);
-
-  recorder.startRecording();
-
-  EXPECT_FALSE(recorder.isRecording());
-  EXPECT_EQ(startedSpy.count(), 0);
-  ASSERT_GE(stateSpy.count(), 1);
-  EXPECT_EQ(stateSpy.last()[0].toInt(),
-            static_cast<int>(RecordingManager::RecordingState::Idle));
-  EXPECT_GT(storage.usedSize(), storage.maxSize());
+  RecordingManager manager;
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy errors(&manager, &RecordingManager::recordingError);
+  manager.startRecording("Fixture");
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_TRUE(QFileInfo::exists(current));
+  EXPECT_EQ(manager.state(), RecordingManager::RecordingState::Idle);
 }
 
-// --- Captured-source naming (manual recording while a game is detected
-// must not inherit the detected game when the portal captured
-// something else) ---
-
-TEST_F(RecordingManagerTest, GenericSourceLabelsCarryNoIdentity) {
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel(""));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("Unknown Game"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("KWin Wayland"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("kwin_wayland"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("gnome-shell"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("GNOME Shell"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("org.gnome.Shell"));
-  EXPECT_TRUE(RecordingManager::isGenericSourceLabel("steam_app_1422450"));
-  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Deadlock"));
-  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("deadlock.exe"));
-  EXPECT_FALSE(RecordingManager::isGenericSourceLabel("Firefox"));
+TEST_F(RecordingManagerTest, RepeatedStartKeepsOneDemandAndOneReservedPath) {
+  SettingsManager settings;
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy prepared(&manager, &RecordingManager::recordingPathPrepared);
+  manager.startRecording("Fixture");
+  const auto first = id(manager);
+  const auto path = manager.currentFilePath();
+  manager.startRecording("Different game");
+  EXPECT_NE(first, 0u);
+  EXPECT_EQ(id(manager), first);
+  EXPECT_EQ(manager.currentFilePath(), path);
+  EXPECT_EQ(prepared.size(), 1);
+  EXPECT_TRUE(engine->hasDemand());
+  EXPECT_FALSE(QFileInfo::exists(path));
+  manager.stopRecording(); // Cancel before queued producer startup.
+  EXPECT_FALSE(engine->hasDemand());
 }
 
 TEST_F(RecordingManagerTest, BookmarksRequireActiveVideoAndSurviveStop) {
-  bookmarkLifecycle();
-}
-
-TEST_F(RecordingManagerTest, SourceLabelsAgreeAcrossTitleAndExeForms) {
-  // Portal exe basenames agree with detector display names.
-  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("Deadlock", "deadlock.exe"));
-  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("deadlock.exe", "Deadlock"));
-  EXPECT_TRUE(RecordingManager::sourceLabelsAgree("Firefox", "firefox"));
-  // A different captured window disagrees with the detected game.
-  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Firefox", "Deadlock"));
-  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Deadlock", "Discord"));
-  // Empty labels never agree (callers guard empties separately).
-  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("", "Deadlock"));
-  EXPECT_FALSE(RecordingManager::sourceLabelsAgree("Deadlock", ""));
-}
-
-TEST_F(RecordingManagerTest,
-       RepeatStartAttemptsWhileOverLimitNotifyEveryPress) {
-  // Regression: record keybind / manual button while storage is full used
-  // to abort silently after the first episode notice (latched signal, no
-  // recordingError). Every explicit attempt must surface feedback.
-  createDummyFile("old.mkv", 5000);
-  createDummyFile("new.mkv", 5000);
-
-  StorageManager storage(tempDir.path());
-  storage.setMaxSize(6000);
-  storage.setAutoDeleteOldest(false);
-
   SettingsManager settings;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-
-  QSignalSpy startedSpy(&recorder, &RecordingManager::recordingStarted);
-  QSignalSpy errorSpy(&recorder, &RecordingManager::recordingError);
-  QSignalSpy cannotSpy(&storage,
-                       &StorageManager::storageLimitCannotCleanup);
-
-  for (int i = 0; i < 3; ++i) {
-    recorder.startRecording();
-    EXPECT_FALSE(recorder.isRecording());
-  }
-
-  EXPECT_EQ(startedSpy.count(), 0);
-  // The in-app error dialog fires on every press, even with storage
-  // notices toggled off; the notification signal fires on every press
-  // too (forced, bypassing the episode latch).
-  ASSERT_EQ(errorSpy.count(), 3);
-  EXPECT_EQ(cannotSpy.count(), 3);
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_TRUE(errorSpy.at(i).at(0).toString().contains("Storage full"));
-  }
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  EXPECT_FALSE(manager.addBookmark());
+  manager.startRecording("Fixture");
+  EXPECT_FALSE(manager.addBookmark());
+  emit engine->outputStarted(id(manager));
+  EXPECT_FALSE(manager.addBookmark()); // Started, but no media origin yet.
+  const auto path = manager.currentFilePath();
+  QFile output(path);
+  ASSERT_TRUE(output.open(QIODevice::WriteOnly));
+  output.write(QByteArray(64, 'x'));
+  output.close();
+  mediaPosition(manager, 1234);
+  ASSERT_TRUE(manager.addBookmark());
+  manager.stopRecording();
+  EXPECT_FALSE(manager.addBookmark());
+  const auto marks = RecordingAnnotations::bookmarks(path);
+  ASSERT_EQ(marks.size(), 1);
+  EXPECT_EQ(marks[0].toMap()["positionMs"].toLongLong(), 1234);
 }
 
-TEST_F(RecordingManagerTest, CancelInitializingDiscardsAlreadyQueuedReady) {
+TEST_F(RecordingManagerTest, SuccessfulCompletionPublishesOnlyAfterOutputSettles) {
   SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  StorageManager storage(tempDir.path());
-  QPointer<PendingCapture> capture;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-  installPendingCapture(recorder, capture);
-  QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-  QSignalSpy stopped(&recorder, &RecordingManager::recordingStopped);
-  QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-  QSignalSpy names(&recorder, &RecordingManager::currentGameNameChanged);
-
-  recorder.startRecording("Closing Game");
-  ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-  ASSERT_FALSE(capture.isNull());
-  const QString path = recorder.currentFilePath();
-  ASSERT_FALSE(path.isEmpty());
-  createDummyFile(QFileInfo(path).fileName(), 128);
-  storage.setMaxSize(64);
-  storage.setAutoDeleteOldest(true);
-  EXPECT_FALSE(storage.enforceStorageLimit(true)); // In-progress file protected.
-
-  emit capture->ready(); // Queued delivery survives disconnect/destruction.
-  recorder.stopRecording();
-  ASSERT_TRUE(waitForIdle(recorder));
-  EXPECT_TRUE(capture.isNull());
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-  EXPECT_TRUE(recorder.currentFilePath().isEmpty());
-  EXPECT_TRUE(recorder.currentGameName().isEmpty());
-  EXPECT_EQ(names.count(), 2);
-  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-  EXPECT_EQ(started.count(), 0);
-  EXPECT_EQ(stopped.count(), 0); // Cancellation is not a completed recording.
-  EXPECT_EQ(errors.count(), 0); // Late ready must not try to build a pipeline.
-  EXPECT_TRUE(storage.enforceStorageLimit(true));
-  EXPECT_FALSE(QFileInfo::exists(path)); // Cancellation released the exclusion.
-
-  recorder.startRecording("Next Game");
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-  ASSERT_FALSE(capture.isNull());
-  recorder.stopRecording();
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy stopped(&manager, &RecordingManager::recordingStopped);
+  QSignalSpy complete(&manager, &RecordingManager::recordingCompletionReady);
+  QSignalSpy finished(&manager, &RecordingManager::recordingFinished);
+  manager.startRecording("Fixture");
+  const auto output = id(manager);
+  const auto path = manager.currentFilePath();
+  completedPart(manager, path, true, false);
+  EXPECT_EQ(stopped.size(), 1);
+  EXPECT_TRUE(complete.isEmpty());
+  emit engine->outputStopped(output, true, {});
+  ASSERT_EQ(complete.size(), 1);
+  EXPECT_EQ(complete[0][0].toString(), path);
+  EXPECT_EQ(finished.size(), 1);
+  EXPECT_EQ(manager.state(), RecordingManager::RecordingState::Idle);
+  EXPECT_TRUE(manager.currentFilePath().isEmpty());
+  emit engine->outputStopped(output, true, {});
+  EXPECT_EQ(complete.size(), 1);
+  EXPECT_EQ(finished.size(), 1);
 }
 
-TEST_F(RecordingManagerTest, QueuedOldReadyCannotStartReplacementAttempt) {
-  queuedOldAttemptCannotAffectReplacement(false);
-}
-
-TEST_F(RecordingManagerTest, QueuedOldErrorCannotCancelReplacementAttempt) {
-  queuedOldAttemptCannotAffectReplacement(true);
-}
-
-TEST_F(RecordingManagerTest, StaleRestoreSettlesBeforeReauthorizationAndRetry) {
+TEST_F(RecordingManagerTest, FailedOutputPreservesFootageAndNeverAnnouncesSaved) {
   SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  settings.setRestoreToken("Restored Game", "stale-token");
-  StorageManager storage(tempDir.path());
-  QPointer<PendingCapture> capture;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-  installPendingCapture(recorder, capture);
-  QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
-  QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-  QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-
-  recorder.startRecording("Restored Game");
-  ASSERT_FALSE(capture.isNull());
-  ASSERT_EQ(capture->config.waylandRestoreToken, "stale-token");
-  EXPECT_TRUE(capture->config.windowOnly);
-  const QString stalePath = recorder.currentFilePath();
-  createDummyFile(QFileInfo(stalePath).fileName(), 128);
-  storage.setMaxSize(64);
-  storage.setAutoDeleteOldest(true);
-
-  bool observedSettledState = false;
-  QObject::connect(&recorder, &RecordingManager::restoreAuthNeeded, &recorder,
-                   [&](const QString &game) {
-    observedSettledState = true;
-    EXPECT_EQ(game, "Restored Game");
-    EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-    EXPECT_TRUE(recorder.currentFilePath().isEmpty());
-    EXPECT_TRUE(capture.isNull());
-    EXPECT_EQ(recorder.currentGameName(), game); // Prompt retains its identity.
-    EXPECT_TRUE(storage.enforceStorageLimit(true));
-    EXPECT_FALSE(QFileInfo::exists(stalePath)); // Exclusion cleared before emit.
-    // Application owns token invalidation; simulate only that caller action,
-    // then retry immediately to catch a manager left busy at signal delivery.
-    settings.setRestoreToken(game, QString());
-    recorder.startRecording(game);
-  });
-
-  emit capture->restoreTokenStale("stale-token");
-  if (auth.isEmpty()) {
-    ASSERT_TRUE(auth.wait(3000));
-  }
-  EXPECT_TRUE(observedSettledState);
-  ASSERT_EQ(auth.count(), 1);
-  EXPECT_EQ(auth.at(0).at(0).toString(), "Restored Game");
-  ASSERT_FALSE(capture.isNull());
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-  EXPECT_TRUE(capture->config.waylandRestoreToken.isEmpty());
-  EXPECT_EQ(started.count(), 0);
-  EXPECT_EQ(errors.count(), 0);
-  recorder.stopRecording();
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy errors(&manager, &RecordingManager::recordingError);
+  QSignalSpy complete(&manager, &RecordingManager::recordingCompletionReady);
+  manager.startRecording("Fixture");
+  const auto output = id(manager);
+  const auto path = manager.currentFilePath();
+  QFile footage(path);
+  ASSERT_TRUE(footage.open(QIODevice::WriteOnly));
+  footage.write("preserved footage");
+  footage.close();
+  emit engine->outputError(output, "write failed");
+  completedPart(manager, path, false, false);
+  emit engine->outputStopped(output, false, "write failed");
+  EXPECT_EQ(errors.size(), 1);
+  EXPECT_TRUE(complete.isEmpty());
+  EXPECT_TRUE(manager.lastRecordingFailed());
+  EXPECT_TRUE(QFileInfo::exists(path));
 }
 
-TEST_F(RecordingManagerTest, CaptureSourceLossAfterGameExitSavesNormally) { captureEndRace(0); }
-TEST_F(RecordingManagerTest, CaptureSourceLossBeforeGameExitDrainsThenSavesNormally) { captureEndRace(1); }
-TEST_F(RecordingManagerTest, CaptureSourceLossWhileGameLivesStillFails) { captureEndRace(2); }
-TEST_F(RecordingManagerTest, DestroyedWindowWithSamePidResumesFullRecording) { windowHandoff(0); }
-TEST_F(RecordingManagerTest, ExplicitStopCancelsWindowRecovery) { windowHandoff(1); }
-TEST_F(RecordingManagerTest, LauncherExitWaitsForAuthoritativeCensusHandoff) {
-  censusHandoffRace(0);
-}
-TEST_F(RecordingManagerTest, CensusConfirmedExitDoesNotWaitForRuntimeHelper) {
-  censusHandoffRace(1);
-}
-TEST_F(RecordingManagerTest, ExplicitStopCancelsPendingCensusHandoff) {
-  censusHandoffRace(2);
-}
-TEST_F(RecordingManagerTest, RemovedApprovalCancelsPendingCensusHandoff) {
-  censusHandoffRace(3);
-}
-TEST_F(RecordingManagerTest, AmbiguousSourceLossCannotUseCensusHandoffException) {
-  censusHandoffRace(4);
-}
-TEST_F(RecordingManagerTest, NamesakeCannotInheritPendingCensusHandoff) {
-  censusHandoffRace(5);
-}
-TEST_F(RecordingManagerTest, ExitedRuntimeCannotKeepCensusHandoffPending) {
-  censusHandoffRace(6);
-}
-TEST_F(RecordingManagerTest, PortalClosurePreservesFootageAndRequiresExplicitSelection) {
-  portalClosureResume(0);
-}
-TEST_F(RecordingManagerTest, PortalClosureCensusConfirmedExitNeedsNoResume) {
-  portalClosureResume(1);
-}
-TEST_F(RecordingManagerTest, StopDismissesResumeWithoutAllowingAutomaticRecapture) {
-  portalClosureResume(2);
-}
-TEST_F(RecordingManagerTest, PortalResumeCannotFollowNamesakeInstance) {
-  portalClosureResume(3);
-}
-TEST_F(RecordingManagerTest, CancelledPortalResumeNeverAutomaticallyRetries) {
-  portalClosureResume(4);
-}
-TEST_F(RecordingManagerTest, PortalClosureWithLivePayloadNeverAutomaticallyRecaptures) {
-  portalClosureResume(5);
-}
-TEST_F(RecordingManagerTest, ManualPortalClosureSavesWithoutGameResume) {
-  portalClosureResume(6);
-}
-TEST_F(RecordingManagerTest, PortalSelectionFenceSurvivesSelectingAnotherInstance) {
-  portalClosureResume(7);
-}
-TEST_F(RecordingManagerTest, FreshEmptySelectionCannotFallBackToOldClosedGrant) {
-  portalClosureResume(8);
-}
-TEST_F(RecordingManagerTest, GameExitCancelsWindowRecovery) { windowHandoff(2); }
-TEST_F(RecordingManagerTest, RemovedApprovalCancelsWindowRecovery) { windowHandoff(3); }
-TEST_F(RecordingManagerTest, NamesakeInstanceCannotInheritWindowRecovery) { windowHandoff(4); }
-TEST_F(RecordingManagerTest, FinalizationFailureCancelsWindowRecovery) { windowHandoff(5); }
-TEST_F(RecordingManagerTest, AmbiguousPermissionLossDoesNotRetryWindow) { windowHandoff(6); }
-TEST_F(RecordingManagerTest, LiveInstanceWindowRecoveryDoesNotExhaustAttemptBudget) { windowHandoff(7); }
-TEST_F(RecordingManagerTest, LongWindowGapRetriesApprovedEmptyCaptureUntilReady) { windowHandoff(9); }
-TEST_F(RecordingManagerTest, EmptyHandoffCaptureIsDiscardedWithoutSaveNotification) { windowHandoff(10); }
-TEST_F(RecordingManagerTest, DestroyedWindowWithoutApprovalDoesNotRearm) { windowHandoff(11); }
-TEST_F(RecordingManagerTest, CaptureServiceFailureIsNotHiddenByGameExit) { captureEndRace(3); }
-TEST_F(RecordingManagerTest, CaptureGameExitDoesNotHideFinalizationFailure) { captureEndRace(4); }
-TEST_F(RecordingManagerTest, ManualCaptureSourceLossDoesNotBorrowDetectedGameExit) { captureEndRace(5); }
-TEST_F(RecordingManagerTest, QueuedCaptureLossAfterExplicitStopDoesNotTurnSaveIntoError) { captureEndRace(6); }
-TEST_F(RecordingManagerTest, CaptureGameExitGraceDoesNotHideOutputFailure) { captureEndRace(7); }
-
-TEST_F(RecordingManagerTest, GenericPortalRetainsGamePidForAudioPreparation) { audioPidHandoff(0); }
-TEST_F(RecordingManagerTest, PinnedGameInstanceTakesPriorityOverPortalPid) {
-  audioPidHandoff(1);
-}
-TEST_F(RecordingManagerTest, AudioPreparationDoesNotFollowANamesakeDetection) { audioPidHandoff(2); }
-TEST_F(RecordingManagerTest, AudioPreparationDoesNotBorrowAnotherGameTitle) { audioPidHandoff(3); }
-TEST_F(RecordingManagerTest, ManualAudioPreparationDoesNotBorrowDetectedGame) { audioPidHandoff(4); }
-TEST_F(RecordingManagerTest, AudioPreparationWithoutMatchingDetectionKeepsOnlyTargetHint) { audioPidHandoff(5); }
-
-TEST_F(RecordingManagerTest, DiagnosticGameIdentityIsPinnedAndManualPickerDoesNotBorrowIt) {
+TEST_F(RecordingManagerTest, HandoffReservesNextPartAndDefersCompletion) {
   SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  StorageManager storage(tempDir.path());
-  GameDetectionService detector;
-  detector.addToWhitelist("steam_app_1422450", "Deadlock");
-  detector.addToWhitelist("steam_app_999", "Deadlock");
-  publishGame(detector, 61010, "steam_app_1422450");
-  ASSERT_EQ(detector.currentGameName(), "Deadlock");
-  EXPECT_TRUE(detector.captureIdentityInfo("Another game").isEmpty());
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-  recorder.setGameDetectionService(&detector);
-  QPointer<PendingCapture> capture;
-  installPendingCapture(recorder, capture);
-  recorder.startRecording("Deadlock");
-  ASSERT_FALSE(capture.isNull());
-  const auto first = diagnosticHealth(recorder);
-  EXPECT_EQ(first["detectedGameKey"].toString(), "steam_app_1422450");
-  EXPECT_EQ(first["detectedSteamAppId"].toString(), "1422450");
-  EXPECT_EQ(first["detectedGamePid"].toLongLong(), 61010);
-  EXPECT_FALSE(first.contains("sourcePid")); // never pretend this came from the portal
-  detector.addToBlacklist("steam_app_1422450");
-  publishGame(detector, 61011, "steam_app_999");
-  ASSERT_EQ(detector.currentGameKey(), "steam_app_999");
-  EXPECT_EQ(diagnosticHealth(recorder)["detectedGameKey"], first["detectedGameKey"]);
-  EXPECT_EQ(diagnosticHealth(recorder)["detectedGamePid"], first["detectedGamePid"]);
-  recorder.stopRecording();
-  ASSERT_TRUE(waitForIdle(recorder));
-  recorder.startRecording(""); // a picker could choose something other than the detected game
-  EXPECT_FALSE(diagnosticHealth(recorder).contains("detectedGameKey"));
-  recorder.stopRecording();
-  ASSERT_TRUE(waitForIdle(recorder));
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy prepared(&manager, &RecordingManager::recordingPathPrepared);
+  QSignalSpy stopped(&manager, &RecordingManager::recordingStopped);
+  QSignalSpy complete(&manager, &RecordingManager::recordingCompletionReady);
+  manager.startRecording("Fixture");
+  const auto path = manager.currentFilePath();
+  completedPart(manager, path, true, true);
+  EXPECT_EQ(stopped.size(), 1);
+  EXPECT_TRUE(stopped[0][3].toBool());
+  EXPECT_EQ(prepared.size(), 2);
+  EXPECT_TRUE(complete.isEmpty());
+  EXPECT_EQ(manager.state(), RecordingManager::RecordingState::Initializing);
+  emit engine->outputStopped(id(manager), true, {});
+  ASSERT_EQ(complete.size(), 1);
+  EXPECT_EQ(complete[0][0].toString(), path);
 }
-
-TEST_F(RecordingManagerTest, RestoreTokenCallbacksKeepOriginatingIdentity) {
-  SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  settings.setRestoreTokenForIdentity("first", "Game.exe", "first-token");
-  StorageManager storage(tempDir.path());
-  GameDetectionService detector;
-  detector.addToWhitelist("first", "Game.exe");
-  detector.addToWhitelist("second", "Game.exe");
-  publishGame(detector, 61010, "first");
-  ASSERT_EQ(detector.currentGameKey(), "first");
-  QPointer<PendingCapture> capture;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-  recorder.setGameDetectionService(&detector);
-  installPendingCapture(recorder, capture);
-  recorder.startRecording("Game.exe");
-  ASSERT_FALSE(capture.isNull());
-  ASSERT_EQ(capture->config.waylandRestoreToken, "first-token");
-  detector.addToBlacklist("first");
-  publishGame(detector, 61011, "second");
-  ASSERT_EQ(detector.currentGameName(), "Game.exe");
-  ASSERT_EQ(detector.currentGameKey(), "second");
-  emit capture->restoreTokenUpdated("updated-first-token");
-  EXPECT_EQ(settings.getRestoreToken("first"), "updated-first-token");
-  EXPECT_TRUE(settings.getRestoreToken("second").isEmpty());
-  QSignalSpy auth(&recorder, &RecordingManager::restoreAuthNeeded);
-  emit capture->restoreTokenStale("updated-first-token");
-  if (auth.isEmpty())
-    ASSERT_TRUE(auth.wait(3000));
-  ASSERT_EQ(auth.count(), 1);
-  EXPECT_EQ(auth.at(0).at(1).toString(), "first");
-}
-
-TEST_F(RecordingManagerTest, QueuedStartupErrorReleasesOutputAndStorageExclusion) {
-  SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  StorageManager storage(tempDir.path());
-  QPointer<PendingCapture> capture;
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  recorder.setStorageManager(&storage);
-  installPendingCapture(recorder, capture);
-  QSignalSpy errors(&recorder, &RecordingManager::recordingError);
-  QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-
-  recorder.startRecording("Failed Game");
-  ASSERT_FALSE(capture.isNull());
-  const QString path = recorder.currentFilePath();
-  createDummyFile(QFileInfo(path).fileName(), 128);
-  storage.setMaxSize(64);
-  storage.setAutoDeleteOldest(true);
-  emit capture->captureError("Portal denied capture");
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
-  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
-  ASSERT_TRUE(waitForIdle(recorder));
-  EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
-  EXPECT_TRUE(capture.isNull());
-  EXPECT_TRUE(recorder.currentFilePath().isEmpty());
-  ASSERT_EQ(errors.count(), 1);
-  EXPECT_EQ(errors.at(0).at(0).toString(), "Portal denied capture");
-  EXPECT_EQ(started.count(), 0);
-  EXPECT_TRUE(storage.enforceStorageLimit(true));
-  EXPECT_FALSE(QFileInfo::exists(path));
-}
-
-TEST_F(RecordingManagerTest, OutputPathSkipsExistingBaseAndNumberedCollision) {
-  SettingsManager settings;
-  settings.setRecordingsPath(tempDir.path());
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  // Cover adjacent wall-clock seconds rather than assuming the test never
-  // crosses a second boundary. Every candidate has both base and _2 occupied.
-  const QDateTime now = QDateTime::currentDateTime();
-  for (int offset = -5; offset <= 5; ++offset) {
-    const QString stem = "Game_Name_" +
-        now.addSecs(offset).toString("yyyy-MM-dd_HH-mm-ss");
-    createDummyFile(stem + ".mkv", 17);
-    createDummyFile(stem + "_2.mkv", 23);
-  }
-  const QString path = outputPath(recorder, "Game: / Name");
-  EXPECT_EQ(QFileInfo(path).absolutePath(), tempDir.path());
-  EXPECT_TRUE(QFileInfo(path).fileName().startsWith("Game_Name_"));
-  EXPECT_TRUE(path.endsWith("_3.mkv"));
-  EXPECT_FALSE(QFileInfo::exists(path));
-  // Name allocation must not reserve/truncate any existing recording.
-  EXPECT_EQ(QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files).size(), 22);
-  for (const QString &name : QDir(tempDir.path()).entryList({"*.mkv"}, QDir::Files)) {
-    QFile file(tempDir.path() + "/" + name);
-    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
-    EXPECT_EQ(file.readAll(), QByteArray(name.endsWith("_2.mkv") ? 23 : 17, 'x'));
-  }
-}
-
-TEST_F(RecordingManagerTest, OutputPathUsesSafeFallbackAndAlwaysMkv) {
-  SettingsManager settings;
-  // Even an existing installation that selected MP4 now records as MKV.
-  const auto settingsPath = settings.settingsFilePath();
-  ASSERT_TRUE(QDir().mkpath(QFileInfo(settingsPath).path()));
-  QFile legacy(settingsPath);
-  ASSERT_TRUE(legacy.open(QIODevice::WriteOnly));
-  legacy.write(R"({"video":{"format":"mp4"}})");
-  legacy.close();
-  settings.load();
-  settings.setRecordingsPath(tempDir.path());
-  RecordingManager recorder;
-  recorder.setSettingsManager(&settings);
-  const QString sanitized = outputPath(recorder, "../ : ???");
-  EXPECT_EQ(QFileInfo(sanitized).absolutePath(), tempDir.path());
-  EXPECT_TRUE(QFileInfo(sanitized).fileName().startsWith("Game_"));
-  EXPECT_TRUE(sanitized.endsWith(".mkv"));
-  EXPECT_TRUE(QFileInfo(outputPath(recorder, QString())).fileName()
-                  .startsWith("Recording_"));
-  EXPECT_TRUE(outputPath(recorder, QString()).endsWith(".mkv"));
-}
-
-TEST_F(RecordingManagerTest, FinalizationFailureDoesNotEmitRecordingSaved) {
-  stopWithFinalization(false, false);
-}
-
-TEST_F(RecordingManagerTest, PipelineFailureDoesNotEmitRecordingSaved) {
-  stopWithFinalization(true, true);
-}
-
-TEST_F(RecordingManagerTest, SuccessfulFinalizationStillEmitsRecordingSaved) {
-  stopWithFinalization(true, false);
-}
-
-TEST_F(RecordingManagerTest, SessionPacketFailureSuppressesSavedAndPreservesPartialFile) {
-  preserveFailedSessionOutput(false, true);
-}
-
-TEST_F(RecordingManagerTest, SessionTrailerFailureSuppressesSavedAndPreservesPartialFile) {
-  preserveFailedSessionOutput(true, false);
-}
-
-TEST_F(RecordingManagerTest, AsyncFinalizationKeepsHeartbeatAndRetainsStoppingPipeline) {
-  gatedStop(true);
-}
-
-TEST_F(RecordingManagerTest, AsyncFinalizationFailureSettlesOnceWithoutSaved) {
-  gatedStop(false);
-}
-
-TEST_F(RecordingManagerTest, StartupLookupSnapshotsInputsAndRejectsCancelledAttempt) {
-  gatedStartupLookup();
-}
-
-TEST_F(RecordingManagerTest, SettingsChangeDuringStartupCoalescesLatestAudioConfiguration) {
-  gatedStartupLookup(false);
-}
-
-TEST_F(RecordingManagerTest, DisablingLateAdoptedVoiceUsesActualSlotNotOriginalLayout) {
-  disableLateAdoptedVoice();
-}
-
-// Launchers and boot screens expose a transient window that the portal happily
-// restores and then loses as the real game window appears. Nothing has been
-// recorded at that point, so it must not surface as a capture error — but a
-// source that keeps dying still has to.
-TEST_F(RecordingManagerTest, LauncherWindowLossBeforeStartIsRetriedSilently) {
-  windowHandoff(8);
-}
+} // namespace TrophyBackend

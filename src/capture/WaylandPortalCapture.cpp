@@ -784,6 +784,7 @@ void WaylandPortalCapture::onSessionCreated(unsigned int response,
   if (response != 0) {
     qWarning() << "Wayland Portal: Session creation failed or cancelled";
     clearStartGuard();
+    m_lastErrorKind = response == 1 ? CaptureErrorKind::Cancelled : CaptureErrorKind::Other;
     emit captureError("Wayland Portal: Session creation failed or cancelled");
     return;
   }
@@ -904,6 +905,7 @@ void WaylandPortalCapture::onSourcesSelected(unsigned int response,
     }
     qWarning() << "Wayland Portal: Source selection failed or cancelled";
     clearStartGuard();
+    m_lastErrorKind = response == 1 ? CaptureErrorKind::Cancelled : CaptureErrorKind::Other;
     emit captureError("Wayland Portal: Source selection failed or cancelled");
     return;
   }
@@ -987,6 +989,7 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
     }
     qWarning() << "Wayland Portal: Failed to start screencast";
     clearStartGuard();
+    m_lastErrorKind = response == 1 ? CaptureErrorKind::Cancelled : CaptureErrorKind::Other;
     emit captureError("Wayland Portal: Failed to start screencast");
     return;
   }

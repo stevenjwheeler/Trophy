@@ -352,6 +352,40 @@ static const auto *portalTestEnvironment =
 
 using namespace TrophyBackend;
 
+TEST_F(WaylandPortalCaptureTest, ExplicitCancellationIsDistinctFromPortalFailureAtEveryStage) {
+  if (!startFake()) GTEST_SKIP() << "Requires private portal launcher";
+  for (int stage = 0; stage < 3; ++stage) {
+    for (uint response : {1u, 2u}) {
+      SCOPED_TRACE(stage);
+      SCOPED_TRACE(response);
+      WaylandPortalCapture capture;
+      CaptureConfig config;
+      config.useDmaBuf = false;
+      ASSERT_TRUE(capture.initialize(config));
+      QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+      ASSERT_TRUE(capture.startCapture());
+      ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+      if (stage > 0) {
+        ASSERT_EQ(control("Respond", {pendingPath(capture), 0u,
+            QVariantMap{{"session_handle", "/test/session"}}}).type(), QDBusMessage::ReplyMessage);
+        ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+      }
+      if (stage > 1) {
+        ASSERT_EQ(control("Respond", {pendingPath(capture), 0u, QVariantMap{}}).type(),
+            QDBusMessage::ReplyMessage);
+        ASSERT_TRUE(waitUntil([&] { return captureStageIsStart(capture); }));
+      }
+      ASSERT_EQ(control("Respond", {pendingPath(capture), response, QVariantMap{}}).type(),
+          QDBusMessage::ReplyMessage);
+      ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+      EXPECT_EQ(capture.lastErrorKind(), response == 1u
+          ? IVideoCaptureSource::CaptureErrorKind::Cancelled
+          : IVideoCaptureSource::CaptureErrorKind::Other);
+      EXPECT_FALSE(starting(capture));
+    }
+  }
+}
+
 TEST_F(WaylandPortalCaptureTest, GrantedNodeRemovalIgnoresOtherNodesAndRetiredGenerations) {
   WaylandPortalCapture capture;
   simulateCapturing(capture, 7);

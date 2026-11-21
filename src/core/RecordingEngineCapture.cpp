@@ -602,6 +602,15 @@ void RecordingEngine::finishStoppedRecording() {
       m_operationTimer->start();
       return;
     }
+    if (sameInstance && instanceState == CaptureLifecycle::InstanceState::Running &&
+        !m_shuttingDown && m_captureEndGrace.elapsed() < m_captureEndGraceMs) {
+      // Session::Closed can arrive just before process exit. Capture is already
+      // drained; allow the bounded exit grace before offering selection or
+      // reporting a live-game interruption. Never restore the closed grant.
+      m_operationTimer->setInterval(100);
+      m_operationTimer->start();
+      return;
+    }
     offerResume = sameInstance && instanceState == CaptureLifecycle::InstanceState::Running;
     m_pendingCaptureError.clear();
     m_portalClosurePending = false;
@@ -929,6 +938,14 @@ void RecordingEngine::onCaptureError(const QString &error) {
   if (m_captureSource)
     qDebug() << "Capture error classification:"
              << static_cast<int>(m_captureSource->lastErrorKind()) << error;
+  if (m_state == RecordingState::Initializing && m_explicitCaptureSelectionAttempt &&
+      m_captureSource &&
+      m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::Cancelled) {
+    // The user cancelled a fresh picker. Keep the automatic-selection fence,
+    // but do not turn that explicit cancellation into a pipeline failure.
+    stopRecording();
+    return;
+  }
   if (m_captureSource &&
       m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SessionClosed) {
     m_interruptedGame = m_currentGameName;

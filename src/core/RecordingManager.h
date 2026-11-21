@@ -74,6 +74,8 @@ private:
   friend class ApplicationAuthorizePromptTest;
   friend class ApplicationAudioProbeTest;
   friend class EncodedOutputsTest;
+  friend class RecordingManagerTest;
+  friend struct RecordingEngineTestAccess;
   struct FileOutput final : EncodedOutput {
     struct Part {
       quint64 generation = 0;

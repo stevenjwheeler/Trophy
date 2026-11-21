@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "DetectionFixture.h"
 #include "audio/PipeWireAudioSource.h"
+#include "audio/AudioMixer.h"
 #include "capture/IVideoCaptureSource.h"
 #include "core/RecordingManager.h"
 #include "core/ReplayManager.h"
@@ -41,43 +42,21 @@ public:
   QString name() const override { return "generic portal fixture"; }
 };
 
-class RecordingManagerTest {
-public:
-  static void prepareAudioOnly(RecordingManager &mgr, uint32_t node,
-                               GenericAudioTestCapture *&capture) {
-    mgr.m_captureFactory = [&capture] {
-      auto source = std::make_unique<GenericAudioTestCapture>();
-      capture = source.get();
-      return source;
-    };
-    mgr.m_pipelineBuilder = [&mgr, node] {
-      EXPECT_EQ(mgr.m_preparedAudio.gameNode, node);
-      EXPECT_EQ(mgr.m_preparedAudio.gameNodeName, "Wwise");
-      return true; // Exercise real lookup, not native video/encoding.
-    };
-  }
-};
-
 namespace TrophyBackend {
-class ReplayManagerTest {
-public:
-  static void prepareAudioOnly(ReplayManager &mgr, uint32_t node, uint32_t pid,
+struct RecordingEngineTestAccess {
+  static void prepareAudioOnly(RecordingEngine &engine, uint32_t node, uint32_t pid,
                                GenericAudioTestCapture *&capture) {
-    mgr.m_captureFactory = [&capture] {
+    engine.m_captureFactory = [&capture] {
       auto source = std::make_unique<GenericAudioTestCapture>();
       capture = source.get();
       return source;
     };
-    mgr.m_segmentBuilder = [&mgr, node, pid] {
-      EXPECT_EQ(mgr.m_lookupCache.gameNodeId, node);
-      EXPECT_EQ(mgr.m_lookupCache.gameNodeName, "Wwise");
-      int tracks = 0, voice = -1, mic = -1;
-      uint32_t sessionPid = 0;
-      QStringList hints;
-      bool found = false, voiceFound = false;
-      mgr.setupAudioSources(tracks, hints, sessionPid, found, voice, voiceFound, mic, false);
-      EXPECT_EQ(sessionPid, pid);
-      EXPECT_TRUE(found);
+    engine.m_pipelineBuilder = [&engine, node, pid] {
+      EXPECT_EQ(engine.m_preparedAudio.gameNode, node);
+      EXPECT_EQ(engine.m_preparedAudio.gameNodeName, "Wwise");
+      EXPECT_EQ(engine.m_preparedAudio.pid, pid);
+      const auto routing = engine.configureAudio(engine.m_audioMixer, engine.m_preparedAudio);
+      EXPECT_TRUE(routing.gameFound);
       return true;
     };
   }
@@ -299,27 +278,27 @@ TEST(AppAudioGroupTest, GenericPortalManagersFindWwiseByPinnedGamePid) {
   settings.setVoiceChatApp("");
   settings.setInstantReplayEnabled(true);
   StorageManager storage(library.path());
-  RecordingManager recording;
+  auto engine = std::make_shared<RecordingEngine>();
+  engine->setGameDetectionService(&detector);
+  RecordingManager recording(engine);
   recording.setSettingsManager(&settings);
   recording.setStorageManager(&storage);
-  recording.setGameDetectionService(&detector);
   GenericAudioTestCapture *capture = nullptr;
-  ::RecordingManagerTest::prepareAudioOnly(recording, node, capture);
+  RecordingEngineTestAccess::prepareAudioOnly(*engine, node, pid, capture);
   recording.startRecording("Baldur's Gate 3");
-  ASSERT_NE(capture, nullptr);
+  ASSERT_TRUE(waitFor([&] { return capture != nullptr; }));
   emit capture->ready();
-  ASSERT_TRUE(waitFor([&] { return recording.isRecording(); }));
+  ASSERT_TRUE(waitFor([&] { return engine->state() == RecordingEngine::State::Running; }));
   recording.stopRecording();
   ASSERT_TRUE(waitFor([&] { return recording.state() == RecordingManager::RecordingState::Idle; }));
-  ReplayManager replay;
+  ReplayManager replay(engine);
   replay.setSettingsManager(&settings);
-  replay.setGameDetectionService(&detector);
   capture = nullptr;
-  TrophyBackend::ReplayManagerTest::prepareAudioOnly(replay, node, pid, capture);
+  RecordingEngineTestAccess::prepareAudioOnly(*engine, node, pid, capture);
   replay.startDvr("Baldur's Gate 3");
-  ASSERT_NE(capture, nullptr);
+  ASSERT_TRUE(waitFor([&] { return capture != nullptr; }));
   emit capture->ready();
-  ASSERT_TRUE(waitFor([&] { return replay.isActive(); }));
+  ASSERT_TRUE(waitFor([&] { return engine->state() == RecordingEngine::State::Running; }));
   replay.stopDvr();
   ASSERT_TRUE(waitFor([&] { return !replay.isActive() && !replay.isStarting(); }));
 }

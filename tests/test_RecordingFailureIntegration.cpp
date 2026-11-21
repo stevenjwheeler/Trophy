@@ -633,37 +633,74 @@ public:
     return result;
   }
 };
-// Existing friend seam: native capture/encoding/muxing paths remain real.
+// Inspect the shared producer, never resurrect native fields on a consumer.
+struct RecordingEngineTestAccess {
+  static RecordingEngine &engine(const RecordingManager &recording) {
+    return *recording.m_engine;
+  }
+  static RecordingEngine &engine(const ReplayManager &replay) {
+    return *replay.m_engine;
+  }
+  template<class Consumer> static auto &session(const Consumer &consumer) {
+    return engine(consumer).m_session;
+  }
+  template<class Consumer> static auto &capture(const Consumer &consumer) {
+    return engine(consumer).m_captureSource;
+  }
+  template<class Consumer> static auto &encoder(const Consumer &consumer) {
+    return engine(consumer).m_videoEncoder;
+  }
+  template<class Consumer> static void install(Consumer &consumer) {
+    engine(consumer).m_captureFactory = [] { return std::make_unique<WaylandPortalCapture>(); };
+  }
+  template<class Consumer> static void recoveryDelay(Consumer &consumer, int ms) {
+    engine(consumer).m_recoveryDelayMs = ms;
+  }
+  static void exitGrace(RecordingManager &recording, int ms) {
+    engine(recording).m_captureEndGraceMs = ms;
+  }
+  static AudioMixer *mixer(const ReplayManager &replay) { return engine(replay).m_audioMixer; }
+  static bool idle(const ReplayManager &replay) {
+    return !replay.m_id && !replay.m_save.valid() &&
+        engine(replay).state() == RecordingEngine::State::Idle;
+  }
+  static QString finalized(const ReplayManager &replay) {
+    if (!replay.m_buffer) return {};
+    const auto snapshot = replay.m_buffer->snapshot(30);
+    for (const auto &piece : snapshot.pieces)
+      if (piece.packets.empty() && QFileInfo::exists(piece.block->path)) return piece.block->path;
+    return {};
+  }
+};
+using Native = RecordingEngineTestAccess;
 class ReplayManagerTest {
 public:
   static void install(ReplayManager &replay) {
-    replay.m_captureFactory = [] { return std::make_unique<WaylandPortalCapture>(); };
+    Native::install(replay);
   }
-  static bool idle(const ReplayManager &replay) { return replay.m_state == ReplayManager::State::Idle; }
-  static bool recovering(const ReplayManager &replay) { return replay.m_state == ReplayManager::State::Recovering; }
-  static void recoveryDelay(ReplayManager &replay, int ms) { replay.m_recoveryDelayMs = ms; }
+  static bool idle(const ReplayManager &replay) { return Native::idle(replay); }
+  static bool recovering(const ReplayManager &replay) { return replay.isRecoveringCapture(); }
+  static void recoveryDelay(ReplayManager &replay, int ms) { Native::recoveryDelay(replay, ms); }
   static qint64 frames(const ReplayManager &replay) {
-    return replay.m_session ? replay.m_session->frameCount() : 0;
+    return Native::session(replay) ? Native::session(replay)->frameCount() : 0;
   }
-  static void rotate(ReplayManager &replay) { replay.rotateSegment(); }
-  static int retiring(const ReplayManager &replay) { return int(replay.m_retiringSegments.size()); }
   static QString finalized(const ReplayManager &replay) {
-    return replay.m_segments.isEmpty() ? QString() : replay.m_segments.first().path;
+    return Native::finalized(replay);
   }
-  static QPointer<IVideoCaptureSource> capture(const ReplayManager &replay) { return replay.m_capture.get(); }
-  static RecordingSession *session(const ReplayManager &replay) { return replay.m_session.get(); }
+  static QPointer<IVideoCaptureSource> capture(const ReplayManager &replay) { return Native::capture(replay).get(); }
+  static RecordingSession *session(const ReplayManager &replay) { return Native::session(replay).get(); }
   static void saveWithoutRebuild(ReplayManager &replay) {
-    const auto capture = replay.m_capture.get();
-    const auto encoder = replay.m_encoder.get();
-    const auto session = replay.m_session.get();
+    const auto capture = Native::capture(replay).get();
+    const auto encoder = Native::encoder(replay).get();
+    const auto session = Native::session(replay).get();
     replay.saveReplay();
-    EXPECT_EQ(replay.m_capture.get(), capture);
-    EXPECT_EQ(replay.m_encoder.get(), encoder);
-    EXPECT_EQ(replay.m_session.get(), session);
+    EXPECT_EQ(Native::capture(replay).get(), capture);
+    EXPECT_EQ(Native::encoder(replay).get(), encoder);
+    EXPECT_EQ(Native::session(replay).get(), session);
   }
-  static AudioMixer *mixer(const ReplayManager &replay) { return replay.m_audioMixer.get(); }
+  static AudioMixer *mixer(const ReplayManager &replay) { return Native::mixer(replay); }
   static QSize outputSize(const ReplayManager &replay) {
-    return replay.m_encoder ? QSize(replay.m_encoder->width(), replay.m_encoder->height()) : QSize();
+    return Native::encoder(replay) ? QSize(Native::encoder(replay)->width(), Native::encoder(replay)->height()) : QSize();
   }
 };
 } // namespace TrophyBackend
@@ -708,9 +745,9 @@ protected:
                  StorageManager &storage, bool separate) {
     configureSettings(settings, separate);
     recorder.setSettingsManager(&settings); recorder.setStorageManager(&storage);
-    recorder.setAudioMixer(&mixer);
-    recorder.setGameDetectionService(detector.get());
-    recorder.m_captureFactory = [] { return std::make_unique<WaylandPortalCapture>(); };
+    Native::engine(recorder).setAudioMixer(&mixer);
+    Native::engine(recorder).setGameDetectionService(detector.get());
+    Native::install(recorder);
   }
   void configureSettings(SettingsManager &settings, bool separate) {
     settings.setRecordingsPath(root.path());
@@ -722,12 +759,12 @@ protected:
   }
   void awaitAudibleRecording(RecordingManager &recorder, AudioMixer &mixer) {
     ASSERT_TRUE(waitFor([&] {
-      return recorder.m_session &&
+      return Native::session(recorder) &&
              mixer.semanticAudioDiagnostics(0).value("rms").toDouble() > 0.01;
     }));
-    const auto first = recorder.m_session->frameCount();
+    const auto first = Native::session(recorder)->frameCount();
     ASSERT_TRUE(waitFor(
-        [&] { return recorder.m_session->frameCount() >= first + 10; }));
+        [&] { return Native::session(recorder)->frameCount() >= first + 10; }));
   }
   void awaitAudibleReplay(ReplayManager &replay) {
     using Peer = TrophyBackend::ReplayManagerTest;
@@ -753,7 +790,7 @@ protected:
       ReplayManager replay;
       replay.setSettingsManager(&settings);
       replay.setStorageManager(&storage);
-      replay.setGameDetectionService(detector.get());
+      Native::engine(replay).setGameDetectionService(detector.get());
       Peer::install(replay);
       QSignalSpy saved(&replay, &ReplayManager::replaySaved);
       replay.startDvr("Failure fixture");
@@ -781,22 +818,22 @@ protected:
       ASSERT_FALSE(mixer.sourceIsDesktopAudio(0));
       ProcessGames::publish({});
       TrophyBackend::RecordingSessionTestPeer::refreshAudio(
-          *recorder.m_session);
+          *Native::session(recorder));
       ASSERT_TRUE(waitFor([&] { return mixer.sourceIsDesktopAudio(0); }));
       awaitAudibleRecording(recorder, mixer);
       EXPECT_TRUE(
-          recorder.m_session->captureHealth()["desktopFallback"].toBool());
+          Native::session(recorder)->captureHealth()["desktopFallback"].toBool());
       ProcessGames::publish(detector->games());
       TrophyBackend::RecordingSessionTestPeer::refreshAudio(
-          *recorder.m_session);
+          *Native::session(recorder));
       ASSERT_TRUE(waitFor([&] { return !mixer.sourceIsDesktopAudio(0); }));
       awaitAudibleRecording(recorder, mixer);
       EXPECT_FALSE(
-          recorder.m_session->captureHealth()["desktopFallback"].toBool());
+          Native::session(recorder)->captureHealth()["desktopFallback"].toBool());
     } else {
       EXPECT_TRUE(mixer.sourceIsDesktopAudio(0));
       EXPECT_TRUE(
-          recorder.m_session->captureHealth()["desktopFallback"].toBool());
+          Native::session(recorder)->captureHealth()["desktopFallback"].toBool());
     }
     const auto path = recorder.currentFilePath();
     recorder.stopRecording();
@@ -830,7 +867,7 @@ protected:
     RecordingManager recorder;
     configure(settings, recorder, mixer, storage, separate);
     QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingCompletionReady);
     QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
@@ -846,7 +883,7 @@ protected:
         recorder.startRecording("Failure fixture");
       }
       if (!waitFor([&] {
-            return recorder.m_session && recorder.m_session->frameCount() >= 15;
+            return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15;
           }))
         return false;
       awaitAudibleRecording(recorder, mixer);
@@ -855,7 +892,7 @@ protected:
     ASSERT_TRUE(begin());
     EXPECT_EQ(started.size(), 1);
     const QString partial = recorder.currentFilePath();
-    const QPointer<IVideoCaptureSource> oldCapture(recorder.m_captureSource.get());
+    const QPointer<IVideoCaptureSource> oldCapture(Native::capture(recorder).get());
     const int before = ticks;
     fail(failure);
     ASSERT_FALSE(HasFatalFailure());
@@ -906,7 +943,7 @@ protected:
     recorder.startRecording("Failure fixture");
     ASSERT_TRUE(waitFor([] { return control("HasHeld").arguments().value(0).toBool(); }));
     const QString abandoned = recorder.currentFilePath();
-    const QPointer<IVideoCaptureSource> oldCapture(recorder.m_captureSource.get());
+    const QPointer<IVideoCaptureSource> oldCapture(Native::capture(recorder).get());
     fail(failure);
     ASSERT_FALSE(HasFatalFailure());
     // With no native connection yet, daemon loss is observed when the held
@@ -931,7 +968,7 @@ protected:
     } else {
       recorder.startRecording("Failure fixture");
     }
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     // A late reply from the abandoned attempt cannot touch the fresh capture.
     awaitAudibleRecording(recorder, mixer);
     ASSERT_EQ(control("ReleaseHeld").type(), QDBusMessage::ReplyMessage);
@@ -957,26 +994,20 @@ protected:
     ReplayManager replay;
     replay.setSettingsManager(&settings); replay.setStorageManager(&storage);
     Peer::install(replay);
-    replay.setGameDetectionService(detector.get());
+    Native::engine(replay).setGameDetectionService(detector.get());
     QSignalSpy saved(&replay, &ReplayManager::replaySaved);
     QSignalSpy errors(&replay, &ReplayManager::replayFailed);
     QSignalSpy authorization(&replay, &ReplayManager::restoreAuthNeeded);
     replay.startDvr("Failure fixture");
     ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
     awaitAudibleReplay(replay);
-    Peer::rotate(replay);
     ASSERT_TRUE(waitFor([&] { return !Peer::finalized(replay).isEmpty(); }));
     // A settled predecessor is genuine decodable media before a later failure.
     checkMedia(Peer::finalized(replay));
     ASSERT_TRUE(waitFor([&] { return Peer::frames(replay) >= 15; }));
     const auto oldCapture = Peer::capture(replay);
-    // The first rotation above took the persistent path (container swap on a
-    // forced keyframe, no retiring leg). Changing a video setting forces the
-    // make-before-break rebuild, so this second rotation still lands the
-    // failure inside the handoff-ownership window this case exists to cover.
-    settings.setFps(24);
-    Peer::rotate(replay);
-    ASSERT_GT(Peer::retiring(replay), 0); // Failure arrives during handoff ownership.
+    // GOP persistence no longer rotates/rebuilds the native producer. Exercise
+    // service loss with real cached footage and the same live capture.
     fail(failure);
     ASSERT_FALSE(HasFatalFailure());
     ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
@@ -1013,9 +1044,10 @@ protected:
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     recorder.startRecording("Failure fixture");
-    QPointer<WaylandPortalCapture> capture = qobject_cast<WaylandPortalCapture *>(recorder.m_captureSource.get());
+    ASSERT_TRUE(waitFor([&] { return bool(Native::capture(recorder)); }));
+    QPointer<WaylandPortalCapture> capture = qobject_cast<WaylandPortalCapture *>(Native::capture(recorder).get());
     ASSERT_NE(capture, nullptr);
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     awaitAudibleRecording(recorder, mixer);
     const auto path = recorder.currentFilePath();
     const std::array<QSize, 4> sizes{{{120,96}, {240,96}, {161,97}, {160,96}}};
@@ -1042,7 +1074,7 @@ protected:
                      &name, &serial) != PW_ID_ANY;
         }));
         ASSERT_TRUE(waitFor([&] {
-          return recorder.m_session && recorder.m_session->audioRoutingState().boundSerial[0] == serial &&
+          return Native::session(recorder) && Native::session(recorder)->audioRoutingState().boundSerial[0] == serial &&
               !mixer.sourceOperationPending(0) && mixer.sourceIsCapturing(0);
         }));
       }
@@ -1069,16 +1101,17 @@ protected:
     settings.setInstantReplayEnabled(true);
     ReplayManager replay;
     replay.setSettingsManager(&settings);
-    replay.setGameDetectionService(detector.get());
+    Native::engine(replay).setGameDetectionService(detector.get());
     Peer::install(replay);
     Peer::recoveryDelay(replay, 250);
     QSignalSpy saved(&replay, &ReplayManager::replaySaved);
     QSignalSpy errors(&replay, &ReplayManager::replayFailed);
     QSignalSpy authorization(&replay, &ReplayManager::restoreAuthNeeded);
     replay.startDvr("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return replay.isActive() &&
+        Native::engine(replay).state() == RecordingEngine::State::Running &&
+        Peer::frames(replay) >= 15; }));
     awaitAudibleReplay(replay);
-    Peer::rotate(replay);
     ASSERT_TRUE(waitFor([&] { return !Peer::finalized(replay).isEmpty(); }));
     const QString retained = Peer::finalized(replay);
     ASSERT_TRUE(waitFor([&] { return Peer::frames(replay) >= 15; }));
@@ -1114,7 +1147,10 @@ protected:
       ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
       checkMedia(saved.first().first().toString());
     }
-    ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
+    ASSERT_TRUE(waitFor([&] {
+      return replay.isActive() && Native::engine(replay).state() == RecordingEngine::State::Running &&
+          Peer::frames(replay) >= 15;
+    }));
     EXPECT_TRUE(replacement->videoMatches(240, 120, 1));
     EXPECT_EQ(Peer::outputSize(replay), QSize(240, 120));
     EXPECT_TRUE(QFileInfo::exists(retained));
@@ -1138,21 +1174,22 @@ protected:
     StorageManager storage(root.path());
     RecordingManager recorder;
     configure(settings, recorder, mixer, storage, separate);
-    recorder.m_recoveryDelayMs = 250;
-    recorder.m_captureEndGraceMs = 100;
+    Native::recoveryDelay(recorder, 250);
+    Native::exitGrace(recorder, 100);
     QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     int fullRecordingHandoffs = 0;
-    QObject::connect(&recorder, &RecordingManager::recordingFinished, &recorder, [&] {
-      if (recorder.isRecoveringCapture()) ++fullRecordingHandoffs;
+    QObject::connect(&Native::engine(recorder), &RecordingEngine::generationEnded,
+        &recorder, [&](quint64, bool succeeded, bool continuing, RecordingEngine::EndReason) {
+      if (succeeded && continuing && recorder.isRecoveringCapture()) ++fullRecordingHandoffs;
     });
     recorder.startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     awaitAudibleRecording(recorder, mixer);
     const auto partial = recorder.currentFilePath();
     if (boundary == 2) {
-      auto *capture = qobject_cast<WaylandPortalCapture *>(recorder.m_captureSource.get());
+      auto *capture = qobject_cast<WaylandPortalCapture *>(Native::capture(recorder).get());
       ASSERT_NE(capture, nullptr);
       ASSERT_GE(TrophyBackend::WaylandPortalCaptureTest::revokeNodeRead(*capture, media->node()), 0);
       ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
@@ -1168,8 +1205,8 @@ protected:
     ASSERT_EQ(control("Configure", {replacement->node(), QString()}).type(), QDBusMessage::ReplyMessage);
     media->closeVideo(); // Same game PID/instance; only the captured window dies.
     ASSERT_TRUE(waitFor([&] {
-      return recorder.state() == RecordingManager::RecordingState::Idle &&
-             recorder.isRecoveringCapture();
+      return Native::engine(recorder).state() == RecordingEngine::State::Recovering &&
+          saved.size() == 1;
     }));
     EXPECT_EQ(saved.size(), 1);
     EXPECT_EQ(fullRecordingHandoffs, 1);
@@ -1184,8 +1221,8 @@ protected:
     }
     checkMedia(partial);
     ASSERT_TRUE(waitFor([&] {
-      return started.size() == 2 && recorder.m_session &&
-             recorder.m_session->frameCount() >= 15;
+      return started.size() == 2 && Native::session(recorder) &&
+              Native::session(recorder)->frameCount() >= 15;
     }));
     const auto continued = recorder.currentFilePath();
     EXPECT_NE(continued, partial);
@@ -1203,13 +1240,13 @@ protected:
     StorageManager storage(root.path());
     RecordingManager recorder;
     configure(settings, recorder, mixer, storage, separate);
-    recorder.m_recoveryDelayMs = 50;
+    Native::recoveryDelay(recorder, 50);
     QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
     recorder.startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     awaitAudibleRecording(recorder, mixer);
     const auto partial = recorder.currentFilePath();
     ASSERT_EQ(control("Configure", {media->node(), "empty-start"}).type(), QDBusMessage::ReplyMessage);
@@ -1233,7 +1270,7 @@ protected:
       ASSERT_TRUE(replacement->start());
       ASSERT_EQ(control("Configure", {replacement->node(), QString()}).type(), QDBusMessage::ReplyMessage);
       ASSERT_TRUE(waitFor([&] {
-        return started.size() == 2 && recorder.m_session && recorder.m_session->frameCount() >= 15;
+        return started.size() == 2 && Native::session(recorder) && Native::session(recorder)->frameCount() >= 15;
       }));
       const auto continued = recorder.currentFilePath();
       recorder.stopRecording();
@@ -1258,7 +1295,7 @@ protected:
     RecordingManager recorder;
     configure(settings, recorder, mixer, storage, separate);
     QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingCompletionReady);
     QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
@@ -1269,7 +1306,7 @@ protected:
       settings.removeRestoreToken(identity.isEmpty() ? game : identity);
     });
     recorder.startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     awaitAudibleRecording(recorder, mixer);
     const QString partial = recorder.currentFilePath();
     if (boundary < 2) {
@@ -1277,7 +1314,7 @@ protected:
           QDBusMessage::ReplyMessage);
       ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
     } else {
-      auto *capture = qobject_cast<WaylandPortalCapture *>(recorder.m_captureSource.get());
+      auto *capture = qobject_cast<WaylandPortalCapture *>(Native::capture(recorder).get());
       ASSERT_NE(capture, nullptr);
       ASSERT_GE(TrophyBackend::WaylandPortalCaptureTest::revokeNodeRead(*capture, media->node()), 0);
     }
@@ -1311,8 +1348,9 @@ protected:
       ASSERT_EQ(control("Configure", {media->node(), "cancel-start"}).type(), QDBusMessage::ReplyMessage);
       ASSERT_TRUE(recorder.resumeCapture());
       ASSERT_TRUE(waitFor([&] {
-        return errors.size() == 2 && recorder.state() == RecordingManager::RecordingState::Idle;
+        return recorder.state() == RecordingManager::RecordingState::Idle;
       }));
+      EXPECT_EQ(errors.size(), 1); // Explicit cancellation is quiet, not another failure.
       EXPECT_EQ(authorization.size(), 0); EXPECT_EQ(saved.size(), 1);
       EXPECT_TRUE(recorder.requiresCaptureSelection());
       EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
@@ -1324,14 +1362,14 @@ protected:
     } else {
       recorder.startRecording("Failure fixture");
     }
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"),
         boundary < 2 ? "fixture-new-token" : "fixture-saved-token");
     const auto retry = recorder.currentFilePath();
     recorder.stopRecording();
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
     EXPECT_EQ(saved.size(), boundary < 2 ? 2 : 1);
-    EXPECT_EQ(errors.size(), boundary < 2 ? 2 : 1);
+    EXPECT_EQ(errors.size(), 1);
     EXPECT_EQ(authorization.size(), 0);
     EXPECT_FALSE(recorder.requiresCaptureSelection());
     checkMedia(retry);
@@ -1350,10 +1388,10 @@ protected:
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy authorization(&recorder, &RecordingManager::restoreAuthNeeded);
     recorder.startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 20; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 20; }));
     awaitAudibleRecording(recorder, mixer);
     const auto path = recorder.currentFilePath();
-    const QPointer<IVideoCaptureSource> capture(recorder.m_captureSource.get());
+    const QPointer<IVideoCaptureSource> capture(Native::capture(recorder).get());
     ASSERT_TRUE(media->setDelivery(!pauseVideo, !pauseAudio));
     // Keep nodes and permissions intact: absence of frames/PCM is not proof
     // of source retirement, service failure, or permission revocation.
@@ -1361,11 +1399,11 @@ protected:
     QTest::qWait(700);
     EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Recording);
     EXPECT_EQ(errors.size(), 0); EXPECT_EQ(saved.size(), 0);
-    EXPECT_EQ(recorder.m_captureSource.get(), capture.data());
+    EXPECT_EQ(Native::capture(recorder).get(), capture.data());
     if (pauseVideo) EXPECT_LE(media->produced.load(), produced + 1);
     ASSERT_TRUE(media->setDelivery(true, true));
-    const auto before = recorder.m_session->frameCount();
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= before + 35; }));
+    const auto before = Native::session(recorder)->frameCount();
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= before + 35; }));
     EXPECT_EQ(started.size(), 1);
     EXPECT_EQ(recorder.currentFilePath(), path);
     recorder.stopRecording();
@@ -1392,7 +1430,7 @@ protected:
     settings.setInstantReplayEnabled(true);
     ReplayManager replay;
     replay.setSettingsManager(&settings);
-    replay.setGameDetectionService(&gameDetector);
+    Native::engine(replay).setGameDetectionService(&gameDetector);
     Peer::install(replay);
     QSignalSpy saved(&replay, &ReplayManager::replaySaved);
     QSignalSpy errors(&replay, &ReplayManager::replayFailed);
@@ -1446,12 +1484,12 @@ protected:
     StorageManager storage(root.path());
     RecordingManager recorder;
     configure(settings, recorder, mixer, storage, separate);
-    recorder.setGameDetectionService(&detector);
-    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    Native::engine(recorder).setGameDetectionService(&detector);
+    QSignalSpy saved(&recorder, &RecordingManager::recordingCompletionReady);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy finished(&recorder, &RecordingManager::recordingFinished);
     recorder.startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(recorder) && Native::session(recorder)->frameCount() >= 15; }));
     const auto path = recorder.currentFilePath();
     if (timing == 0) {
       game.terminate();
@@ -1459,7 +1497,7 @@ protected:
     }
     if (timing < 2) media->closeVideo();
     else {
-      auto *capture = qobject_cast<WaylandPortalCapture *>(recorder.m_captureSource.get());
+      auto *capture = qobject_cast<WaylandPortalCapture *>(Native::capture(recorder).get());
       ASSERT_NE(capture, nullptr);
       ASSERT_GE(TrophyBackend::WaylandPortalCaptureTest::revokeNodeRead(*capture, media->node()), 0);
     }
@@ -1487,13 +1525,13 @@ protected:
     QSignalSpy errors(recorder.get(), &RecordingManager::recordingError);
     QSignalSpy authorization(recorder.get(), &RecordingManager::restoreAuthNeeded);
     recorder->startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder->m_session && recorder->m_session->frameCount() >= 20; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(*recorder) && Native::session(*recorder)->frameCount() >= 20; }));
     const QString path = recorder->currentFilePath();
-    const QPointer<IVideoCaptureSource> capture(recorder->m_captureSource.get());
+    const QPointer<IVideoCaptureSource> capture(Native::capture(*recorder).get());
     ASSERT_TRUE(media->changeVideo(161, 97, 15, 3));
     ASSERT_TRUE(waitFor([&] { return media->videoMatches(161, 97, 3); }));
-    const auto before = recorder->m_session->frameCount();
-    ASSERT_TRUE(waitFor([&] { return recorder->m_session->frameCount() >= before + 15; }));
+    const auto before = Native::session(*recorder)->frameCount();
+    ASSERT_TRUE(waitFor([&] { return Native::session(*recorder)->frameCount() >= before + 15; }));
     ASSERT_TRUE(media->setDelivery(false, false));
     QTest::qWait(150);
     EXPECT_EQ(recorder->state(), RecordingManager::RecordingState::Recording);
@@ -1531,7 +1569,7 @@ protected:
     QSignalSpy retrySaved(recorder.get(), &RecordingManager::recordingStopped);
     QSignalSpy retryErrors(recorder.get(), &RecordingManager::recordingError);
     recorder->startRecording("Failure fixture");
-    ASSERT_TRUE(waitFor([&] { return recorder->m_session && recorder->m_session->frameCount() >= 20; }));
+    ASSERT_TRUE(waitFor([&] { return Native::session(*recorder) && Native::session(*recorder)->frameCount() >= 20; }));
     const QString retry = recorder->currentFilePath();
     EXPECT_NE(retry, path);
     recorder->stopRecording();
@@ -1553,7 +1591,7 @@ protected:
     ReplayManager replay;
     replay.setSettingsManager(&settings); replay.setStorageManager(&storage);
     Peer::install(replay);
-    replay.setGameDetectionService(detector.get());
+    Native::engine(replay).setGameDetectionService(detector.get());
     QSignalSpy errors(&replay, &ReplayManager::replayFailed);
     QSignalSpy saved(&replay, &ReplayManager::replaySaved);
     replay.startDvr("Failure fixture");
@@ -1594,7 +1632,7 @@ protected:
         return Peer::session(replay) == session &&
                Peer::frames(replay) >= before + 30;
       }));
-      Peer::rotate(replay);
+      EXPECT_EQ(Peer::session(replay), session);
       ASSERT_EQ(Peer::outputSize(replay), QSize(160,96));
       ASSERT_TRUE(waitFor([&] {
         return replay.isActive() && Peer::session(replay) &&
@@ -1622,7 +1660,7 @@ protected:
     ReplayManager replay;
     replay.setSettingsManager(&settings); replay.setStorageManager(&storage);
     Peer::install(replay);
-    replay.setGameDetectionService(detector.get());
+    Native::engine(replay).setGameDetectionService(detector.get());
     QSignalSpy saved(&replay, &ReplayManager::replaySaved);
     QSignalSpy errors(&replay, &ReplayManager::replayFailed);
     QSignalSpy authorization(&replay, &ReplayManager::restoreAuthNeeded);
@@ -1678,7 +1716,7 @@ protected:
 
 TEST_P(RecordingManagerTest, NativeServiceLossFinalizesPartialAndFreshRecordingWorks) { exercise(); }
 TEST_P(RecordingManagerTest, StartupServiceLossRejectsLateReplyAndFreshRecordingWorks) { startupFailure(); }
-TEST_P(RecordingManagerTest, DvrHandoffServiceLossCleansCacheAndFreshClipWorks) { dvrFailure(); }
+TEST_P(RecordingManagerTest, DvrProducerServiceLossCleansCacheAndFreshClipWorks) { dvrFailure(); }
 TEST_P(RecordingManagerTest, NativeFormatChangesPreserveCanvasAndDecodedAudio) { nativeFormatChanges(); }
 TEST_P(RecordingManagerTest, PermissionRevocationStopsAndRequiresExplicitRetry) { permissionRevocation(); }
 TEST_P(RecordingManagerTest, NativeSameProcessWindowHandoffPreservesRecordingIntent) { nativeWindowHandoff(); }

@@ -225,7 +225,8 @@ ReplayManager::ReplayManager(std::shared_ptr<RecordingEngine> engine, QObject *p
   });
   connect(m_engine.get(), &RecordingEngine::generationEnded, this,
           [this](quint64 id, bool, bool, RecordingEngine::EndReason reason) {
-    if (id == m_id && reason == RecordingEngine::EndReason::PermissionClosed && !m_stopping) {
+    if (id == m_id && reason == RecordingEngine::EndReason::PermissionClosed &&
+        m_started && !m_stopping) {
       m_errorReported = true;
       emit replayFailed(QStringLiteral("Screen sharing ended. Select a game window to resume."));
     }

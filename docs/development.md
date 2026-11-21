@@ -34,6 +34,9 @@ file writer; `ReplayManager` contains its private packet buffer and export jobs.
 Neither manager receives native pipeline handles. Their boundary consists of
 immutable encoded packets, stream descriptions, generation/timeline IDs and
 pinned identity metadata.
+Manager unit tests cover consumer policy and completion feedback; engine tests
+cover producer demand and lifecycle. Private-service integration tests inspect
+the shared engine rather than injecting capture resources into either manager.
 
 Consumer attachment supplies demand. Compatible attachments reuse the approved
 live input and encoder; releasing the last consumer drains and stops the
@@ -233,8 +236,8 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
 - `RecordingFailureTest` runs synthetic SHM video and a tone through the real
   private PipeWire graph, fake portal, recording/DVR managers and software
   H.264/AAC/MKV pipeline. Merged/separate cases cover portal closure, portal
-  service exit and PipeWire daemon exit during recording, startup and DVR
-  handoff. Tests decode retained recordings and recovered recordings/clips,
+  service exit and PipeWire daemon exit during recording, startup and live DVR
+  buffering. Tests decode retained recordings and recovered recordings/clips,
   check stream timestamps, video dimensions and non-silent decoded PCM, and verify cleanup,
   no false save signal, stale-reply rejection and saved-token preservation.
   Window-handoff groups replace the real capture node after encoded frames,
@@ -245,7 +248,7 @@ ctest --test-dir ../trophy-build --output-on-failure --timeout 120 \
   and mono/stereo, and check decoded colors, aspect padding, replacement tones
   and resumed audio timing. Audio recreation tests normal source rebinding,
   not in-place renegotiation of an application's fixed client format. DVR tests
-  rotate across changes and decode the combined clip, rejecting decoder errors
+  retain the producer across in-place changes and decode the combined clip, rejecting decoder errors
   as well as invalid API results.
   Permission cases close the fake portal grant, reject a saved token at
   SelectSources/Start, cancel an explicit authorization attempt, and revoke

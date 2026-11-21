@@ -46,6 +46,7 @@ signals:
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
 private:
   friend class EncodedOutputsTest;
+  friend struct RecordingEngineTestAccess;
   struct Buffer final : EncodedOutput {
     struct Block {
       EncodedStream stream;

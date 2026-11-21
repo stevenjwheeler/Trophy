@@ -527,7 +527,7 @@ if(Python3_Interpreter_FOUND)
     target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
         Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
-    foreach(case IN ITEMS DesktopFallback NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit DvrGameExit NativeSameProcessWindowHandoff DvrSameProcessWindowHandoff NativeLongWindowGap TransientDeliveryStall RenegotiatedStalledCapture)
+    foreach(case IN ITEMS DesktopFallback NativeServiceLoss StartupServiceLoss DvrProducerServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit DvrGameExit NativeSameProcessWindowHandoff DvrSameProcessWindowHandoff NativeLongWindowGap TransientDeliveryStall RenegotiatedStalledCapture)
         add_test(NAME RecordingFailureTest.${case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
                 $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
