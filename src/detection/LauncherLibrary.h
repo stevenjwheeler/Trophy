@@ -13,6 +13,7 @@ struct LauncherGame {
   QString executable{}, winePrefix{};
   bool bootstrap = false;
   QStringList sources{};
+  bool runtimeTool = false;
 };
 
 // Local installed metadata only. Call on the census worker, never from QML.

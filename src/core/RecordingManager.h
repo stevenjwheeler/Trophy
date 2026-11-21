@@ -133,6 +133,10 @@ signals:
   // Handoff parts are saved quietly; a normal stop/game exit retains feedback.
   void recordingStopped(const QString &filePath, qint64 durationMs,
                         qint64 sizeBytes, bool quiet = false);
+  // User feedback is separate from filing parts: a quiet handoff can later
+  // resolve to game exit without producing a second recordingStopped event.
+  void recordingCompletionReady(const QString &filePath, qint64 durationMs,
+                                qint64 sizeBytes);
   void recordingError(const QString &error);
   /**
    * The portal rejected our saved restore token. The app deletes it and
@@ -186,7 +190,14 @@ private:
   bool recoveryIdentityIsCurrent() const;
   bool recoveryAwaitingCensus() const;
   void scheduleCaptureRecovery();
-  void cancelCaptureRecovery();
+  void cancelCaptureRecovery(bool finishFeedback = true);
+  void finishDeferredCompletion();
+  struct SavedCompletion {
+    QString path;
+    qint64 durationMs = 0, sizeBytes = 0;
+  };
+  SavedCompletion m_deferredCompletion;
+  bool m_startingRecovery = false;
   bool m_captureRecoveryPending = false;
   QString m_recoveryGame, m_recoveryKey, m_recoveryInstance;
   quint64 m_recoveryGeneration = 0;

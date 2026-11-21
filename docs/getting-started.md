@@ -56,27 +56,23 @@ packages, a compiler and Python are not needed to run the ordinary application.
 | **RPM** | **Fedora 44 x86_64** | Compatible Fedora Qt, FFmpeg, Wayland, PipeWire and `xdg-desktop-portal` runtime packages, installed through the package manager. Other RPM-based distros and newer Fedora releases are not automatically guaranteed compatible. |
 | **tar.xz** | **Ubuntu 26.04-compatible x86_64 environment** | Compatible native Qt/FFmpeg and desktop dependencies (including `xdg-desktop-portal` and a backend), supplied by you. Preserve the extracted directory layout. This is a native install-tree archive, **not a self-contained AppImage**. |
 
-For the **AppImage**, packaging rejects required symbol versions above
-**GLIBC 2.39**, **GLIBCXX 3.4.32** and **CXXABI 1.3.14**, including requirements
-from bundled libraries and plugins. These are build-policy ceilings, not a
-guarantee of compatibility with every system meeting those numbers. An individual
-artifact may require lower versions; the diagnostic AppImage build records its
-actual minimum glibc in `bundle.json`. Do not upgrade system libraries just to
-run Trophy—use a compatible package. See the
-[packaging notes](../packaging/README.md#package-formats) for the detailed
-baseline and dependency policy.
+**Not sure which download to choose? Start with the AppImage.** It includes
+Trophy's application libraries and is the recommended option if your system
+does not match a native package listed above. It still needs a compatible
+Wayland desktop, PipeWire and graphics drivers. If a package is incompatible,
+choose another supported package rather than replacing core system libraries.
+Detailed build requirements are in the [packaging notes](../packaging/README.md).
 
-The AppImage is the recommended starting point when you are not on the exact
-native-package target. If FUSE is unavailable, use extract-and-run with your
-downloaded filename, for example:
+If the AppImage will not open because FUSE is unavailable, you can run it without
+FUSE from a terminal. Replace `Trophy.AppImage` with your downloaded filename:
 
 ```sh
 APPIMAGE_EXTRACT_AND_RUN=1 ./Trophy.AppImage
 ```
 
-Fedora's official FFmpeg build may omit libx264. Software H.264 recording and
-H.264 share export require a codec-enabled FFmpeg provider; follow your distro's
-guidance rather than assuming every codec ships with the native package.
+**Using a native package on Fedora?** Some video codecs may not be included.
+If software recording or MP4 export is unavailable, try the AppImage or follow
+your distribution's guidance for installing the missing codecs.
 
 ### System requirements
 
@@ -146,11 +142,9 @@ support likewise does not guarantee every DMA-BUF capture path works.
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
-2. With an AppImage, Trophy registers its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — Trophy keeps its own entry for the stable identity and hides it from menus so you are not offered a duplicate.
-3. There are no Trophy window helpers to install. Process-based detection is independent of the compositor; window/screen selection belongs to the system portal.
-4. Steam, Heroic/Legendary (Epic), Heroic GOG/Amazon and Lutris can supply local installed-game identities automatically. Games without usable executable metadata still need an exact executable name or path in Games; see [launcher coverage and limitations](game-detection.md#identification-and-catalogues).
-5. Assign recording and clip/bookmark shortcuts through your desktop's portal approval dialog. If its backend does not support portal shortcuts, bind the commands described under [Keyboard shortcuts](#keyboard-shortcuts) natively.
-6. Start a game and authorize its capture when prompted. Saved approvals can restore capture on later sessions; stale approvals may need authorization again.
+2. Assign your recording and clip/bookmark shortcuts. If your desktop does not support configuring them in Trophy, use the [native keyboard shortcut instructions](#keyboard-shortcuts).
+3. Start a game. If Trophy does not detect it, open **Games → Add Game**, select its process, and choose **Watch**.
+4. Authorize capture when prompted and select your game window in the desktop's capture picker.
 
 Manual recording is also available. When no game is tracked, the Record action opens the system capture picker. When a game is tracked, it targets that game.
 
@@ -158,21 +152,31 @@ Manual recording is also available. When no game is tracked, the Record action o
 
 Trophy polls Linux processes independently of windows, then associates PipeWire
 playback streams with game instances. Native and Proton/Wine executables use
-local launcher installation metadata and exact user rules. Generic
-launchers and Wine services do not identify games. Use Games to block
+local launcher installation metadata and exact user rules. Shared storefronts,
+Steam runtime infrastructure and Wine services are not treated as games. A
+verified game-specific launcher can establish a game's identity while Trophy
+waits for its game payload before automatic capture. Use Games to block
 applications, define standalone games, or select among concurrent instances.
 
+Supported local metadata sources include **Steam**, **Heroic** (Epic, GOG and
+Amazon), **Legendary** (Epic), **Nile** (Amazon) and **Lutris**. Games without a
+usable metadata match can be added manually through **Games → Add Game**; see
+[Adding a standalone game](#adding-a-standalone-game).
+
+Automatic recording and DVR wait for game audio during startup, with a bounded
+fallback for silent games; see [Launcher and window handoffs](user-guide.md#launcher-and-window-handoffs).
 When game audio cannot be captured, Trophy falls back to desktop audio and
-retries game capture every three seconds. This includes other applications
+retries game-audio capture every three seconds. The desktop mix includes other applications
 and Voice; a separate Voice source is suppressed to avoid duplication.
 The microphone remains independent. Capture diagnostics indicate fallback.
 Screen capture still requires portal authorization.
 No game process injection, graphics layer, root access or compositor PID is
 needed. This is not an anti-cheat certification.
 
-Upgrading removes Trophy's previous graphics enrollment. Already-running
-launchers may retain an old `LD_PRELOAD` environment until a fresh login.
-See [architecture and limitations](game-detection.md).
+Trophy automatically cleans up its old graphics-reporter registration at startup.
+If you upgrade while Steam or another launcher is already running, you may need
+to sign out and back in to clear the old launch environment. See
+[architecture and limitations](game-detection.md).
 
 ### Adding a standalone game
 
@@ -184,11 +188,6 @@ Rows show the executable/payload path and PID, including
 Wine payloads rather than their loader. **Refresh** reads the latest cached
 census. Trophy checks PID/start identity and payload again before saving a rule,
 so an exited/reused process cannot silently become the wrong definition.
-
-The previous Trophy KWin script and GNOME Shell extension are no longer used or
-bundled. If an older version installed them in your user account, disable/remove
-`trophy-monitor` in KWin Scripts or **Trophy Window Helper** in GNOME Extensions.
-Trophy does not modify your desktop's helper configuration during startup.
 
 ## Keyboard shortcuts
 

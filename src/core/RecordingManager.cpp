@@ -154,7 +154,7 @@ void RecordingManager::startRecording(const QString &gameName) {
   }
   m_explicitCaptureSelectionAttempt = std::exchange(m_forceCaptureSelectionOnce, false);
   m_portalClosurePending = false;
-  cancelCaptureRecovery();
+  cancelCaptureRecovery(!m_startingRecovery);
 
   qDebug() << "startRecording called. gameName:" << gameName;
 
@@ -519,6 +519,7 @@ void RecordingManager::completePipelineAndStart() {
   }
 
   // Start timers and fully enter recording state
+  m_deferredCompletion = {}; // A real successor continues the recording intent.
   m_recordingTimer.start();
   m_progressTimer->start();
 
@@ -540,7 +541,7 @@ void RecordingManager::stopRecording() {
     m_pendingCaptureError.clear();
   }
   const bool wasRecovering = m_captureRecoveryPending;
-  cancelCaptureRecovery();
+  cancelCaptureRecovery(!m_startingRecovery);
   if (wasRecovering) {
     m_pendingCaptureError.clear();
     if (m_state == RecordingState::Idle || m_state == RecordingState::Stopping)
@@ -720,7 +721,12 @@ void RecordingManager::finishStoppedRecording() {
   const qint64 sizeBytes = settledSizeBytes;
   emit recordingFinished();
   if (saved) {
+    const bool deferFeedback = quietFiling && m_captureRecoveryPending;
+    if (deferFeedback)
+      m_deferredCompletion = {filePath, durationMs, sizeBytes};
     emit recordingStopped(filePath, durationMs, sizeBytes, quietFiling);
+    if (!deferFeedback)
+      emit recordingCompletionReady(filePath, durationMs, sizeBytes);
   } else if (!pipelineFailed && !emptyCapture) {
     // Prefer the concrete reason (e.g. a stalled encoder) over the generic
     // finalize wording.
@@ -1338,11 +1344,21 @@ bool RecordingManager::recoveryAwaitingCensus() const {
          m_gameDetector->instanceLaunchContextAlive(m_recoveryInstance);
 }
 
-void RecordingManager::cancelCaptureRecovery() {
+void RecordingManager::finishDeferredCompletion() {
+  const auto completion = std::exchange(m_deferredCompletion, SavedCompletion{});
+  if (!m_shuttingDown && !completion.path.isEmpty())
+    emit recordingCompletionReady(completion.path, completion.durationMs,
+                                  completion.sizeBytes);
+}
+
+void RecordingManager::cancelCaptureRecovery(bool finishFeedback) {
   ++m_recoveryGeneration;
-  if (!m_captureRecoveryPending) return;
-  m_captureRecoveryPending = false;
-  emit captureRecoveryChanged();
+  if (m_captureRecoveryPending) {
+    m_captureRecoveryPending = false;
+    emit captureRecoveryChanged();
+  }
+  if (finishFeedback)
+    finishDeferredCompletion();
 }
 
 void RecordingManager::scheduleCaptureRecovery() {
@@ -1358,7 +1374,11 @@ void RecordingManager::scheduleCaptureRecovery() {
       return;
     }
     const QString game = m_recoveryGame;
+    m_startingRecovery = true;
     startRecording(game);
+    m_startingRecovery = false;
+    if (m_state != RecordingState::Initializing && !isRecording())
+      finishDeferredCompletion(); // Storage/source setup can reject synchronously.
   });
 }
 
@@ -1399,7 +1419,11 @@ void RecordingManager::onCaptureError(const QString &error) {
         m_pendingCaptureError = error;
         m_captureEndGrace.start();
       }
+      // An approved empty retry still belongs to the same continuation.
+      // Retain feedback for the last saved part until recovery truly ends.
+      m_startingRecovery = true;
       stopRecording();
+      m_startingRecovery = false;
       m_captureRecoveryPending = true;
       emit captureRecoveryChanged();
       return;

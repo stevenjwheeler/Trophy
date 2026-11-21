@@ -298,6 +298,73 @@ TEST_F(GameDetectionServiceTest, PickerDesktopHintsRespectExecAndHiddenOverrides
   EXPECT_EQ(apps, (QSet<QString>{"/games/A Game/game", "/games/env-game"}));
 }
 
+TEST_F(GameDetectionServiceTest, SteamRuntimeToolsAreNotGamesOrInstanceMembers) {
+  const QString runtimeDirectory = "/library/steamapps/common/SteamLinuxRuntime4.0";
+  const QList<LauncherGame> catalogue{
+      {424004, "Steam Linux Runtime 4.0", runtimeDirectory},
+      {424005, "Actual Game", "/library/steamapps/common/ActualGame"}};
+  for (const auto &name : QStringList{
+           "srt-logger", "srt-client-container", "srt-launcher-service",
+           "srt-launch-client", "x86_64-linux-gnu-srt-launcher-service",
+           "i386-linux-gnu-srt-launch-client", "steam-runtime-supervisor",
+           "steam-runtime-launcher-service", "pressure-vessel-wrap",
+           "pressure-vessel-unruntime", "srt-bwrap", "pv-adverb"}) {
+    SCOPED_TRACE(name.toStdString());
+    GameDetectionService service;
+    setCatalogue(service, catalogue);
+    auto helper = process(110, runtimeDirectory + "/pressure-vessel/bin/" + name,
+                          1, 424004);
+    const auto game = process(120, "/library/steamapps/common/ActualGame/game",
+                              helper.pid, 424005);
+    EXPECT_TRUE(ProcessGames::excluded(helper.payload()));
+    apply(service, {{helper.pid, helper}, {game.pid, game}});
+    ASSERT_EQ(service.games().size(), 1);
+    EXPECT_EQ(service.currentGameName(), "Actual Game");
+    EXPECT_EQ(service.currentGamePid(), game.pid);
+    EXPECT_FALSE(service.games().first().processes.contains(helper.pid));
+    apply(service, {{helper.pid, helper}});
+    EXPECT_FALSE(service.isGameRunning()); // Helpers alone cannot keep it alive.
+  }
+}
+
+TEST_F(GameDetectionServiceTest, SteamApprovalReportsSteamAfterRuntimeHelperStartsFirst) {
+  GameDetectionService service;
+  const QString directory = "/library/steamapps/common/Terraria";
+  setCatalogue(service, {
+      {105600, "Terraria", directory},
+      {424004, "Steam Linux Runtime 4.0",
+       "/library/steamapps/common/SteamLinuxRuntime4.0"}});
+  define(service, "steam_app_105600", "Terraria");
+  auto logger = process(110, "/library/steamapps/common/SteamLinuxRuntime4.0/"
+                             "pressure-vessel/bin/srt-logger", 1, 105600);
+  auto game = process(120, directory + "/Terraria.bin.x86_64", logger.pid, 105600);
+  QStringList announcedSources;
+  QObject::connect(&service, &GameDetectionService::gameDetected,
+                   [&](const QString &, qint64) {
+    announcedSources.append(service.currentGameSource());
+  });
+  apply(service, {{logger.pid, logger}});
+  EXPECT_FALSE(service.isGameRunning());
+  EXPECT_TRUE(announcedSources.isEmpty());
+  apply(service, {{logger.pid, logger}, {game.pid, game}});
+  ASSERT_EQ(service.games().size(), 1);
+  EXPECT_EQ(service.currentGamePid(), game.pid);
+  EXPECT_EQ(service.currentGameSource(), "Steam");
+  EXPECT_EQ(announcedSources, QStringList{"Steam"});
+  apply(service, {{logger.pid, logger}, {game.pid, game}});
+  EXPECT_EQ(announcedSources.size(), 1);
+}
+
+TEST_F(GameDetectionServiceTest, SteamAppRuleWithoutManifestDoesNotClaimInstallationMatch) {
+  GameDetectionService service;
+  define(service, "steam_app_105600", "Terraria");
+  const auto game = process(120, "/outside/known/libraries/Terraria.bin.x86_64",
+                            1, 105600);
+  apply(service, {{game.pid, game}});
+  ASSERT_TRUE(service.isGameRunning());
+  EXPECT_EQ(service.currentGameSource(), "Steam App ID rule");
+}
+
 TEST_F(GameDetectionServiceTest,
        DetectedIdentitySurvivesSynchronousRuleRebuild) {
   GameDetectionService service;

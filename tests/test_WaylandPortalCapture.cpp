@@ -17,6 +17,7 @@
 #include <QSignalSpy>
 #include <QTest>
 #include <condition_variable>
+#include <future>
 #include <chrono>
 #include <thread>
 #include <mutex>
@@ -258,6 +259,63 @@ protected:
   static void removeNode(WaylandPortalCapture &capture, uint32_t id) {
     WaylandPortalCapture::on_registry_global_remove(&capture, id);
   }
+  void nodeClosureRace(int scenario) {
+    WaylandPortalCapture capture;
+    simulateCapturing(capture, 7);
+    enableNative(capture, 7);
+    node(capture, 101);
+    std::promise<void> release;
+    const auto future = release.get_future().share();
+    auto completed = std::make_shared<std::atomic_bool>(false);
+    auto calls = std::make_shared<std::atomic_int>(0);
+    capture.m_nodeDestructionLookup = [future, completed, calls, scenario](
+        uint32_t, uint32_t, uint64_t) {
+      ++*calls;
+      future.wait();
+      completed->store(true);
+      return scenario != 1;
+    };
+    QSignalSpy errors(&capture, &IVideoCaptureSource::captureError);
+    if (scenario != 3) {
+      removeNode(capture, 101);
+      removeNode(capture, 101); // Duplicate callbacks cannot stack probes.
+    }
+    capture.portalSessionLost("sharing closed",
+                             IVideoCaptureSource::CaptureErrorKind::SessionClosed);
+    EXPECT_FALSE(capture.isCapturing()); // Delivery retires before attestation.
+    if (scenario == 3) {
+      EXPECT_EQ(errors.size(), 1);
+      removeNode(capture, 101); // Closed alone cannot authorize a later probe.
+      QCoreApplication::processEvents();
+      EXPECT_EQ(calls->load(), 0);
+      EXPECT_EQ(capture.lastErrorKind(),
+                IVideoCaptureSource::CaptureErrorKind::SessionClosed);
+      return;
+    }
+    EXPECT_EQ(errors.size(), 0);
+    EXPECT_FALSE(capture.startCapture());
+    QCoreApplication::processEvents(); // Dispatch the pre-Closed node removal.
+    if (scenario == 2) {
+      capture.stopCapture();
+      simulateCapturing(capture, 9);
+      enableNative(capture, 9);
+    }
+    release.set_value();
+    ASSERT_TRUE(waitUntil([&] { return completed->load(); }));
+    if (scenario == 2) {
+      QTest::qWait(20);
+      EXPECT_EQ(errors.size(), 0); // Neither Stop nor a new attempt inherits it.
+    } else {
+      ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+      EXPECT_EQ(capture.lastErrorKind(),
+                scenario == 1 ? IVideoCaptureSource::CaptureErrorKind::SessionClosed
+                              : IVideoCaptureSource::CaptureErrorKind::SourceDestroyed);
+      postNative(capture, 7);
+      QCoreApplication::processEvents();
+      EXPECT_EQ(errors.size(), 1);
+    }
+    EXPECT_EQ(calls->load(), 1);
+  }
   static void activatePortalOnly(WaylandPortalCapture &capture) {
     // Exercise real D-Bus session lifecycle without claiming native video
     // negotiation: only the final PipeWire-start boundary is emulated here.
@@ -325,6 +383,22 @@ TEST_F(WaylandPortalCaptureTest, GrantedNodeRemovalIgnoresOtherNodesAndRetiredGe
   removeNode(capture, 303);
   QCoreApplication::processEvents();
   EXPECT_EQ(errors.size(), 1);
+}
+
+TEST_F(WaylandPortalCaptureTest, PortalClosedCannotErasePendingProvenNodeDestruction) {
+  nodeClosureRace(0);
+}
+
+TEST_F(WaylandPortalCaptureTest, InconclusivePendingNodeCheckKeepsPortalClosureTerminal) {
+  nodeClosureRace(1);
+}
+
+TEST_F(WaylandPortalCaptureTest, StopAndNewAttemptDiscardPendingClosedNodeCheck) {
+  nodeClosureRace(2);
+}
+
+TEST_F(WaylandPortalCaptureTest, PortalClosureAloneNeverStartsDestructionAttestation) {
+  nodeClosureRace(3);
 }
 
 TEST_F(WaylandPortalCaptureTest, NativeCoreAndStreamLossRetireOnceButObjectErrorsDoNot) {

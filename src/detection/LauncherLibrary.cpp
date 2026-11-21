@@ -301,8 +301,13 @@ void steam(QList<LauncherGame> &games, const QString &home, const QString &data)
       const auto install = field(acf, "installdir");
       const auto directory = QDir::cleanPath(apps.filePath("common/" + install));
       if (id && !install.isEmpty() &&
-          directory.startsWith(QDir::cleanPath(apps.filePath("common")) + "/"))
-        games.append({id, field(acf, "name"), directory, {}, {}, false, {"Steam"}});
+          directory.startsWith(QDir::cleanPath(apps.filePath("common")) + "/")) {
+        // A container-runtime tool is installation metadata, not a game.
+        // Read its role on the census worker; never infer it from the title.
+        const auto tool = QString::fromUtf8(bytes(directory + "/toolmanifest.vdf"));
+        const bool runtime = field(tool, "compatmanager_layer_name") == "container-runtime";
+        games.append({id, field(acf, "name"), directory, {}, {}, false, {"Steam"}, runtime});
+      }
     }
   }
 }

@@ -1084,7 +1084,9 @@ Page {
                                 width: 10; height: 10; radius: 5
                                 Layout.alignment: Qt.AlignVCenter
                                 objectName: "captureStatusIndicator"
-                                color: (recordingManager && recordingManager.isRecording) ? "white" : ((gameDetector && gameDetector.isGameRunning) ? Theme.successColor : Theme.textMutedColor)
+                                color: (recordingManager && recordingManager.isRecording) ? "white"
+                                       : (app && app.recordingPhase === "waiting-game") ? Theme.cautionColor
+                                       : ((gameDetector && gameDetector.isGameRunning) ? Theme.successColor : Theme.textMutedColor)
                                 SequentialAnimation on opacity {
                                     running: (recordingManager && recordingManager.isRecording)
                                     loops: Animation.Infinite
@@ -1094,8 +1096,8 @@ Page {
                             }
                             Label {
                                 objectName: "captureStatusLabel"
-                                 text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
-                                      : (app && app.recordingPhase === "waiting-game") ? qsTr("LAUNCHING")
+                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
+                                      : (app && app.recordingPhase === "waiting-game") ? qsTr("WAITING FOR WINDOW")
                                       : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
                                       : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
                                       : ((gameDetector && gameDetector.isGameRunning) ? qsTr("READY") : qsTr("IDLE"))

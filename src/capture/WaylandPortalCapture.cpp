@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <utility>
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -581,6 +582,9 @@ void WaylandPortalCapture::stopCapture() {
 }
 
 void WaylandPortalCapture::prepareStopCapture() {
+  m_closedDuringNodeRemoval = 0;
+  m_deferredSessionError.clear();
+  m_nodeRemovalGeneration.store(0);
   if (m_retiring.exchange(true))
     return;
   m_nativeEventsEnabled.store(false);
@@ -644,6 +648,9 @@ void WaylandPortalCapture::onPortalOwnerChanged(const QString &, const QString &
 }
 
 void WaylandPortalCapture::portalSessionLost(const QString &reason, CaptureErrorKind kind) {
+  const auto nativeGeneration = m_nativeGeneration.load();
+  const bool pendingDestruction = kind == CaptureErrorKind::SessionClosed &&
+      nativeGeneration != 0 && m_nodeRemovalGeneration.load() == nativeGeneration;
   // The session no longer exists. Do not send Close to a replacement service.
   // Retire logical delivery before notifying the manager; its normal error
   // path owns asynchronous native drainage/finalization. Never tear down a
@@ -658,6 +665,16 @@ void WaylandPortalCapture::portalSessionLost(const QString &reason, CaptureError
   // the old native objects, even if an error receiver tries to restart inline.
   if (active && !m_retiring.exchange(true)) {
     m_lastErrorKind = kind;
+    if (pendingDestruction) {
+      // A node-removal event was observed before Closed. Retire delivery now,
+      // but let its already-started independent attestation settle instead of
+      // erasing it by invalidating the native generation. Closed by itself
+      // never starts a destruction probe or authorizes a new grant.
+      m_closedDuringNodeRemoval = nativeGeneration;
+      m_deferredSessionError = reason;
+      qDebug() << "Wayland Portal: session closed during granted-node removal check";
+      return;
+    }
     emit captureError(reason);
   }
 }
@@ -1336,25 +1353,61 @@ void WaylandPortalCapture::on_registry_global_remove(void *data, uint32_t id) {
   if (self->m_nativeEventsEnabled.load() && self->m_pipewireNodeId >= 0 &&
       id == static_cast<uint32_t>(self->m_pipewireNodeId)) {
     const auto generation = self->m_nativeGeneration.load();
+    quint64 expected = 0;
+    if (!generation || !self->m_nodeRemovalGeneration.compare_exchange_strong(expected, generation))
+      return; // One bounded probe per native generation.
     const auto cookie = self->m_coreCookie.load();
     const auto serial = self->m_targetSerial.load();
     QMetaObject::invokeMethod(self, [self, id, generation, cookie, serial] {
-      if (!self->m_nativeEventsEnabled.load() ||
-          generation != self->m_nativeGeneration.load() || self->m_retiring.load())
-        return;
-      auto *watcher = new QFutureWatcher<bool>(self);
-      QObject::connect(watcher, &QFutureWatcher<bool>::finished, self,
-                       [self, watcher, generation] {
-        const bool destroyed = watcher->result();
-        watcher->deleteLater();
-        self->postNativeError(
-            destroyed ? QStringLiteral("PipeWire capture window disappeared")
-                      : QStringLiteral("PipeWire capture source disappeared or access was revoked"),
-            generation, destroyed ? CaptureErrorKind::SourceDestroyed
-                                  : CaptureErrorKind::SourceUnavailable);
-      });
-      watcher->setFuture(QtConcurrent::run(captureNodeWasDestroyed, cookie, id, serial));
+      self->beginNodeRemovalCheck(id, generation, cookie, serial);
     }, Qt::QueuedConnection);
+  }
+}
+
+void WaylandPortalCapture::beginNodeRemovalCheck(uint32_t node, quint64 generation,
+                                                uint32_t cookie, uint64_t serial) {
+  const bool settlingClosed = m_closedDuringNodeRemoval == generation;
+  if (m_nodeRemovalGeneration.load() != generation ||
+      (!settlingClosed && (!m_nativeEventsEnabled.load() ||
+                           generation != m_nativeGeneration.load() || m_retiring.load())))
+    return;
+  auto *watcher = new QFutureWatcher<bool>(this);
+  connect(watcher, &QFutureWatcher<bool>::finished, this, [this, watcher, generation] {
+    const bool destroyed = watcher->result();
+    watcher->deleteLater();
+    finishNodeRemovalCheck(generation, destroyed);
+  });
+  const auto lookup = m_nodeDestructionLookup;
+  watcher->setFuture(QtConcurrent::run([lookup, cookie, node, serial] {
+    return lookup ? lookup(cookie, node, serial)
+                  : captureNodeWasDestroyed(cookie, node, serial);
+  }));
+}
+
+void WaylandPortalCapture::finishNodeRemovalCheck(quint64 generation, bool destroyed) {
+  auto expected = generation;
+  if (!m_nodeRemovalGeneration.compare_exchange_strong(expected, 0))
+    return; // Explicit Stop or a new attempt retired this check.
+  if (m_closedDuringNodeRemoval == generation) {
+    m_closedDuringNodeRemoval = 0;
+    const auto error = std::exchange(m_deferredSessionError, QString{});
+    m_lastErrorKind = destroyed ? CaptureErrorKind::SourceDestroyed
+                               : CaptureErrorKind::SessionClosed;
+    qDebug() << "Wayland Portal: prior node removal"
+             << (destroyed ? "confirmed destroyed" : "inconclusive; sharing stays closed");
+    emit captureError(destroyed ? QStringLiteral("PipeWire capture window disappeared")
+                               : error);
+    return;
+  }
+  if (m_nativeEventsEnabled.load() && generation == m_nativeGeneration.load() &&
+      !m_retiring.load()) {
+    // This completion is already on the owner thread. Do not queue another
+    // delivery that Closed could overtake after attestation has succeeded.
+    closePortalSession();
+    portalSessionLost(
+        destroyed ? QStringLiteral("PipeWire capture window disappeared")
+                  : QStringLiteral("PipeWire capture source disappeared or access was revoked"),
+        destroyed ? CaptureErrorKind::SourceDestroyed : CaptureErrorKind::SourceUnavailable);
   }
 }
 

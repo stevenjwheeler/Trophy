@@ -92,6 +92,11 @@ Steam App ID is strong corroboration when available. Inherited
 service a game. Local manifests provide display names and `steam_app_<id>`
 identity keys, not the identity of a particular running instance.
 
+Recognition provenance distinguishes saved Steam App ID approvals from custom
+executable rules. A verified installation match reports `Steam`, including when
+the game already has a saved App ID approval. An App ID rule without a matching
+installation path reports `Steam App ID rule`, not a claimed manifest match.
+
 Other launcher entries do **not** grant directory-wide or prefix-wide
 ownership. Initial matching requires the configured executable's exact host path.
 Conflicting names for the same payload are not automatically selected;
@@ -140,6 +145,15 @@ prefix. Another private runtime or a shared Wine broker is an ancestry
 boundary; a common storefront ancestor, broker name or prefix is insufficient.
 Runtime/broker processes are never game members and cannot keep an otherwise
 finished game alive.
+
+Steam runtime infrastructure (including SRT loggers, client containers and
+architecture-prefixed launcher services) is excluded even when its executable
+matches an installed Steam Linux Runtime tool. This filters helper executables,
+not games launched inside the runtime.
+The worker also reads `toolmanifest.vdf`: installations whose compatibility
+layer is `container-runtime` exclude their infrastructure payloads, including
+new diagnostics not covered by executable-name filters. A game outside that
+tool installation is not excluded because its parent runs the runtime.
 
 Capture-window loss can arrive between census ticks, after the original
 payload exits but before its already-running successor enters the cached
@@ -302,12 +316,26 @@ encoding, muxing, clip/DVR and portal lifecycles are retained.
 
 ### Captured-window handoff
 
+Saved handoff parts are filed immediately without a session-end chime. Their
+completion feedback remains deferred until either a replacement capture starts
+(continuation, still quiet) or recovery ends without a replacement (one normal
+saved-recording notification/chime). A briefly surviving process at window
+shutdown must not permanently suppress completion when the game then exits.
+
 The portal's `Session::Closed` signal has its own terminal classification,
 separate from proven node/window destruction. It can mean source shutdown or
 revoked sharing and never grants automatic recapture. Recording drains and
 preserves the current part, settles the pinned instance against the census
 instead of declaring the departed bootstrap to be game exit. This terminal
 permission boundary is not the automatic launcher-handoff mechanism.
+
+If the granted node was independently reported removed *before* `Closed`,
+the already-pending destruction check is allowed to finish while frame delivery
+retires immediately. Confirmed destruction can then take the existing recovery
+path; an inconclusive check remains terminal. `Closed` alone never starts this
+probe, and Stop/new-attempt generations discard late results. This preserves
+source-loss evidence when portal/native events race; it cannot guarantee
+handoff when the backend supplies only an ambiguous closure.
 
 An explicit recording restart uses a fresh window-only portal selection with no saved
 restore token. Existing tokens are not deleted just because the session ended.

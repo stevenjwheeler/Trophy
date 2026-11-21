@@ -12,17 +12,24 @@ Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 ### Launcher and window handoffs
 
-Automatic recording waits past a locally verified game-specific launcher until
-the actual game payload joins that same tracked instance. It then waits for
+Automatic full recording and DVR wait past a locally verified game-specific launcher until
+the actual game payload joins that same tracked instance. Trophy then waits for
 owned game audio before requesting capture, without an extra launcher-resume
 step. Audio present on the first check allows an immediate start; otherwise
 two consecutive successful polls settle it. Silent games start after ten
 resolved polls, normally about 20 seconds (slow audio queries can take longer).
-A launcher left open
-does not become the capture target just because it has been running longer.
+A launcher left open does not become the capture target just because it has
+been running longer.
 This process check does not prove window visibility: the portal still owns
 source selection and authorization. When owned game audio is not yet available,
 Trophy retains desktop-audio fallback and retries owned game audio.
+
+An orange dot and **Waiting for window** on the Dashboard indicate that automatic
+full recording is waiting for game startup or audio readiness before requesting
+capture. This is a startup status, not a guarantee that a particular window has
+been found. Use Stop to cancel the pending recording. Closing a launcher without
+starting the game clears the wait and returns Trophy to Idle when nothing else
+is selected.
 
 If a captured loader/splash window disappears while the **same game instance**
 remains alive and selected, Trophy saves the completed part and retries full
@@ -33,15 +40,21 @@ The game can keep the same PID or hand off to another verified member of the
 same instance.
 
 Continuation is a **new recording file**, not DVR or an automatic merge.
-The gap between parts is not recorded. Stop cancels pending recovery; game exit,
+The gap between parts is not recorded. Intermediate handoff parts are saved
+quietly; completion notification and sound follow your settings when recording
+ends. If a suspected handoff turns out to be game exit, completion feedback is
+delivered after recovery is cancelled rather than suppressed permanently.
+Stop cancels pending recovery; game exit,
 changed selection, removed approval or blocked capture also prevents another
 attempt. A generic portal rejection, permission loss, startup timeout, or
 service/output failure is not treated as a temporarily absent window. Portal
 backends still control whether the replacement can be restored silently.
 
-If the desktop portal closes the entire sharing session, Trophy saves any
-recorded footage and stops capture rather than assuming sharing permission still
-applies. This is distinct from waiting past a known launcher before capture.
+If the desktop portal closes the entire sharing session without confirmed
+window-loss evidence, Trophy saves any recorded footage and stops capture rather
+than assuming sharing permission still applies. A confirmed window-loss handoff
+can still recover when a portal closure arrives at the same time. This is
+distinct from waiting past a known launcher before capture.
 An explicit recording start after session closure uses fresh portal authorization,
 not the old closed grant. Cancellation or denial never starts an automatic retry.
 

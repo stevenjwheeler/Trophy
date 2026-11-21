@@ -547,6 +547,7 @@ protected:
       return true;
     };
     QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy completion(&recorder, &RecordingManager::recordingCompletionReady);
     QSignalSpy errors(&recorder, &RecordingManager::recordingError);
     QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
     int finishesWithIntent = 0;
@@ -576,6 +577,7 @@ protected:
       EXPECT_EQ(saved.size(), scenario == 8 || scenario == 10 ? 0 : 1);
       if (!saved.isEmpty())
         EXPECT_TRUE(saved.first().at(3).toBool()); // No session-end chime on a handoff.
+      EXPECT_EQ(completion.size(), 0); // Filing a part does not finish the intent.
       if (scenario == 10) EXPECT_FALSE(QFileInfo::exists(firstPath));
       if (scenario == 1) recorder.stopRecording(); // Explicit stop during retry delay.
       if (scenario == 2) {
@@ -610,10 +612,12 @@ protected:
             ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
             EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
             EXPECT_EQ(errors.size(), 0);
+            EXPECT_EQ(completion.size(), 0); // Empty retries must remain quiet.
           }
         }
         recorder.completePipelineAndStart();
         ASSERT_TRUE(recorder.isRecording());
+        EXPECT_EQ(completion.size(), 0); // A real successor consumes deferred feedback.
         if (scenario != 10) EXPECT_NE(recorder.currentFilePath(), firstPath);
         EXPECT_EQ(started.size(), scenario == 8 ? 1 : 2);
         if (scenario == 7) {
@@ -643,6 +647,18 @@ protected:
         EXPECT_EQ(started.size(), 1);
       }
       EXPECT_EQ(errors.size(), 0);
+    }
+    if (scenario == 5 || scenario == 6 || scenario == 11) {
+      EXPECT_TRUE(completion.isEmpty()); // Failed outputs never announce success.
+    } else {
+      ASSERT_EQ(completion.size(), 1);
+      EXPECT_EQ(completion.first().at(0).toString(),
+                scenario >= 1 && scenario <= 4 ? firstPath
+                                               : saved.last().at(0).toString());
+      EXPECT_EQ(completion.first().at(2).toLongLong(), scenario == 10 ? 0 : 8192);
+      // Repeated cancellation/Stop cannot replay feedback for a saved part.
+      recorder.cancelCaptureRecovery();
+      EXPECT_EQ(completion.size(), 1);
     }
     if (scenario != 10) {
       ASSERT_TRUE(first.open(QIODevice::ReadOnly));

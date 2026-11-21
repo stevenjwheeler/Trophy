@@ -89,6 +89,13 @@ private:
   // its indicator — alive forever.
   void closePortalSession();
   void portalSessionLost(const QString &reason, CaptureErrorKind kind = CaptureErrorKind::Other);
+  void beginNodeRemovalCheck(uint32_t node, quint64 generation,
+                             uint32_t cookie, uint64_t serial);
+  void finishNodeRemovalCheck(quint64 generation, bool destroyed);
+  std::atomic<quint64> m_nodeRemovalGeneration{0};
+  quint64 m_closedDuringNodeRemoval = 0;
+  QString m_deferredSessionError;
+  std::function<bool(uint32_t, uint32_t, uint64_t)> m_nodeDestructionLookup;
   bool startPipeWireStream(uint32_t nodeId);
   void stopPipeWireStream();
   void postNativeReady(quint64 generation);

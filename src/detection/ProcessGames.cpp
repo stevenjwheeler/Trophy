@@ -25,6 +25,10 @@ namespace {
 bool alwaysExcluded(const QString &payload) {
   const auto name = normalized(base(payload));
   return name.isEmpty() || name.endsWith("updater") ||
+         name.startsWith("steam-runtime-") ||
+         name.startsWith("pressure-vessel-") ||
+         name.endsWith("-srt-launcher-service") ||
+         name.endsWith("-srt-launch-client") ||
          prerequisiteInstallerNames().contains(name) ||
          QStringList{"steam",
                      "heroic",
@@ -70,7 +74,11 @@ bool alwaysExcluded(const QString &payload) {
                      "pv-bwrap",
                      "bwrap",
                      "pv-adverb",
-                     "srt-bwrap",
+                      "srt-bwrap",
+                      "srt-logger",
+                      "srt-client-container",
+                      "srt-launcher-service",
+                      "srt-launch-client",
                      "reaper",
                      "steam-runtime-launcher-service",
                      "steam-runtime-launch-client",
@@ -148,6 +156,11 @@ QList<GameInstance> ProcessGames::identify(
     QStringList sources;
   };
   QMap<qint64, Seed> seeds;
+  const auto runtimePayload = [&](const ProcessInfo &p) {
+    return std::any_of(catalogue.begin(), catalogue.end(), [&](const auto &game) {
+      return game.runtimeTool && under(p.payload(), game.directory);
+    });
+  };
   const auto veto = [&](const ProcessInfo &p, const QString &key) {
     return blocked.contains(normalized(key)) ||
            blocked.contains(normalized(base(p.payload()))) ||
@@ -158,7 +171,7 @@ QList<GameInstance> ProcessGames::identify(
   for (const auto &p : ps) {
     const auto payload = p.payload();
     const auto bootstrapDirectory = verifiedBootstrapDirectory(p, catalogue);
-    if (excluded(payload) && bootstrapDirectory.isEmpty())
+    if (runtimePayload(p) || (excluded(payload) && bootstrapDirectory.isEmpty()))
       continue;
     QString key, name;
     QStringList sources;
@@ -175,6 +188,8 @@ QList<GameInstance> ProcessGames::identify(
       }
     }
     const bool explicitRule = !key.isEmpty();
+    const bool steamAppRule = explicitRule && p.steamId &&
+                             key == QString("steam_app_%1").arg(p.steamId);
     // Environment is inherited by launchers/services. Require a payload in
     // the matching installed game's directory, not any "steamapps" path.
     for (const auto &game : catalogue) {
@@ -211,8 +226,12 @@ QList<GameInstance> ProcessGames::identify(
       continue;
     if (name.isEmpty())
       name = base(payload);
-    if (explicitRule)
+    if (explicitRule && !steamAppRule)
       sources.append("user rule");
+    else if (steamAppRule && !sources.contains("Steam"))
+      // Saved Steam approvals are keyed by App ID, not custom executable
+      // rules. Do not imply a manifest/path match if only that rule matched.
+      sources.append("Steam App ID rule");
     sources.removeDuplicates();
     auto context = GameLaunchContext::attest(
         p, bootstrapDirectory.isEmpty()
@@ -351,6 +370,7 @@ QList<GameInstance> ProcessGames::identify(
       if (!p.pid || p.start != prior.start ||
           p.executable != prior.executable || p.payload() != prior.payload() ||
           owners.contains(p.pid) ||
+          runtimePayload(p) ||
           (excluded(p.payload()) && verifiedBootstrapDirectory(p, catalogue).isEmpty()) ||
           veto(p, old.key) || blocked.contains(normalized(old.name)) ||
           (old.launchContext.hasScope() && !old.launchContext.contains(p)))
@@ -372,7 +392,7 @@ QList<GameInstance> ProcessGames::identify(
   auto contexts = result;
   contexts.append(previous);
   for (const auto &p : ps) {
-    if (owners.contains(p.pid) || excluded(p.payload()))
+    if (owners.contains(p.pid) || excluded(p.payload()) || runtimePayload(p))
       continue;
     QMap<QString, GameInstance> candidates;
     for (const auto &game : contexts) {
@@ -402,7 +422,8 @@ QList<GameInstance> ProcessGames::identify(
     changed = false;
     for (const auto &p : ps) {
       if (owners.contains(p.pid) || !owners.contains(p.parent) ||
-          excluded(p.payload()) || ps.value(p.parent).start > p.start)
+          excluded(p.payload()) || runtimePayload(p) ||
+          ps.value(p.parent).start > p.start)
         continue;
       const auto owner = owners.value(p.parent);
       for (auto &g : result) {

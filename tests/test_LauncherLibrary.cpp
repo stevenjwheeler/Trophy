@@ -11,6 +11,7 @@
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <sqlite3.h>
+#include <algorithm>
 
 using namespace TrophyBackend;
 class LauncherLibraryTest : public ::testing::Test {
@@ -141,6 +142,49 @@ TEST_F(LauncherLibraryTest, SteamRejectsManifestDirectoryTraversal) {
   write(data + "/Steam/steamapps/appmanifest_42.acf",
         "\"appid\" \"42\" \"name\" \"Bad\" \"installdir\" \"../../Other\"");
   EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, SteamRuntimeManifestExcludesItsToolsWithoutExcludingHostedGames) {
+  const auto apps = data + "/Steam/steamapps";
+  const auto runtime = apps + "/common/SteamLinuxRuntime_4";
+  write(apps + "/appmanifest_4004.acf",
+        "\"appid\" \"4004\" \"name\" \"Steam Linux Runtime 4.0\" "
+        "\"installdir\" \"SteamLinuxRuntime_4\"");
+  write(runtime + "/toolmanifest.vdf",
+        "\"manifest\" { \"compatmanager_layer_name\" \"container-runtime\" }");
+  write(apps + "/appmanifest_42.acf",
+        "\"appid\" \"42\" \"name\" \"Actual Game\" \"installdir\" \"Game\"");
+  const auto games = read();
+  ASSERT_EQ(games.size(), 2);
+  const auto tool = std::find_if(games.begin(), games.end(),
+                               [](const auto &g) { return g.steamId == 4004; });
+  ASSERT_NE(tool, games.end());
+  EXPECT_TRUE(tool->runtimeTool);
+  auto helper = process();
+  auto gameProcess = process(71);
+  gameProcess.executable = apps + "/common/Game/game";
+  gameProcess.arguments = {gameProcess.executable};
+  gameProcess.parent = helper.pid;
+  gameProcess.steamId = 42;
+  for (const auto &relative : QStringList{
+           "/pressure-vessel/bin/pv-verify",
+           "/pressure-vessel/libexec/steam-runtime-tools-0/x86_64-linux-gnu-check-vulkan",
+           "/pressure-vessel/libexec/steam-runtime-tools-0/i386-linux-gnu-inspect-library",
+           "/_v2-entry-point", "/run", "/new-helper-not-in-name-list"}) {
+    SCOPED_TRACE(relative.toStdString());
+    helper.executable = runtime + relative;
+    helper.arguments = {helper.executable};
+    helper.steamId = 4004;
+    EXPECT_TRUE(identify({{helper.pid, helper}}, games).isEmpty());
+    // Inheriting the game's App ID and a saved rule cannot promote a tool.
+    helper.steamId = 42;
+    const QMap<QString, QString> rules{{"steam_app_42", "Actual Game"}};
+    EXPECT_TRUE(identify({{helper.pid, helper}}, games, rules).isEmpty());
+    const auto result = identify({{helper.pid, helper}, {gameProcess.pid, gameProcess}}, games, rules);
+    ASSERT_EQ(result.size(), 1);
+    EXPECT_EQ(result.first().primaryPid, gameProcess.pid);
+    EXPECT_EQ(result.first().processes.size(), 1);
+  }
 }
 TEST_F(LauncherLibraryTest, LegendaryAndHeroicEpicUseInstalledExecutables) {
   for (const auto &relative : {"/legendary", "/heroic/legendaryConfig/legendary"})

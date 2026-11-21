@@ -56,6 +56,8 @@ protected:
     app.m_detectionDebounceTimer = new QTimer(&app);
     QObject::connect(app.m_gameDetector.get(), &GameDetectionService::currentGameChanged,
                      &app, &Application::resumePendingCapture);
+    QObject::connect(app.m_gameDetector.get(), &GameDetectionService::gameClosed,
+                     &app, &Application::clearPendingCaptureForGame);
     setCurrent("Brand New Game");
   }
 
@@ -301,6 +303,21 @@ protected:
       fireWindowTimeout();
     EXPECT_FALSE(windowPendingEmpty());
     EXPECT_TRUE(fullRecordingStarts.isEmpty());
+    if (scenario == 4) {
+      QSignalSpy phase(&app, &Application::recordingStateChanged);
+      QSignalSpy availability(&app, &Application::recordingAvailabilityChanged);
+      detector.apply({}); // Close the launcher without ever starting the game.
+      EXPECT_EQ(app.recordingPhase(), "idle");
+      EXPECT_TRUE(windowPendingEmpty());
+      EXPECT_TRUE(app.m_pendingWindowInstance.isEmpty());
+      EXPECT_FALSE(windowTimerActive());
+      EXPECT_GT(phase.size(), 0);
+      EXPECT_GT(availability.size(), 0);
+      fireWindowTimeout();
+      EXPECT_TRUE(fullRecordingStarts.isEmpty());
+      app.m_recordingManager.reset();
+      return;
+    }
     if (scenario == 1)
       app.requestToggleRecording(); // Explicit Stop while launch is pending.
     if (scenario == 2)
@@ -348,7 +365,7 @@ protected:
     if (scenario == 5)
       app.m_pendingAudioInstance = "another-instance";
     drainAudioProbe();
-    if (scenario >= 3) {
+    if (scenario >= 3 && scenario <= 5) {
       EXPECT_TRUE(fullRecordingStarts.isEmpty());
       EXPECT_TRUE(audioPendingEmpty());
       EXPECT_FALSE(audioRetryActive());
@@ -358,6 +375,20 @@ protected:
     EXPECT_FALSE(audioPendingEmpty());
     EXPECT_TRUE(audioIsRecord());
     EXPECT_EQ(app.recordingPhase(), "waiting-game");
+    if (scenario == 6) {
+      QSignalSpy phase(&app, &Application::recordingStateChanged);
+      QSignalSpy availability(&app, &Application::recordingAvailabilityChanged);
+      setCurrentIdentity({}, {}, 0);
+      EXPECT_EQ(app.recordingPhase(), "idle");
+      EXPECT_TRUE(audioPendingEmpty());
+      EXPECT_FALSE(audioRetryActive());
+      EXPECT_GT(phase.size(), 0);
+      EXPECT_GT(availability.size(), 0);
+      app.onAudioWaitTimeout();
+      EXPECT_TRUE(fullRecordingStarts.isEmpty());
+      app.m_recordingManager.reset();
+      return;
+    }
     if (scenario == 2) {
       app.requestToggleRecording();
       EXPECT_TRUE(audioPendingEmpty());
@@ -433,6 +464,14 @@ TEST_F(ApplicationAuthorizePromptTest, ApprovedLauncherWaitsForPayloadAndStartsW
 
 TEST_F(ApplicationAuthorizePromptTest, StopCancelsPendingBootstrapCapture) {
   bootstrapWait(1);
+}
+
+TEST_F(ApplicationAuthorizePromptTest, ClosingLauncherWithoutGameClearsWaitingPhase) {
+  bootstrapWait(4);
+}
+
+TEST_F(ApplicationAuthorizePromptTest, GameExitDuringAudioWaitClearsWaitingPhase) {
+  audioSettling(6);
 }
 
 TEST_F(ApplicationAuthorizePromptTest, BlockCancelsPendingBootstrapCapture) {

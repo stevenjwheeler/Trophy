@@ -731,6 +731,8 @@ void Application::connectSignals() {
               return;
             m_detectionDebounceTimer->start();
           });
+  connect(m_gameDetector.get(), &GameDetectionService::gameClosed,
+          this, &Application::clearPendingCaptureForGame);
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed, this, [this](const QString &gameName) {
             m_authorizePromptTokenInvalid = false;
             emit currentGameChanged();
@@ -746,15 +748,6 @@ void Application::connectSignals() {
             }
             if (m_pendingDvrGame == gameName) {
               m_pendingDvrGame.clear();
-            }
-            if (m_pendingWindowGame == gameName) {
-              m_pendingWindowGame.clear();
-              m_windowWaitTimer->stop();
-            }
-            if (m_pendingAudioGame == gameName) {
-              m_pendingAudioGame.clear();
-              ++m_audioWaitGeneration;
-              m_audioWaitTimer->stop();
             }
             if (m_pendingAutoRecordGame.isEmpty() && m_pendingDvrGame.isEmpty()) {
               m_detectionDebounceTimer->stop();
@@ -1017,11 +1010,12 @@ void Application::connectSignals() {
                   m_recordingManager->currentGameName());
           });
   connect(m_recordingManager.get(), &RecordingManager::recordingStopped, this,
-          [this](const QString &filePath, qint64 durationMs, qint64 sizeBytes, bool quiet) {
+          [this](const QString &filePath, qint64, qint64, bool) {
             m_recordingLibrary->refreshAnnotations(filePath);
             preparePlayerCaches(filePath);
-            if (quiet)
-              return;
+          });
+  connect(m_recordingManager.get(), &RecordingManager::recordingCompletionReady, this,
+          [this](const QString &, qint64 durationMs, qint64 sizeBytes) {
             playRecordingStoppedPing(false);
             if (!m_settingsManager->notifyRecordings())
               return;
@@ -1620,6 +1614,31 @@ void Application::resumePendingCapture() {
   startWhenWindowReady(game, isRecord);
   emit recordingStateChanged();
   emit recordingAvailabilityChanged();
+}
+
+void Application::clearPendingCaptureForGame(const QString &game) {
+  bool changed = false;
+  if (!game.isEmpty() && m_pendingWindowGame == game) {
+    m_pendingWindowGame.clear();
+    m_pendingWindowInstance.clear();
+    if (m_windowWaitTimer)
+      m_windowWaitTimer->stop();
+    changed = true;
+  }
+  if (!game.isEmpty() && m_pendingAudioGame == game) {
+    m_pendingAudioGame.clear();
+    m_pendingAudioInstance.clear();
+    ++m_audioWaitGeneration;
+    if (m_audioWaitTimer)
+      m_audioWaitTimer->stop();
+    changed = true;
+  }
+  if (changed) {
+    // Native state stays Idle throughout launch/audio waits. Notify the
+    // derived phase explicitly so QML cannot retain a closed launch.
+    emit recordingStateChanged();
+    emit recordingAvailabilityChanged();
+  }
 }
 
 void Application::cancelPendingCapture() {

@@ -242,6 +242,7 @@ private:
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
   void resumePendingCapture();
+  void clearPendingCaptureForGame(const QString &game);
   // A launcher/boot window was captured and disappeared before anything was
   // recorded: wait for the window that replaces it and try again.
   void resumeReplayAfterRecording();
