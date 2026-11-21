@@ -148,7 +148,7 @@ support likewise does not guarantee every DMA-BUF capture path works.
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
 2. With an AppImage, Trophy registers its menu entry automatically on first launch, before it talks to the portal, so capture approvals and shortcuts belong to Trophy from the start. Nothing to confirm; **Settings → Desktop Integration** shows the entry and can remove it. Installing through an AppImage manager such as Gear Lever works too — Trophy keeps its own entry for the stable identity and hides it from menus so you are not offered a duplicate.
 3. There are no Trophy window helpers to install. Process-based detection is independent of the compositor; window/screen selection belongs to the system portal.
-4. Add standalone/non-Steam games by exact executable name or path in Games. Steam library metadata supplies identities for installed native and Proton games.
+4. Steam, Heroic/Legendary (Epic), Heroic GOG/Amazon and Lutris can supply local installed-game identities automatically. Games without usable executable metadata still need an exact executable name or path in Games; see [launcher coverage and limitations](game-detection.md#identification-and-catalogues).
 5. Assign recording and clip/bookmark shortcuts through your desktop's portal approval dialog. If its backend does not support portal shortcuts, bind the commands described under [Keyboard shortcuts](#keyboard-shortcuts) natively.
 6. Start a game and authorize its capture when prompted. Saved approvals can restore capture on later sessions; stale approvals may need authorization again.
 
@@ -158,7 +158,7 @@ Manual recording is also available. When no game is tracked, the Record action o
 
 Trophy polls Linux processes independently of windows, then associates PipeWire
 playback streams with game instances. Native and Proton/Wine executables use
-local Steam metadata and exact user rules. Generic
+local launcher installation metadata and exact user rules. Generic
 launchers and Wine services do not identify games. Use Games to block
 applications, define standalone games, or select among concurrent instances.
 

@@ -53,6 +53,10 @@ protected:
   static void setApplications(GameDetectionService &service, const QSet<QString> &apps) {
     service.m_applicationExecutables = apps;
   }
+  static void setCatalogue(GameDetectionService &service,
+                           const QList<LauncherGame> &games) {
+    service.m_catalogue = games;
+  }
   static void writeFile(const QString &path, const QByteArray &bytes) {
     QFile file(path);
     ASSERT_TRUE(file.open(QIODevice::WriteOnly));
@@ -223,6 +227,52 @@ TEST_F(GameDetectionServiceTest, UnlistedNativeGameRequiresAnExplicitRule) {
   EXPECT_EQ(service.games().first().name, "My standalone game");
 }
 
+TEST_F(GameDetectionServiceTest, LauncherCatalogueFeedsSelectionAndPicker) {
+  GameDetectionService service;
+  const auto p = process(5000, "/games/non-steam/native");
+  setCatalogue(service, {{0, "A Launcher Game", {}, p.payload(), {}}});
+  apply(service, {{p.pid, p}});
+  ASSERT_EQ(service.games().size(), 1);
+  EXPECT_EQ(service.currentGameName(), "A Launcher Game");
+  EXPECT_EQ(service.currentGameKey(), "exe:/games/non-steam/native");
+  ASSERT_EQ(service.runningProcesses().size(), 1);
+  EXPECT_TRUE(service.runningProcesses().first().toMap()["likelyApplication"].toBool());
+  define(service, "exe:/games/non-steam/native", "My Override");
+  apply(service, {{p.pid, p}});
+  EXPECT_EQ(service.currentGameName(), "My Override");
+  service.stop();
+  EXPECT_TRUE(service.games().isEmpty());
+  EXPECT_TRUE(service.runningProcesses().isEmpty());
+}
+
+TEST_F(GameDetectionServiceTest, VerifiedBootstrapHandoffKeepsCaptureIdentityAndPrompt) {
+  GameDetectionService service;
+  const auto bootstrap = process(5000, "/games/fixture/Launcher.exe");
+  auto child = process(5001, "/games/fixture/Retail/Game.exe", bootstrap.pid);
+  setCatalogue(service, {{0, "A Launcher Game", "/games/fixture",
+                          bootstrap.payload(), {}, true, {"Heroic (Epic)"}}});
+  QSignalSpy detected(&service, &GameDetectionService::gameDetected);
+  QSignalSpy closed(&service, &GameDetectionService::gameClosed);
+  apply(service, {{bootstrap.pid, bootstrap}, {child.pid, child}});
+  ASSERT_EQ(service.games().size(), 1);
+  EXPECT_EQ(service.currentGameName(), "A Launcher Game");
+  EXPECT_EQ(service.currentGameSource(), "Heroic (Epic)");
+  EXPECT_EQ(detected.count(), 1);
+  const auto identity = service.captureIdentityInfo("A Launcher Game");
+  const auto rows = service.runningProcesses();
+  ASSERT_EQ(rows.size(), 2);
+  EXPECT_TRUE(rows[0].toMap()["likelyApplication"].toBool());
+  child.parent = 1;
+  apply(service, {{child.pid, child}});
+  EXPECT_EQ(service.currentGamePid(), child.pid);
+  const auto next = service.captureIdentityInfo("A Launcher Game");
+  EXPECT_EQ(next["detectedGameInstance"], identity["detectedGameInstance"]);
+  EXPECT_EQ(next["detectedGameKey"], identity["detectedGameKey"]);
+  EXPECT_EQ(detected.count(), 1);
+  EXPECT_EQ(closed.count(), 0);
+  EXPECT_EQ(service.currentGameSource(), "Heroic (Epic)");
+}
+
 TEST_F(GameDetectionServiceTest, PickerDesktopHintsRespectExecAndHiddenOverrides) {
   QTemporaryDir root;
   const auto user = root.path() + "/user";
@@ -300,7 +350,7 @@ TEST_F(GameDetectionServiceTest, ProcessPickerExposesWinePayloadNotLoader) {
             "/prefix/drive_c/Games/Game.exe");
   EXPECT_FALSE(
       service.addProcessGame(20, p.identity(), "Not a live process", false));
-  const QList<SteamGame> steam{{42, "Fixture", "/prefix/drive_c/Games"}};
+  const QList<LauncherGame> steam{{42, "Fixture", "/prefix/drive_c/Games"}};
   const auto blocked =
       GameWhitelist::normalizeKey("wine:/prefix:" + p.payload());
   EXPECT_TRUE(

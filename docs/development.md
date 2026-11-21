@@ -8,7 +8,7 @@ Game detection and Add Game use the asynchronous Linux process census.
 No KWin scripts, GNOME Shell extensions or Hyprland/Sway IPC are built,
 installed or invoked. Window/screen selection and authorization belong to the
 standard ScreenCast portal, not Trophy-specific desktop integrations.
-Use `detection_probe --benchmark` to measure local census, Steam metadata and
+Use `detection_probe --benchmark` to measure local census, launcher metadata and
 identification cost; it does not open a compositor connection.
 
 The Add Game list is a process picker, not a visible-window census. There is
@@ -21,7 +21,7 @@ as proof that a process owns a visible window. See the
 Add Game defaults to **Likely applications**: known game primaries, Windows
 payloads and executable matches from cached desktop application launchers.
 **Show all processes** restores the other selectable process rows. Desktop
-metadata is refreshed on the census worker alongside local Steam metadata;
+metadata is refreshed on the census worker alongside installed-game metadata;
 opening/filtering the picker performs no new filesystem enumeration.
 
 ## Dependencies
@@ -30,6 +30,7 @@ opening/filtering the picker performs no new filesystem enumeration.
 - Qt 6 development packages: Core, Gui, Qml, Quick, QuickControls2, Multimedia, DBus, Concurrent, Network, and Widgets.
 - FFmpeg development libraries: libavcodec, libavformat, libavutil, libswscale, and libswresample.
 - PipeWire development libraries.
+- libyaml and SQLite development libraries (read-only local launcher metadata).
 - Optional libva/libva-drm for VA-API, libdrm and EGL for DMA-BUF support, and GBM for related tests.
 - GoogleTest and Qt Test when building tests (enabled by default).
 
@@ -50,7 +51,7 @@ Arch/CachyOS:
 
 ```bash
 sudo pacman -S --needed base-devel cmake qt6-base qt6-declarative qt6-multimedia \
-    ffmpeg pipewire libva pkgconf \
+    ffmpeg pipewire libva pkgconf libyaml sqlite \
     libdrm mesa gtest
 ```
 
@@ -58,7 +59,7 @@ Fedora (FFmpeg development package availability depends on enabled repositories)
 
 ```bash
 sudo dnf install gcc-c++ make cmake qt6-qtbase-devel qt6-qtdeclarative-devel \
-    qt6-qtmultimedia-devel ffmpeg-devel pipewire-devel libva-devel \
+    qt6-qtmultimedia-devel ffmpeg-devel pipewire-devel libva-devel libyaml-devel sqlite-devel \
     libdrm-devel mesa-libEGL-devel \
     mesa-libgbm-devel gtest-devel
 ```
@@ -68,7 +69,7 @@ Ubuntu/Debian:
 ```bash
 sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-declarative-dev \
     qt6-multimedia-dev libavcodec-dev libavformat-dev libavutil-dev \
-    libswscale-dev libswresample-dev libpipewire-0.3-dev libva-dev \
+    libswscale-dev libswresample-dev libpipewire-0.3-dev libva-dev libyaml-dev libsqlite3-dev \
     libgtest-dev libdrm-dev libegl-dev libgbm-dev
 ```
 

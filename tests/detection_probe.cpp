@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
     constexpr int iterations = 100;
     QJsonObject output;
     TrophyBackend::ProcessCensus::Snapshot snapshot;
-    QList<TrophyBackend::SteamGame> steam;
+    QList<TrophyBackend::LauncherGame> catalogue;
     const auto measure = [&](const QString &name, auto operation) {
       QElapsedTimer timer;
       timer.start();
@@ -40,14 +40,14 @@ int main(int argc, char **argv) {
                       {"meanCpuMs", (cpuMs() - cpu) / iterations}};
     };
     measure("census", [&] { snapshot = TrophyBackend::ProcessCensus::scan(); });
-    measure("steamMetadata",
-            [&] { steam = TrophyBackend::ProcessGames::steamLibrary(); });
+    measure("launcherMetadata",
+            [&] { catalogue = TrophyBackend::LauncherLibrary::installed(); });
     measure("identify", [&] {
       TrophyBackend::ProcessGames::identify(
-          snapshot, steam, {}, {});
+          snapshot, catalogue, {}, {});
     });
     output["processes"] = snapshot.size();
-    output["steamGames"] = steam.size();
+    output["installedGames"] = catalogue.size();
     output["iterations"] = iterations;
     const auto json = QJsonDocument(output).toJson();
     std::fwrite(json.constData(), 1, json.size(), stdout);
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
   }
   const auto games = TrophyBackend::ProcessGames::identify(
       TrophyBackend::ProcessCensus::scan(),
-      TrophyBackend::ProcessGames::steamLibrary(), {}, {});
+      TrophyBackend::LauncherLibrary::installed(), {}, {});
   TrophyBackend::ProcessGames::publish(games);
   QJsonArray output;
   for (const auto &g : games) {

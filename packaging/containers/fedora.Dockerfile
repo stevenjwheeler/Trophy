@@ -5,4 +5,5 @@ RUN dnf install -y --setopt=install_weak_deps=False \
     cmake ninja-build ccache gcc-c++ make pkgconf-pkg-config python3 dbus-daemon binutils file cpio \
     qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtmultimedia-devel qt6-qtwayland qt6-qtsvg \
     ffmpeg-free-devel pipewire-devel pipewire-utils libva-devel \
+    libyaml-devel sqlite-devel \
     mesa-libEGL-devel mesa-libgbm-devel libdrm-devel rpm-build desktop-file-utils appstream

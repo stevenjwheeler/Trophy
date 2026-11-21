@@ -362,6 +362,7 @@ TEST_F(WaylandPortalCaptureTest, PortalClosedDuringSelectionRejectsLateResponseA
   const QString oldRequest = pendingPath(capture);
   control("CloseSession", {"/test/session"});
   ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_EQ(capture.lastErrorKind(), IVideoCaptureSource::CaptureErrorKind::SessionClosed);
   EXPECT_FALSE(starting(capture));
   EXPECT_FALSE(watchdogActive(capture));
   EXPECT_FALSE(capture.isCapturing());
@@ -393,6 +394,7 @@ TEST_F(WaylandPortalCaptureTest, ActivePortalClosureIgnoresWrongPathSenderAndRet
   EXPECT_EQ(errors.size(), 0);
   control("CloseSession", {"/test/session"});
   ASSERT_TRUE(waitUntil([&] { return errors.size() == 1; }));
+  EXPECT_EQ(capture.lastErrorKind(), IVideoCaptureSource::CaptureErrorKind::SessionClosed);
   EXPECT_FALSE(capture.isCapturing());
   EXPECT_FALSE(capture.startCapture());
   control("CloseSession", {"/test/session"});

@@ -2,11 +2,7 @@
 #include "ProcessGames.h"
 #include "GameWhitelist.h"
 #include "PrerequisiteInstallers.h"
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
 #include <QMutexLocker>
-#include <QRegularExpression>
 #include <QSet>
 #include <algorithm>
 
@@ -19,60 +15,34 @@ QString base(QString path) {
   return path.section('/', -1);
 }
 QString normalized(const QString &s) { return GameWhitelist::normalizeKey(s); }
-QString text(const QString &path) {
-  QFile f(path);
-  return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.read(1024LL * 1024))
-                                     : QString();
-}
-QString field(const QString &s, const QString &name) {
-  return QRegularExpression("\"" + name + "\"\\s+\"([^\"]+)\"")
-      .match(s)
-      .captured(1);
-}
 bool under(const QString &path, const QString &directory) {
   return !directory.isEmpty() && path.startsWith(directory + "/");
 }
+
 } // namespace
 
-QList<SteamGame> ProcessGames::steamLibrary() {
-  const auto home = QDir::homePath();
-  QStringList libraries;
-  for (const auto &root :
-       {home + "/.steam/steam", home + "/.local/share/Steam",
-        home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam",
-        home + "/.var/app/com.valvesoftware.Steam/.steam/steam"}) {
-    if (!QDir(root + "/steamapps").exists())
-      continue;
-    libraries.append(QFileInfo(root).canonicalFilePath());
-    const auto vdf = text(root + "/steamapps/libraryfolders.vdf");
-    auto matches =
-        QRegularExpression("\"path\"\\s+\"([^\"]+)\"").globalMatch(vdf);
-    while (matches.hasNext())
-      libraries.append(matches.next().captured(1).replace("\\\\", "\\"));
-  }
-  libraries.removeDuplicates();
-  QList<SteamGame> result;
-  for (const auto &library : libraries) {
-    QDir apps(library + "/steamapps");
-    for (const auto &manifest :
-         apps.entryList({"appmanifest_*.acf"}, QDir::Files)) {
-      const auto acf = text(apps.filePath(manifest));
-      const uint id = field(acf, "appid").toUInt();
-      const auto install = field(acf, "installdir");
-      if (id && !install.isEmpty())
-        result.append({id, field(acf, "name"),
-                       QDir::cleanPath(apps.filePath("common/" + install))});
-    }
-  }
-  return result;
-}
-
-bool ProcessGames::excluded(const QString &payload) {
+namespace {
+bool alwaysExcluded(const QString &payload) {
   const auto name = normalized(base(payload));
-  return name.isEmpty() || name.endsWith("launcher") ||
-         name.endsWith("updater") ||
+  return name.isEmpty() || name.endsWith("updater") ||
          prerequisiteInstallerNames().contains(name) ||
          QStringList{"steam",
+                     "heroic",
+                     "lutris",
+                     "legendary",
+                     "nile",
+                     "bottles",
+                     "galaxyclient",
+                     "battle.net",
+                     "eadesktop",
+                     "ubisoftconnect",
+                     "upc",
+                     "epicgameslauncher",
+                     "ealauncher",
+                     "origin",
+                     "originthinsetupinternal",
+                     "ubisoftgamelauncher",
+                     "battlenet",
                      "steamwebhelper",
                      "steamservice",
                      "proton",
@@ -112,15 +82,70 @@ bool ProcessGames::excluded(const QString &payload) {
                      "firefox",
                      "chrome",
                      "chromium"}
-             .contains(name);
+              .contains(name);
+}
+} // namespace
+
+bool ProcessGames::excluded(const QString &payload) {
+  return alwaysExcluded(payload) ||
+         normalized(base(payload)).endsWith("launcher");
+}
+
+bool ProcessGames::bootstrapCandidate(const QString &payload) {
+  return !alwaysExcluded(payload) &&
+         normalized(base(payload)).endsWith("launcher");
+}
+
+QString ProcessGames::verifiedBootstrapDirectory(
+    const ProcessInfo &process, const QList<LauncherGame> &catalogue) {
+  const auto payload = process.payload();
+  if (!bootstrapCandidate(payload))
+    return {};
+  QSet<QString> names, directories;
+  for (const auto &game : catalogue) {
+    if (game.steamId || payload != game.executable ||
+        (!game.winePrefix.isEmpty() && process.winePrefix != game.winePrefix))
+      continue;
+    names.insert(game.name);
+    if (game.bootstrap && under(payload, game.directory))
+      directories.insert(game.directory);
+  }
+  return names.size() == 1 && directories.size() == 1
+             ? *directories.begin() : QString();
+}
+
+QString ProcessGames::verifiedInstallationDirectory(
+    const ProcessInfo &process, const QList<LauncherGame> &catalogue) {
+  const auto payload = process.payload();
+  QSet<QString> steamDirectories, directories, names;
+  for (const auto &game : catalogue) {
+    if (game.steamId) {
+      if ((!process.steamId || process.steamId == game.steamId) &&
+          under(payload, game.directory))
+        steamDirectories.insert(game.directory);
+    } else if (payload == game.executable &&
+               (game.winePrefix.isEmpty() || process.winePrefix == game.winePrefix)) {
+      names.insert(game.name);
+      if (under(payload, game.directory))
+        directories.insert(game.directory);
+    }
+  }
+  // Match the existing Steam precedence, but never choose an ambiguous scope.
+  if (!steamDirectories.isEmpty())
+    return steamDirectories.size() == 1 ? *steamDirectories.begin() : QString();
+  return names.size() == 1 && directories.size() == 1
+             ? *directories.begin() : QString();
 }
 
 QList<GameInstance> ProcessGames::identify(
-    const ProcessCensus::Snapshot &ps, const QList<SteamGame> &steam,
+    const ProcessCensus::Snapshot &ps, const QList<LauncherGame> &catalogue,
     const QMap<QString, QString> &definitions, const QStringList &blocked,
     const QList<GameInstance> &previous) {
   struct Seed {
-    QString key, name, anchor;
+    QString key, name, anchor, previousId;
+    GameLaunchContext launchContext;
+    bool explicitRule = false;
+    QStringList sources;
   };
   QMap<qint64, Seed> seeds;
   const auto veto = [&](const ProcessInfo &p, const QString &key) {
@@ -132,9 +157,11 @@ QList<GameInstance> ProcessGames::identify(
   };
   for (const auto &p : ps) {
     const auto payload = p.payload();
-    if (excluded(payload))
+    const auto bootstrapDirectory = verifiedBootstrapDirectory(p, catalogue);
+    if (excluded(payload) && bootstrapDirectory.isEmpty())
       continue;
     QString key, name;
+    QStringList sources;
     const QString pathKey = payload.endsWith(".exe", Qt::CaseInsensitive)
                                 ? "wine:" + p.winePrefix + ":" + payload
                                 : "exe:" + payload;
@@ -147,27 +174,59 @@ QList<GameInstance> ProcessGames::identify(
         break;
       }
     }
+    const bool explicitRule = !key.isEmpty();
     // Environment is inherited by launchers/services. Require a payload in
     // the matching installed game's directory, not any "steamapps" path.
-    for (const auto &game : steam) {
-      if ((p.steamId && p.steamId != game.id) ||
+    for (const auto &game : catalogue) {
+      if (!game.steamId || (p.steamId && p.steamId != game.steamId) ||
           !under(payload, game.directory))
         continue;
-      key = QString("steam_app_%1").arg(game.id);
+      key = QString("steam_app_%1").arg(game.steamId);
       if (name.isEmpty())
         name = game.name;
+      sources.append(game.sources.isEmpty() ? QStringList{"Steam"} : game.sources);
       break;
+    }
+    if (sources.isEmpty()) {
+      QSet<QString> names;
+      QStringList launcherSources;
+      for (const auto &game : catalogue)
+        if (!game.steamId && payload == game.executable &&
+            (game.winePrefix.isEmpty() || p.winePrefix == game.winePrefix)) {
+          names.insert(game.name);
+          launcherSources.append(game.sources.isEmpty()
+                                     ? QStringList{"local launcher metadata"} : game.sources);
+        }
+      // Conflicting metadata must not silently choose a title. Exact user
+      // rules and Steam metadata above remain authoritative.
+      if (names.size() == 1) {
+        if (key.isEmpty()) {
+          key = normalized(pathKey);
+          name = *names.begin();
+        }
+        sources.append(launcherSources);
+      }
     }
     if (key.isEmpty() || veto(p, key) || blocked.contains(normalized(name)))
       continue;
     if (name.isEmpty())
       name = base(payload);
+    if (explicitRule)
+      sources.append("user rule");
+    sources.removeDuplicates();
+    auto context = GameLaunchContext::attest(
+        p, bootstrapDirectory.isEmpty()
+               ? verifiedInstallationDirectory(p, catalogue) : bootstrapDirectory, ps);
+    // Ordinary direct/descendant detection retains its existing policy when
+    // no private runtime is attested. Bootstraps still require scoped children.
+    if (!context.runtime.pid && bootstrapDirectory.isEmpty())
+      context = {};
     auto anchor = p;
     QSet<qint64> visited{p.pid};
     // Steam launch context groups sibling Wine payloads, but never crosses
     // into Steam itself or another App ID. Standalone instances use the
     // matched executable root, not an entire Wine prefix.
-    if (p.steamId) {
+    if (p.steamId && key.startsWith("steam_app_") && !context.hasScope()) {
       while (ps.contains(anchor.parent) && !visited.contains(anchor.parent)) {
         const auto parent = ps.value(anchor.parent);
         const auto parentPayload = normalized(base(parent.payload()));
@@ -184,8 +243,62 @@ QList<GameInstance> ProcessGames::identify(
         anchor = parent;
       }
     }
-    seeds.insert(p.pid, {key, name, anchor.identity()});
+    seeds.insert(p.pid, {key, name,
+                         context.runtime.pid ? context.runtime.identity() : anchor.identity(),
+                         {}, context, explicitRule, sources});
   }
+  // A sibling may itself match a catalogue entry. Resolve it to the observed
+  // launch before assigning fresh instance IDs; explicit different user rules
+  // remain separate. Names alone never establish the relationship.
+  const auto originalSeeds = seeds;
+  QSet<qint64> deniedSeeds;
+  for (auto it = seeds.begin(); it != seeds.end(); ++it) {
+    auto &seed = it.value();
+    const auto p = ps.value(it.key());
+    QMap<QString, Seed> candidates;
+    const auto compatible = [&](const QString &key, const QString &name) {
+      return seed.key == key || (!seed.explicitRule && seed.name == name);
+    };
+    for (const auto &old : previous) {
+      const auto prior = old.processes.value(p.pid);
+      const bool unchanged = prior.pid == p.pid && prior.start == p.start &&
+                             prior.executable == p.executable &&
+                             prior.payload() == p.payload() &&
+                             prior.winePrefix == p.winePrefix;
+      if (!old.launchContext.hasScope() || !compatible(old.key, old.name) ||
+          !(unchanged ? old.launchContext.contains(p)
+                      : old.launchContext.ownsSibling(p, ps)))
+        continue;
+      candidates.insert(old.id, {old.key, old.name, {}, old.id,
+                                  old.launchContext, seed.explicitRule,
+                                  old.detectionSources});
+    }
+    // An unchanged member's prior identity wins over a freshly formed root.
+    if (candidates.isEmpty())
+      for (auto root = originalSeeds.begin(); root != originalSeeds.end(); ++root) {
+        const auto &owner = root.value();
+        if (root.key() == p.pid || !owner.launchContext.runtime.pid ||
+            !compatible(owner.key, owner.name) ||
+            !owner.launchContext.ownsSibling(p, ps))
+          continue;
+        candidates.insert("game:" + owner.key + "@" + owner.anchor, owner);
+      }
+    if (candidates.size() == 1) {
+      const auto &owner = candidates.first();
+      if (veto(p, owner.key) || blocked.contains(normalized(owner.name))) {
+        deniedSeeds.insert(p.pid);
+        continue;
+      }
+      const bool userRule = seed.explicitRule;
+      const auto currentSources = seed.sources;
+      seed = owner;
+      seed.explicitRule = userRule;
+      seed.sources.append(currentSources);
+      seed.sources.removeDuplicates();
+    }
+  }
+  for (const auto pid : deniedSeeds)
+    seeds.remove(pid);
   QList<GameInstance> result;
   QMap<qint64, QString> owners;
   for (auto it = seeds.begin(); it != seeds.end(); ++it) {
@@ -207,11 +320,13 @@ QList<GameInstance> ProcessGames::identify(
       }
       parent = ps.value(parent).parent;
     }
-    QString id = "game:" + seed.key + "@" + seed.anchor;
+    QString id = seed.previousId.isEmpty()
+                     ? "game:" + seed.key + "@" + seed.anchor : seed.previousId;
     for (const auto &old : previous) {
       const auto prior = old.processes.value(p.pid);
       if (old.key == seed.key && prior.start == p.start &&
-          prior.executable == p.executable) {
+          prior.executable == p.executable && prior.payload() == p.payload() &&
+          prior.winePrefix == p.winePrefix) {
         id = old.id;
         break;
       }
@@ -219,9 +334,12 @@ QList<GameInstance> ProcessGames::identify(
     auto found = std::find_if(result.begin(), result.end(),
                               [&](const auto &g) { return g.id == id; });
     if (found == result.end()) {
-      result.append({id, seed.key, seed.name, p.pid, {}});
+      result.append({id, seed.key, seed.name, p.pid, {},
+                     seed.launchContext, seed.sources});
       found = std::prev(result.end());
     }
+    found->detectionSources.append(seed.sources);
+    found->detectionSources.removeDuplicates();
     found->processes.insert(p.pid, p);
     owners[p.pid] = id;
   }
@@ -232,17 +350,50 @@ QList<GameInstance> ProcessGames::identify(
       const auto p = ps.value(prior.pid);
       if (!p.pid || p.start != prior.start ||
           p.executable != prior.executable || p.payload() != prior.payload() ||
-          owners.contains(p.pid) || excluded(p.payload()) || veto(p, old.key))
+          owners.contains(p.pid) ||
+          (excluded(p.payload()) && verifiedBootstrapDirectory(p, catalogue).isEmpty()) ||
+          veto(p, old.key) || blocked.contains(normalized(old.name)) ||
+          (old.launchContext.hasScope() && !old.launchContext.contains(p)))
         continue;
       auto found = std::find_if(result.begin(), result.end(),
                                 [&](const auto &g) { return g.id == old.id; });
       if (found == result.end()) {
-        result.append({old.id, old.key, old.name, p.pid, {}});
+        result.append({old.id, old.key, old.name, p.pid, {},
+                       old.launchContext, old.detectionSources});
         found = std::prev(result.end());
       }
       found->processes.insert(p.pid, p);
       owners[p.pid] = old.id;
     }
+  }
+  // Adopt only installation payloads whose ancestry resolves to the exact
+  // private runtime attested while an identified seed was present. The runtime
+  // itself is never a member and cannot keep a finished game alive.
+  auto contexts = result;
+  contexts.append(previous);
+  for (const auto &p : ps) {
+    if (owners.contains(p.pid) || excluded(p.payload()))
+      continue;
+    QMap<QString, GameInstance> candidates;
+    for (const auto &game : contexts) {
+      if (veto(p, game.key) ||
+          blocked.contains(normalized(game.name)) ||
+          !game.launchContext.ownsSibling(p, ps))
+        continue;
+      candidates.insert(game.id, game);
+    }
+    if (candidates.size() != 1)
+      continue;
+    const auto owner = candidates.first();
+    auto found = std::find_if(result.begin(), result.end(),
+                              [&](const auto &game) { return game.id == owner.id; });
+    if (found == result.end()) {
+      result.append({owner.id, owner.key, owner.name, p.pid, {},
+                     owner.launchContext, owner.detectionSources});
+      found = std::prev(result.end());
+    }
+    found->processes.insert(p.pid, p);
+    owners[p.pid] = owner.id;
   }
   // Descendants can produce audio without matching a game definition. Never
   // walk up to Steam/Wine and adopt siblings by shared launcher alone.
@@ -256,6 +407,7 @@ QList<GameInstance> ProcessGames::identify(
       const auto owner = owners.value(p.parent);
       for (auto &g : result) {
         if (g.id != owner || veto(p, g.key) ||
+            (g.launchContext.hasScope() && !g.launchContext.contains(p)) ||
             (p.steamId && p.steamId != ps.value(p.parent).steamId))
           continue;
         g.processes.insert(p.pid, p);
@@ -264,6 +416,19 @@ QList<GameInstance> ProcessGames::identify(
         break;
       }
     }
+  }
+  // A metadata-backed bootstrap establishes launch identity, not a capture
+  // target. Prefer its verified payload as soon as one joins the same
+  // instance, even when the launcher stays open (and has the lower PID).
+  for (auto &game : result) {
+    const auto primary = game.processes.value(game.primaryPid);
+    if (verifiedBootstrapDirectory(primary, catalogue).isEmpty())
+      continue;
+    for (const auto &member : game.processes)
+      if (verifiedBootstrapDirectory(member, catalogue).isEmpty()) {
+        game.primaryPid = member.pid;
+        break;
+      }
   }
   return result;
 }

@@ -12,6 +12,18 @@ Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 ### Launcher and window handoffs
 
+Automatic recording waits past a locally verified game-specific launcher until
+the actual game payload joins that same tracked instance. It then waits for
+owned game audio before requesting capture, without an extra launcher-resume
+step. Audio present on the first check allows an immediate start; otherwise
+two consecutive successful polls settle it. Silent games start after ten
+resolved polls, normally about 20 seconds (slow audio queries can take longer).
+A launcher left open
+does not become the capture target just because it has been running longer.
+This process check does not prove window visibility: the portal still owns
+source selection and authorization. When owned game audio is not yet available,
+Trophy retains desktop-audio fallback and retries owned game audio.
+
 If a captured loader/splash window disappears while the **same game instance**
 remains alive and selected, Trophy saves the completed part and retries full
 recording using the saved portal approval. It waits 1.5 seconds after cleanup
@@ -26,6 +38,12 @@ changed selection, removed approval or blocked capture also prevents another
 attempt. A generic portal rejection, permission loss, startup timeout, or
 service/output failure is not treated as a temporarily absent window. Portal
 backends still control whether the replacement can be restored silently.
+
+If the desktop portal closes the entire sharing session, Trophy saves any
+recorded footage and stops capture rather than assuming sharing permission still
+applies. This is distinct from waiting past a known launcher before capture.
+An explicit recording start after session closure uses fresh portal authorization,
+not the old closed grant. Cancellation or denial never starts an automatic retry.
 
 ### Interrupted-file repair
 

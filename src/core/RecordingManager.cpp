@@ -94,7 +94,26 @@ void RecordingManager::setAudioMixer(AudioMixer *mixer) {
 
 
 void RecordingManager::setGameDetectionService(GameDetectionService *detector) {
+  if (m_gameDetector)
+    disconnect(m_gameDetector, nullptr, this, nullptr);
   m_gameDetector = detector;
+  if (detector) {
+    const auto refresh = [this] {
+      const auto previousFences = m_captureSelectionFences;
+      QSet<QString> liveInstances;
+      for (const auto &game : m_gameDetector->games())
+        liveInstances.insert(game.id);
+      m_captureSelectionFences.intersect(liveInstances);
+      if (m_captureSelectionRequired && !interruptionIdentityIsCurrent())
+        clearCaptureInterruption();
+      else if (!m_captureSelectionFences.isEmpty() ||
+               previousFences != m_captureSelectionFences)
+        emit captureRecoveryChanged();
+    };
+    connect(detector, &GameDetectionService::currentGameChanged, this, refresh);
+    connect(detector, &GameDetectionService::instancesChanged, this, refresh);
+    connect(detector, &GameDetectionService::blacklistChanged, this, refresh);
+  }
 }
 
 bool RecordingManager::isGenericSourceLabel(const QString &label) {
@@ -129,6 +148,12 @@ void RecordingManager::startRecording(const QString &gameName) {
     qWarning() << "Cannot start recording: not in Idle state";
     return;
   }
+  if (!gameName.isEmpty() && requiresCaptureSelection() && !m_forceCaptureSelectionOnce) {
+    qInfo() << "Screen sharing ended; explicit window selection is required to resume";
+    return; // Automatic starts cannot reacquire an ambiguously closed session.
+  }
+  m_explicitCaptureSelectionAttempt = std::exchange(m_forceCaptureSelectionOnce, false);
+  m_portalClosurePending = false;
   cancelCaptureRecovery();
 
   qDebug() << "startRecording called. gameName:" << gameName;
@@ -271,7 +296,7 @@ void RecordingManager::startRecording(const QString &gameName) {
   capConfig.windowOnly = !isManual;
 
   // Use restore token only for automatic recordings, always prompt for manual
-  if (!isManual) {
+  if (!isManual && !m_explicitCaptureSelectionAttempt) {
     capConfig.waylandRestoreToken =
         m_settings->getRestoreTokenForIdentity(tokenKey, m_currentGameName);
     if (!capConfig.waylandRestoreToken.isEmpty()) {
@@ -300,6 +325,12 @@ void RecordingManager::startRecording(const QString &gameName) {
 void RecordingManager::finishPipelineAndStart() {
   if (m_state != RecordingState::Initializing) {
     return;
+  }
+  if (m_explicitCaptureSelectionAttempt) {
+    m_explicitCaptureSelectionAttempt = false;
+    m_captureSelectionFences.remove(
+        m_detectedGameInfo.value("detectedGameInstance").toString());
+    clearCaptureInterruption();
   }
   if (!m_captureReadyForPipeline)
     emit captureSelectionFinished();
@@ -498,6 +529,16 @@ void RecordingManager::completePipelineAndStart() {
 }
 
 void RecordingManager::stopRecording() {
+  // Explicit Stop dismisses continuation, but does not allow automatic
+  // reacquisition of an ambiguously closed portal session.
+  if (m_captureResumeRequired) {
+    m_captureResumeRequired = false;
+    emit captureRecoveryChanged();
+  }
+  if (m_portalClosurePending) {
+    m_portalClosurePending = false;
+    m_pendingCaptureError.clear();
+  }
   const bool wasRecovering = m_captureRecoveryPending;
   cancelCaptureRecovery();
   if (wasRecovering) {
@@ -568,6 +609,27 @@ void RecordingManager::finishStoppedRecording() {
   if (m_state != RecordingState::Stopping)
     return;
   m_stopNativeSettled = true;
+  bool offerResume = false;
+  if (m_portalClosurePending && !m_recordingFailed) {
+    const bool sameInstance = interruptionIdentityIsCurrent();
+    if (sameInstance && !m_gameDetector->instanceAlive(m_interruptedInstance) &&
+        m_gameDetector->instanceLaunchContextAlive(m_interruptedInstance)) {
+      // Resolve the launcher/census race without retrying a closed grant.
+      m_operationTimer->setInterval(100);
+      m_operationTimer->start();
+      return;
+    }
+    offerResume = sameInstance && m_gameDetector->instanceAlive(m_interruptedInstance);
+    m_pendingCaptureError.clear();
+    m_portalClosurePending = false;
+    qInfo() << "Screen sharing session ended for" << m_captureGameName
+            << (offerResume ? "- game is still tracked; select a window to resume"
+                            : "- no current live game member remains");
+    if (!offerResume)
+      clearCaptureInterruption();
+  }
+  if (m_recordingFailed)
+    m_portalClosurePending = false;
   if (!m_pendingCaptureError.isEmpty() && !m_recordingFailed) {
     if (capturedGameHasEnded()) {
       qInfo() << "Captured game ended; completing recording normally";
@@ -576,6 +638,15 @@ void RecordingManager::finishStoppedRecording() {
       // A proven destroyed window with a surviving pinned instance is a
       // handoff, not a failed recording. Save this part before reopening.
       m_pendingCaptureError.clear();
+    } else if (m_captureRecoveryPending && recoveryAwaitingCensus()) {
+      // The verified launcher exited between census ticks. Native recording
+      // has drained; wait for authoritative membership, not a wall-clock
+      // cutoff or the dead bootstrap PID. The next census either promotes
+      // a verified successor or removes the instance (runtime helpers alone
+      // never keep it alive).
+      m_operationTimer->setInterval(100);
+      m_operationTimer->start();
+      return;
     } else if (!m_shuttingDown && m_captureEndGrace.elapsed() < m_captureEndGraceMs) {
       // Native consumers have already drained. Give the detector/process exit
       // a bounded chance to confirm window shutdown before publishing Saved
@@ -599,6 +670,10 @@ void RecordingManager::finishStoppedRecording() {
   const bool finalized = teardownPipeline() && m_stopFinalizationSucceeded;
   if (!finalized || m_recordingFailed || !recoveryInstanceIsCurrent())
     cancelCaptureRecovery();
+  if (offerResume && finalized && !m_recordingFailed) {
+    m_captureResumeRequired = true;
+    emit captureRecoveryChanged();
+  }
   if (m_cancelInitializing) {
     if (m_storage) m_storage->clearExcludedRecordingPath();
     m_currentFilePath.clear();
@@ -615,7 +690,8 @@ void RecordingManager::finishStoppedRecording() {
     return;
   }
   const bool pipelineFailed = m_recordingFailed;
-  const bool quietFiling = m_captureRecoveryPending && recoveryInstanceIsCurrent();
+  const bool quietFiling = (m_captureRecoveryPending && recoveryInstanceIsCurrent()) ||
+                          m_captureResumeRequired;
   const bool emptyCapture = quietFiling && finalized && !pipelineFailed &&
                             settledSizeBytes <= 0;
   const bool saved = finalized && !pipelineFailed && !emptyCapture;
@@ -657,6 +733,58 @@ void RecordingManager::finishStoppedRecording() {
   qInfo() << "Recording stopped:" << filePath;
   if (m_captureRecoveryPending)
     scheduleCaptureRecovery();
+  if (m_captureResumeRequired)
+    emit captureResumeOffered(m_interruptedGame);
+}
+
+bool RecordingManager::interruptionIdentityIsCurrent() const {
+  return m_gameDetector && !m_interruptedInstance.isEmpty() &&
+         m_gameDetector->captureIdentityInfo(m_interruptedGame)
+                 .value("detectedGameInstance").toString() == m_interruptedInstance &&
+         m_gameDetector->currentGameKey() == m_interruptedKey &&
+         !m_gameDetector->isBlocked(m_interruptedKey);
+}
+
+bool RecordingManager::requiresCaptureSelection() const {
+  if (!m_gameDetector)
+    return m_captureSelectionRequired;
+  const auto game = m_gameDetector->currentGameName();
+  const auto instance = m_gameDetector->captureIdentityInfo(game)
+                            .value("detectedGameInstance").toString();
+  return !instance.isEmpty() && m_captureSelectionFences.contains(instance);
+}
+
+void RecordingManager::clearCaptureInterruption() {
+  const bool changed = m_captureSelectionRequired || m_captureResumeRequired;
+  m_captureSelectionRequired = false;
+  m_captureResumeRequired = false;
+  m_interruptedGame.clear();
+  m_interruptedKey.clear();
+  m_interruptedInstance.clear();
+  if (changed)
+    emit captureRecoveryChanged();
+}
+
+bool RecordingManager::resumeCapture() {
+  if (m_state != RecordingState::Idle || !requiresCaptureSelection() ||
+      !m_gameDetector)
+    return false;
+  const auto selectedGame = m_gameDetector->currentGameName();
+  const auto selectedInstance = m_gameDetector->captureIdentityInfo(selectedGame)
+                                    .value("detectedGameInstance").toString();
+  if (!m_gameDetector->instanceAlive(selectedInstance) ||
+      m_gameDetector->isBlocked(m_gameDetector->currentGameKey()))
+    return false;
+  m_interruptedGame = selectedGame;
+  m_interruptedKey = m_gameDetector->currentGameKey();
+  m_interruptedInstance = selectedInstance;
+  m_captureSelectionRequired = true;
+  const auto game = m_interruptedGame;
+  m_captureResumeRequired = false;
+  m_forceCaptureSelectionOnce = true;
+  startRecording(game);
+  emit captureRecoveryChanged();
+  return m_state == RecordingState::Initializing;
 }
 
 void RecordingManager::setState(RecordingState newState) {
@@ -1187,17 +1315,27 @@ bool RecordingManager::capturedGameHasEnded() const {
     return false;
   const auto instance =
       m_detectedGameInfo.value("detectedGameInstance").toString();
-  return !instance.isEmpty() && !m_gameDetector->instanceAlive(instance);
+  return !instance.isEmpty() && !m_gameDetector->instanceAlive(instance) &&
+         !(m_captureRecoveryPending && recoveryAwaitingCensus());
 }
 
-bool RecordingManager::recoveryInstanceIsCurrent() const {
+bool RecordingManager::recoveryIdentityIsCurrent() const {
   return !m_shuttingDown && m_gameDetector && m_settings &&
-         !m_recoveryInstance.isEmpty() &&
-         m_gameDetector->instanceAlive(m_recoveryInstance) &&
+          !m_recoveryInstance.isEmpty() &&
          m_gameDetector->captureIdentityInfo(m_recoveryGame).value("detectedGameInstance").toString() == m_recoveryInstance &&
          m_gameDetector->currentGameKey() == m_recoveryKey &&
          !m_gameDetector->isBlocked(m_recoveryKey) &&
-         !m_settings->getRestoreTokenForIdentity(m_recoveryKey, m_recoveryGame).isEmpty();
+          !m_settings->getRestoreTokenForIdentity(m_recoveryKey, m_recoveryGame).isEmpty();
+}
+
+bool RecordingManager::recoveryInstanceIsCurrent() const {
+  return recoveryIdentityIsCurrent() &&
+         m_gameDetector->instanceAlive(m_recoveryInstance);
+}
+
+bool RecordingManager::recoveryAwaitingCensus() const {
+  return recoveryIdentityIsCurrent() &&
+         m_gameDetector->instanceLaunchContextAlive(m_recoveryInstance);
 }
 
 void RecordingManager::cancelCaptureRecovery() {
@@ -1214,6 +1352,8 @@ void RecordingManager::scheduleCaptureRecovery() {
     if (generation != m_recoveryGeneration || !m_captureRecoveryPending)
       return;
     if (m_state != RecordingState::Idle || !recoveryInstanceIsCurrent()) {
+      qInfo() << "Full recording recovery cancelled for" << m_recoveryGame
+              << "- recording state or tracked game instance is no longer current";
       cancelCaptureRecovery();
       return;
     }
@@ -1227,15 +1367,34 @@ void RecordingManager::onCaptureError(const QString &error) {
   // failures still use onEncodingError and cannot be hidden by this guard.
   if (m_state == RecordingState::Stopping || m_state == RecordingState::Idle)
     return;
+  if (m_captureSource)
+    qDebug() << "Capture error classification:"
+             << static_cast<int>(m_captureSource->lastErrorKind()) << error;
+  if (m_captureSource &&
+      m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SessionClosed) {
+    m_interruptedGame = m_currentGameName;
+    m_interruptedKey = m_detectedGameInfo.value("detectedGameKey").toString();
+    m_interruptedInstance = m_detectedGameInfo.value("detectedGameInstance").toString();
+    m_pendingCaptureError = error;
+    m_captureEndGrace.start();
+    stopRecording();
+    m_portalClosurePending = true;
+    m_captureSelectionRequired = !m_isManualRecording && interruptionIdentityIsCurrent();
+    if (m_captureSelectionRequired)
+      m_captureSelectionFences.insert(m_interruptedInstance);
+    emit captureRecoveryChanged();
+    return;
+  }
   if (m_captureSource &&
       (m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceDestroyed ||
        (m_state == RecordingState::Initializing &&
-        m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceNotReady)) &&
+         m_captureSource->lastErrorKind() == IVideoCaptureSource::CaptureErrorKind::SourceNotReady)) &&
+      !requiresCaptureSelection() &&
       !m_isManualRecording && m_gameDetector && m_captureGameName == m_currentGameName) {
     m_recoveryGame = m_currentGameName;
     m_recoveryKey = m_detectedGameInfo.value("detectedGameKey").toString();
     m_recoveryInstance = m_detectedGameInfo.value("detectedGameInstance").toString();
-    if (recoveryInstanceIsCurrent()) {
+    if (recoveryInstanceIsCurrent() || recoveryAwaitingCensus()) {
       if (m_state == RecordingState::Recording) {
         m_pendingCaptureError = error;
         m_captureEndGrace.start();

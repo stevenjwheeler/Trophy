@@ -151,6 +151,7 @@ public:
   Q_INVOKABLE void playRecordingStoppedPing(bool preview);
   // Global-shortcut record toggle (mirrors F9, with feedback).
   Q_INVOKABLE void requestToggleRecording();
+  Q_INVOKABLE void cancelPendingCapture();
   // Opens a pre-filled GitHub bug report in the browser. Browsers cannot
   // accept a file attachment via URL, so the issue body embeds the app
   // version plus the tail of trophy.log (see BugReport.h) instead.
@@ -185,6 +186,8 @@ private:
   void registerQmlTypes();
   void exposeServicesToQml();
   void connectSignals();
+  void onCaptureRecoveryChanged();
+  void onInstantReplayEnabledChanged();
   void onGameDetected(QString gameName);
   void updateDiscordPresence();
   // Only successful, finalized outputs are warmed (never active recordings or
@@ -234,6 +237,7 @@ private:
   QTimer *m_windowWaitTimer = nullptr;
   QString m_pendingWindowGame;
   QString m_pendingCaptureKey;
+  QString m_pendingWindowInstance;
   bool m_pendingWindowIsRecord = false;
   static constexpr int kWindowWaitMs = 30000;
   void startWhenWindowReady(const QString &game, bool isRecord);
@@ -241,13 +245,11 @@ private:
   // A launcher/boot window was captured and disappeared before anything was
   // recorded: wait for the window that replaces it and try again.
   void resumeReplayAfterRecording();
-  // Audio-settled capture: auto-armed recording/DVR waits for the
-  // game's PipeWire node to exist (stable across two polls) before
-  // starting, so launch sessions don't open on monitor fallback and
-  // swap mid-track. Bounded (~20s): the timeout starts anyway with
-  // today's fallback behavior. Manual starts never wait.
+  // Automatic full recording and DVR wait for owned audio after payload
+  // readiness. Silent games retain the bounded desktop-audio fallback.
   QTimer *m_audioWaitTimer = nullptr;
   QString m_pendingAudioGame;
+  QString m_pendingAudioInstance;
   bool m_pendingAudioIsRecord = false;
   int m_audioWaitHits = 0;
   int m_audioWaitTicks = 0;
@@ -267,7 +269,12 @@ private:
                                 bool present,
                                 const std::function<void(bool)> &onResult);
   void startWhenAudioSettled(const QString &game, bool isRecord);
+  void onAudioWaitTimeout();
+  bool pendingAudioIdentityIsCurrent() const;
+  bool stopPendingCaptureForSelection();
+  std::function<void(const QString &)> m_startFullRecording;
   static bool gameAudioNodePresent(const QString &game, qint64 pid);
+  std::function<bool(const QString &, qint64)> m_gameAudioLookup = gameAudioNodePresent;
   // One async presence probe (worker thread); onResult runs on the GUI
   // thread unless superseded by a generation bump (game-close / re-arm).
   void probeGameAudioAsync(const QString &game, qint64 pid,

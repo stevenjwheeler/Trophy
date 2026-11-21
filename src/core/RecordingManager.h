@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -45,6 +46,8 @@ class RecordingManager : public QObject {
 
   Q_PROPERTY(RecordingState state READ state NOTIFY stateChanged)
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY stateChanged)
+  Q_PROPERTY(bool captureResumeRequired READ captureResumeRequired NOTIFY captureRecoveryChanged)
+  Q_PROPERTY(bool requiresCaptureSelection READ requiresCaptureSelection NOTIFY captureRecoveryChanged)
   Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY
                  currentGameNameChanged)
   Q_PROPERTY(
@@ -79,6 +82,8 @@ public:
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
   bool isRecoveringCapture() const { return m_captureRecoveryPending; }
+  bool captureResumeRequired() const { return m_captureResumeRequired; }
+  bool requiresCaptureSelection() const;
   bool lastRecordingFailed() const { return m_recordingFailed; }
   QString currentGameName() const { return m_currentGameName; }
   uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
@@ -93,6 +98,7 @@ public:
   // Recording control
   Q_INVOKABLE void startRecording(const QString &gameName = QString());
   Q_INVOKABLE void stopRecording();
+  Q_INVOKABLE bool resumeCapture();
   Q_INVOKABLE bool addBookmark();
   QVariantMap captureHealth() const;
 
@@ -123,6 +129,7 @@ signals:
   // recordingStopped below is the successful-save notification only.
   void recordingFinished();
   void captureRecoveryChanged();
+  void captureResumeOffered(const QString &gameName);
   // Handoff parts are saved quietly; a normal stop/game exit retains feedback.
   void recordingStopped(const QString &filePath, qint64 durationMs,
                         qint64 sizeBytes, bool quiet = false);
@@ -176,12 +183,21 @@ private:
   int m_captureEndGraceMs = 5000;
   // Recovery is lifetime-bound to the pinned instance, not an attempt budget.
   bool recoveryInstanceIsCurrent() const;
+  bool recoveryIdentityIsCurrent() const;
+  bool recoveryAwaitingCensus() const;
   void scheduleCaptureRecovery();
   void cancelCaptureRecovery();
   bool m_captureRecoveryPending = false;
   QString m_recoveryGame, m_recoveryKey, m_recoveryInstance;
   quint64 m_recoveryGeneration = 0;
   int m_recoveryDelayMs = 1500;
+  bool interruptionIdentityIsCurrent() const;
+  void clearCaptureInterruption();
+  bool m_portalClosurePending = false;
+  bool m_captureSelectionRequired = false, m_captureResumeRequired = false;
+  QSet<QString> m_captureSelectionFences;
+  bool m_forceCaptureSelectionOnce = false, m_explicitCaptureSelectionAttempt = false;
+  QString m_interruptedGame, m_interruptedKey, m_interruptedInstance;
   bool m_stopNativeSettled = false;
   std::future<bool> m_stopFinalizationWorker;
   qint64 m_stopDurationMs = 0;

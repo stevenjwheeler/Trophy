@@ -72,7 +72,7 @@ The full documentation is on the website at **[gettrophy.app/docs](https://gettr
 
 ## A few things to know
 
-- Game detection uses unprivileged Linux process information and PipeWire, independently of the compositor. No injected graphics reporters or desktop extensions are required. See [detection design and verification](docs/game-detection.md).
+- Game detection uses unprivileged Linux process information and local Steam, Heroic/Legendary and Lutris installation metadata, independently of the compositor. No injected graphics reporters or desktop extensions are required. See [launcher coverage and detection design](docs/game-detection.md).
 - Game audio falls back to the desktop mix when an application-specific source is unavailable. That mix can include other apps; [check your audio setup](https://gettrophy.app/docs/user-guide.html#audio).
 - MP4 export is whole-file and uses software encoding. Snip a clip first to share a shorter range. Size targets are approximate, and HDR-to-SDR conversion is not supported.
 

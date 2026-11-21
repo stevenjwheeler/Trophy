@@ -632,7 +632,7 @@ void WaylandPortalCapture::onPortalSessionClosed(const QVariantMap &) {
       message().path() != m_sessionHandle || message().service() != m_sessionOwner)
     return;
   portalSessionLost(QStringLiteral("Wayland Portal: screen sharing session was closed"),
-                    CaptureErrorKind::SourceUnavailable);
+                    CaptureErrorKind::SessionClosed);
 }
 
 void WaylandPortalCapture::onPortalOwnerChanged(const QString &, const QString &oldOwner,

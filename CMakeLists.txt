@@ -122,8 +122,10 @@ qt_standard_project_setup()
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
 
-# Find FFmpeg using pkg-config
+# Find native dependencies using pkg-config
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBYAML REQUIRED IMPORTED_TARGET yaml-0.1)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
 
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
@@ -215,9 +217,11 @@ endif()
 # Process identity is shared by detection and PipeWire worker threads.
 add_library(trophy_processes STATIC
     src/detection/ProcessCensus.cpp src/detection/ProcessGames.cpp
+    src/detection/LauncherLibrary.cpp
+    src/detection/GameLaunchContext.cpp
     src/detection/GameWhitelist.cpp)
 set_target_properties(trophy_processes PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(trophy_processes PUBLIC Qt6::Core)
+target_link_libraries(trophy_processes PUBLIC Qt6::Core PRIVATE PkgConfig::LIBYAML PkgConfig::SQLITE3)
 target_include_directories(trophy_processes PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(trophy_processes PRIVATE -Wall -Wextra -Wpedantic)
@@ -362,6 +366,8 @@ set(MUXING_HEADERS
 set(DETECTION_HEADERS
     src/detection/ProcessCensus.h
     src/detection/ProcessGames.h
+    src/detection/LauncherLibrary.h
+    src/detection/GameLaunchContext.h
     src/detection/DefaultAppCatalog.h
     src/detection/GameIconProvider.h
     src/detection/GameIconSource.h

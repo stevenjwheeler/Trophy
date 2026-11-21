@@ -222,6 +222,10 @@ ApplicationWindow {
     function openWindowPicker() {
         // The system portal owns window/screen selection. A detected game
         // keeps its pinned process identity even if portal labels are generic.
+        if (window.recordingManager.requiresCaptureSelection === true) {
+            window.recordingManager.resumeCapture();
+            return;
+        }
         if (window.gameDetector && window.gameDetector.currentGameName !== "")
             window.recordingManager.startRecording(window.gameDetector.currentGameName);
         else

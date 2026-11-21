@@ -1094,7 +1094,8 @@ Page {
                             }
                             Label {
                                 objectName: "captureStatusLabel"
-                                text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
+                                 text: (recordingManager && recordingManager.isRecording) ? qsTr("RECORDING")
+                                      : (app && app.recordingPhase === "waiting-game") ? qsTr("LAUNCHING")
                                       : (app && app.recordingPhase === "initializing") ? qsTr("STARTING")
                                       : (app && app.recordingPhase === "stopping") ? qsTr("SAVING")
                                       : ((gameDetector && gameDetector.isGameRunning) ? qsTr("READY") : qsTr("IDLE"))
@@ -1134,6 +1135,7 @@ Page {
                         objectName: "recordButton"
                         readonly property bool canStop: !!recordingManager
                             && (recordingManager.isRecording
+                                || (app && app.recordingPhase === "waiting-game")
                                 || (app && app.recordingPhase === "initializing"))
                         enabled: canStop
                                  || (app && app.canStartRecording)
@@ -1143,7 +1145,14 @@ Page {
                         icon.width: 24; icon.height: 24
                         icon.color: canStop ? "white" : (recordBtn.hovered ? "white" : (gameDetector && gameDetector.currentGameName ? Theme.primaryColor : Theme.textMutedColor))
                         flat: true
-                        onClicked: canStop ? recordingManager.stopRecording() : window.openWindowPicker()
+                        onClicked: {
+                            if (app && app.recordingPhase === "waiting-game")
+                                app.cancelPendingCapture();
+                            else if (canStop)
+                                recordingManager.stopRecording();
+                            else
+                                window.openWindowPicker();
+                        }
                         background: Rectangle {
                             radius: 22
                             color: recordBtn.hovered ? (recordBtn.canStop ? "#40FFFFFF" : Theme.primaryColor) : (recordBtn.canStop ? "#20FFFFFF" : "transparent")

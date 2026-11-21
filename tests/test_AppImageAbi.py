@@ -38,7 +38,11 @@ class AppImageAbiTest(unittest.TestCase):
             log = directory / "apt.log"
             stubs = {
                 "sudo": 'printf "%s\\n" "$*" >> "$SDK_TEST_APT_LOG"\nexit 0\n',
-                "pkg-config": 'exit "${SDK_TEST_PKG_STATUS:-0}"\n',
+                "pkg-config": (
+                    'for package in "$@"; do\n'
+                    '  [ "$package" != "${SDK_TEST_MISSING_PKG:-}" ] || exit 1\n'
+                    'done\nexit "${SDK_TEST_PKG_STATUS:-0}"\n'
+                ),
                 "ffmpeg": 'printf "%s\\n" "${SDK_TEST_ENCODER:-V libx264}"\n',
             }
             for tool in ("ffprobe", "pipewire", "wireplumber", "pw-cli",
@@ -68,6 +72,22 @@ class AppImageAbiTest(unittest.TestCase):
     def test_sdk_dependency_checks_still_require_software_h264(self):
         self.assertNotEqual(
             self.run_sdk_dependency_checks(SDK_TEST_ENCODER="No encoder").returncode, 0)
+
+    def test_sdk_requires_launcher_metadata_libraries(self):
+        for package in ("yaml-0.1", "sqlite3"):
+            with self.subTest(package=package):
+                self.assertNotEqual(self.run_sdk_dependency_checks(
+                    SDK_TEST_MISSING_PKG=package).returncode, 0)
+
+    def test_package_build_environments_install_launcher_metadata_headers(self):
+        root = Path(__file__).resolve().parents[1]
+        action = (root / ".github/actions/setup-sdk/action.yml").read_text()
+        self.assertIn("libyaml-dev libsqlite3-dev", action)
+        for filename in ("ubuntu.Dockerfile", "appimage.Dockerfile"):
+            dockerfile = (root / "packaging/containers" / filename).read_text()
+            self.assertIn("libyaml-dev libsqlite3-dev", dockerfile)
+        fedora = (root / "packaging/containers/fedora.Dockerfile").read_text()
+        self.assertIn("libyaml-devel sqlite-devel", fedora)
 
     def test_all_sdk_handoff_jobs_share_the_pinned_runner(self):
         root = Path(__file__).resolve().parents[1]

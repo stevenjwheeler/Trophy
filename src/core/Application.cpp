@@ -119,7 +119,10 @@ static void installNvidiaNoStablePerfLimitProfile() {
 }
 
 Application::Application(int &argc, char **argv)
-    : QApplication(argc, argv) {}
+    : QApplication(argc, argv),
+      m_startFullRecording([this](const QString &game) {
+        m_recordingManager->startRecording(game);
+      }) {}
 
 Application::~Application() {
   m_discordPresence.reset();
@@ -645,12 +648,8 @@ void Application::connectSignals() {
   updateDiscordPresence();
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingStateChanged);
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
-  connect(m_recordingManager.get(), &RecordingManager::captureRecoveryChanged, this, [this] {
-    emit recordingAvailabilityChanged();
-    if (!m_recordingManager->isRecoveringCapture() &&
-        m_recordingManager->state() == RecordingManager::RecordingState::Idle)
-      m_replayManager->setPaused(false);
-  });
+  connect(m_recordingManager.get(), &RecordingManager::captureRecoveryChanged,
+          this, &Application::onCaptureRecoveryChanged);
   connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {
             m_recordingLibrary->setActiveRecordingPath(filePath);
             // The background replay loop pauses while recording.
@@ -686,66 +685,8 @@ void Application::connectSignals() {
           [this]() { onWindowWaitTimeout(); });
   connect(m_detectionDebounceTimer, &QTimer::timeout, this,
           [this]() { onAuthorizeDebounceFired(); });
-  connect(m_audioWaitTimer, &QTimer::timeout, this, [this]() {
-    if (!isCurrentCaptureGame(m_pendingAudioGame)) {
-      if (!m_pendingAudioGame.isEmpty() &&
-          m_gameDetector->currentGameName() == m_pendingAudioGame &&
-          !isGameBlocked(m_pendingAudioGame))
-        return; // Let liveness promote the successor or close the game.
-      m_pendingAudioGame.clear();
-      ++m_audioWaitGeneration;
-      m_audioWaitTimer->stop();
-      return;
-    }
-    // A slow PipeWire query never stacks and never blocks the GUI: skip
-    // ticks while a probe is in flight (skipped ticks don't count toward
-    // the timeout — only resolved polls do).
-    if (m_audioProbeInflight)
-      return;
-    const QString game = m_pendingAudioGame;
-    const bool isRecord = m_pendingAudioIsRecord;
-    qint64 pid = 0;
-    if (m_gameDetector && m_gameDetector->currentGameName() == game)
-      pid = m_gameDetector->currentGamePid();
-    probeGameAudioAsync(game, pid, m_audioWaitGeneration,
-                        [this, game, isRecord](bool present) {
-                          // Superseded (game closed / re-armed): the
-                          // generation check already passed, so also match
-                          // the pending identity before touching counters.
-                           if (m_pendingAudioGame != game || !isCurrentCaptureGame(game))
-                            return;
-                          ++m_audioWaitTicks;
-                          if (present) {
-                            if (++m_audioWaitHits >= 2) {
-                              qCDebug(appLog)
-                                  << "Game audio settled for" << game
-                                  << "- starting";
-                              m_pendingAudioGame.clear();
-                              ++m_audioWaitGeneration;
-                              m_audioWaitTimer->stop();
-                              if (isRecord)
-                                m_recordingManager->startRecording(game);
-                              else
-                                m_replayManager->startDvr(game);
-                              return;
-                            }
-                          } else {
-                            m_audioWaitHits = 0;
-                          }
-                          if (m_audioWaitTicks >= kAudioWaitMaxTicks) {
-                            qCDebug(appLog)
-                                << "Game audio never appeared for" << game
-                                << "- starting anyway (monitor fallback)";
-                            m_pendingAudioGame.clear();
-                            ++m_audioWaitGeneration;
-                            m_audioWaitTimer->stop();
-                            if (isRecord)
-                              m_recordingManager->startRecording(game);
-                            else
-                              m_replayManager->startDvr(game);
-                          }
-                        });
-  });
+  connect(m_audioWaitTimer, &QTimer::timeout,
+          this, &Application::onAudioWaitTimeout);
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
             if (!isCurrentCaptureGame(game) || identity != m_gameDetector->currentGameKey())
               return;
@@ -1003,7 +944,7 @@ void Application::connectSignals() {
             m_notificationService->showCaptureSelectionHint(game);
             // Don't start capturing a transient window (mod loader / splash).
             // Defer until a real game window appears.
-            if (m_gameDetector && !m_gameDetector->isGameRunning()) {
+            if (m_gameDetector && !m_gameDetector->isGamePayloadReady()) {
               qCInfo(appLog) << "Deferring capture for" << game
                              << "(no visible game window yet)";
               m_pendingWindowGame = game;
@@ -1011,9 +952,12 @@ void Application::connectSignals() {
               m_windowWaitTimer->start();
               return;
             }
-            if (isRecord)
-              m_recordingManager->startRecording(game);
-            else
+            if (isRecord) {
+              if (m_recordingManager->requiresCaptureSelection())
+                m_recordingManager->resumeCapture();
+              else
+                m_recordingManager->startRecording(game);
+            } else if (!m_recordingManager->requiresCaptureSelection())
               m_replayManager->startDvr(game);
             // Includes synchronous refusal/failure before a state transition.
             if (isRecord ? m_recordingManager->state() != RecordingManager::RecordingState::Initializing
@@ -1098,10 +1042,14 @@ void Application::connectSignals() {
             const QString game = m_gameDetector
                                      ? m_gameDetector->currentGameName()
                                      : QString();
-            m_recordingManager->startRecording(game);
+            if (m_recordingManager->requiresCaptureSelection())
+              m_recordingManager->resumeCapture();
+            else
+              m_recordingManager->startRecording(game);
           });
   connect(m_trayManager.get(), &SystemTrayManager::stopRecordingRequested,
           this, [this]() {
+            cancelPendingCapture();
             if (m_recordingManager->isRecording()) {
               m_recordingManager->stopRecording();
             }
@@ -1189,15 +1137,7 @@ void Application::connectSignals() {
                 "Couldn't Save Clip", reason, "dialog-warning", 3000, 2);
           });
   connect(m_settingsManager.get(), &SettingsManager::instantReplayEnabledChanged,
-          this, [this]() {
-            if (!m_settingsManager->instantReplayEnabled()) {
-              m_replayManager->stopDvr();
-            } else if (m_gameDetector &&
-                       !m_gameDetector->currentGameName().isEmpty() &&
-                       !m_recordingManager->isRecording()) {
-              m_replayManager->startDvr(m_gameDetector->currentGameName());
-            }
-          });
+          this, &Application::onInstantReplayEnabledChanged);
   connect(m_settingsManager.get(),
           &SettingsManager::globalShortcutsEnabledChanged, this, [this]() {
             if (m_shortcutManager)
@@ -1213,7 +1153,9 @@ void Application::connectSignals() {
 void Application::onGameDetected(QString gameName) {
   // Authorization may synchronously rebuild the detector's instances. Own
   // the name throughout this callback rather than borrowing a signal argument.
-  qCInfo(appLog) << "Game detected:" << gameName;
+  const auto source = m_gameDetector->currentGameSource();
+  qCInfo(appLog) << "Game detected:" << gameName << "from"
+                << (source.isEmpty() ? QStringLiteral("unknown") : source);
   emit currentGameChanged();
   if (m_settingsManager->autoRecordEnabled()) {
     const auto token = restoreTokenForGame(gameName);
@@ -1252,8 +1194,14 @@ bool Application::gameAudioNodePresent(const QString &game, qint64 pid) {
 }
 
 void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
+  if (stopPendingCaptureForSelection())
+    return;
   if (!isCurrentCaptureGame(game))
     return;
+  if (!m_gameDetector->isGamePayloadReady()) {
+    startWhenWindowReady(game, isRecord);
+    return;
+  }
   qint64 pid = 0;
   if (m_gameDetector && m_gameDetector->currentGameName() == game)
     pid = m_gameDetector->currentGamePid();
@@ -1261,6 +1209,8 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
   // cost as the polls): start now on delivery, else enter the wait loop.
   // Pending is armed up-front so a game-close in between supersedes us.
   m_pendingAudioGame = game;
+  m_pendingAudioInstance = m_gameDetector->captureIdentityInfo(game)
+                               .value("detectedGameInstance").toString();
   m_pendingAudioIsRecord = isRecord;
   m_audioWaitHits = 0;
   m_audioWaitTicks = 0;
@@ -1274,9 +1224,11 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
       m_pendingAudioGame.clear();
       ++m_audioWaitGeneration;
       if (isRecord)
-        m_recordingManager->startRecording(game);
+        m_startFullRecording(game);
       else
         m_replayManager->startDvr(game);
+      emit recordingStateChanged();
+      emit recordingAvailabilityChanged();
       return;
     }
     // Node not there yet (launching game): wait for it to appear and look
@@ -1286,6 +1238,62 @@ void Application::startWhenAudioSettled(const QString &game, bool isRecord) {
                     << "until its audio node settles";
     m_audioWaitTimer->start();
   });
+  emit recordingStateChanged();
+  emit recordingAvailabilityChanged();
+}
+
+void Application::onAudioWaitTimeout() {
+  if (stopPendingCaptureForSelection())
+    return;
+  if (!m_pendingAudioGame.isEmpty() && !pendingAudioIdentityIsCurrent()) {
+    cancelPendingCapture();
+    return;
+  }
+  if (!isCurrentCaptureGame(m_pendingAudioGame)) {
+    if (!m_pendingAudioGame.isEmpty() &&
+        m_gameDetector->currentGameName() == m_pendingAudioGame &&
+        !isGameBlocked(m_pendingAudioGame))
+      return; // Let liveness promote the successor or close the game.
+    m_pendingAudioGame.clear();
+    ++m_audioWaitGeneration;
+    m_audioWaitTimer->stop();
+    return;
+  }
+  if (!m_gameDetector->isGamePayloadReady() || m_audioProbeInflight)
+    return; // Never stack slow probes or consume timeout ticks for them.
+  const QString game = m_pendingAudioGame;
+  const bool isRecord = m_pendingAudioIsRecord;
+  probeGameAudioAsync(game, m_gameDetector->currentGamePid(), m_audioWaitGeneration,
+                     [this, game, isRecord](bool present) {
+    if (m_pendingAudioGame != game || !isCurrentCaptureGame(game))
+      return;
+    ++m_audioWaitTicks;
+    m_audioWaitHits = present ? m_audioWaitHits + 1 : 0;
+    if (m_audioWaitHits < 2 && m_audioWaitTicks < kAudioWaitMaxTicks)
+      return;
+    qCDebug(appLog) << (m_audioWaitHits >= 2 ? "Game audio settled for"
+                                          : "Game audio wait expired for")
+                    << game << "- starting capture";
+    m_pendingAudioGame.clear();
+    ++m_audioWaitGeneration;
+    m_audioWaitTimer->stop();
+    if (isRecord)
+      m_startFullRecording(game);
+    else
+      m_replayManager->startDvr(game);
+    emit recordingStateChanged();
+    emit recordingAvailabilityChanged();
+  });
+}
+
+bool Application::pendingAudioIdentityIsCurrent() const {
+  return m_gameDetector &&
+         m_gameDetector->currentGameName() == m_pendingAudioGame &&
+         (m_pendingCaptureKey.isEmpty() ||
+          m_gameDetector->currentGameKey() == m_pendingCaptureKey) &&
+         (m_pendingAudioInstance.isEmpty() ||
+          m_gameDetector->captureIdentityInfo(m_pendingAudioGame)
+                  .value("detectedGameInstance").toString() == m_pendingAudioInstance);
 }
 
 void Application::probeGameAudioAsync(
@@ -1293,9 +1301,10 @@ void Application::probeGameAudioAsync(
     const std::function<void(bool)> &onResult) {
   QPointer<Application> self(this);
   const quint64 ticket = claimAudioProbe();
-  (void)QtConcurrent::run([self, game, pid, ticket, generation, onResult]() {
-    // Static pure lookup: no Application state, worker-safe.
-    const bool present = gameAudioNodePresent(game, pid);
+  const auto lookup = m_gameAudioLookup;
+  (void)QtConcurrent::run([self, game, pid, ticket, generation, onResult, lookup]() {
+    // Copy the lookup before dispatch; the worker never reads Application state.
+    const bool present = lookup(game, pid);
     if (self.isNull())
       return;
     QMetaObject::invokeMethod(
@@ -1330,7 +1339,50 @@ void Application::applyGameAudioProbeResult(
   m_audioProbeInflight = false;
   if (generation != m_audioWaitGeneration)
     return;
+  if (!m_pendingAudioGame.isEmpty() && !pendingAudioIdentityIsCurrent()) {
+    cancelPendingCapture();
+    return;
+  }
+  if (stopPendingCaptureForSelection())
+    return;
+  if (m_gameDetector && !m_gameDetector->isGamePayloadReady() &&
+      !m_pendingAudioGame.isEmpty()) {
+    const auto game = std::exchange(m_pendingAudioGame, {});
+    ++m_audioWaitGeneration;
+    if (m_audioWaitTimer)
+      m_audioWaitTimer->stop();
+    startWhenWindowReady(game, m_pendingAudioIsRecord);
+    return;
+  }
   onResult(present);
+}
+
+bool Application::stopPendingCaptureForSelection() {
+  if (!m_recordingManager || !m_recordingManager->requiresCaptureSelection())
+    return false;
+  m_pendingAudioGame.clear();
+  m_pendingWindowGame.clear();
+  m_pendingAutoRecordGame.clear();
+  m_pendingDvrGame.clear();
+  ++m_audioWaitGeneration; // Retire in-flight results without releasing their claim.
+  if (m_audioWaitTimer)
+    m_audioWaitTimer->stop();
+  if (m_windowWaitTimer)
+    m_windowWaitTimer->stop();
+  if (m_detectionDebounceTimer)
+    m_detectionDebounceTimer->stop();
+  return true;
+}
+
+void Application::onInstantReplayEnabledChanged() {
+  if (!m_settingsManager->instantReplayEnabled()) {
+    m_replayManager->stopDvr();
+  } else if (!stopPendingCaptureForSelection() && m_gameDetector &&
+             !m_gameDetector->currentGameName().isEmpty() &&
+             !m_recordingManager->isRecording() &&
+             !m_recordingManager->isRecoveringCapture()) {
+    startWhenWindowReady(m_gameDetector->currentGameName(), false);
+  }
 }
 
 void Application::authorizeGame(const QString &game) {
@@ -1369,12 +1421,25 @@ void Application::onWindowWaitTimeout() {
   // continue through an explicit authorize action, never a bare picker.
   const QString game = m_pendingWindowGame;
   const bool isRecord = m_pendingWindowIsRecord;
+  if (!m_pendingWindowInstance.isEmpty() && m_gameDetector &&
+      m_gameDetector->captureIdentityInfo(game)
+              .value("detectedGameInstance").toString() != m_pendingWindowInstance) {
+    m_pendingWindowGame.clear();
+    m_pendingWindowInstance.clear();
+    return;
+  }
+  if (isCurrentCaptureGame(game) && m_gameDetector->isGamePayloadReady()) {
+    m_pendingWindowGame.clear();
+    m_pendingWindowInstance.clear();
+    startWhenWindowReady(game, isRecord);
+    return;
+  }
   if (m_gameDetector && m_gameDetector->currentGameName() == game &&
       m_gameDetector->currentGameKey() == m_pendingCaptureKey &&
       !isGameBlocked(game) && !restoreTokenForGame(game).isEmpty()) {
     // Slow launches (notably VR) can take longer than 30 seconds. Keep
     // listening for the window; don't silently discard an approved start.
-    qCInfo(appLog) << "Still waiting for window for approved game" << game
+    qCInfo(appLog) << "Still waiting for game payload for approved game" << game
                    << "- capture remains pending";
     return;
   }
@@ -1415,7 +1480,7 @@ void Application::onAuthorizeDebounceFired() {
     return;
   }
   // Process liveness, not compositor window geometry, gates authorization.
-  if (m_gameDetector && !m_gameDetector->isGameRunning()) {
+  if (m_gameDetector && !m_gameDetector->isGamePayloadReady()) {
     qCDebug(appLog) << "Deferring authorize prompt for" << pending
                     << "(game process not available yet)";
     return;
@@ -1482,7 +1547,8 @@ bool Application::isGameBlocked(const QString &game) const {
 }
 
 void Application::resumeReplayAfterRecording() {
-  if (m_recordingManager->isRecoveringCapture())
+  if (m_recordingManager->isRecoveringCapture() ||
+      m_recordingManager->requiresCaptureSelection())
     return; // Saving a part must not turn a full-recording handoff into DVR.
   m_replayManager->setPaused(false);
   if (m_recordingManager->lastRecordingFailed())
@@ -1496,34 +1562,55 @@ void Application::startWhenWindowReady(const QString &game, bool isRecord) {
   if (game.isEmpty() || !m_gameDetector ||
       m_gameDetector->currentGameName() != game || isGameBlocked(game))
     return;
+  if (m_recordingManager && m_recordingManager->requiresCaptureSelection())
+    return; // A closed portal grant needs an explicit user selection.
   m_pendingCaptureKey = m_gameDetector->currentGameKey();
-  if (isCurrentCaptureGame(game) && m_gameDetector->isGameRunning()) {
+  if (isCurrentCaptureGame(game) && m_gameDetector->isGamePayloadReady()) {
     qCDebug(appLog) << "Game process present for" << game
                     << "- waiting for settled game audio";
     startWhenAudioSettled(game, isRecord);
     return;
   }
-  // The portal can only restore against a concrete window; requesting now
-  // would pop a picker for a game that is still launching. Wait for the
-  // window; approved slow launches remain pending rather than prompting.
+  // Do not bind the grant to a known game-specific launcher that disappears
+  // on Play. Process evidence cannot prove window ownership; it can exclude
+  // the metadata-backed bootstrap before asking the portal to restore.
   qCDebug(appLog) << "Deferring capture for" << game
-                  << "until its window appears";
+                  << "until its game payload appears";
   m_pendingWindowGame = game;
+  m_pendingWindowInstance = m_gameDetector->captureIdentityInfo(game)
+                                .value("detectedGameInstance").toString();
   m_pendingWindowIsRecord = isRecord;
   m_windowWaitTimer->start();
+  emit recordingStateChanged();
+  emit recordingAvailabilityChanged();
 }
 
 void Application::resumePendingCapture() {
   const QString game = m_gameDetector->currentGameName();
+  // First-time authorization must also wait for the payload, not present a
+  // picker for the bootstrap. PID promotion wakes a deferred notification.
+  if ((m_pendingAutoRecordGame == game || m_pendingDvrGame == game) &&
+      m_gameDetector->isGamePayloadReady() && shouldShowAuthorizePrompt(game)) {
+    m_detectionDebounceTimer->start();
+  }
   if (!isCurrentCaptureGame(game) ||
       m_gameDetector->currentGameKey() != m_pendingCaptureKey)
     return;
   const bool waitingWindow = m_pendingWindowGame == game;
+  if (waitingWindow && !m_pendingWindowInstance.isEmpty() &&
+      m_gameDetector->captureIdentityInfo(game)
+              .value("detectedGameInstance").toString() != m_pendingWindowInstance) {
+    m_pendingWindowGame.clear();
+    m_pendingWindowInstance.clear();
+    m_windowWaitTimer->stop();
+    return;
+  }
   const bool waitingAudio = m_pendingAudioGame == game;
   if (!waitingWindow && !waitingAudio)
     return;
   const bool isRecord = waitingWindow ? m_pendingWindowIsRecord : m_pendingAudioIsRecord;
   m_pendingWindowGame.clear();
+  m_pendingWindowInstance.clear();
   m_windowWaitTimer->stop();
   m_pendingAudioGame.clear();
   ++m_audioWaitGeneration;
@@ -1531,11 +1618,46 @@ void Application::resumePendingCapture() {
   qCInfo(appLog) << "Resuming pending capture after process handoff for" << game
                  << "PID:" << m_gameDetector->currentGamePid();
   startWhenWindowReady(game, isRecord);
+  emit recordingStateChanged();
+  emit recordingAvailabilityChanged();
+}
+
+void Application::cancelPendingCapture() {
+  m_pendingWindowGame.clear();
+  m_pendingWindowInstance.clear();
+  m_pendingAudioGame.clear();
+  m_pendingAudioInstance.clear();
+  m_pendingAutoRecordGame.clear();
+  m_pendingDvrGame.clear();
+  ++m_audioWaitGeneration;
+  if (m_windowWaitTimer)
+    m_windowWaitTimer->stop();
+  if (m_audioWaitTimer)
+    m_audioWaitTimer->stop();
+  if (m_detectionDebounceTimer)
+    m_detectionDebounceTimer->stop();
+  emit recordingStateChanged();
+  emit recordingAvailabilityChanged();
 }
 bool Application::isWayland() const { return CaptureFactory::detectDisplayServer() == CaptureFactory::DisplayServer::Wayland; }
 
+void Application::onCaptureRecoveryChanged() {
+  stopPendingCaptureForSelection();
+  // recordingPhase/canRestartTrophy depend on recovery intent as well as the
+  // native recording state. An idle cancelled retry has no stateChanged signal.
+  emit recordingStateChanged();
+  emit recordingAvailabilityChanged();
+  if (m_recordingManager && m_replayManager &&
+      !m_recordingManager->isRecoveringCapture() &&
+      !m_recordingManager->requiresCaptureSelection() &&
+      m_recordingManager->state() == RecordingManager::RecordingState::Idle)
+    m_replayManager->setPaused(false);
+}
+
 bool Application::canStartRecording() const {
   return m_captureAvailable && m_recordingManager &&
+         m_pendingWindowGame.isEmpty() &&
+         (m_pendingAudioGame.isEmpty() || !m_pendingAudioIsRecord) &&
          !m_recordingManager->isRecoveringCapture() &&
          m_recordingManager->state() == RecordingManager::RecordingState::Idle;
 }
@@ -1543,6 +1665,9 @@ bool Application::canStartRecording() const {
 QString Application::recordingPhase() const {
   if (!m_recordingManager)
     return QStringLiteral("idle");
+  if ((!m_pendingWindowGame.isEmpty() && m_pendingWindowIsRecord) ||
+      (!m_pendingAudioGame.isEmpty() && m_pendingAudioIsRecord))
+    return QStringLiteral("waiting-game");
   if (m_recordingManager->isRecoveringCapture())
     return QStringLiteral("initializing");
   switch (m_recordingManager->state()) {
@@ -1935,6 +2060,21 @@ float Application::trackLevel(int trackIndex) const {
 }
 
 void Application::requestToggleRecording() {  if (!m_recordingManager) {
+    return;
+  }
+  if (!m_pendingWindowGame.isEmpty()) {
+    const bool wasRecording = m_pendingWindowIsRecord;
+    cancelPendingCapture();
+    if (wasRecording)
+      return;
+  }
+  if (!m_pendingAudioGame.isEmpty() && m_pendingAudioIsRecord) {
+    cancelPendingCapture();
+    return;
+  }
+  if (m_recordingManager->requiresCaptureSelection() &&
+      m_recordingManager->state() == RecordingManager::RecordingState::Idle) {
+    m_recordingManager->resumeCapture();
     return;
   }
   if (m_recordingManager->isRecording() || m_recordingManager->isRecoveringCapture()) {

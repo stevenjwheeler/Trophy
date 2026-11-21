@@ -549,6 +549,11 @@ target_include_directories(test_Recording PRIVATE ${TEST_INCLUDE_DIRS} ${AVFORMA
 target_link_libraries(test_Recording PRIVATE ${TEST_LINK_LIBS} Qt6::Concurrent ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${AVCODEC_LIBRARIES})
 gtest_discover_tests(test_Recording)
 
+add_executable(test_LauncherLibrary test_LauncherLibrary.cpp)
+target_link_libraries(test_LauncherLibrary PRIVATE trophy_processes
+    GTest::GTest GTest::gtest_main PkgConfig::SQLITE3)
+gtest_discover_tests(test_LauncherLibrary)
+
 add_executable(test_GameDetectionService test_GameDetectionService.cpp)
 target_include_directories(test_GameDetectionService PRIVATE ${TEST_INCLUDE_DIRS})
 target_compile_definitions(test_GameDetectionService PRIVATE TROPHY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

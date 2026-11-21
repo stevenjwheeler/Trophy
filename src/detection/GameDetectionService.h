@@ -31,9 +31,12 @@ public:
   void start();
   void stop();
   bool isGameRunning() const { return m_currentGamePid > 0; }
+  // Process readiness only: the portal still owns actual window selection.
+  bool isGamePayloadReady() const;
   QString currentGameName() const { return m_currentGameName; }
   qint64 currentGamePid() const { return m_currentGamePid; }
   QString currentGameKey() const { return m_currentGameKey; }
+  QString currentGameSource() const;
   QStringList recentGames() const { return m_recentGames; }
   QList<GameInstance> games() const { return m_instances; }
   QVariantList instances() const;
@@ -47,6 +50,8 @@ public:
     return name == m_currentGameName ? m_currentGameKey : name;
   }
   bool instanceAlive(const QString &id) const;
+  // Census-settling evidence only: a runtime is never a live game member.
+  bool instanceLaunchContextAlive(const QString &id) const;
   Q_INVOKABLE bool addToWhitelist(const QString &key, const QString &display);
   Q_INVOKABLE bool addToBlacklist(const QString &key);
   Q_INVOKABLE bool removeFromWhitelist(const QString &key);
@@ -101,7 +106,7 @@ private:
   QTimer m_timer;
   struct ScanResult {
     ProcessCensus::Snapshot processes;
-    QList<SteamGame> catalogue;
+    QList<LauncherGame> catalogue;
     QSet<QString> applicationExecutables;
     bool catalogueUpdated = false;
   };
@@ -110,7 +115,7 @@ private:
   std::future<QVariantList> m_audioScan;
   QVariantList m_audioStreams;
   ProcessCensus::Snapshot m_processes;
-  QList<SteamGame> m_steam;
+  QList<LauncherGame> m_catalogue;
   QSet<QString> m_applicationExecutables;
   QList<GameInstance> m_instances;
   QString m_selectedId;

@@ -403,7 +403,8 @@ public slots:
   QDBusObjectPath SelectSources(const QDBusObjectPath &, const QVariantMap &options) {
     tokens.append(options.value("restore_token").toString());
     const auto path = request(options);
-    const uint response = mode == "deny-select" && !tokens.last().isEmpty() ? 2 : 0;
+    const uint response = (mode == "deny-select" && !tokens.last().isEmpty()) ||
+                                  mode == "deny-fresh-select" ? 2 : 0;
     QTimer::singleShot(0, this, [this, path, response] { respond(path, {}, response); });
     return QDBusObjectPath(path);
   }
@@ -412,7 +413,8 @@ public slots:
     if (mode == "hold-start") held = path;
     else {
       const uint response = mode == "cancel-start" ? 1 :
-          (mode == "deny-start" && !tokens.last().isEmpty() ? 2 : 0);
+          ((mode == "deny-start" && !tokens.last().isEmpty()) ||
+                   mode == "deny-fresh-start" ? 2 : 0);
       auto results = streams();
       if (mode == "empty-start")
         results["streams"] = QVariant::fromValue(QList<FixtureStream>{});
@@ -825,7 +827,12 @@ protected:
     QObject::connect(&heartbeat, &QTimer::timeout, [&] { ++ticks; });
     heartbeat.start(5);
     auto begin = [&] {
-      recorder.startRecording("Failure fixture");
+      if (recorder.requiresCaptureSelection()) {
+        if (!recorder.resumeCapture())
+          return false;
+      } else {
+        recorder.startRecording("Failure fixture");
+      }
       if (!waitFor([&] {
             return recorder.m_session && recorder.m_session->frameCount() >= 15;
           }))
@@ -843,9 +850,10 @@ protected:
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
     EXPECT_GT(ticks, before);
     EXPECT_TRUE(oldCapture.isNull());
-    EXPECT_EQ(errors.size(), 1);
+    EXPECT_EQ(errors.size(), failure == 0 ? 0 : 1);
     EXPECT_EQ(finished.size(), 1);
-    EXPECT_EQ(saved.size(), 0);
+    EXPECT_EQ(saved.size(), failure == 0 ? 1 : 0);
+    EXPECT_EQ(recorder.requiresCaptureSelection(), failure == 0);
     EXPECT_EQ(authorization.size(), 0);
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
     EXPECT_TRUE(recorder.currentFilePath().isEmpty());
@@ -858,12 +866,17 @@ protected:
     EXPECT_NE(retry, partial);
     recorder.stopRecording();
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
-    EXPECT_EQ(saved.size(), 1); EXPECT_EQ(finished.size(), 2); EXPECT_EQ(errors.size(), 1);
+    EXPECT_EQ(saved.size(), failure == 0 ? 2 : 1);
+    EXPECT_EQ(finished.size(), 2);
+    EXPECT_EQ(errors.size(), failure == 0 ? 0 : 1);
+    EXPECT_FALSE(recorder.requiresCaptureSelection());
     EXPECT_EQ(authorization.size(), 0);
     checkMedia(retry);
     const auto tokens = qdbus_cast<QStringList>(control("Tokens").arguments().value(0));
     ASSERT_FALSE(tokens.isEmpty());
-    for (const auto &token : tokens) EXPECT_EQ(token, "fixture-saved-token");
+    EXPECT_EQ(tokens.size(), failure == 1 ? 1 : 2);
+    EXPECT_EQ(tokens.first(), "fixture-saved-token");
+    EXPECT_EQ(tokens.last(), failure == 0 ? "" : "fixture-saved-token");
   }
 
   void startupFailure() {
@@ -889,7 +902,9 @@ protected:
     if (failure == 2) { ASSERT_EQ(control("ReleaseHeld").type(), QDBusMessage::ReplyMessage); }
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
     EXPECT_TRUE(oldCapture.isNull());
-    EXPECT_EQ(errors.size(), 1); EXPECT_EQ(started.size(), 0); EXPECT_EQ(saved.size(), 0);
+    EXPECT_EQ(errors.size(), failure == 0 ? 0 : 1);
+    EXPECT_EQ(started.size(), 0); EXPECT_EQ(saved.size(), 0);
+    EXPECT_EQ(recorder.requiresCaptureSelection(), failure == 0);
     EXPECT_EQ(authorization.size(), 0);
     EXPECT_FALSE(QFileInfo::exists(abandoned));
     EXPECT_TRUE(recorder.currentFilePath().isEmpty());
@@ -897,13 +912,19 @@ protected:
     recover(failure);
     ASSERT_FALSE(HasFatalFailure());
     ASSERT_EQ(control("Configure", {media->node(), ""}).type(), QDBusMessage::ReplyMessage);
-    recorder.startRecording("Failure fixture");
+    if (failure == 0) {
+      recorder.startRecording("Failure fixture");
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      ASSERT_TRUE(recorder.resumeCapture());
+    } else {
+      recorder.startRecording("Failure fixture");
+    }
     ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
     // A late reply from the abandoned attempt cannot touch the fresh capture.
     awaitAudibleRecording(recorder, mixer);
     ASSERT_EQ(control("ReleaseHeld").type(), QDBusMessage::ReplyMessage);
     QTest::qWait(20);
-    EXPECT_EQ(errors.size(), 1);
+    EXPECT_EQ(errors.size(), failure == 0 ? 0 : 1);
     EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Recording);
     const auto path = recorder.currentFilePath();
     recorder.stopRecording();
@@ -1167,7 +1188,7 @@ protected:
     awaitAudibleRecording(recorder, mixer);
     const QString partial = recorder.currentFilePath();
     if (boundary < 2) {
-      ASSERT_EQ(control("Configure", {media->node(), boundary == 0 ? "deny-select" : "deny-start"}).type(),
+      ASSERT_EQ(control("Configure", {media->node(), boundary == 0 ? "deny-fresh-select" : "deny-fresh-start"}).type(),
           QDBusMessage::ReplyMessage);
       ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
     } else {
@@ -1176,43 +1197,58 @@ protected:
       ASSERT_GE(TrophyBackend::WaylandPortalCaptureTest::revokeNodeRead(*capture, media->node()), 0);
     }
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
-    EXPECT_EQ(errors.size(), 1); EXPECT_EQ(saved.size(), 0); EXPECT_EQ(finished.size(), 1);
+    EXPECT_EQ(errors.size(), boundary < 2 ? 0 : 1);
+    EXPECT_EQ(saved.size(), boundary < 2 ? 1 : 0);
+    EXPECT_EQ(finished.size(), 1);
     EXPECT_EQ(authorization.size(), 0);
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
     checkMedia(partial);
     if (boundary < 2) {
       recorder.startRecording("Failure fixture");
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      EXPECT_TRUE(recorder.requiresCaptureSelection());
+      ASSERT_TRUE(recorder.resumeCapture());
       ASSERT_TRUE(waitFor([&] {
-        return authorization.size() == 1 && recorder.state() == RecordingManager::RecordingState::Idle;
+        return errors.size() == 1 && recorder.state() == RecordingManager::RecordingState::Idle;
       }));
-      EXPECT_EQ(started.size(), 1); EXPECT_EQ(saved.size(), 0);
-      EXPECT_TRUE(settings.getRestoreToken("Failure fixture").isEmpty());
+      EXPECT_EQ(started.size(), 1); EXPECT_EQ(saved.size(), 1);
+      EXPECT_EQ(authorization.size(), 0);
+      EXPECT_TRUE(recorder.requiresCaptureSelection());
+      EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
       auto tokens = qdbus_cast<QStringList>(control("Tokens").arguments().value(0));
       EXPECT_EQ(tokens.size(), 2);
       QTest::qWait(100); // Rejection must not silently retry without a token.
       EXPECT_EQ(qdbus_cast<QStringList>(control("Tokens").arguments().value(0)), tokens);
-      for (const auto &token : tokens) EXPECT_EQ(token, "fixture-saved-token");
+      EXPECT_EQ(tokens.first(), "fixture-saved-token");
+      EXPECT_TRUE(tokens.last().isEmpty());
       // Cancellation following an explicit authorization request stays
       // cancelled: no new token, save, or automatic retry/reauthorization.
       ASSERT_EQ(control("Configure", {media->node(), "cancel-start"}).type(), QDBusMessage::ReplyMessage);
-      recorder.startRecording("Failure fixture");
+      ASSERT_TRUE(recorder.resumeCapture());
       ASSERT_TRUE(waitFor([&] {
         return errors.size() == 2 && recorder.state() == RecordingManager::RecordingState::Idle;
       }));
-      EXPECT_EQ(authorization.size(), 1); EXPECT_EQ(saved.size(), 0);
-      EXPECT_TRUE(settings.getRestoreToken("Failure fixture").isEmpty());
+      EXPECT_EQ(authorization.size(), 0); EXPECT_EQ(saved.size(), 1);
+      EXPECT_TRUE(recorder.requiresCaptureSelection());
+      EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
       ASSERT_EQ(control("Configure", {media->node(), "grant-new-token"}).type(), QDBusMessage::ReplyMessage);
     }
     // Explicit fresh authorization/capture after the denial, never an auto-picker.
-    recorder.startRecording("Failure fixture");
+    if (boundary < 2) {
+      ASSERT_TRUE(recorder.resumeCapture());
+    } else {
+      recorder.startRecording("Failure fixture");
+    }
     ASSERT_TRUE(waitFor([&] { return recorder.m_session && recorder.m_session->frameCount() >= 15; }));
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"),
         boundary < 2 ? "fixture-new-token" : "fixture-saved-token");
     const auto retry = recorder.currentFilePath();
     recorder.stopRecording();
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
-    EXPECT_EQ(saved.size(), 1); EXPECT_EQ(errors.size(), boundary < 2 ? 2 : 1);
-    EXPECT_EQ(authorization.size(), boundary < 2 ? 1 : 0);
+    EXPECT_EQ(saved.size(), boundary < 2 ? 2 : 1);
+    EXPECT_EQ(errors.size(), boundary < 2 ? 2 : 1);
+    EXPECT_EQ(authorization.size(), 0);
+    EXPECT_FALSE(recorder.requiresCaptureSelection());
     checkMedia(retry);
   }
 
@@ -1336,9 +1372,10 @@ protected:
         ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
       }
       ASSERT_TRUE(waitFor([&] { return recorder->state() == RecordingManager::RecordingState::Idle; }));
-      EXPECT_EQ(saved.size(), boundary == 0 ? 1 : 0);
+      EXPECT_EQ(saved.size(), 1);
       EXPECT_EQ(finished.size(), 1);
-      EXPECT_EQ(errors.size(), boundary == 0 ? 0 : 1);
+      EXPECT_EQ(errors.size(), 0);
+      EXPECT_EQ(recorder->requiresCaptureSelection(), boundary == 1);
     }
     EXPECT_TRUE(capture.isNull());
     EXPECT_EQ(authorization.size(), 0);

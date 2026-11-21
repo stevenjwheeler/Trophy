@@ -714,6 +714,266 @@ protected:
     }
   }
 
+  void censusHandoffRace(int scenario) {
+    QProcess bootstrap, runtime, successor;
+    for (auto *process : {&bootstrap, &runtime, &successor}) {
+      process->start("sleep", {"30"});
+      ASSERT_TRUE(process->waitForStarted());
+    }
+    const auto bootstrapPid = bootstrap.processId();
+    const auto successorPid = successor.processId();
+    const QString key = "steam_app_42424242", name = "Exit fixture";
+    SettingsManager settings;
+    settings.setRecordingsPath(tempDir.path());
+    settings.setRestoreTokenForIdentity(key, name, "approved-token");
+    StorageManager storage(tempDir.path());
+    GameDetectionService detector;
+    detector.addToWhitelist(key, name);
+    publishGame(detector, bootstrapPid, key);
+    auto &instance = detector.m_instances.first();
+    instance.launchContext = {
+        QFileInfo(ProcessCensus::inspect(bootstrapPid).payload()).absolutePath(),
+        {}, ProcessCensus::inspect(runtime.processId())};
+    const auto originalId = instance.id;
+    RecordingManager recorder;
+    recorder.setSettingsManager(&settings);
+    recorder.setStorageManager(&storage);
+    recorder.setGameDetectionService(&detector);
+    recorder.m_captureEndGraceMs = 1; // Must not be a handoff/retry deadline.
+    recorder.m_recoveryDelayMs = 50;
+    QPointer<PendingCapture> capture;
+    installPendingCapture(recorder, capture);
+    recorder.m_pipelineBuilder = [&] {
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(true, true, 8192);
+      return true;
+    };
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    recorder.startRecording(name);
+    recorder.completePipelineAndStart();
+    ASSERT_TRUE(recorder.isRecording());
+    const auto firstPath = recorder.currentFilePath();
+    {
+      QFile file(firstPath);
+      ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+      file.write("saved launcher footage");
+    }
+    bootstrap.terminate();
+    ASSERT_TRUE(bootstrap.waitForFinished());
+    EXPECT_FALSE(detector.instanceAlive(originalId));
+    EXPECT_TRUE(detector.instanceLaunchContextAlive(originalId));
+    capture->errorKind = scenario == 4
+                            ? IVideoCaptureSource::CaptureErrorKind::SourceUnavailable
+                            : IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
+    emit capture->captureError("window disappeared before next census");
+    if (scenario != 4) {
+      QTest::qWait(40); // Longer than the ordinary error-classification grace.
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Stopping);
+      EXPECT_TRUE(recorder.isRecoveringCapture());
+      EXPECT_EQ(saved.size(), 0);
+      EXPECT_EQ(errors.size(), 0);
+      if (scenario == 0) {
+        auto &game = detector.m_instances.first();
+        const auto process = ProcessCensus::inspect(successorPid);
+        game.primaryPid = successorPid;
+        game.processes = {{successorPid, process}};
+        detector.updateCurrentGame(name, successorPid, key);
+      } else if (scenario == 1) {
+        // The authoritative census found no payload, even though the runtime
+        // remains alive. A helper must not keep recovery alive.
+        detector.m_instances.clear();
+        detector.m_selectedId.clear();
+        detector.updateCurrentGame({}, 0);
+      } else if (scenario == 2) {
+        recorder.stopRecording();
+      } else if (scenario == 3) {
+        settings.removeRestoreToken(key);
+      } else if (scenario == 5) {
+        publishGame(detector, successorPid, key); // Namesake, not same instance.
+      } else if (scenario == 6) {
+        runtime.terminate();
+        ASSERT_TRUE(runtime.waitForFinished());
+      }
+    }
+    ASSERT_TRUE(waitForIdle(recorder));
+    ASSERT_EQ(saved.size(), 1);
+    EXPECT_EQ(errors.size(), 0);
+    if (scenario == 0) {
+      EXPECT_TRUE(saved.first().at(3).toBool());
+      ASSERT_TRUE(recorder.isRecoveringCapture());
+      QTest::qWait(100);
+      ASSERT_EQ(recorder.state(), RecordingManager::RecordingState::Initializing);
+      EXPECT_EQ(capture->config.waylandRestoreToken, "approved-token");
+      EXPECT_EQ(recorder.snapshotAudioPreparation().pid, successorPid);
+      EXPECT_EQ(detector.games().first().id, originalId);
+      recorder.completePipelineAndStart();
+      EXPECT_TRUE(recorder.isRecording());
+      recorder.stopRecording();
+      ASSERT_TRUE(waitForIdle(recorder));
+    } else {
+      QTest::qWait(100);
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      EXPECT_FALSE(recorder.isRecoveringCapture());
+    }
+    QFile file(firstPath);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    EXPECT_EQ(file.readAll(), "saved launcher footage");
+    for (auto *process : {&runtime, &successor})
+      if (process->state() != QProcess::NotRunning) {
+        process->terminate();
+        ASSERT_TRUE(process->waitForFinished());
+      }
+  }
+
+  void portalClosureResume(int scenario) {
+    QProcess bootstrap, runtime, successor;
+    for (auto *process : {&bootstrap, &runtime, &successor}) {
+      process->start("sleep", {"30"});
+      ASSERT_TRUE(process->waitForStarted());
+    }
+    const auto successorPid = successor.processId();
+    const QString key = "steam_app_42424242", name = "Exit fixture";
+    SettingsManager settings;
+    settings.setRecordingsPath(tempDir.path());
+    settings.setRestoreTokenForIdentity(key, name, "existing-token");
+    StorageManager storage(tempDir.path());
+    GameDetectionService detector;
+    detector.addToWhitelist(key, name);
+    publishGame(detector, bootstrap.processId(), key);
+    detector.m_instances.first().launchContext = {
+        QFileInfo(ProcessCensus::inspect(bootstrap.processId()).payload()).absolutePath(),
+        {}, ProcessCensus::inspect(runtime.processId())};
+    RecordingManager recorder;
+    recorder.setSettingsManager(&settings);
+    recorder.setStorageManager(&storage);
+    recorder.setGameDetectionService(&detector);
+    recorder.m_recoveryDelayMs = 20;
+    recorder.m_captureEndGraceMs = 1;
+    recorder.m_audioPreparationLookup = [](auto input) { return input; };
+    QPointer<PendingCapture> capture;
+    installPendingCapture(recorder, capture);
+    recorder.m_pipelineBuilder = [&] {
+      recorder.m_muxer = std::make_unique<FinalizationMuxer>(true, true, 8192);
+      return true;
+    };
+    QSignalSpy saved(&recorder, &RecordingManager::recordingStopped);
+    QSignalSpy errors(&recorder, &RecordingManager::recordingError);
+    QSignalSpy started(&recorder, &RecordingManager::recordingStarted);
+    QSignalSpy offered(&recorder, &RecordingManager::captureResumeOffered);
+    recorder.startRecording(scenario == 6 ? QString() : name);
+    recorder.completePipelineAndStart();
+    const auto firstPath = recorder.currentFilePath();
+    {
+      QFile file(firstPath);
+      ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+      file.write("preserved portal-closed footage");
+    }
+    if (scenario != 5 && scenario != 6) {
+      bootstrap.terminate();
+      ASSERT_TRUE(bootstrap.waitForFinished());
+    }
+    capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SessionClosed;
+    emit capture->captureError("sharing session closed");
+    if (scenario != 5 && scenario != 6) {
+      QTest::qWait(40);
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Stopping);
+      EXPECT_EQ(saved.size(), 0);
+      EXPECT_FALSE(recorder.isRecoveringCapture());
+      if (scenario == 1) {
+        detector.m_instances.clear();
+        detector.m_selectedId.clear();
+        detector.updateCurrentGame({}, 0);
+      } else {
+        auto &game = detector.m_instances.first();
+        const auto process = ProcessCensus::inspect(successorPid);
+        game.primaryPid = successorPid;
+        game.processes = {{successorPid, process}};
+        detector.updateCurrentGame(name, successorPid, key);
+      }
+    }
+    ASSERT_TRUE(waitForIdle(recorder));
+    ASSERT_EQ(saved.size(), 1);
+    EXPECT_EQ(errors.size(), 0);
+    EXPECT_FALSE(recorder.isRecoveringCapture());
+    if (scenario == 1 || scenario == 6) {
+      EXPECT_FALSE(recorder.captureResumeRequired());
+      EXPECT_FALSE(recorder.requiresCaptureSelection());
+      EXPECT_EQ(offered.size(), 0);
+    } else {
+      EXPECT_TRUE(recorder.captureResumeRequired());
+      EXPECT_TRUE(recorder.requiresCaptureSelection());
+      EXPECT_TRUE(saved.first().at(3).toBool());
+      EXPECT_EQ(offered.size(), 1);
+      QTest::qWait(100);
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      EXPECT_EQ(started.size(), 1); // No automatic grant reacquisition.
+      recorder.startRecording(name);
+      EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      EXPECT_EQ(settings.getRestoreTokenForIdentity(key, name), "existing-token");
+      if (scenario == 7) {
+        const auto original = detector.m_instances.first();
+        const auto otherProcess = ProcessCensus::inspect(runtime.processId());
+        detector.m_instances.append({"other-instance", "exe:/other", "Other Game",
+            otherProcess.pid, {{otherProcess.pid, otherProcess}}});
+        detector.m_selectedId = "other-instance";
+        detector.updateCurrentGame("Other Game", otherProcess.pid, "exe:/other");
+        EXPECT_FALSE(recorder.requiresCaptureSelection());
+        detector.m_selectedId = original.id;
+        detector.updateCurrentGame(name, original.primaryPid, key);
+        EXPECT_TRUE(recorder.requiresCaptureSelection());
+      }
+      if (scenario == 2) {
+        recorder.stopRecording();
+        EXPECT_FALSE(recorder.captureResumeRequired());
+        EXPECT_TRUE(recorder.requiresCaptureSelection()); // Auto-start fence remains.
+        recorder.startRecording(name);
+        EXPECT_EQ(recorder.state(), RecordingManager::RecordingState::Idle);
+      } else if (scenario == 3) {
+        publishGame(detector, successorPid, key); // A new namesake identity.
+        EXPECT_FALSE(recorder.resumeCapture());
+      } else {
+        ASSERT_TRUE(recorder.resumeCapture());
+        EXPECT_TRUE(recorder.requiresCaptureSelection());
+        ASSERT_FALSE(capture.isNull());
+        EXPECT_TRUE(capture->config.windowOnly);
+        EXPECT_TRUE(capture->config.waylandRestoreToken.isEmpty());
+        if (scenario == 4 || scenario == 8) {
+          capture->errorKind = scenario == 4
+                                  ? IVideoCaptureSource::CaptureErrorKind::Other
+                                  : IVideoCaptureSource::CaptureErrorKind::SourceNotReady;
+          emit capture->captureError(scenario == 4
+                                        ? "user cancelled portal selection"
+                                        : "fresh selection returned no stream");
+          ASSERT_TRUE(waitForIdle(recorder));
+          EXPECT_TRUE(recorder.requiresCaptureSelection());
+          QTest::qWait(100);
+          EXPECT_EQ(started.size(), 1);
+        } else {
+          recorder.finishPipelineAndStart();
+          const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+          while (!recorder.isRecording() && std::chrono::steady_clock::now() < until) {
+            QCoreApplication::processEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+          EXPECT_TRUE(recorder.isRecording());
+          EXPECT_FALSE(recorder.requiresCaptureSelection());
+          EXPECT_FALSE(recorder.captureResumeRequired());
+          EXPECT_EQ(started.size(), 2);
+          recorder.stopRecording();
+          ASSERT_TRUE(waitForIdle(recorder));
+        }
+      }
+    }
+    QFile first(firstPath);
+    ASSERT_TRUE(first.open(QIODevice::ReadOnly));
+    EXPECT_EQ(first.readAll(), "preserved portal-closed footage");
+    for (auto *process : {&bootstrap, &runtime, &successor})
+      if (process->state() != QProcess::NotRunning) {
+        process->terminate();
+        ASSERT_TRUE(process->waitForFinished());
+      }
+  }
+
   QString outputPath(RecordingManager &recorder, const QString &game) {
     recorder.m_currentGameName = game;
     return recorder.generateOutputPath();
@@ -1080,6 +1340,54 @@ TEST_F(RecordingManagerTest, CaptureSourceLossBeforeGameExitDrainsThenSavesNorma
 TEST_F(RecordingManagerTest, CaptureSourceLossWhileGameLivesStillFails) { captureEndRace(2); }
 TEST_F(RecordingManagerTest, DestroyedWindowWithSamePidResumesFullRecording) { windowHandoff(0); }
 TEST_F(RecordingManagerTest, ExplicitStopCancelsWindowRecovery) { windowHandoff(1); }
+TEST_F(RecordingManagerTest, LauncherExitWaitsForAuthoritativeCensusHandoff) {
+  censusHandoffRace(0);
+}
+TEST_F(RecordingManagerTest, CensusConfirmedExitDoesNotWaitForRuntimeHelper) {
+  censusHandoffRace(1);
+}
+TEST_F(RecordingManagerTest, ExplicitStopCancelsPendingCensusHandoff) {
+  censusHandoffRace(2);
+}
+TEST_F(RecordingManagerTest, RemovedApprovalCancelsPendingCensusHandoff) {
+  censusHandoffRace(3);
+}
+TEST_F(RecordingManagerTest, AmbiguousSourceLossCannotUseCensusHandoffException) {
+  censusHandoffRace(4);
+}
+TEST_F(RecordingManagerTest, NamesakeCannotInheritPendingCensusHandoff) {
+  censusHandoffRace(5);
+}
+TEST_F(RecordingManagerTest, ExitedRuntimeCannotKeepCensusHandoffPending) {
+  censusHandoffRace(6);
+}
+TEST_F(RecordingManagerTest, PortalClosurePreservesFootageAndRequiresExplicitSelection) {
+  portalClosureResume(0);
+}
+TEST_F(RecordingManagerTest, PortalClosureCensusConfirmedExitNeedsNoResume) {
+  portalClosureResume(1);
+}
+TEST_F(RecordingManagerTest, StopDismissesResumeWithoutAllowingAutomaticRecapture) {
+  portalClosureResume(2);
+}
+TEST_F(RecordingManagerTest, PortalResumeCannotFollowNamesakeInstance) {
+  portalClosureResume(3);
+}
+TEST_F(RecordingManagerTest, CancelledPortalResumeNeverAutomaticallyRetries) {
+  portalClosureResume(4);
+}
+TEST_F(RecordingManagerTest, PortalClosureWithLivePayloadNeverAutomaticallyRecaptures) {
+  portalClosureResume(5);
+}
+TEST_F(RecordingManagerTest, ManualPortalClosureSavesWithoutGameResume) {
+  portalClosureResume(6);
+}
+TEST_F(RecordingManagerTest, PortalSelectionFenceSurvivesSelectingAnotherInstance) {
+  portalClosureResume(7);
+}
+TEST_F(RecordingManagerTest, FreshEmptySelectionCannotFallBackToOldClosedGrant) {
+  portalClosureResume(8);
+}
 TEST_F(RecordingManagerTest, GameExitCancelsWindowRecovery) { windowHandoff(2); }
 TEST_F(RecordingManagerTest, RemovedApprovalCancelsWindowRecovery) { windowHandoff(3); }
 TEST_F(RecordingManagerTest, NamesakeInstanceCannotInheritWindowRecovery) { windowHandoff(4); }

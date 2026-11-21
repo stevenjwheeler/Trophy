@@ -10,6 +10,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QRegularExpression>
+#include <QDebug>
 #include <algorithm>
 
 namespace TrophyBackend {
@@ -75,7 +76,9 @@ QVariantList GameDetectionService::runningProcesses() const {
   QVariantList rows;
   for (const auto &p : m_processes) {
     const auto payload = p.payload();
-    if (payload.isEmpty() || ProcessGames::excluded(payload))
+    if (payload.isEmpty() ||
+        (ProcessGames::excluded(payload) &&
+         ProcessGames::verifiedBootstrapDirectory(p, m_catalogue).isEmpty()))
       continue;
     const auto name = QFileInfo(payload).fileName();
     const bool knownGame = std::any_of(m_instances.begin(), m_instances.end(),
@@ -104,7 +107,9 @@ bool GameDetectionService::addProcessGame(qint64 pid, const QString &identity,
   const auto payload = live.payload();
   if (live.identity() != identity || live.executable != cached->executable ||
       payload != cached->payload() || payload.isEmpty() ||
-      live.winePrefix != cached->winePrefix || ProcessGames::excluded(payload))
+      live.winePrefix != cached->winePrefix ||
+      (ProcessGames::excluded(payload) &&
+       ProcessGames::verifiedBootstrapDirectory(live, m_catalogue).isEmpty()))
     return false; // Exit/reuse/exec since listing: never save a stale rule.
   const auto key = payload.endsWith(".exe", Qt::CaseInsensitive)
                        ? "wine:" + live.winePrefix + ":" + payload
@@ -152,6 +157,7 @@ void GameDetectionService::stop() {
   m_instances.clear();
   m_processes.clear();
   m_applicationExecutables.clear();
+  m_catalogue.clear();
   m_selectedId.clear();
   ProcessGames::publish({});
   updateCurrentGame({}, 0);
@@ -174,7 +180,7 @@ void GameDetectionService::poll() {
       return;
     auto result = m_scan.get();
     if (result.catalogueUpdated) {
-      m_steam = std::move(result.catalogue);
+      m_catalogue = std::move(result.catalogue);
       m_applicationExecutables = std::move(result.applicationExecutables);
     }
     apply(result.processes);
@@ -185,7 +191,7 @@ void GameDetectionService::poll() {
     result.processes = ProcessCensus::scan();
     result.catalogueUpdated = refreshCatalogue;
     if (refreshCatalogue) {
-      result.catalogue = ProcessGames::steamLibrary();
+      result.catalogue = LauncherLibrary::installed();
       result.applicationExecutables = desktopApplicationExecutables(
           QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation));
     }
@@ -193,13 +199,61 @@ void GameDetectionService::poll() {
   });
 }
 void GameDetectionService::apply(const ProcessCensus::Snapshot &snapshot) {
+  const auto previousProcesses = m_processes;
+  const auto previousInstances = m_instances;
   m_processes = snapshot;
   QMap<QString, QString> definitions;
   for (const auto &key : m_whitelist->whitelistEntries())
     definitions[key] = m_whitelist->getWhitelistName(key);
   m_instances =
-      ProcessGames::identify(snapshot, m_steam, definitions,
+      ProcessGames::identify(snapshot, m_catalogue, definitions,
                              m_whitelist->blacklistEntries(), m_instances);
+  // Lifecycle-only diagnostics: enough to distinguish an observed handoff
+  // from a broker-mediated/unobserved launch, without logging argv or tokens.
+  const auto sameProcess = [](const ProcessInfo &a, const ProcessInfo &b) {
+    return a.pid == b.pid && a.start == b.start &&
+           a.executable == b.executable && a.payload() == b.payload() &&
+           a.winePrefix == b.winePrefix;
+  };
+  for (const auto &game : m_instances) {
+    if (!game.launchContext.hasScope())
+      continue;
+    for (const auto &p : game.processes)
+      if (!sameProcess(p, previousProcesses.value(p.pid)) ||
+          std::none_of(previousInstances.begin(), previousInstances.end(),
+                       [&](const auto &old) {
+                         return old.id == game.id && old.processes.contains(p.pid);
+                       }))
+        qDebug() << "Launch tracking member:" << game.name << "PID" << p.pid
+                 << "start" << p.start << "parent" << p.parent
+                 << "payload" << p.payload();
+  }
+  auto scopes = previousInstances;
+  scopes.append(m_instances);
+  QSet<QString> tracedScopes;
+  for (const auto &game : scopes) {
+    const auto scopeKey = game.launchContext.directory + QChar('\0') + game.launchContext.prefix;
+    if (!game.launchContext.hasScope() || tracedScopes.contains(scopeKey))
+      continue;
+    tracedScopes.insert(scopeKey);
+    for (const auto &p : snapshot) {
+      if (!game.launchContext.contains(p) ||
+          sameProcess(p, previousProcesses.value(p.pid)) ||
+          std::any_of(m_instances.begin(), m_instances.end(), [&](const auto &owner) {
+            return owner.processes.contains(p.pid);
+          }))
+        continue;
+      qDebug() << "Unowned launch-installation process:" << game.name
+               << "PID" << p.pid << "start" << p.start << "parent" << p.parent
+               << "payload" << p.payload() << "- no verified game membership";
+    }
+  }
+  for (const auto &old : previousInstances)
+    if (old.launchContext.hasScope() &&
+        std::none_of(m_instances.begin(), m_instances.end(),
+                     [&](const auto &game) { return game.id == old.id; }))
+      qDebug() << "Launch tracking ended:" << old.name
+               << "- no verified members remain";
   ProcessGames::publish(m_instances);
   auto selected =
       std::find_if(m_instances.begin(), m_instances.end(),
@@ -221,6 +275,23 @@ void GameDetectionService::apply(const ProcessCensus::Snapshot &snapshot) {
   rebuildModels();
   emit instancesChanged();
 }
+QString GameDetectionService::currentGameSource() const {
+  for (const auto &game : m_instances)
+    if (game.id == m_selectedId)
+      return game.detectionSources.join(", ");
+  return {};
+}
+
+bool GameDetectionService::isGamePayloadReady() const {
+  if (!isGameRunning())
+    return false;
+  for (const auto &game : m_instances)
+    if (game.id == m_selectedId)
+      return ProcessGames::verifiedBootstrapDirectory(
+                 game.processes.value(game.primaryPid), m_catalogue).isEmpty();
+  return true; // Direct/manual identities retain their existing behavior.
+}
+
 bool GameDetectionService::selectInstance(const QString &id) {
   const auto found = std::find_if(m_instances.begin(), m_instances.end(),
                                   [&](const auto &g) { return g.id == id; });
@@ -249,7 +320,8 @@ QVariantList GameDetectionService::instances() const {
     list.append(QVariantMap{
         {"id", g.id},
         {"key", g.key},
-        {"name", g.name},
+         {"name", g.name},
+         {"detectionSources", g.detectionSources},
         {"label", QString("%1 (PID %2)").arg(g.name).arg(g.primaryPid)},
         {"pid", g.primaryPid},
         {"processes", pids},
@@ -269,6 +341,14 @@ GameDetectionService::captureIdentityInfo(const QString &name) const {
           {"detectedSteamAppId",
            QString::number(steamAppIdFromAppId(m_currentGameKey))}};
 }
+bool GameDetectionService::instanceLaunchContextAlive(const QString &id) const {
+  for (const auto &game : m_instances)
+    if (game.id == id && game.launchContext.runtime.pid)
+      return game.launchContext.matchesRuntime(
+          ProcessCensus::inspect(game.launchContext.runtime.pid));
+  return false;
+}
+
 bool GameDetectionService::instanceAlive(const QString &id) const {
   for (const auto &g : m_instances)
     if (g.id == id)
@@ -293,8 +373,8 @@ bool GameDetectionService::processExists(qint64 pid) {
   return ProcessCensus::inspect(pid).pid != 0;
 }
 QString GameDetectionService::getSteamAppName(uint id) const {
-  for (const auto &g : m_steam)
-    if (g.id == id)
+  for (const auto &g : m_catalogue)
+    if (id && g.steamId == id)
       return g.name;
   return {};
 }

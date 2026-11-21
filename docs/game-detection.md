@@ -15,12 +15,20 @@ reporter ABI/multilib machinery, and window-driven game identification.
 `ProcessCensus` did not exist on the `main` base; no code from the previous
 `detection-refactor` attempt was used.
 
-There are three domain components:
+There are five domain components:
 
 * `src/detection/ProcessCensus.{h,cpp}` reads same-UID `/proc` records:
   executable, argv, cwd, PPID, start ticks and selected launch variables.
   It checks stat before/after inspection and rejects exit/reuse/exec races.
   Zombies, unreadable processes and oversized input are skipped.
+* `src/detection/LauncherLibrary.{h,cpp}` reads installed-game metadata from
+  local launchers into one catalogue. Steam discovery lives here alongside
+  Heroic, Legendary, Nile and Lutris; process identification does not enumerate
+  launcher files.
+* `src/detection/GameLaunchContext.{h,cpp}` attests a private runtime targeting
+  an already identified payload and checks installation, prefix and ancestry
+  boundaries. This reusable mechanism applies to ordinary catalogue games as
+  well as game-specific bootstraps; it performs no filesystem enumeration.
 * `src/detection/ProcessGames.{h,cpp}` identifies payloads and owns instance
   membership. Instance identity includes the launch PID/start ticks, not
   just title, executable or App ID. Related descendants are included, but
@@ -35,9 +43,8 @@ There are three domain components:
   and `waiting`/`associated` audio state; `selectInstance()` selects capture.
 
 The process timer is one second, with at most one census outstanding.
-Steam metadata is refreshed on the census worker at startup and every 30 scans.
-This reads local `libraryfolders.vdf`/`appmanifest_*.acf` files to notice
-installed/renamed games; it is not a network catalogue update. `/proc` reads
+Launcher metadata is refreshed on the census worker at startup and every 30 scans.
+This notices installed/renamed games without a network catalogue update. `/proc` reads
 kernel-provided process metadata, not game binaries or gameplay state. Link targets use
 bounded `readlink()` calls without repeatedly resolving filesystem components.
 The worker still validates start time and executable before/after inspection;
@@ -51,8 +58,9 @@ At one census per second this is about 1.4% of **one CPU core**, not 1.4% of the
 whole machine; metadata contributes about 0.013% of one core averaged over
 30 seconds. These numbers exclude PipeWire/audio/video work and are not a
 worst-case or battery-life guarantee. Reproduce with `detection_probe --benchmark`.
-They predate the desktop-launcher hint index used by the filtered Add Game
-picker; that additional periodic worker cost has not yet been benchmarked.
+They predate both the desktop-launcher hint index used by the filtered Add Game
+picker and the additional non-Steam metadata readers; those periodic worker
+costs have not yet been benchmarked.
 
 Detection generally takes one to two ticks. Very short processes can exist
 entirely between samples and are intentionally not guaranteed observable.
@@ -65,13 +73,128 @@ no eBPF, ptrace, injected library, privilege requirement or X11 detection.
 
 ## Identification and catalogues
 
-`ProcessGames::steamLibrary()` reads local Steam libraryfolders and app
+`LauncherLibrary::installed()` supplies all supported launcher sources through
+one catalogue:
+
+| Launcher | Local source | Recognition evidence |
+| --- | --- | --- |
+| Steam | `steamapps/libraryfolders.vdf` and `appmanifest_*.acf` | Installed app directory, with App ID corroboration when present |
+| Legendary / Heroic Epic | `legendary/installed.json` or `heroic/legendaryConfig/legendary/installed.json` under XDG config | Exact installed executable |
+| Heroic GOG | `heroic/gog_store/installed.json` and the installed product's `goggame-<id>.info` | Matching product ID and primary file launch task |
+| Nile / Heroic Amazon | `nile/` or `heroic/nile_config/nile/` under XDG config | Installed ID joined to local `library.json` title and `fuel.json` main executable |
+| Lutris | XDG data `lutris/pga.db` and XDG config `lutris/games/<configpath>.yml` | Installed Linux/Wine entry's exact executable, plus configured Wine prefix |
+
+Steam discovery reads local libraryfolders and app
 manifests, including extra drives and common Flatpak locations.
 An executable must be inside an installed app's directory; a matching
 Steam App ID is strong corroboration when available. Inherited
 `SteamAppId` alone does not make Steam, Proton, a runtime helper or Wine
 service a game. Local manifests provide display names and `steam_app_<id>`
 identity keys, not the identity of a particular running instance.
+
+Other launcher entries do **not** grant directory-wide or prefix-wide
+ownership. Initial matching requires the configured executable's exact host path.
+Conflicting names for the same payload are not automatically selected;
+an explicit user rule can resolve them. User names override launcher names,
+and blocks remain authoritative. All sources preserve independent concurrent
+instances and use the existing runtime process/audio checks.
+
+A generic `Launcher.exe` (or game-specific `*Launcher` binary) is normally
+excluded, but can establish an instance when local installed-game metadata
+names its exact executable inside a verified installation. The worker records
+that bootstrap role and installation scope; its canonical executable must not
+escape the installation through a symlink. Known shared storefronts such as
+Epic Games Launcher, Ubisoft Connect and EA App remain excluded even when
+configured as an entry's launch executable. An executable basename, user
+display name, Steam variable or shared Wine prefix cannot enable the exception.
+
+Bootstrap descendants must have observed process ancestry, a payload inside
+the same installation and the same Wine prefix as the bootstrap. Unrelated
+siblings and out-of-installation children are not adopted. Once an unchanged
+child has been observed, it can retain the game key/instance ID after the
+bootstrap exits or the child is reparented; PID reuse, payload changes, blocks
+and runtime-prefix changes invalidate that membership. This feeds the existing
+debounce and recording recovery without granting additional capture permission
+or bypassing the desktop portal.
+
+Known metadata-backed bootstraps establish detection identity but do not arm
+automatic capture. Once a verified non-bootstrap member joins the instance,
+it becomes the primary even while the launcher remains open. Pending recording
+enters audio settling on that promotion; authorization
+notifications for new games are also deferred past the bootstrap. The wait is
+instance-scoped, has no launcher timeout and is cancelled by Stop, blocking or
+instance replacement. It is process readiness, not proof of a visible window.
+Unclassified launchers/loaders and pre-existing launcher-bound portal tokens
+cannot be guaranteed to retarget automatically by this policy.
+
+UMU/pressure-vessel can make an identified executable and its successor siblings under a private
+`pv-adverb` instead of Linux parent/child processes. This case requires the
+runtime's command after `--` to explicitly invoke Proton's
+`waitforexitandrun` (optionally through `umu-shim`/Python) with the exact
+identified payload, plus ancestry
+through `srt-bwrap`/`bwrap` to an `umu-run` invocation targeting that same
+payload. The observed runtime PID/start time, executable and command are then
+pinned as the private launch context. Subsequent in-installation payloads must
+resolve to that exact context with unchanged identity and the same runtime
+prefix. Another private runtime or a shared Wine broker is an ancestry
+boundary; a common storefront ancestor, broker name or prefix is insufficient.
+Runtime/broker processes are never game members and cannot keep an otherwise
+finished game alive.
+
+Capture-window loss can arrive between census ticks, after the original
+payload exits but before its already-running successor enters the cached
+membership. For proven window destruction or an approved empty capture, the
+recorder can retain full-recording intent while that same selected/approved
+instance is being resolved against its unchanged private launch context.
+Native recording is drained during this census-settling phase; a new capture
+attempt still requires a verified live game member. This has no wall-clock
+handoff/retry cutoff: the next authoritative census either establishes the
+successor or removes the instance. A runtime helper alone cannot keep a
+census-confirmed finished game alive. Explicit Stop, changed instance,
+removed approval or dead runtime cancel pending work. Ambiguous permission
+loss is not promoted into this recoverable path.
+
+Launch-context attestation is not restricted to `*Launcher` filenames.
+Ordinary Steam and other catalogue games use the same mechanism when their
+installation scope is unambiguous. Siblings that also have their own matching
+catalogue entry can retain the original launch identity rather than appearing
+as a second game. Explicit different user rules remain independent, and blocks
+on the established launch are honored during the handoff. User-defined seeds
+can participate when catalogue metadata independently verifies their installation;
+a user name/path rule alone never grants ownership of the whole executable
+directory. Direct/descendant detection keeps its existing behavior when there
+is no attested runtime context.
+
+This is not retrospective executable discovery: a game already running after
+an unobserved bootstrap exit still needs direct executable evidence or an exact
+user rule. Handoffs without observed ancestry or an attested private launch
+context are not inferred from installation or prefix membership alone.
+Debug logs report launch tracking members (PID, start time, parent and
+payload), newly observed unowned processes in the tracked installation, and
+loss of all verified members. These diagnostics do not log process arguments
+or portal tokens and do not change matching decisions.
+The `Game detected` info message also reports recognition provenance, such as
+`from "Steam"`, `from "Heroic (Epic)"` or `from "Lutris, user rule"`.
+Metadata and rule sources are retained together when both apply, and the
+established source attribution survives verified process handoffs.
+
+Launcher files are read only, on the census worker. SQLite opens existing
+Lutris databases read-only with a short lock timeout and query work budget.
+JSON/YAML reads and catalogue entries are bounded; missing, malformed,
+oversized and unsupported entries are skipped. No launcher is executed,
+no account credentials are read, and no online login or catalogue is needed.
+Non-Steam executable files are checked for an ELF/PE header to avoid treating
+wrapper scripts as game binaries or verified bootstraps.
+
+Coverage is intentionally conservative: native launcher metadata in standard
+XDG locations is supported; custom database/config locations, launcher-specific
+executable overrides, emulator/ROM entries, script-only launch tasks, and
+Wine drive-letter paths in launcher configuration may still need an exact
+Trophy rule. GOG detection currently requires a matching `.info` primary file
+task; Linux packages that only expose `start.sh` are not inferred from their
+installation directory. Amazon Fuel files must be valid JSON. Reading a
+Flatpak Steam library from native Trophy is not support for running Trophy
+inside Flatpak.
 
 Native Linux payloads are ordinary executable paths. Wine loader argv is
 interpreted only at the payload position, not by searching arbitrary
@@ -82,8 +205,8 @@ This mapping is stored in the process snapshot; identification and picker
 rendering do not perform filesystem lookups. Explicit mappings override C:/Z:
 defaults. Broken mappings and unknown/drive-relative paths are rejected rather
 than inferred from CWD or an inherited Steam App ID.
-Wine services/installers/crash handlers and generic launchers are excluded.
-Unknown non-Steam games need exact user definitions; a generic executable
+Wine services/installers/crash handlers and unverified generic launchers are excluded.
+Games without usable launcher metadata need exact user definitions; a generic executable
 named `Game.exe` is not automatically a game.
 
 The Games allow-list supplies user definitions and display names; it accepts
@@ -133,6 +256,16 @@ game starts does not change the game identity.
 
 ## Recording integration
 
+Automatic full recordings and DVR both use asynchronous owned-audio settling
+after payload readiness. A present initial probe starts capture; otherwise two
+consecutive successful polls settle audio. Ten resolved polls trigger the
+silent-game fallback (2-second timer, with slow in-flight probes neither
+overlapping nor consuming ticks). Stop and identity changes invalidate queued
+results. Audio is a startup hint, not proof that a window exists or a guarantee
+of silent portal restoration. Session audio preparation, desktop fallback and
+owned-game retry remain in place. Neither path bypasses portal selection,
+approval or process-identity checks.
+
 Recording and DVR pin `detectedGameInstance` at capture start. Their
 initial lookup and session retries use that exact instance, not a later
 namesake, compositor PID or portal display label. Portal capture and restore
@@ -168,6 +301,22 @@ Desktop-only audio remains an explicit recording setting. Existing audio mixer,
 encoding, muxing, clip/DVR and portal lifecycles are retained.
 
 ### Captured-window handoff
+
+The portal's `Session::Closed` signal has its own terminal classification,
+separate from proven node/window destruction. It can mean source shutdown or
+revoked sharing and never grants automatic recapture. Recording drains and
+preserves the current part, settles the pinned instance against the census
+instead of declaring the departed bootstrap to be game exit. This terminal
+permission boundary is not the automatic launcher-handoff mechanism.
+
+An explicit recording restart uses a fresh window-only portal selection with no saved
+restore token. Existing tokens are not deleted just because the session ended.
+An instance-scoped selection fence blocks automatic full recording and DVR
+until explicit fresh selection succeeds or that instance ends. Stopping,
+changing selection and switching back cannot bypass the fence; concurrent
+instances retain independent fences. Manual recordings do not inherit a
+detected-game resume target. Cancelled/empty fresh selections do not fall back
+to an older closed grant.
 
 When a captured window disappears while its exact pinned game instance remains
 alive, full recording saves the completed part and retries the existing portal

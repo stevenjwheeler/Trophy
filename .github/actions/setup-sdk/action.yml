@@ -21,6 +21,7 @@ runs:
           libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev
           libxcb-shm0-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0
           libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber
+          libyaml-dev libsqlite3-dev
           libdrm-dev libgbm-dev libva-dev libva-drm2 libgtest-dev
           nasm libx264-dev libopus-dev zlib1g-dev git xz-utils
           desktop-file-utils appstream file ffmpeg dbus-daemon)
@@ -33,7 +34,7 @@ runs:
         done
         # Process detection has no injected Vulkan/OpenGL reporters or 32-bit
         # companions. Verify the dependencies actually used by this SDK.
-        pkg-config --exists libpipewire-0.3
+        pkg-config --exists libpipewire-0.3 yaml-0.1 sqlite3
         for tool in ffmpeg ffprobe pipewire wireplumber pw-cli pw-dump dbus-run-session zstd; do
           command -v "$tool" >/dev/null || { echo "ERROR: required tool $tool missing"; exit 1; }
         done

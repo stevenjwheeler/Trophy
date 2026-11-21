@@ -80,12 +80,25 @@ class CardManagerFake : public QObject {
   Q_PROPERTY(QString currentGameName MEMBER gameName NOTIFY changed)
   Q_PROPERTY(qint64 recordingDuration MEMBER duration NOTIFY changed)
   Q_PROPERTY(qint64 recordingSize MEMBER size NOTIFY changed)
+  Q_PROPERTY(bool captureResumeRequired MEMBER resumeRequired NOTIFY changed)
 public:
   bool isRecording() const { return live; }
   bool live = false;
   QString gameName = "Manual Recording";
   qint64 duration = 65000;
   qint64 size = 1048576;
+  bool resumeRequired = false;
+  int resumeRequests = 0, stopRequests = 0;
+  Q_INVOKABLE void resumeCapture() {
+    ++resumeRequests;
+    resumeRequired = false;
+    emit changed();
+  }
+  Q_INVOKABLE void stopRecording() {
+    ++stopRequests;
+    resumeRequired = false;
+    emit changed();
+  }
 signals:
   void changed();
 };
@@ -1285,6 +1298,10 @@ TEST_F(RecordingCardBindingTest,
   EXPECT_EQ(label->property("text").toString(), "STARTING");
   state.insert("recordingPhase", "stopping");
   EXPECT_EQ(label->property("text").toString(), "SAVING");
+  state.insert("recordingPhase", "waiting-game");
+  EXPECT_EQ(label->property("text").toString(), "LAUNCHING");
+  EXPECT_EQ(page->findChild<QObject *>("captureResumeBanner"), nullptr);
+  EXPECT_EQ(page->findChild<QObject *>("captureResumeButton"), nullptr);
   manager.live = true;
   emit manager.changed();
   EXPECT_EQ(label->property("text").toString(), "RECORDING");
