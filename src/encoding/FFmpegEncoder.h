@@ -83,6 +83,7 @@ private:
   bool processPacket(AVPacket *packet, EncodedPacket &output);
   void logSummary();
   void reportEncodeRejection(int code);
+  bool failInitialization(const char *stage, int code);
   bool convertSoftwareFrame(const VideoFrame &frame);
   int submitFrame(AVFrame *frame, std::vector<EncodedPacket> &packets,
                   bool *accepted = nullptr);

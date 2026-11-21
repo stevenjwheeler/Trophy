@@ -238,19 +238,19 @@ def smoke(image, log_path, expect_host_libva=False, expect_bundled_runtime=False
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
         output = log_path.read_text()
+        app_log = config / "trophy.log"
+        app_output = app_log.read_text(errors="replace") if app_log.exists() else ""
         if expect_bundled_runtime:
             # Support depends on knowing which half of the runtime was used, so
             # a bundle that stops reporting it is a regression too.
             for marker in ("Runtime libraries:", "from the host", "from the bundle"):
-                if marker not in output:
+                if marker not in app_output:
                     raise RuntimeError(
                         f"startup log is missing the runtime library inventory ({marker})")
             # The bundled FFmpeg must keep the software H.264 encoder that the
             # Qt SDK's LGPL copy lacks; without x264 there is no recording
             # fallback when no GPU encoder is usable. The encoder catalogue is
             # DEBUG level, so it lands in trophy.log, not the console.
-            app_log = config / "trophy.log"
-            app_output = app_log.read_text(errors="replace") if app_log.exists() else ""
             if "x264" not in output and "x264" not in app_output:
                 raise RuntimeError(
                     "startup log does not report the software x264 encoder; "

@@ -19,5 +19,22 @@ public:
     ProcessGames::publish(service.m_instances);
     service.updateCurrentGame(name, pid, key);
   }
+  static void setLaunchRuntime(GameDetectionService &service, qint64 pid) {
+    auto &instance = service.m_instances.first();
+    instance.launchContext.runtime = ProcessCensus::inspect(pid);
+  }
+  static void promotePayload(GameDetectionService &service, qint64 pid) {
+    auto &instance = service.m_instances.first();
+    instance.primaryPid = pid;
+    instance.processes = {{pid, ProcessCensus::inspect(pid)}};
+    ProcessGames::publish(service.m_instances);
+    service.updateCurrentGame(instance.name, pid, instance.key);
+  }
+  static void clear(GameDetectionService &service) {
+    service.m_instances.clear();
+    service.m_selectedId.clear();
+    ProcessGames::publish(service.m_instances);
+    service.updateCurrentGame({}, 0);
+  }
 };
 } // namespace TrophyBackend

@@ -78,7 +78,23 @@ constexpr double kCutEpsilonSec = 5e-6;
 struct CutInput {
   QString path;
   double offset = 0.0;
+  std::optional<QVector<qint64>> videoDtsMs;
 };
+
+int restoreVideoClock(const CutInput &in, AVFormatContext *ctx, AVPacket *packet,
+                      qsizetype &videoIndex, int result) {
+  if (!in.videoDtsMs) return result;
+  const auto &clock = *in.videoDtsMs;
+  if (result == AVERROR_EOF)
+    return videoIndex == clock.size() ? result : AVERROR_INVALIDDATA;
+  if (result < 0 || packet->stream_index != 0) return result;
+  if (videoIndex >= clock.size() || clock[videoIndex] == AV_NOPTS_VALUE)
+    return AVERROR_INVALIDDATA;
+  const int64_t offsetUs = std::llround(in.offset * AV_TIME_BASE);
+  packet->dts = av_rescale_q(clock[videoIndex++] * 1000 - offsetUs,
+                             AV_TIME_BASE_Q, ctx->streams[0]->time_base);
+  return result;
+}
 
 AVFormatContext *openCutInput(const CutInput &in, QString *errMsg,
                               const ReplayClipperInternal::Operations &ops) {
@@ -95,6 +111,46 @@ AVFormatContext *openCutInput(const CutInput &in, QString *errMsg,
     return nullptr;
   }
   return ctx;
+}
+
+using PacketOwner = std::unique_ptr<AVPacket, void (*)(AVPacket *)>;
+
+// Matroska does not store DTS. With reordered video its demuxer may leave the
+// first packets (including the IDR) without DTS. Recover only a bounded head
+// from a later, known video DTS and positive packet durations, never from PTS
+// order. Scanning and copying must use exactly the same recovered clock.
+bool primeTimestampHead(AVFormatContext *ctx, std::deque<PacketOwner> &head,
+                        int &readResult, QString *error,
+                        const ReplayClipperInternal::Operations &ops) {
+  int64_t bytes = 0;
+  for (int count = 0; count < 256; ++count) {
+    PacketOwner next(ops.packetAlloc(), [](AVPacket *p) { av_packet_free(&p); });
+    if (!next) {
+      if (error) *error = QStringLiteral("cannot allocate input packet");
+      return false;
+    }
+    readResult = ops.readFrame(ctx, next.get());
+    if (readResult < 0) break;
+    bytes += std::max(next->size, 0);
+    if (bytes > 32 * 1024 * 1024) {
+      if (error) *error = QStringLiteral("segment timestamp head exceeds buffer limit");
+      return false;
+    }
+    const bool anchor = next->stream_index == 0 && next->dts != AV_NOPTS_VALUE;
+    head.push_back(std::move(next));
+    if (!anchor) continue;
+    int64_t dts = head.back()->dts;
+    for (auto it = std::next(head.rbegin()); it != head.rend(); ++it) {
+      auto *packet = it->get();
+      if (packet->stream_index != 0) continue;
+      if (packet->duration <= 0 || dts < INT64_MIN + packet->duration) break;
+      dts -= packet->duration;
+      if (packet->dts == AV_NOPTS_VALUE && packet->pts != AV_NOPTS_VALUE)
+        packet->dts = dts;
+    }
+    break;
+  }
+  return true;
 }
 
 // All inputs must share the first input's stream layout. Handles close
@@ -152,8 +208,9 @@ bool validateLayout(const QList<CutInput> &inputs, unsigned *nbStreams,
 // keyframe time (valid DTS only — file-head packets often lack one and a
 // DTS-less start breaks the mux clock). Each pass opens its own handles.
 bool scanKeys(const QList<CutInput> &inputs, QVector<double> *keyTimes,
-              QVector<double> *keyDts, double *globalEnd, QString *errMsg,
-              const ReplayClipperInternal::Operations &ops) {
+               QVector<double> *keyDts, double *globalEnd, QString *errMsg,
+               const ReplayClipperInternal::Operations &ops,
+               bool recoverHeads = false) {
   double end = -1.0;
   QVector<double> keys;
   QVector<double> dts;
@@ -168,8 +225,25 @@ bool scanKeys(const QList<CutInput> &inputs, QVector<double> *keyTimes,
         *errMsg = QStringLiteral("cannot allocate scan packet");
       return false;
     }
+    std::deque<PacketOwner> head;
+    int headResult = 0;
+    if (recoverHeads && !in.videoDtsMs &&
+        !primeTimestampHead(ctx, head, headResult, errMsg, ops)) {
+      av_packet_free(&pkt);
+      return false;
+    }
+    qsizetype videoIndex = 0;
+    const auto readPacket = [&] {
+      if (!head.empty()) {
+        av_packet_move_ref(pkt, head.front().get());
+        head.pop_front();
+        return 0;
+      }
+      const int result = headResult < 0 ? headResult : ops.readFrame(ctx, pkt);
+      return restoreVideoClock(in, ctx, pkt, videoIndex, result);
+    };
     int readResult = 0;
-    while ((readResult = ops.readFrame(ctx, pkt)) >= 0) {
+    while ((readResult = readPacket()) >= 0) {
       if (pkt->stream_index == 0) {
         const double t = in.offset + pktPtsSec(pkt, ctx->streams[0]->time_base);
         if (t > end)
@@ -233,7 +307,8 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
               double timelineOriginSec, double endSec,
               const QString &outputPath, QString *error,
                double *keptSeconds, double cutSecForLog,
-               const ReplayClipperInternal::Operations &ops) {
+                const ReplayClipperInternal::Operations &ops,
+                bool recoverHeads = false) {
   auto fail = [&](const QString &msg) {
     qWarning() << "ReplayClipper:" << msg;
     if (error)
@@ -326,42 +401,22 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
     // dropping that head discards the IDR and corrupts dependent pictures.
     // Buffer only a bounded head, then backfill decode timestamps from the
     // first known DTS and actual packet durations, never from reordered PTS.
-    using PacketOwner = std::unique_ptr<AVPacket, void (*)(AVPacket *)>;
     std::deque<PacketOwner> head;
     int headResult = 0;
-    if (cutFound) {
-      int64_t headBytes = 0;
-      for (int count = 0; count < 256; ++count) {
-        PacketOwner next(ops.packetAlloc(), [](AVPacket *p) { av_packet_free(&p); });
-        if (!next) { av_packet_free(&pkt); return fail("cannot allocate input packet"); }
-        headResult = ops.readFrame(ctx, next.get());
-        if (headResult < 0) break;
-        headBytes += std::max(next->size, 0);
-        if (headBytes > 32 * 1024 * 1024) {
-          av_packet_free(&pkt);
-          return fail("segment timestamp head exceeds buffer limit");
-        }
-        const bool anchor = next->stream_index == 0 && next->dts != AV_NOPTS_VALUE;
-        head.push_back(std::move(next));
-        if (!anchor) continue;
-        int64_t dts = head.back()->dts;
-        for (auto it = std::next(head.rbegin()); it != head.rend(); ++it) {
-          auto *p = it->get();
-          if (p->stream_index != 0) continue;
-          if (p->duration <= 0 || dts < INT64_MIN + p->duration) break;
-          dts -= p->duration;
-          if (p->dts == AV_NOPTS_VALUE && p->pts != AV_NOPTS_VALUE) p->dts = dts;
-        }
-        break;
-      }
+    if ((cutFound || recoverHeads) && !in.videoDtsMs &&
+        !primeTimestampHead(ctx, head, headResult, &msg, ops)) {
+      av_packet_free(&pkt);
+      return fail(msg);
     }
+    qsizetype videoIndex = 0;
     auto readPacket = [&] {
       if (!head.empty()) {
         av_packet_move_ref(pkt, head.front().get());
         head.pop_front();
         return 0;
       }
-      return headResult < 0 ? headResult : ops.readFrame(ctx, pkt);
+      const int result = headResult < 0 ? headResult : ops.readFrame(ctx, pkt);
+      return restoreVideoClock(in, ctx, pkt, videoIndex, result);
     };
     bool segmentVideoStarted = false;
     int readResult = 0;
@@ -483,7 +538,7 @@ bool writeCut(const QList<CutInput> &inputs, unsigned nbStreams, double cutKey,
 
 bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
                               double windowSeconds, const QString &outputPath,
-                              QString *error, double *keptSeconds) {
+                              QString *error, double *keptSeconds, double endSeconds) {
   const ReplayClipperInternal::Operations defaults;
   const auto &ops = s_operations ? *s_operations : defaults;
   auto fail = [&](const QString &msg) {
@@ -497,12 +552,14 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
     return fail("no segments");
   if (windowSeconds <= 0)
     return fail("window must be positive");
+  if (!(endSeconds > 0))
+    return fail("tail end must be positive");
   if (outputPath.isEmpty())
     return fail("no output path");
 
   QList<CutInput> inputs;
   for (const ReplaySegment &seg : segments)
-    inputs.push_back({seg.path, seg.startOffsetSec});
+    inputs.push_back({seg.path, seg.startOffsetSec, seg.videoDtsMs});
 
   unsigned nbStreams = 0;
   {
@@ -516,21 +573,21 @@ bool ReplayClipper::saveTail(const QList<ReplaySegment> &segments,
   double globalEnd = -1.0;
   {
     QString msg;
-    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg, ops))
+    if (!scanKeys(inputs, &keyTimes, &keyDts, &globalEnd, &msg, ops, true))
       return fail(msg);
   }
   if (globalEnd < 0)
     return fail("segments contain no video packets");
 
-  const double cutSec = globalEnd - windowSeconds;
+  const double cutSec = std::min(globalEnd, endSeconds) - windowSeconds;
   const double cutKey = pickCutKey(keyTimes, cutSec);
   if (cutKey < 0)
     return fail("segments contain no usable keyframe");
 
   return writeCut(inputs, nbStreams, cutKey,
                   dtsForKey(keyTimes, keyDts, cutKey),
-                  std::numeric_limits<double>::infinity(), outputPath, error,
-                   keptSeconds, cutSec, ops);
+                   endSeconds, outputPath, error,
+                    keptSeconds, cutSec, ops, true);
 }
 
 bool ReplayClipper::saveRange(const QString &sourcePath, double startSeconds,

@@ -554,8 +554,11 @@ CudaImportState::CacheEntry *cudaImportCacheAcquire(CudaImportState &st,
   EGLImage img = eglCreateImage(st.display, EGL_NO_CONTEXT,
                                 EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
   if (img == EGL_NO_IMAGE) {
+    const EGLint error = eglGetError();
     close(fd);
-    st.error = QStringLiteral("eglCreateImage failed");
+    st.error = QStringLiteral("eglCreateImage failed (EGL 0x%1, %2x%3, modifier 0x%4)")
+        .arg(quint32(error), 0, 16).arg(frame.width).arg(frame.height)
+        .arg(frame.drmModifier, 0, 16);
     return nullptr;
   }
   CudaGraphicsResource res = nullptr;
@@ -819,10 +822,10 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
 
 bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   const AVCodec *codec = avcodec_find_encoder_by_name(m_codecName.toUtf8().constData());
-  if (!codec) return false;
+  if (!codec) return failInitialization("encoder lookup", AVERROR_ENCODER_NOT_FOUND);
 
   m_codecCtx = avcodec_alloc_context3(codec);
-  if (!m_codecCtx) return false;
+  if (!m_codecCtx) return failInitialization("codec context allocation", AVERROR(ENOMEM));
 
   m_codecCtx->width = config.width;
   m_codecCtx->height = config.height;
@@ -883,20 +886,27 @@ bool FFmpegEncoder::initializeCodec(const EncoderConfig &config) {
   int ret = avcodec_open2(m_codecCtx, codec, &opts);
   av_dict_free(&opts);
 
-  if (ret < 0) { cleanup(); return false; }
+  if (ret < 0) {
+    failInitialization("avcodec_open2", ret);
+    cleanup();
+    return false;
+  }
   return true;
 }
 
 bool FFmpegEncoder::initializeHardwareContext() {
     enum AVHWDeviceType type = m_codecName.contains("nvenc") ? AV_HWDEVICE_TYPE_CUDA : AV_HWDEVICE_TYPE_VAAPI;
 
-    if (av_hwdevice_ctx_create(&m_hwDeviceCtx, type, nullptr, nullptr, 0) < 0) return false;
+    const int deviceResult = av_hwdevice_ctx_create(&m_hwDeviceCtx, type, nullptr, nullptr, 0);
+    if (deviceResult < 0) return failInitialization("hardware device creation", deviceResult);
     
     // Attach device context
     m_codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
+    if (!m_codecCtx->hw_device_ctx)
+      return failInitialization("hardware device reference", AVERROR(ENOMEM));
 
     m_hwFramesCtx = av_hwframe_ctx_alloc(m_hwDeviceCtx);
-    if (!m_hwFramesCtx) return false;
+    if (!m_hwFramesCtx) return failInitialization("hardware frames allocation", AVERROR(ENOMEM));
 
     AVHWFramesContext *f = (AVHWFramesContext *)m_hwFramesCtx->data;
     f->format = m_codecCtx->pix_fmt;
@@ -909,10 +919,22 @@ bool FFmpegEncoder::initializeHardwareContext() {
     f->height = m_codecCtx->height;
     f->initial_pool_size = 20;
 
-    if (av_hwframe_ctx_init(m_hwFramesCtx) < 0) return false;
+    const int framesResult = av_hwframe_ctx_init(m_hwFramesCtx);
+    if (framesResult < 0) return failInitialization("hardware frames initialization", framesResult);
 
     m_codecCtx->hw_frames_ctx = av_buffer_ref(m_hwFramesCtx);
+    if (!m_codecCtx->hw_frames_ctx)
+      return failInitialization("hardware frames reference", AVERROR(ENOMEM));
     return true;
+}
+
+bool FFmpegEncoder::failInitialization(const char *stage, int code) {
+  char message[AV_ERROR_MAX_STRING_SIZE] = {};
+  av_strerror(code, message, sizeof(message));
+  qWarning() << "FFmpegEncoder:" << m_codecName << stage << "failed:"
+             << message << "code:" << code << "size:"
+             << QSize(m_config.width, m_config.height) << "fps:" << m_config.fps;
+  return false;
 }
 
 bool FFmpegEncoder::encodeFrame(const VideoFrame &frame, EncodedPacket &output) {

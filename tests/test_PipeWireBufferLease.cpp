@@ -7,8 +7,6 @@ extern "C" {
 }
 #include "capture/PipeWireBufferLease.h"
 #include "capture/IVideoCaptureSource.h"
-#include "core/FrameDispatcher.h"
-#include "core/CallbackSink.h"
 
 using namespace TrophyBackend;
 
@@ -166,25 +164,6 @@ TEST_F(PipeWireBufferLeaseTest, RemovedBufferIsNotReturnedDuringRenegotiation) {
   EXPECT_EQ(returnedCount, 0);
   // Reuse of the address must not resurrect the old entry.
   leases->retain(&buffer).reset();
-  pw_loop_iterate(loop, 0);
-  EXPECT_EQ(returnedCount, 1);
-}
-
-TEST_F(PipeWireBufferLeaseTest, DispatcherCopiesAndMovesKeepProducerPinned) {
-  pw_buffer buffer{};
-  FrameDescriptor descriptor;
-  descriptor.bufferLease = leases->retain(&buffer);
-  std::unique_ptr<FrameDescriptor> retained;
-  FrameDispatcher dispatcher;
-  dispatcher.registerSink(std::make_shared<CallbackSink>([&](FrameDescriptor &&frame) {
-    retained = std::make_unique<FrameDescriptor>(std::move(frame));
-    return true;
-  }));
-  dispatcher.dispatch(descriptor);
-  descriptor.bufferLease.reset();
-  pw_loop_iterate(loop, 0);
-  EXPECT_EQ(returnedCount, 0);
-  retained.reset();
   pw_loop_iterate(loop, 0);
   EXPECT_EQ(returnedCount, 1);
 }

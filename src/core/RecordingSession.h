@@ -31,11 +31,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <thread>
 #include <vector>
-#include "FrameDispatcher.h"
 
 
 namespace TrophyBackend {
@@ -96,38 +94,7 @@ public:
     return m_outputFinalized.load() && !m_outputFailed.load();
   }
 
-  // --- Persistent DVR output rotation ---------------------------------
-  // Swap only the container while the encoder/audio pipeline stays live.
-  // The cut lands on a forced video keyframe. `nextMuxer` must be an
-  // uninitialized muxer; `currentMuxer` is the externally owned current
-  // muxer, or null once this session already owns it. On success the
-  // session takes ownership of both and outputPath() becomes nextPath.
-  // Returns false (ownership stays with the caller) when a rotation is
-  // already pending or the successor cannot be prepared.
-  bool beginOutputRotation(std::unique_ptr<IMuxer> &nextMuxer,
-                           std::unique_ptr<IMuxer> &currentMuxer,
-                           const QString &nextPath,
-                           const QMap<QString, QString> &metadata);
-  // Abort a rotation that has not cut yet: held audio is written to the
-  // current file and the successor is discarded. Emits outputRotationAborted.
-  void abortOutputRotation();
-  struct RotationResult {
-    QString oldPath;
-    qint64 oldBytes = 0;
-    QJsonObject audioHistory{};
-  };
-  // Settle any rotation synchronously (stop path). A cut already made is
-  // finalized and returned so the owner can enlist that segment; a rotation
-  // still waiting for its keyframe is aborted. Never emits a signal.
-  std::optional<RotationResult> settleRotation();
-  bool rotationPending() const;
-  // Owner-thread cleanup: finalized outgoing muxers are deleted here because
-  // QObject destruction must not happen on the encoding thread.
-  std::vector<std::unique_ptr<IMuxer>> takeRetiredMuxers();
-  QString outputPath() const {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    return m_outputPath;
-  }
+  QString outputPath() const { return m_outputPath; }
 
   qint64 frameCount() const { return m_frameCount; }
   qint64 bytesWritten() const { return m_bytesWritten; }
@@ -148,7 +115,6 @@ public:
     std::array<QString, AudioMixer::kTrackCount> boundSerial;
   };
   AudioRoutingState audioRoutingState() const;
-  void inheritAudioRouting(const RecordingSession &previous);
 
   // Audio identities to watch for (called by RecordingManager/ReplayManager
   // during setup). Game lookup resolves the pinned instance or explicit
@@ -177,8 +143,6 @@ public:
   }
   void setDesktopAudio(bool desktop) { m_desktopAudio = desktop; noteAudioRouting(); }
 
-  void setFrameDispatcher(std::shared_ptr<TrophyBackend::FrameDispatcher> d) { m_frameDispatcher = d; }
-  bool pushQueuedFrame(QueuedFrame &&frame);
 
   // Mark a track as already having a source so the node-check timer won't re-add it
   void markSourceConnected(int trackIndex, const QString &serial = {}) {
@@ -200,12 +164,6 @@ public:
 signals:
   void errorOccurred(const QString &error);
   void stopFinished();
-  // Emitted after a persistent rotation cut has finalized the outgoing file.
-  // Queued to the owner, which must call takeRetiredMuxers() to release it.
-  void outputRotated(const QString &oldPath, const QString &newPath,
-                     qint64 oldBytes, const QJsonObject &audioHistory);
-  // Emitted when a rotation could not cut and was rolled back.
-  void outputRotationAborted(const QString &nextPath);
 
 private:
   friend class RecordingSessionTestPeer;
@@ -221,53 +179,7 @@ private:
   bool writeOutputPacket(const EncodedPacket &packet);
   qint64 currentMuxerBytes() const;
   bool writeToMuxer(IMuxer *muxer, const EncodedPacket &packet);
-  // Rotation state machine. All of these require m_rotationMutex held.
-  bool performRotationCutLocked(const EncodedPacket &keyframe);
-  bool abortRotationLocked();
-  void finalizeRotationOldLocked();
-  void checkRotationFenceLocked();
-  bool rotationFenceSatisfiedLocked() const;
-  void noteOutgoingLocked(const EncodedPacket &packet);
-  void markAudioCaughtUpLocked(int stream);
-  void resetAudioHistoryForSegment();
-  void pollRotation();
-  void flushRotationEvents(); // Emits outside m_rotationMutex.
-  struct RotationEvent {
-    bool aborted = false;
-    QString oldPath;
-    QString newPath;
-    qint64 oldBytes = 0;
-    QJsonObject audioHistory;
-  };
-  enum class RotationState { None, Pending, Rotating };
-  static constexpr int64_t kNoPts = std::numeric_limits<int64_t>::min();
-  static constexpr int64_t kRotationKeyframeTimeoutMs = 2000;
-  static constexpr int64_t kRotationFenceTimeoutMs = 1500;
-  static constexpr qint64 kRotationHeldAudioLimit = 1 << 20; // ~1 MiB
-  mutable std::mutex m_rotationMutex;
-  RotationState m_rotationState = RotationState::None;
-  // Owns the current muxer once this session has adopted it (after the first
-  // rotation). Before that the muxer is externally owned (m_ownedCurrent null).
-  std::unique_ptr<IMuxer> m_ownedCurrent;
-  std::unique_ptr<IMuxer> m_rotationNext;
-  std::unique_ptr<IMuxer> m_rotationOld;
-  std::vector<std::unique_ptr<IMuxer>> m_retiredMuxers;
-  std::vector<StreamInfo> m_streamInfos; // start() stream layout, in order
-  std::vector<EncodedPacket> m_heldAudio;
-  qint64 m_heldAudioBytes = 0;
-  int64_t m_lastWrittenVideoPts = kNoPts;
-  std::vector<int64_t> m_lastWrittenAudioPts; // indexed by muxer stream
-  // Streams whose outgoing-file audio must reach the cut before it finalizes.
-  std::vector<bool> m_rotationFencePending;
-  std::vector<RotationEvent> m_rotationEvents;
-  qint64 m_rotationOldBytes = 0;
-  QString m_rotationNextPath;
-  QString m_rotationOldPath;
-  QJsonObject m_rotationOldHistory;
-  int64_t m_rotationHoldFrom = 0;
-  int64_t m_rotationCutPts = 0;
-  int64_t m_rotationArmedAtMs = 0;
-  int64_t m_rotationCutAtMs = 0;
+  mutable std::mutex m_outputMutex;
   void setOutputError(const QString &text);
   void failOutput(const QString &text);
   void encodeAudioPackets(AudioEncoder &encoder, const float *samples,
@@ -420,7 +332,6 @@ private:
   static int64_t steadyNowMs();
 
   std::thread m_encodingThread;
-  std::shared_ptr<TrophyBackend::FrameDispatcher> m_frameDispatcher;
 
   // Video frame queue for producer/consumer
   std::queue<QueuedFrame> m_videoQueue;
@@ -465,16 +376,10 @@ private:
   bool m_gameAudioPending = false;
   bool m_desktopAudio = false;
   void noteAudioRouting(); // Owner-thread routing history; audio receipt is atomic.
-  // Read on the encoding thread when a persistent rotation snapshots and
-  // resets per-segment history, so these are atomics.
+  // Routing history is published to packet consumers alongside live telemetry.
   std::atomic<bool> m_audioHistoryStarted{false};
   std::atomic<bool> m_usedSystemAudio{false};
   std::atomic<bool> m_usedGameAudio{false};
-  // Last routing state published by noteAudioRouting (owner thread). The cut
-  // seeds the next segment's history from these instead of racing the plain
-  // owner-thread routing flags.
-  std::atomic<bool> m_historyGamePending{false};
-  std::atomic<bool> m_historyDesktop{false};
   std::array<std::atomic<bool>, kAudioTrackCount> m_audioReceived{};
   std::atomic<quint64> m_queueDrops{0};
   std::array<int, kAudioTrackCount> m_trackToStreamMap{};  // Map track index to muxer stream index

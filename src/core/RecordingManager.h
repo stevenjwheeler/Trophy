@@ -1,272 +1,126 @@
-/*
- * Trophy - Game recording and clipping
- * Copyright (C) 2026
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
-
-#include <QElapsedTimer>
+#include "RecordingEngine.h"
 #include <QObject>
-#include <QPointer>
-#include <QSet>
-#include <QString>
-#include <QStringList>
-#include <QTimer>
-#include <QVariantMap>
-#include <functional>
-#include <future>
-#include <memory>
-
-class RecordingManagerTest;
+#include <atomic>
+#include <mutex>
 
 namespace TrophyBackend {
-
 class SettingsManager;
 class StorageManager;
-class AudioMixer;
-class RecordingSession;
-class IVideoCaptureSource;
-class GameDetectionService;
-class IEncoder;
-class IMuxer;
 
-/**
- * @brief Orchestrates the recording pipeline
- *
- * RecordingManager is responsible for:
- * - Managing recording state machine
- * - Creating and connecting capture, encoding, and muxing components
- * - Coordinating audio and video streams
- * - Handling recording lifecycle events
- */
+// Full-recording policy and library feedback. Native recording work belongs
+// exclusively to RecordingEngine; this facade owns only a packet file output.
 class RecordingManager : public QObject {
   Q_OBJECT
-
   Q_PROPERTY(RecordingState state READ state NOTIFY stateChanged)
   Q_PROPERTY(bool isRecording READ isRecording NOTIFY stateChanged)
   Q_PROPERTY(bool captureResumeRequired READ captureResumeRequired NOTIFY captureRecoveryChanged)
   Q_PROPERTY(bool requiresCaptureSelection READ requiresCaptureSelection NOTIFY captureRecoveryChanged)
-  Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY
-                 currentGameNameChanged)
-  Q_PROPERTY(
-      qint64 recordingDuration READ recordingDuration NOTIFY progressUpdated)
+  Q_PROPERTY(QString currentGameName READ currentGameName NOTIFY currentGameNameChanged)
+  Q_PROPERTY(qint64 recordingDuration READ recordingDuration NOTIFY progressUpdated)
   Q_PROPERTY(qint64 recordingSize READ recordingSize NOTIFY progressUpdated)
-  Q_PROPERTY(
-      QString currentFilePath READ currentFilePath NOTIFY recordingStarted)
-  Q_PROPERTY(QString activeEncoderName READ activeEncoderName NOTIFY
-                 activeEncoderNameChanged)
+  Q_PROPERTY(QString currentFilePath READ currentFilePath NOTIFY recordingStarted)
+  Q_PROPERTY(QString activeEncoderName READ activeEncoderName NOTIFY activeEncoderNameChanged)
   Q_PROPERTY(QString detectedEncoderName READ detectedEncoderName NOTIFY detectedEncoderNameChanged)
-
 public:
-  enum class RecordingState {
-    Idle,
-    Initializing,
-    Recording,
-    Stopping,
-    Error
-  };
+  enum class RecordingState { Idle, Initializing, Recording, Stopping, Error };
   Q_ENUM(RecordingState)
-
   explicit RecordingManager(QObject *parent = nullptr);
+  RecordingManager(std::shared_ptr<RecordingEngine> engine, QObject *parent = nullptr);
   ~RecordingManager() override;
-
-  // Dependency injection
   void setSettingsManager(SettingsManager *settings);
-  void setStorageManager(StorageManager *storage);
-  void setAudioMixer(AudioMixer *mixer);
-  void setGameDetectionService(GameDetectionService *detector);
-
-  // State
+  void setStorageManager(StorageManager *storage) { m_storage = storage; }
   RecordingState state() const { return m_state; }
   bool isRecording() const { return m_state == RecordingState::Recording; }
-  bool isRecoveringCapture() const { return m_captureRecoveryPending; }
-  bool captureResumeRequired() const { return m_captureResumeRequired; }
-  bool requiresCaptureSelection() const;
-  bool lastRecordingFailed() const { return m_recordingFailed; }
-  QString currentGameName() const { return m_currentGameName; }
-  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
-  qint64 recordingDuration() const; // milliseconds
-  qint64 recordingSize() const;     // bytes
-  QString currentFilePath() const { return m_currentFilePath; }
-  QString activeEncoderName() const;
-  QString detectedEncoderName() const;
-  // Application's asynchronous availability result supplies this label.
+  bool isRecoveringCapture() const;
+  bool captureResumeRequired() const { return m_engine->captureResumeRequired(); }
+  bool requiresCaptureSelection() const { return m_engine->requiresCaptureSelection(); }
+  bool lastRecordingFailed() const { return m_failed; }
+  QString currentGameName() const { return m_game; }
+  uint capturedSteamAppId() const { return m_engine->capturedSteamAppId(); }
+  qint64 recordingDuration() const;
+  qint64 recordingSize() const;
+  QString currentFilePath() const;
+  QString activeEncoderName() const { return m_engine->activeEncoderName(); }
+  QString detectedEncoderName() const { return m_detectedEncoder; }
   void setDetectedEncoderName(const QString &name);
-
-  // Recording control
-  Q_INVOKABLE void startRecording(const QString &gameName = QString());
+  std::shared_ptr<CaptureLifecycle::Authorization> captureAuthorization() const {
+    return m_engine->captureAuthorization();
+  }
+  QVariantMap captureHealth() const { return m_engine->captureHealth(); }
+  Q_INVOKABLE void startRecording(const QString &game = {});
   Q_INVOKABLE void stopRecording();
   Q_INVOKABLE bool resumeCapture();
   Q_INVOKABLE bool addBookmark();
-  QVariantMap captureHealth() const;
-
-  /**
-   * @brief Whether a portal source label carries no real identity.
-   *
-   * Empty, compositor-generic (kwin/wayland/Unknown Game) and bare
-   * portal app-ids (steam_app_<id> with no title behind them) say
-   * nothing about what is actually captured.
-   */
-  static bool isGenericSourceLabel(const QString &label);
-  /**
-   * @brief Whether two source names plausibly denote the same target.
-   *
-   * Case-insensitive containment either way ("Deadlock" vs
-   * "deadlock.exe"). Used to decide if the portal's captured source
-   * agrees with the detected game before adopting it as the file name.
-   */
-  static bool sourceLabelsAgree(const QString &a, const QString &b);
-
 signals:
-  // The capture source is ready; portal selection no longer needs guidance.
   void captureSelectionFinished();
   void stateChanged(RecordingState state);
   void currentGameNameChanged();
   void recordingStarted(const QString &filePath);
-  // Terminal cleanup for every active recording, including failed output.
-  // recordingStopped below is the successful-save notification only.
+  void recordingPathPrepared(const QString &filePath);
   void recordingFinished();
+  void recordingStopping();
   void captureRecoveryChanged();
   void captureResumeOffered(const QString &gameName);
-  // Handoff parts are saved quietly; a normal stop/game exit retains feedback.
-  void recordingStopped(const QString &filePath, qint64 durationMs,
-                        qint64 sizeBytes, bool quiet = false);
-  // User feedback is separate from filing parts: a quiet handoff can later
-  // resolve to game exit without producing a second recordingStopped event.
-  void recordingCompletionReady(const QString &filePath, qint64 durationMs,
-                                qint64 sizeBytes);
+  void recordingStopped(const QString &filePath, qint64 durationMs, qint64 sizeBytes, bool quiet = false);
+  void recordingCompletionReady(const QString &filePath, qint64 durationMs, qint64 sizeBytes);
   void recordingError(const QString &error);
-  /**
-   * The portal rejected our saved restore token. The app deletes it and
-   * re-authorizes through the New Game prompt — never a bare picker.
-   */
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
   void progressUpdated(qint64 duration, qint64 fileSize);
   void activeEncoderNameChanged();
   void detectedEncoderNameChanged();
-
-private slots:
-  void onEncodingError(const QString &error);
-  void updateProgress();
-  void finishPipelineAndStart();
-  void pollOperations();
-
 private:
-  friend class ::RecordingManagerTest;
-  friend class ApplicationAudioProbeTest;
   friend class ApplicationAuthorizePromptTest;
-
-  // Private injection seam for lifecycle tests; normal starts use CaptureFactory.
-  std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
-  std::function<bool()> m_pipelineBuilder;
-
-  void setState(RecordingState newState);
-  bool buildPipeline();
-  bool teardownPipeline();
-  QString generateOutputPath() const;
-  struct AudioPreparation {
-    QString mode, gameDevice, micDevice, voiceApp;
-    bool separate = true;
-    uint32_t pid = 0;
-    QStringList hints;
-    uint32_t gameNode = 0xffffffffu, voiceNode = 0xffffffffu;
-    QString gameNodeName, gameSerial, voiceNodeName, voiceSerial;
+  friend class ApplicationAudioProbeTest;
+  friend class EncodedOutputsTest;
+  struct FileOutput final : EncodedOutput {
+    struct Part {
+      quint64 generation = 0;
+      QString path;
+      qint64 durationMs = 0, bytes = 0;
+      bool succeeded = false;
+      QJsonObject history;
+    };
+    explicit FileOutput(QString directory);
+    ~FileOutput() override;
+    bool begin(const EncodedStream &stream) override;
+    bool write(const EncodedFrame &packet) override;
+    bool end() override;
+    bool started() const override { return m_started.load(); }
+    QString error() const override;
+    void setAudioHistory(quint64 generation, const QJsonObject &history) override;
+    QString path() const;
+    qint64 durationMs() const { return m_duration.load(); }
+    qint64 positionMs() const { return m_position.load(); }
+    qint64 bytes() const { return m_bytes.load(); }
+    QList<Part> takeParts();
+    bool open();
+    QString preparePath(const QString &game);
+    QString m_directory;
+    EncodedStream m_stream;
+    std::shared_ptr<IMuxer> m_muxer;
+    mutable std::mutex m_mutex;
+    QString m_path, m_nextPath, m_error;
+    QList<Part> m_parts;
+    qint64 m_origin = 0;
+    bool m_open = false;
+    std::atomic<bool> m_started{false};
+    std::atomic<qint64> m_duration{0}, m_bytes{0}, m_position{-1};
   };
-  AudioPreparation snapshotAudioPreparation() const;
-  static AudioPreparation lookupAudioPreparation(AudioPreparation input);
-  void beginAudioPreparation();
-  void completePipelineAndStart();
-  void finishStoppedRecording();
-  void onCaptureError(const QString &error);
-  bool capturedGameHasEnded() const;
-  QString m_captureGameName;
-  QString m_pendingCaptureError;
-  QElapsedTimer m_captureEndGrace;
-  int m_captureEndGraceMs = 5000;
-  // Recovery is lifetime-bound to the pinned instance, not an attempt budget.
-  bool recoveryInstanceIsCurrent() const;
-  bool recoveryIdentityIsCurrent() const;
-  bool recoveryAwaitingCensus() const;
-  void scheduleCaptureRecovery();
-  void cancelCaptureRecovery(bool finishFeedback = true);
-  void finishDeferredCompletion();
-  struct SavedCompletion {
-    QString path;
-    qint64 durationMs = 0, sizeBytes = 0;
-  };
-  SavedCompletion m_deferredCompletion;
-  bool m_startingRecovery = false;
-  bool m_captureRecoveryPending = false;
-  QString m_recoveryGame, m_recoveryKey, m_recoveryInstance;
-  quint64 m_recoveryGeneration = 0;
-  int m_recoveryDelayMs = 1500;
-  bool interruptionIdentityIsCurrent() const;
-  void clearCaptureInterruption();
-  bool m_portalClosurePending = false;
-  bool m_captureSelectionRequired = false, m_captureResumeRequired = false;
-  QSet<QString> m_captureSelectionFences;
-  bool m_forceCaptureSelectionOnce = false, m_explicitCaptureSelectionAttempt = false;
-  QString m_interruptedGame, m_interruptedKey, m_interruptedInstance;
-  bool m_stopNativeSettled = false;
-  std::future<bool> m_stopFinalizationWorker;
-  qint64 m_stopDurationMs = 0;
-  qint64 m_stopSizeBytes = 0;
-  QString m_activeEncoderName;
-  QString m_detectedEncoderName = QStringLiteral("Checking…");
-  bool m_stopFinalizationSucceeded = true;
-  bool m_cancelInitializing = false;
-  QString m_pendingRestoreAuthorization;
-  QString m_pendingRestoreIdentity;
-  std::function<AudioPreparation(AudioPreparation)> m_audioPreparationLookup =
-      lookupAudioPreparation;
-  AudioPreparation m_preparedAudio;
-  std::future<AudioPreparation> m_audioPreparationWorker;
-  uint64_t m_pipelineGeneration = 0, m_audioPreparationGeneration = 0;
-  bool m_audioPreparationRequested = false;
-  bool m_captureReadyForPipeline = false;
-  QPointer<IVideoCaptureSource> m_audioPreparationCapture;
-  QTimer *m_operationTimer = nullptr;
-
-  RecordingState m_state = RecordingState::Idle;
-  QString m_currentGameName;
-  QVariantMap m_detectedGameInfo;
-  QString m_currentFilePath;
-  bool m_isManualRecording = false;
-  bool m_recordingFailed = false;
-  QString m_lastOutputError;
-  bool m_shuttingDown = false;
-
-  // Dependencies (not owned)
+  void start(const QString &game, bool fresh);
+  void setState(RecordingState state);
+  void fileParts(bool quiet);
+  void preparePart();
+  void completeFeedback();
+  std::shared_ptr<RecordingEngine> m_engine;
+  std::shared_ptr<FileOutput> m_output;
   SettingsManager *m_settings = nullptr;
   StorageManager *m_storage = nullptr;
-  AudioMixer *m_audioMixer = nullptr;
-  GameDetectionService *m_gameDetector = nullptr;
-
-  // Pipeline components (owned)
-  std::unique_ptr<RecordingSession> m_session;
-  std::unique_ptr<IVideoCaptureSource> m_captureSource;
-  std::unique_ptr<IEncoder> m_videoEncoder;
-  std::unique_ptr<IMuxer> m_muxer;
-
-  // Progress tracking
-  QElapsedTimer m_recordingTimer;
-  QTimer *m_progressTimer = nullptr;
-
- public:
-  // Live audio retargeting: swap one track's source on the running
-  // pipeline (mixer hot-swaps; no-ops without an active session, in which
-  // case the next build picks the new setting up). Invoked from
-  // Application's settings-change wiring.
-  void applyMicrophoneDevice();
-  void applyGameAudioDevice();
-  void applyVoiceChatApp();
-
- private:
-  // Mixer slots assigned at build (needed to retarget mid-session).
-  int m_micTrack = -1;
-  int m_voiceTrack = -1;
+  quint64 m_id = 0;
+  QString m_game, m_detectedEncoder = QStringLiteral("Checking…");
+  RecordingState m_state = RecordingState::Idle;
+  FileOutput::Part m_deferred;
+  bool m_failed = false, m_errorReported = false, m_quietStop = false;
 };
-
 } // namespace TrophyBackend

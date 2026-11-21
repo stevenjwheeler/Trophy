@@ -235,6 +235,10 @@ set(CORE_SOURCES
     src/core/BugReport.cpp
     src/core/HardwareInfo.cpp
     src/core/RecordingManager.cpp
+    src/core/CaptureLifecycle.cpp
+    src/core/RecordingEngine.cpp
+    src/core/RecordingEngineCapture.cpp
+    src/muxing/ReplayExporter.cpp
     src/core/RecordingSession.cpp
     src/core/StorageManager.cpp
     src/core/NotificationService.cpp
@@ -252,9 +256,6 @@ set(CORE_SOURCES
     src/core/ReleaseNotes.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowChrome.cpp
-    src/core/FrameDispatcher.cpp
-    src/core/CircularFrameBuffer.cpp
-    src/core/FrameTypes.cpp
 )
 
 set(CAPTURE_SOURCES
@@ -314,6 +315,10 @@ set(CORE_HEADERS
     src/core/Application.h
     src/core/HardwareInfo.h
     src/core/RecordingManager.h
+    src/core/CaptureLifecycle.h
+    src/core/RecordingEngine.h
+    src/core/EncodedStream.h
+    src/muxing/ReplayExporter.h
     src/core/RecordingSession.h
     src/core/StorageManager.h
     src/core/NotificationService.h

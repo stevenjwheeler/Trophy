@@ -137,6 +137,7 @@ Application::~Application() {
   m_controlServer.reset();
   m_recordingManager.reset();
   m_replayManager.reset();
+  m_recordingEngine.reset();
 }
 
 bool Application::initialize() {
@@ -366,9 +367,11 @@ bool Application::initialize() {
   // Which half of the runtime came from where: the AppImage bundles Qt/FFmpeg
   // but prefers the host's libva and driver stack, and this is the first thing
   // to check when a machine reports unexpected encoder or ABI behaviour.
-  for (const QString &line :
-       runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
-    qCInfo(appLog).noquote() << line;
+  if (appLog().isDebugEnabled()) {
+    for (const QString &line :
+         runtimeLibraryReport().split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+      qCDebug(appLog).noquote() << line;
+  }
   if (m_desktopIntegration) {
     // A startup install happens before any event loop, so the launcher and
     // icon caches are refreshed here instead.
@@ -421,7 +424,11 @@ void Application::initializeServices() {
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
-  m_recordingManager = std::make_unique<RecordingManager>(this);
+  m_recordingEngine = std::make_shared<RecordingEngine>();
+  m_recordingEngine->setSettingsManager(m_settingsManager.get());
+  m_recordingEngine->setAudioMixer(m_audioMixer.get());
+  m_recordingEngine->setGameDetectionService(m_gameDetector.get());
+  m_recordingManager = std::make_unique<RecordingManager>(m_recordingEngine, this);
   
   m_recordingManager->setSettingsManager(m_settingsManager.get());
   // Hardware discovery can wait on a driver. The dashboard reads cached
@@ -439,8 +446,6 @@ void Application::initializeServices() {
     return encoders.empty() ? QStringLiteral("Software") : encoders.front().description;
   }));
   m_recordingManager->setStorageManager(m_storageManager.get());
-  m_recordingManager->setAudioMixer(m_audioMixer.get());
-  m_recordingManager->setGameDetectionService(m_gameDetector.get());
 
   m_detectionDebounceTimer = new QTimer(this);
   m_detectionDebounceTimer->setSingleShot(true);
@@ -456,9 +461,10 @@ void Application::initializeServices() {
 
   m_trayManager = std::make_unique<SystemTrayManager>(this);
   m_autostartManager = std::make_unique<AutostartManager>(this);
-  m_replayManager = std::make_unique<ReplayManager>(this);
+  m_replayManager = std::make_unique<ReplayManager>(m_recordingEngine, this);
+  connect(m_replayManager.get(), &ReplayManager::captureAuthorizationChanged,
+          m_recordingManager.get(), &RecordingManager::captureRecoveryChanged);
   m_replayManager->setSettingsManager(m_settingsManager.get());
-  m_replayManager->setGameDetectionService(m_gameDetector.get());
   m_replayManager->setStorageManager(m_storageManager.get());
   m_recordingLibrary->setStorageManager(m_storageManager.get());
   m_shareExporter = std::make_unique<ShareExporter>(m_storageManager.get(), this);
@@ -650,8 +656,9 @@ void Application::connectSignals() {
   connect(m_recordingManager.get(), &RecordingManager::stateChanged, this, &Application::recordingAvailabilityChanged);
   connect(m_recordingManager.get(), &RecordingManager::captureRecoveryChanged,
           this, &Application::onCaptureRecoveryChanged);
-  connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &filePath) {
-            m_recordingLibrary->setActiveRecordingPath(filePath);
+  connect(m_recordingManager.get(), &RecordingManager::recordingPathPrepared,
+          m_recordingLibrary.get(), &RecordingLibrary::setActiveRecordingPath);
+  connect(m_recordingManager.get(), &RecordingManager::recordingStarted, this, [this](const QString &) {
             // The background replay loop pauses while recording.
             m_replayManager->setPaused(true);
           });
@@ -660,6 +667,8 @@ void Application::connectSignals() {
              m_recordingLibrary->refresh();
              resumeReplayAfterRecording();
           });
+  connect(m_recordingManager.get(), &RecordingManager::recordingStopping,
+          this, &Application::resumeReplayAfterRecording);
   connect(m_gameDetector.get(), &GameDetectionService::gameDetected, this,
           &Application::onGameDetected);
   // Approval is derived from portal restore tokens: whenever the token
@@ -734,6 +743,7 @@ void Application::connectSignals() {
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed,
           this, &Application::clearPendingCaptureForGame);
   connect(m_gameDetector.get(), &GameDetectionService::gameClosed, this, [this](const QString &gameName) {
+            qCInfo(appLog) << "Game ended:" << gameName;
             m_authorizePromptTokenInvalid = false;
             emit currentGameChanged();
             // A resident authorize prompt for the closing game must not
@@ -776,24 +786,15 @@ void Application::connectSignals() {
   // setters no-op and the next build picks the new values up.
   connect(m_settingsManager.get(), &SettingsManager::microphoneDeviceChanged,
           this, [this]() {
-            if (m_recordingManager && m_recordingManager->isRecording())
-              m_recordingManager->applyMicrophoneDevice();
-            else if (m_replayManager && m_replayManager->isActive())
-              m_replayManager->applyMicrophoneDevice();
+             if (m_recordingEngine) m_recordingEngine->applyMicrophoneDevice();
           });
   connect(m_settingsManager.get(), &SettingsManager::gameAudioDeviceChanged,
           this, [this]() {
-            if (m_recordingManager && m_recordingManager->isRecording())
-              m_recordingManager->applyGameAudioDevice();
-            else if (m_replayManager && m_replayManager->isActive())
-              m_replayManager->applyGameAudioDevice();
+             if (m_recordingEngine) m_recordingEngine->applyGameAudioDevice();
           });
   connect(m_settingsManager.get(), &SettingsManager::voiceChatAppChanged, this,
           [this]() {
-            if (m_recordingManager && m_recordingManager->isRecording())
-              m_recordingManager->applyVoiceChatApp();
-            else if (m_replayManager && m_replayManager->isActive())
-              m_replayManager->applyVoiceChatApp();
+             if (m_recordingEngine) m_recordingEngine->applyVoiceChatApp();
           });
   // Layout changes (mode/tracks) can't hot-swap: the DVR rebuilds at the
   // next segment rotation, recordings at the next start. Say so when the
@@ -801,7 +802,7 @@ void Application::connectSignals() {
   // up to a rotation. (During recording the UI locks these outright.)
   // The copy states the rotation bound concretely, from the constant.
   const QString segmentBound = QStringLiteral("Takes effect within %1 seconds.")
-                                   .arg(ReplayManager::kSegmentSeconds);
+                                    .arg(RecordingEngine::kReconfigurationSeconds);
   connect(m_settingsManager.get(), &SettingsManager::audioModeChanged, this,
           [this, segmentBound]() {
             if (m_replayManager && m_replayManager->isActive())
@@ -1548,8 +1549,12 @@ void Application::resumeReplayAfterRecording() {
   if (m_recordingManager->lastRecordingFailed())
     return; // A terminal capture failure must not silently retry through DVR.
   const QString game = m_gameDetector ? m_gameDetector->currentGameName() : QString();
-  if (isCurrentCaptureGame(game) && !restoreTokenForGame(game).isEmpty())
-    startWhenWindowReady(game, false);
+  if (isCurrentCaptureGame(game) && !restoreTokenForGame(game).isEmpty()) {
+    if (m_recordingEngine && m_recordingEngine->canReuseCapture(game))
+      m_replayManager->startDvr(game);
+    else
+      startWhenWindowReady(game, false);
+  }
 }
 
 void Application::startWhenWindowReady(const QString &game, bool isRecord) {
@@ -1906,7 +1911,7 @@ void Application::requestReplay() {
         "trophy", 3000, 2);
     return;
   }
-  if (!m_replayManager->isActive()) {
+  if (!m_replayManager->isActive() && !m_replayManager->isRecoveringCapture()) {
     m_notificationService->showNotification(
         "Trophy",
         "Launch a game first — there's nothing buffered yet.",
@@ -1939,15 +1944,11 @@ void Application::setTrackMuted(int trackIndex, bool muted) {
   qCInfo(appLog) << "Track" << trackIndex << (muted ? "muted" : "unmuted");
   if (m_audioMixer)
     m_audioMixer->setSemanticTrackMuted(trackIndex, muted);
-  if (m_replayManager)
-    m_replayManager->setSemanticTrackMuted(trackIndex, muted);
 }
 
 bool Application::isTrackMuted(int trackIndex) const {
   if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
     return m_audioMixer->isSemanticTrackMuted(trackIndex);
-  if (m_replayManager && m_replayManager->isActive())
-    return m_replayManager->isSemanticTrackMuted(trackIndex);
   if (m_audioMixer)
     return m_audioMixer->isSemanticTrackMuted(trackIndex);
   return false;
@@ -2062,7 +2063,7 @@ QVariantMap Application::captureHealth() const {
     result["gameName"] = m_recordingManager->currentGameName();
     return result;
   }
-  if (m_replayManager && m_replayManager->isActive()) {
+  if (m_replayManager && (m_replayManager->isActive() || m_replayManager->isRecoveringCapture())) {
     auto result = m_replayManager->captureHealth();
     result["gameName"] = m_replayManager->currentGame();
     return result;
@@ -2073,8 +2074,8 @@ QVariantMap Application::captureHealth() const {
 float Application::trackLevel(int trackIndex) const {
   if (m_recordingManager && m_recordingManager->isRecording() && m_audioMixer)
     return m_audioMixer->semanticTrackLevel(trackIndex);
-  if (m_replayManager && m_replayManager->isActive())
-    return m_replayManager->semanticTrackLevel(trackIndex);
+  if (m_recordingEngine && m_recordingEngine->hasDemand() && m_audioMixer)
+    return m_audioMixer->semanticTrackLevel(trackIndex);
   return 0.0f;
 }
 

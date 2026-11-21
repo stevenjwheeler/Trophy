@@ -4,12 +4,18 @@
  */
 
 #include <QCoreApplication>
+#include <QStringList>
 #include <gtest/gtest.h>
 
 #include "encoding/EncoderFactory.h"
 #include "encoding/IEncoder.h"
+#include "encoding/FFmpegEncoder.h"
 
 using namespace TrophyBackend;
+
+namespace {
+thread_local QStringList *initializationMessages = nullptr;
+}
 
 class EncoderFactoryTestEnvironment : public ::testing::Environment {
 public:
@@ -38,6 +44,30 @@ TEST(EncoderFactoryTest, DetectionReturnsPrioritizedList) {
     EXPECT_FALSE(e.name.isEmpty());
     EXPECT_FALSE(e.description.isEmpty());
   }
+}
+
+TEST(EncoderFactoryTest, InitializationFailureLogsCodecStageErrorCodeAndDimensions) {
+  FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "trophy-missing-test-codec");
+  EncoderConfig config;
+  config.width = 320;
+  config.height = 240;
+  config.fps = 30;
+  QStringList messages;
+  initializationMessages = &messages;
+  const auto previous = qInstallMessageHandler(
+      [](QtMsgType, const QMessageLogContext &, const QString &message) {
+        if (initializationMessages) initializationMessages->append(message);
+      });
+  const bool initialized = encoder.initialize(config);
+  qInstallMessageHandler(previous);
+  initializationMessages = nullptr;
+  const auto log = messages.join('\n').toStdString();
+  EXPECT_FALSE(initialized);
+  EXPECT_NE(log.find("trophy-missing-test-codec"), std::string::npos);
+  EXPECT_NE(log.find("encoder lookup"), std::string::npos);
+  EXPECT_NE(log.find("code:"), std::string::npos);
+  EXPECT_NE(log.find("320"), std::string::npos);
+  EXPECT_NE(log.find("240"), std::string::npos);
 }
 
 TEST(EncoderFactoryTest, IsAvailableConsistentWithDetection) {

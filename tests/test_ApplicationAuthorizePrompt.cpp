@@ -162,12 +162,13 @@ protected:
   bool windowPendingEmpty() const { return app.m_pendingWindowGame.isEmpty(); }
   void finishDuringRecovery() {
     app.m_recordingManager = std::make_unique<RecordingManager>();
-    app.m_recordingManager->m_captureRecoveryPending = true;
+    app.m_recordingManager->m_id = 1;
+    app.m_recordingManager->m_engine->m_captureRecoveryPending = true;
     // Replay is deliberately null: resuming it here would fail immediately.
     app.resumeReplayAfterRecording();
     EXPECT_TRUE(app.m_pendingWindowGame.isEmpty());
     EXPECT_TRUE(app.m_pendingAudioGame.isEmpty());
-    app.m_recordingManager->m_captureRecoveryPending = false;
+    app.m_recordingManager->m_engine->m_captureRecoveryPending = false;
     app.m_recordingManager.reset();
   }
   void checkRecoveryPhaseNotifications() {
@@ -178,12 +179,13 @@ protected:
     QSignalSpy phase(&app, &Application::recordingStateChanged);
     QSignalSpy available(&app, &Application::recordingAvailabilityChanged);
     EXPECT_EQ(app.recordingPhase(), "idle");
-    app.m_recordingManager->m_captureRecoveryPending = true;
+    app.m_recordingManager->m_id = 1;
+    app.m_recordingManager->m_engine->m_captureRecoveryPending = true;
     emit app.m_recordingManager->captureRecoveryChanged();
     EXPECT_EQ(app.recordingPhase(), "initializing");
     EXPECT_EQ(phase.count(), 1);
     EXPECT_EQ(available.count(), 1);
-    app.m_recordingManager->cancelCaptureRecovery();
+    app.m_recordingManager->m_engine->cancelCaptureRecovery();
     EXPECT_EQ(app.recordingPhase(), "idle");
     EXPECT_EQ(phase.count(), 2);
     EXPECT_EQ(available.count(), 2);
@@ -191,14 +193,14 @@ protected:
   }
   void checkCaptureSelectionFence() {
     app.m_recordingManager = std::make_unique<RecordingManager>();
-    app.m_recordingManager->m_captureSelectionRequired = true;
-    app.m_recordingManager->m_captureResumeRequired = true;
+    app.m_recordingManager->m_engine->m_captureSelectionRequired = true;
+    app.m_recordingManager->m_engine->m_captureResumeRequired = true;
     EXPECT_EQ(app.recordingPhase(), "idle");
     // A null replay manager makes any accidental DVR takeover fail loudly.
     app.resumeReplayAfterRecording();
     app.startWhenWindowReady(app.m_gameDetector->currentGameName(), true);
     EXPECT_TRUE(fullRecordingStarts.isEmpty());
-    app.m_recordingManager->m_captureResumeRequired = false;
+    app.m_recordingManager->m_engine->m_captureResumeRequired = false;
     EXPECT_EQ(app.recordingPhase(), "idle");
     app.startWhenWindowReady(app.m_gameDetector->currentGameName(), true);
     EXPECT_TRUE(fullRecordingStarts.isEmpty());
@@ -210,7 +212,7 @@ protected:
     app.m_audioWaitTimer->start(1000);
     const auto generation = app.m_audioWaitGeneration;
     const auto ticket = app.claimAudioProbe();
-    app.m_recordingManager->m_captureSelectionRequired = true;
+    app.m_recordingManager->m_engine->m_captureSelectionRequired = true;
     if (!inFlight)
       app.onCaptureRecoveryChanged();
     bool delivered = false;

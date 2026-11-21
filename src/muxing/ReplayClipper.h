@@ -9,6 +9,9 @@
 
 #include <QList>
 #include <QString>
+#include <limits>
+#include <optional>
+#include <QVector>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -47,6 +50,9 @@ struct Operations {
 struct ReplaySegment {
   QString path;
   double startOffsetSec = 0.0;
+  // Trusted producer DTS, in global timeline milliseconds and demux packet
+  // order. Absent for ordinary files; an engaged vector must match exactly.
+  std::optional<QVector<qint64>> videoDtsMs;
 };
 
 /**
@@ -55,11 +61,10 @@ struct ReplaySegment {
  * Stream-copies packets (no re-encode): the head cut lands on the last
  * video keyframe at or before (newestEnd - windowSeconds) — first one
  * after it when the buffer is shorter than the window — so the clip
- * overshoots the window by up to ~one GOP (two when the cut lands in a
- * segment's first GOP, whose head keyframe lacks a demuxable DTS), never
- * undershoots it. Per-stream output timestamps must be non-decreasing,
+   * overshoots the window by up to ~one GOP rather than undershooting it.
+   * Per-stream output timestamps must be non-decreasing,
  * so packets older than the high-water mark (overlap between rotated
- * segments) are dropped. Later segment heads with missing DTS are recovered
+   * segments) are dropped. Segment heads with missing DTS are recovered
  * from bounded lookahead and known decode durations; if a reference keyframe
  * cannot be retained, video waits for the next safe GOP rather than copying
  * dependent pictures without their references; that fallback may leave a gap.
@@ -72,7 +77,8 @@ public:
   static bool saveTail(const QList<ReplaySegment> &segments,
                        double windowSeconds, const QString &outputPath,
                        QString *error = nullptr,
-                       double *keptSeconds = nullptr);
+                       double *keptSeconds = nullptr,
+                       double endSeconds = std::numeric_limits<double>::infinity());
 
   /**
    * @brief Cuts an arbitrary [startSeconds, endSeconds] range out of a

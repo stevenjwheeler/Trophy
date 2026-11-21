@@ -459,7 +459,8 @@ struct DecoderDiagnostics {
 };
 thread_local DecoderDiagnostics *DecoderDiagnostics::current = nullptr;
 
-void checkMedia(const QString &path, FormatChecks checks = {}) {
+void checkMedia(const QString &path, FormatChecks checks = {},
+                QSize canvas = QSize(SyntheticMedia::width, SyntheticMedia::height)) {
   DecoderDiagnostics diagnostics;
   AVFormatContext *raw = nullptr;
   ASSERT_GE(avformat_open_input(&raw, path.toUtf8().constData(), nullptr, nullptr), 0);
@@ -504,8 +505,8 @@ void checkMedia(const QString &path, FormatChecks checks = {}) {
       EXPECT_EQ(frame->flags & AV_FRAME_FLAG_CORRUPT, 0);
       if (isVideo) {
         ++videoFrames;
-        EXPECT_EQ(frame->width, SyntheticMedia::width);
-        EXPECT_EQ(frame->height, SyntheticMedia::height);
+        EXPECT_EQ(frame->width, canvas.width());
+        EXPECT_EQ(frame->height, canvas.height());
         EXPECT_GT(frame->data[0][frame->height / 2 * frame->linesize[0] + frame->width / 2], 10);
         if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
           const double timestamp = frame->best_effort_timestamp * av_q2d(input->streams[video]->time_base);
@@ -639,6 +640,8 @@ public:
     replay.m_captureFactory = [] { return std::make_unique<WaylandPortalCapture>(); };
   }
   static bool idle(const ReplayManager &replay) { return replay.m_state == ReplayManager::State::Idle; }
+  static bool recovering(const ReplayManager &replay) { return replay.m_state == ReplayManager::State::Recovering; }
+  static void recoveryDelay(ReplayManager &replay, int ms) { replay.m_recoveryDelayMs = ms; }
   static qint64 frames(const ReplayManager &replay) {
     return replay.m_session ? replay.m_session->frameCount() : 0;
   }
@@ -649,6 +652,15 @@ public:
   }
   static QPointer<IVideoCaptureSource> capture(const ReplayManager &replay) { return replay.m_capture.get(); }
   static RecordingSession *session(const ReplayManager &replay) { return replay.m_session.get(); }
+  static void saveWithoutRebuild(ReplayManager &replay) {
+    const auto capture = replay.m_capture.get();
+    const auto encoder = replay.m_encoder.get();
+    const auto session = replay.m_session.get();
+    replay.saveReplay();
+    EXPECT_EQ(replay.m_capture.get(), capture);
+    EXPECT_EQ(replay.m_encoder.get(), encoder);
+    EXPECT_EQ(replay.m_session.get(), session);
+  }
   static AudioMixer *mixer(const ReplayManager &replay) { return replay.m_audioMixer.get(); }
   static QSize outputSize(const ReplayManager &replay) {
     return replay.m_encoder ? QSize(replay.m_encoder->width(), replay.m_encoder->height()) : QSize();
@@ -750,7 +762,7 @@ protected:
       ASSERT_TRUE(Peer::mixer(replay)->sourceIsDesktopAudio(0));
       EXPECT_TRUE(
           Peer::session(replay)->captureHealth()["desktopFallback"].toBool());
-      replay.saveReplay();
+      Peer::saveWithoutRebuild(replay);
       ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
       checkMedia(saved.at(0).at(0).toString());
       replay.stopDvr();
@@ -974,10 +986,11 @@ protected:
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
     recover(failure);
     ASSERT_FALSE(HasFatalFailure());
-    replay.startDvr("Failure fixture");
+    if (failure == 0) ASSERT_TRUE(replay.selectCaptureWindow());
+    else replay.startDvr("Failure fixture");
     ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
     awaitAudibleReplay(replay);
-    replay.saveReplay();
+    Peer::saveWithoutRebuild(replay);
     ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
     const auto path = saved.at(0).at(0).toString();
     checkMedia(path);
@@ -1044,6 +1057,78 @@ protected:
     ASSERT_TRUE(waitFor([&] { return recorder.state() == RecordingManager::RecordingState::Idle; }));
     EXPECT_EQ(saved.size(), 1); EXPECT_EQ(errors.size(), 0);
     checkMedia(path, {videoChanges, audioChanges});
+  }
+
+  void dvrWindowHandoff() {
+    using Peer = TrophyBackend::ReplayManagerTest;
+    const auto [separate, boundary] = GetParam();
+    SettingsManager settings;
+    configureSettings(settings, separate);
+    settings.setVideoResolution("native");
+    settings.setReplayCachePath(root.path() + "/handoff-cache");
+    settings.setInstantReplayEnabled(true);
+    ReplayManager replay;
+    replay.setSettingsManager(&settings);
+    replay.setGameDetectionService(detector.get());
+    Peer::install(replay);
+    Peer::recoveryDelay(replay, 250);
+    QSignalSpy saved(&replay, &ReplayManager::replaySaved);
+    QSignalSpy errors(&replay, &ReplayManager::replayFailed);
+    QSignalSpy authorization(&replay, &ReplayManager::restoreAuthNeeded);
+    replay.startDvr("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
+    awaitAudibleReplay(replay);
+    Peer::rotate(replay);
+    ASSERT_TRUE(waitFor([&] { return !Peer::finalized(replay).isEmpty(); }));
+    const QString retained = Peer::finalized(replay);
+    ASSERT_TRUE(waitFor([&] { return Peer::frames(replay) >= 15; }));
+    if (boundary == 0)
+      Peer::saveWithoutRebuild(replay); // Handoff keeps a pending export's reservation.
+    auto replacement = std::make_unique<SyntheticMedia>();
+    ASSERT_TRUE(replacement->start());
+    ASSERT_TRUE(replacement->changeVideo(240, 120, 30, 1));
+    ASSERT_EQ(control("Configure", {replacement->node(), boundary == 2 ? "empty-start" : ""}).type(),
+              QDBusMessage::ReplyMessage);
+    media->closeVideo();
+    ASSERT_TRUE(waitFor([&] { return Peer::recovering(replay); }));
+    EXPECT_TRUE(QFileInfo::exists(retained));
+    if (boundary == 1) {
+      replay.stopDvr();
+      ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
+      QTest::qWait(400);
+      EXPECT_TRUE(Peer::idle(replay));
+      EXPECT_FALSE(QFileInfo::exists(retained));
+      EXPECT_TRUE(errors.empty());
+      return;
+    }
+    if (boundary == 2) {
+      ASSERT_TRUE(waitFor([&] {
+        return qdbus_cast<QStringList>(control("Tokens").arguments().value(0)).size() >= 5;
+      }));
+      EXPECT_TRUE(QFileInfo::exists(retained));
+      Peer::saveWithoutRebuild(replay); // Retained footage is saveable during a long gap.
+      ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
+      checkMedia(saved.first().first().toString());
+      ASSERT_EQ(control("Configure", {replacement->node(), QString()}).type(), QDBusMessage::ReplyMessage);
+    } else {
+      ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
+      checkMedia(saved.first().first().toString());
+    }
+    ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
+    EXPECT_TRUE(replacement->videoMatches(240, 120, 1));
+    EXPECT_EQ(Peer::outputSize(replay), QSize(240, 120));
+    EXPECT_TRUE(QFileInfo::exists(retained));
+    awaitAudibleReplay(replay);
+    Peer::saveWithoutRebuild(replay);
+    ASSERT_TRUE(waitFor([&] { return saved.size() == 2; }));
+    const QString clip = saved.last().first().toString();
+    checkMedia(clip, {}, QSize(240, 120));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_TRUE(authorization.empty());
+    replay.stopDvr();
+    ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
+    EXPECT_FALSE(QFileInfo::exists(retained));
+    EXPECT_TRUE(QFileInfo::exists(clip));
   }
 
   void nativeWindowHandoff() {
@@ -1290,6 +1375,61 @@ protected:
     checkMedia(path, {false, false, 0x1f, true, pauseVideo});
   }
 
+  void dvrGameExit() {
+    using Peer = TrophyBackend::ReplayManagerTest;
+    const auto [separate, timing] = GetParam();
+    QProcess game;
+    game.start("sleep", {"30"});
+    ASSERT_TRUE(game.waitForStarted());
+    GameDetectionService gameDetector;
+    gameDetector.addToWhitelist("steam_app_42424242", "Failure fixture");
+    DetectionFixture::publish(gameDetector, game.processId(), "steam_app_42424242");
+    media->setAudioIdentity(game.processId(), "sleep");
+    SettingsManager settings;
+    configureSettings(settings, separate);
+    const QString cache = root.path() + "/dvr-exit-cache";
+    settings.setReplayCachePath(cache);
+    settings.setInstantReplayEnabled(true);
+    ReplayManager replay;
+    replay.setSettingsManager(&settings);
+    replay.setGameDetectionService(&gameDetector);
+    Peer::install(replay);
+    QSignalSpy saved(&replay, &ReplayManager::replaySaved);
+    QSignalSpy errors(&replay, &ReplayManager::replayFailed);
+    QSignalSpy authorization(&replay, &ReplayManager::restoreAuthNeeded);
+    replay.startDvr("Failure fixture");
+    ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
+    awaitAudibleReplay(replay);
+    Peer::saveWithoutRebuild(replay);
+    ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
+    const auto clip = saved.first().first().toString();
+    checkMedia(clip);
+    const auto tokens = qdbus_cast<QStringList>(control("Tokens").arguments().value(0));
+    const auto capture = Peer::capture(replay);
+    if (timing == 0) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
+    ASSERT_EQ(control("Revoke").type(), QDBusMessage::ReplyMessage);
+    if (timing == 1)
+      QTimer::singleShot(250, &game, [&] { game.terminate(); });
+    ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
+    EXPECT_TRUE(capture.isNull());
+    EXPECT_EQ(errors.size(), timing == 2 ? 1 : 0);
+    EXPECT_TRUE(authorization.empty());
+    EXPECT_EQ(saved.size(), 1);
+    EXPECT_TRUE(QFileInfo::exists(clip));
+    EXPECT_TRUE(QDir(cache).entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty());
+    replay.startDvr("Failure fixture");
+    QTest::qWait(100);
+    EXPECT_TRUE(Peer::idle(replay));
+    EXPECT_EQ(qdbus_cast<QStringList>(control("Tokens").arguments().value(0)), tokens);
+    if (game.state() != QProcess::NotRunning) {
+      game.terminate();
+      ASSERT_TRUE(game.waitForFinished());
+    }
+  }
+
   void nativeGameExit() {
     const auto [separate, timing] = GetParam();
     QProcess game;
@@ -1458,7 +1598,6 @@ protected:
       ASSERT_EQ(Peer::outputSize(replay), QSize(160,96));
       ASSERT_TRUE(waitFor([&] {
         return replay.isActive() && Peer::session(replay) &&
-               !Peer::session(replay)->rotationPending() &&
                Peer::frames(replay) >= 15;
       }));
       EXPECT_EQ(errors.size(), 0);
@@ -1508,21 +1647,21 @@ protected:
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"), "fixture-saved-token");
     if (boundary < 2) {
       replay.startDvr("Failure fixture");
-      ASSERT_TRUE(waitFor([&] { return authorization.size() == 1 && Peer::idle(replay); }));
-      EXPECT_TRUE(settings.getRestoreToken("Failure fixture").isEmpty());
       const auto tokens = qdbus_cast<QStringList>(control("Tokens").arguments().value(0));
-      ASSERT_EQ(tokens.size(), 2);
+      ASSERT_EQ(tokens.size(), 1); // No implicit restore after ambiguous closure.
       QTest::qWait(100);
       EXPECT_EQ(qdbus_cast<QStringList>(control("Tokens").arguments().value(0)), tokens);
       for (const auto &token : tokens) EXPECT_EQ(token, "fixture-saved-token");
       ASSERT_EQ(control("Configure", {media->node(), "cancel-start"}).type(), QDBusMessage::ReplyMessage);
-      replay.startDvr("Failure fixture");
+      ASSERT_TRUE(replay.selectCaptureWindow());
       ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
-      EXPECT_EQ(authorization.size(), 1); EXPECT_EQ(saved.size(), 0);
-      EXPECT_TRUE(settings.getRestoreToken("Failure fixture").isEmpty());
+      EXPECT_EQ(authorization.size(), 0); EXPECT_EQ(saved.size(), 0);
+      replay.startDvr("Failure fixture");
+      EXPECT_TRUE(Peer::idle(replay)); // Cancellation does not clear the fence.
       ASSERT_EQ(control("Configure", {media->node(), "grant-new-token"}).type(), QDBusMessage::ReplyMessage);
     }
-    replay.startDvr("Failure fixture");
+    if (boundary < 2) ASSERT_TRUE(replay.selectCaptureWindow());
+    else replay.startDvr("Failure fixture");
     ASSERT_TRUE(waitFor([&] { return replay.isActive() && Peer::frames(replay) >= 15; }));
     EXPECT_EQ(settings.getRestoreToken("Failure fixture"),
         boundary < 2 ? "fixture-new-token" : "fixture-saved-token");
@@ -1530,7 +1669,7 @@ protected:
     ASSERT_TRUE(waitFor([&] { return saved.size() == 1; }));
     checkMedia(saved.at(0).at(0).toString());
     EXPECT_EQ(errors.size(), 1);
-    EXPECT_EQ(authorization.size(), boundary < 2 ? 1 : 0);
+    EXPECT_EQ(authorization.size(), 0);
     replay.stopDvr();
     ASSERT_TRUE(waitFor([&] { return Peer::idle(replay); }));
     EXPECT_TRUE(QDir(cache).entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty());
@@ -1543,8 +1682,10 @@ TEST_P(RecordingManagerTest, DvrHandoffServiceLossCleansCacheAndFreshClipWorks) 
 TEST_P(RecordingManagerTest, NativeFormatChangesPreserveCanvasAndDecodedAudio) { nativeFormatChanges(); }
 TEST_P(RecordingManagerTest, PermissionRevocationStopsAndRequiresExplicitRetry) { permissionRevocation(); }
 TEST_P(RecordingManagerTest, NativeSameProcessWindowHandoffPreservesRecordingIntent) { nativeWindowHandoff(); }
+TEST_P(RecordingManagerTest, DvrSameProcessWindowHandoffRetainsBufferAndExportsClip) { dvrWindowHandoff(); }
 TEST_P(RecordingManagerTest, NativeLongWindowGapRetriesUntilReadyOrStopped) { nativeLongWindowGap(); }
 TEST_P(RecordingManagerTest, NativeGameExitSavesButLiveGameRevocationFails) { nativeGameExit(); }
+TEST_P(RecordingManagerTest, DvrGameExitSettlesPortalClosureWithoutFalseFailure) { dvrGameExit(); }
 TEST_P(RecordingManagerTest, TransientDeliveryStallResumesWithoutRetiringCapture) { transientDeliveryStall(); }
 TEST_P(RecordingManagerTest, RenegotiatedStalledCaptureSettlesStopFailureAndDestruction) { formatStallTeardown(); }
 TEST_P(RecordingManagerTest, DvrNativeFormatChangesKeepCompatibleSegmentsAndClip) { dvrFormatChanges(); }

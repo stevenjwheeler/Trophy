@@ -21,6 +21,7 @@ class ApplicationStartupVisibilityTest;
 class UpdateChecker;
 class UpdateInstaller;
 class RecordingManager;
+class RecordingEngine;
 class SettingsManager;
 class StorageManager;
 class RecordingLibrary;
@@ -196,6 +197,7 @@ private:
   friend class ApplicationMediaCacheTest;
 
   std::unique_ptr<RecordingManager> m_recordingManager;
+  std::shared_ptr<RecordingEngine> m_recordingEngine;
   std::unique_ptr<SettingsManager> m_settingsManager;
   std::unique_ptr<StorageManager> m_storageManager;
   std::unique_ptr<RecordingLibrary> m_recordingLibrary;

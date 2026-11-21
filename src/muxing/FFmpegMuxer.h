@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <memory>
 
 #include "IMuxer.h"
 #include <QMap>
@@ -24,6 +25,8 @@ class FFmpegMuxer : public IMuxer {
   Q_OBJECT
 
 public:
+  // Worker-owned output with QObject destruction returned to its owner thread.
+  static std::shared_ptr<IMuxer> createShared();
   explicit FFmpegMuxer(QObject *parent = nullptr);
   ~FFmpegMuxer() override;
 

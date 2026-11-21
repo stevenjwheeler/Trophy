@@ -347,9 +347,12 @@ detected-game resume target. Cancelled/empty fresh selections do not fall back
 to an older closed grant.
 
 When a captured window disappears while its exact pinned game instance remains
-alive, full recording saves the completed part and retries the existing portal
-approval after 1.5 seconds. A PID change is not required. The saved part remains
-in the library; continuation uses a new output file, not DVR. Recovery has no
+alive, recording and DVR use the same capture lifecycle to retry the existing
+portal approval after 1.5 seconds. A PID change is not required. Full recording
+saves the completed part in the library and continues into a new output file.
+DVR retains finalized rolling segments and continues into a fresh cache segment;
+an in-progress clip export keeps its reserved inputs. The window gap is not
+counted as buffered footage. Recovery has no
 attempt-count or elapsed-time cutoff while that exact game instance is alive.
 Each attempt is delayed by 1.5 seconds after teardown; requests never overlap.
 A successful portal grant with an empty stream list is also retryable for an
@@ -357,6 +360,11 @@ approved automatic game capture, allowing the main window to appear later.
 Explicit stop, game exit, a different selected
 instance, removed approval, blocked capture, and output/finalization failure
 cancel recovery.
+
+DVR uses the recording engine's configured resolution. A replacement capture
+in native mode uses the new window's native size, not the launcher's. Clip
+exports that span different sizes normalize video to the newest segment's
+canvas while preserving aspect ratio; compatible exports still stream-copy.
 
 PipeWire registry removal alone is ambiguous. An asynchronous ordinary
 connection checks the daemon cookie and original node serial. If the original

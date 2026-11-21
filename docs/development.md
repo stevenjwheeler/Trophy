@@ -24,6 +24,53 @@ payloads and executable matches from cached desktop application launchers.
 metadata is refreshed on the census worker alongside installed-game metadata;
 opening/filtering the picker performs no new filesystem enumeration.
 
+## Recording engine and output policies
+
+`Application` shares one `RecordingEngine` between full recording and DVR.
+The engine directly owns capture, encoders, recording audio and sessions.
+`RecordingEngineCapture.cpp` contains its native implementation, not a separate
+capture manager or pipeline object. `RecordingManager` contains its private
+file writer; `ReplayManager` contains its private packet buffer and export jobs.
+Neither manager receives native pipeline handles. Their boundary consists of
+immutable encoded packets, stream descriptions, generation/timeline IDs and
+pinned identity metadata.
+
+Consumer attachment supplies demand. Compatible attachments reuse the approved
+live input and encoder; releasing the last consumer drains and stops the
+producer. Mode switches attach the successor before releasing the previous
+consumer. An individual output failure closes only that output while surviving
+consumers continue receiving the same stream.
+
+`CaptureLifecycle` supplies instance-bound recovery, attempt-scoped source/token
+events and shared authorization fences. Recovery and pipeline reconfiguration
+belong to the engine, not either output. Full recording files completed native
+generations as separate parts; DVR retains generations across verified handoffs.
+Header-only generations are not usable replay inputs.
+
+The DVR caches closed GOP packet blocks and holds the current GOP in memory.
+Clip saves take an immutable request-time snapshot, reserving cached files and
+copying the open GOP's packet references. Saving neither rotates nor recreates
+the running encoder, capture or audio session. Snapshots remain valid through
+pruning, consumer switches and buffer destruction. Export failure does not stop
+buffering; real buffer-write or finalization failures close that consumer.
+Snapshots retain the producer's video decode timestamps alongside cached GOPs;
+export maps them through the actual container clock, including audio-induced
+timestamp shifts. It does not infer decode order from presentation timestamps.
+
+Closure completion uses the pinned instance's liveness independently of restore
+permission. DVR drains native work immediately, then allows a bounded exit grace
+for a still-running member or awaits the authoritative census across a verified
+launch-context gap. Confirmed exit is quiet; a live/unclassified closure remains
+terminal and fenced. Output failures take precedence over exit classification,
+and explicit Stop cancels only delayed capture-closure feedback, not output errors.
+
+Native resolution is chosen from each new capture, not a previous loader.
+Only rotations within the same live source retain their encoded canvas.
+`ReplayExporter` stream-copies compatible clips; clips spanning incompatible
+video formats normalize video to the newest segment's canvas on the export
+worker, preserving aspect ratio and copying audio. This fallback requires
+libx264, uses single-threaded codecs, and never modifies the buffered originals.
+
 ## Dependencies
 
 - CMake 3.21+, a C++20 compiler, and pkg-config.

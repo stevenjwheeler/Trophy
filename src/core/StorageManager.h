@@ -100,6 +100,8 @@ public:
 
   // Formatting helpers
   Q_INVOKABLE static QString formatSize(qint64 bytes);
+  static QString newRecordingPath(const QString &directory, const QString &game,
+                                  const QString &suffix = {});
 
 signals:
   // A reservation or active-output exclusion was released/changed. Allows

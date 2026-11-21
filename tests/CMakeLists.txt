@@ -398,10 +398,11 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/core/RecordingManager.cpp
     ${CMAKE_SOURCE_DIR}/src/core/RecordingSession.cpp
     ${CMAKE_SOURCE_DIR}/src/core/ReplayManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/CaptureLifecycle.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RecordingEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/RecordingEngineCapture.cpp
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayExporter.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameDispatcher.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/CircularFrameBuffer.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameTypes.cpp
     ${CMAKE_SOURCE_DIR}/src/settings/SettingsManager.cpp
     ${CMAKE_SOURCE_DIR}/src/capture/CaptureFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/capture/WaylandPortalCapture.cpp
@@ -434,6 +435,15 @@ if(EGL_FOUND)
 endif()
 
 add_executable(test_RecordingManager test_RecordingManager.cpp)
+add_executable(test_RecordingEngine test_RecordingEngine.cpp)
+target_include_directories(test_RecordingEngine PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_RecordingEngine PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
+gtest_discover_tests(test_RecordingEngine)
+add_executable(test_EncodedOutputs test_EncodedOutputs.cpp)
+target_include_directories(test_EncodedOutputs PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_EncodedOutputs PRIVATE test_RecordingBackend Qt6::Core Qt6::Test
+    PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
+gtest_discover_tests(test_EncodedOutputs)
 target_include_directories(test_RecordingManager PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_RecordingManager PRIVATE test_RecordingBackend Qt6::Core Qt6::Network Qt6::Test)
 gtest_discover_tests(test_RecordingManager)
@@ -443,9 +453,7 @@ add_executable(test_PipeWireVideoFormat test_PipeWireVideoFormat.cpp)
 target_include_directories(test_PipeWireVideoFormat PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_PipeWireVideoFormat PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 gtest_discover_tests(test_PipeWireVideoFormat)
-add_executable(test_PipeWireBufferLease test_PipeWireBufferLease.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameDispatcher.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameTypes.cpp)
+add_executable(test_PipeWireBufferLease test_PipeWireBufferLease.cpp)
 target_include_directories(test_PipeWireBufferLease PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_PipeWireBufferLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
 target_link_options(test_PipeWireBufferLease PRIVATE "-Wl,--wrap=pw_stream_queue_buffer"
@@ -519,7 +527,7 @@ if(Python3_Interpreter_FOUND)
     target_include_directories(test_RecordingFailureIntegration PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_RecordingFailureIntegration PRIVATE Trophy GTest::GTest
         Qt6::Test Qt6::DBus Qt6::Network PkgConfig::PIPEWIRE PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL)
-    foreach(case IN ITEMS DesktopFallback NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit NativeSameProcessWindowHandoff NativeLongWindowGap TransientDeliveryStall RenegotiatedStalledCapture)
+    foreach(case IN ITEMS DesktopFallback NativeServiceLoss StartupServiceLoss DvrHandoffServiceLoss NativeFormatChanges PermissionRevocation DvrNativeFormatChanges DvrPermissionRevocation NativeGameExit DvrGameExit NativeSameProcessWindowHandoff DvrSameProcessWindowHandoff NativeLongWindowGap TransientDeliveryStall RenegotiatedStalledCapture)
         add_test(NAME RecordingFailureTest.${case}
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_private_pipewire.py"
                 $<TARGET_FILE:test_RecordingFailureIntegration> "--gtest_filter=*/RecordingManagerTest.${case}*")
@@ -589,15 +597,6 @@ if(EGL_FOUND)
 endif()
 
 
-# --- Frame pipeline (dispatcher + circular buffer, no HW/daemon needed) ---
-add_executable(test_FramePipeline test_FramePipeline.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameDispatcher.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/CircularFrameBuffer.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/FrameTypes.cpp
-)
-target_include_directories(test_FramePipeline PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_FramePipeline PRIVATE ${TEST_LINK_LIBS})
-gtest_discover_tests(test_FramePipeline)
 
 # --- AudioMixer (fake in-process sources, no PipeWire daemon needed) ---
 add_executable(test_AudioMixer test_AudioMixer.cpp
@@ -666,6 +665,7 @@ endif()
 
 # --- ReplayClipper (synthetic segments; no encoder/HW needed) ---
 add_executable(test_ReplayClipper test_ReplayClipper.cpp
+    ${CMAKE_SOURCE_DIR}/src/muxing/ReplayExporter.cpp
     ${CMAKE_SOURCE_DIR}/src/muxing/FFmpegMuxer.cpp
     ${CMAKE_SOURCE_DIR}/src/muxing/ReplayClipper.cpp
     ${CMAKE_SOURCE_DIR}/src/muxing/IMuxer.h

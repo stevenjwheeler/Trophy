@@ -6,6 +6,8 @@
  */
 
 #include "FFmpegMuxer.h"
+#include <QCoreApplication>
+#include <QThread>
 #include "encoding/IEncoder.h"
 #include <QDebug>
 #include <QFileInfo>
@@ -21,6 +23,14 @@ extern "C" {
 }
 
 namespace TrophyBackend {
+std::shared_ptr<IMuxer> FFmpegMuxer::createShared() {
+    auto *muxer = new FFmpegMuxer;
+    if (auto *app = QCoreApplication::instance()) muxer->moveToThread(app->thread());
+    return {muxer, [](IMuxer *value) {
+        if (value->thread() == QThread::currentThread()) delete value;
+        else QMetaObject::invokeMethod(value, [value] { delete value; }, Qt::QueuedConnection);
+    }};
+}
 
 namespace {
 QString ffmpegErrorText(int err) {

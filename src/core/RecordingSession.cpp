@@ -99,15 +99,6 @@ RecordingSession::AudioRoutingState RecordingSession::audioRoutingState() const 
           m_sourceConnected, m_boundSerial};
 }
 
-void RecordingSession::inheritAudioRouting(const RecordingSession &previous) {
-  const auto routing = previous.audioRoutingState();
-  m_activeTrackCount.store(routing.activeTrackCount);
-  m_voiceTrack = routing.voiceTrack;
-  m_gameAudioPending = routing.gameAudioPending;
-  m_sourceConnected = routing.connected;
-  m_boundSerial = routing.boundSerial;
-}
-
 bool RecordingSession::start() {
   if (m_stopWorker.valid())
     return false;
@@ -136,29 +127,6 @@ bool RecordingSession::start() {
   m_shmTransitions = 0;
   m_outputPayloadBytes = 0;
   m_audioStreamInfo.clear();
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    m_rotationState = RotationState::None;
-    m_ownedCurrent.reset();
-    m_rotationNext.reset();
-    m_rotationOld.reset();
-    m_retiredMuxers.clear();
-    m_heldAudio.clear();
-    m_heldAudioBytes = 0;
-    m_rotationFencePending.clear();
-    m_rotationEvents.clear();
-    m_streamInfos.clear();
-    m_lastWrittenVideoPts = kNoPts;
-    m_lastWrittenAudioPts.clear();
-    m_rotationNextPath.clear();
-    m_rotationOldPath.clear();
-    m_rotationOldHistory = QJsonObject();
-    m_rotationOldBytes = 0;
-    m_rotationArmedAtMs = 0;
-    m_rotationCutAtMs = 0;
-    m_rotationHoldFrom = 0;
-    m_rotationCutPts = 0;
-  }
   m_recentRates.clear();
   m_rateDelivered = m_ratePayload = 0;
   const auto *ffmpeg = qobject_cast<FFmpegEncoder *>(m_encoder);
@@ -167,8 +135,6 @@ bool RecordingSession::start() {
   m_audioHistoryStarted.store(false);
   m_usedSystemAudio.store(false);
   m_usedGameAudio.store(false);
-  m_historyGamePending.store(false);
-  m_historyDesktop.store(false);
   for (auto &received : m_audioReceived) received.store(false);
   m_queueDrops = 0;
   m_bytesWritten = 0;
@@ -237,7 +203,6 @@ bool RecordingSession::start() {
     emit errorOccurred("Failed to add video stream to muxer");
     return false;
   }
-  m_streamInfos.push_back(videoStream);
 
   // --- Audio streams ---
   if (m_audioMixer) {
@@ -278,7 +243,6 @@ bool RecordingSession::start() {
           qDebug() << "Added separate audio stream" << idx << "for"
                    << trackNames[i];
           m_trackToStreamMap[i] = idx;
-          m_streamInfos.push_back(s);
           m_audioStreamInfo.append(QVariantMap{
               {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
               {"sampleRate", s.sampleRate}, {"channels", s.channels},
@@ -372,7 +336,6 @@ bool RecordingSession::start() {
         int idx = m_muxer->addStream(s);
         if (idx >= 0) {
           qDebug() << "Added merged audio stream" << idx;
-          m_streamInfos.push_back(s);
           m_audioStreamInfo.append(QVariantMap{
               {"stream", idx}, {"codec", audioConfig.codec.toUpper()},
               {"sampleRate", s.sampleRate}, {"channels", s.channels},
@@ -450,51 +413,18 @@ bool RecordingSession::start() {
     emit errorOccurred("Failed to write muxer header");
     return false;
   }
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    m_lastWrittenAudioPts.assign(m_streamInfos.size(), kNoPts);
-  }
 
   // Pin initial routing before callbacks start.
   m_audioHistoryStarted.store(true);
   noteAudioRouting();
 
-  // Set video capture callback
-  // Replace direct queuing with FrameDispatcher-based routing if available
-  if (!m_frameDispatcher) {
-    // fallback to original behavior
-    m_capture->setFrameCallback([this](const VideoFrame &frame) {
-      if (!m_running)
-        return;
-
-      // Latch the video wall clock on the first frame (same as the
-      // dispatcher path below). DVR sessions have no dispatcher, so
-      // without this the audio gate never opens on video and every
-      // segment drops its first 10s of audio to the gate timeout —
-      // clips then carry full video with ~10s-short audio.
-      noteCapturedVideo(frame);
-
-      if (!admitVideoFrame(frame.timestamp))
-        return;
-
-      queueCapturedFrame(frame);
-    });
-  } else {
-    m_capture->setFrameCallback([this](const VideoFrame &frame) {
-      if (!m_running)
-        return;
-
-      // Latch the video wall clock on the first frame. Audio before this
-      // is dropped downstream (unpairable head content); late audio
-      // tracks offset to this origin instead.
-      noteCapturedVideo(frame);
-
-      if (!admitVideoFrame(frame.timestamp))
-        return;
-
-      queueCapturedFrame(frame);
-    });
-  }
+  m_capture->setFrameCallback([this](const VideoFrame &frame) {
+    if (!m_running) return;
+    // Pair audio with the first delivered video, before rate limiting.
+    noteCapturedVideo(frame);
+    if (!admitVideoFrame(frame.timestamp)) return;
+    queueCapturedFrame(frame);
+  });
 
   if (!m_capture->startCapture()) {
     m_running = false;
@@ -542,8 +472,6 @@ void RecordingSession::noteAudioRouting() {
   if (!m_running || !m_audioHistoryStarted.load()) return;
   const bool fallback = m_gameAudioPending;
   const bool desktop = m_desktopAudio;
-  m_historyGamePending.store(fallback);
-  m_historyDesktop.store(desktop);
   if (desktop || fallback)
     m_usedSystemAudio.store(true);
   if (!desktop && !fallback) m_usedGameAudio.store(true);
@@ -713,31 +641,6 @@ void RecordingSession::noteQueueDepth() {
   m_peakQueueDepth = std::max(m_peakQueueDepth.load(), depth);
 }
 
-bool RecordingSession::pushQueuedFrame(QueuedFrame &&frame) {
-  if (!m_running) {
-    qDebug() << "pushQueuedFrame: rejected (not running)";
-    return false;
-  }
-  std::lock_guard<std::mutex> lock(m_queueMutex);
-  if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
-    m_videoQueue.push(std::move(frame));
-    noteQueueDepth();
-    // Success logs at 60fps; throttle unless TROPHY_VIDEO_DEBUG is set.
-    static std::atomic<uint64_t> s_pushed{0};
-    const uint64_t n = ++s_pushed;
-    if (qEnvironmentVariableIsSet("TROPHY_VIDEO_DEBUG") || n == 1 ||
-        n % 600 == 0) {
-      qDebug() << "pushQueuedFrame: enqueued. queue size:" << m_videoQueue.size();
-    }
-    m_queueCv.notify_one();
-    return true;
-  }
-  qDebug() << "pushQueuedFrame: queue full, dropping frame";
-  noteQueueDepth();
-  ++m_queueDrops;
-  return false;
-}
-
 void RecordingSession::stop(bool keepCaptureSource, bool handoffRouting) {
   if (m_stopWorker.valid()) {
     m_stopWorker.get();
@@ -857,12 +760,6 @@ void RecordingSession::finishStopNative() {
     m_audioCallbackRegistration.reset();
   }
 
-  // A rotation cut that already happened must be settled before this
-  // session's own muxer is finalized; one still waiting for its keyframe is
-  // rolled back so its held audio lands in the current file. Owners normally
-  // settle first (to enlist the outgoing segment); this is the safety net.
-  settleRotation();
-
   if (m_encodingThread.joinable()) {
     m_encodingThread.join();
   }
@@ -952,8 +849,6 @@ void RecordingSession::encodingLoop() {
       }
     }
 
-    // Rotation timeouts/fences advance even when no frame arrived.
-    pollRotation();
 
     std::vector<EncodedPacket> packets;
     bool producedPacket = false;
@@ -1067,38 +962,14 @@ void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
 }
 
 void RecordingSession::handFrameToEncoding(const VideoFrame &frame) {
-  if (!m_frameDispatcher) {
-    std::lock_guard<std::mutex> lock(m_queueMutex);
-    if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
-      m_videoQueue.emplace(frame);
-      noteQueueDepth();
-      m_queueCv.notify_one();
-    } else {
-      qWarning() << "Video queue full, dropping frame";
-      ++m_queueDrops;
-    }
-    return;
-  }
-  if (frame.isDmaBuf && frame.dmaBufFd >= 0) {
-    FrameDescriptor fd;
-    fd.fd = ::dup(frame.dmaBufFd);
-    if (fd.fd == -1)
-      return; // cannot dup, drop
-    fd.width = frame.width;
-    fd.height = frame.height;
-    fd.format = frame.drmFormat;
-    fd.pixelFormat = frame.pixelFormat;
-    fd.drmModifier = frame.drmModifier;
-    fd.dmaBufStride = frame.dmaBufStride;
-    fd.dmaBufOffset = frame.dmaBufOffset;
-    fd.bufferLease = frame.bufferLease;
-    fd.requestCpuFallback = frame.requestCpuFallback;
-    fd.pts = frame.timestamp;
-    m_frameDispatcher->dispatch(fd);
-  } else if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
-    QueuedFrame qf(frame);
-    if (qf.data)
-      pushQueuedFrame(std::move(qf));
+  std::lock_guard<std::mutex> lock(m_queueMutex);
+  if (m_videoQueue.size() < MAX_QUEUE_SIZE) {
+    m_videoQueue.emplace(frame);
+    noteQueueDepth();
+    m_queueCv.notify_one();
+  } else {
+    qWarning() << "Video queue full, dropping frame";
+    ++m_queueDrops;
   }
 }
 
@@ -1374,411 +1245,24 @@ bool RecordingSession::writeToMuxer(IMuxer *muxer, const EncodedPacket &packet) 
 }
 
 qint64 RecordingSession::currentMuxerBytes() const {
-  std::lock_guard<std::mutex> lock(m_rotationMutex);
+  std::lock_guard<std::mutex> lock(m_outputMutex);
   if (m_muxer)
     return m_muxer->bytesWritten();
   return m_bytesWritten.load();
 }
 
-void RecordingSession::noteOutgoingLocked(const EncodedPacket &packet) {
-  if (packet.streamIndex == 0) {
-    if (packet.pts != kNoPts && packet.pts > m_lastWrittenVideoPts)
-      m_lastWrittenVideoPts = packet.pts;
-    return;
-  }
-  if (packet.streamIndex < 0 ||
-      packet.streamIndex >= static_cast<int>(m_lastWrittenAudioPts.size()))
-    return;
-  if (packet.pts != kNoPts &&
-      packet.pts > m_lastWrittenAudioPts[packet.streamIndex])
-    m_lastWrittenAudioPts[packet.streamIndex] = packet.pts;
-}
-
-void RecordingSession::markAudioCaughtUpLocked(int stream) {
-  if (stream >= 0 && stream < static_cast<int>(m_rotationFencePending.size()))
-    m_rotationFencePending[stream] = false;
-}
-
-bool RecordingSession::rotationFenceSatisfiedLocked() const {
-  for (bool pending : m_rotationFencePending)
-    if (pending)
-      return false;
-  return true;
-}
-
-void RecordingSession::resetAudioHistoryForSegment() {
-  const bool fallback = m_historyGamePending.load();
-  const bool desktop = m_historyDesktop.load();
-  m_usedSystemAudio.store(desktop || fallback);
-  m_usedGameAudio.store(!desktop && !fallback);
-  m_audioHistoryStarted.store(true);
-  for (auto &received : m_audioReceived) received.store(false);
-}
-
-void RecordingSession::finalizeRotationOldLocked() {
-  if (!m_rotationOld)
-    return;
-  const QString oldPath = m_rotationOldPath;
-  const QString newPath = m_outputPath;
-  if (!m_rotationOld->finalize())
-    qWarning() << "Recording rotation: outgoing file finalize failed:"
-               << m_rotationOld->lastError();
-  const qint64 bytes = m_rotationOld->bytesWritten();
-  m_rotationOldBytes = bytes;
-  // Deleted by the owner: QObject teardown must not run on the encoding
-  // thread.
-  m_retiredMuxers.push_back(std::move(m_rotationOld));
-
-  RotationEvent event;
-  event.oldPath = oldPath;
-  event.newPath = newPath;
-  event.oldBytes = bytes;
-  event.audioHistory = m_rotationOldHistory;
-  m_rotationEvents.push_back(std::move(event));
-
-  m_rotationOldPath.clear();
-  m_rotationOldHistory = QJsonObject();
-  m_rotationFencePending.clear();
-  m_rotationState = RotationState::None;
-  m_rotationCutAtMs = 0;
-}
-
-void RecordingSession::checkRotationFenceLocked() {
-  if (m_rotationState != RotationState::Rotating || !m_rotationOld)
-    return;
-  if (rotationFenceSatisfiedLocked()) {
-    finalizeRotationOldLocked();
-    return;
-  }
-  if (m_rotationCutAtMs > 0 &&
-      steadyNowMs() - m_rotationCutAtMs > kRotationFenceTimeoutMs) {
-    qWarning() << "Recording rotation: outgoing audio did not reach the cut"
-               << "within the fence timeout; finalizing the segment anyway";
-    finalizeRotationOldLocked();
-  }
-}
-
-bool RecordingSession::performRotationCutLocked(const EncodedPacket &keyframe) {
-  if (!m_rotationNext || !m_ownedCurrent || !m_muxer)
-    return false;
-  const int64_t cut = keyframe.pts;
-  if (cut == kNoPts || cut < m_rotationHoldFrom)
-    return false;
-
-  // The successor's first packet is the forced keyframe; FFmpegMuxer also
-  // rebases that file from this timestamp.
-  if (!writeToMuxer(m_rotationNext.get(), keyframe))
-    return false;
-
-  m_rotationOld = std::move(m_ownedCurrent);
-  m_rotationOldPath = m_outputPath;
-  m_rotationCutPts = cut;
-  m_rotationCutAtMs = steadyNowMs();
-  m_rotationOldBytes = 0;
-  m_ownedCurrent = std::move(m_rotationNext);
-  m_muxer = m_ownedCurrent.get();
-  m_outputPath = m_rotationNextPath;
-  m_rotationNextPath.clear();
-  m_rotationState = RotationState::Rotating;
-
-  // The outgoing segment's history ends at the cut; the successor starts a
-  // fresh one from the current routing.
-  m_rotationOldHistory = audioHistory();
-  resetAudioHistoryForSegment();
-
-  // Only streams that were already carrying audio can be fenced; one that
-  // never wrote anything has nothing to finish in the outgoing file.
-  m_rotationFencePending.assign(m_streamInfos.size(), false);
-  for (size_t i = 1; i < m_lastWrittenAudioPts.size(); ++i) {
-    if (m_lastWrittenAudioPts[i] != kNoPts && m_lastWrittenAudioPts[i] < cut)
-      m_rotationFencePending[i] = true;
-  }
-
-  // Held audio belongs on either side of the cut.
-  std::vector<EncodedPacket> held;
-  held.swap(m_heldAudio);
-  m_heldAudioBytes = 0;
-  bool writesOk = true;
-  for (auto &pkt : held) {
-    if (pkt.pts != kNoPts && pkt.pts < cut) {
-      if (!writeToMuxer(m_rotationOld.get(), pkt)) {
-        writesOk = false;
-        break;
-      }
-      noteOutgoingLocked(pkt);
-    } else {
-      if (!writeToMuxer(m_ownedCurrent.get(), pkt)) {
-        writesOk = false;
-        break;
-      }
-      markAudioCaughtUpLocked(pkt.streamIndex);
-    }
-  }
-  if (!writesOk) {
-    setOutputError(
-        QStringLiteral("Failed to write held audio during segment rotation"));
-    m_outputFailed = true;
-    return true; // The cut is live; the file is already broken.
-  }
-
-  checkRotationFenceLocked();
-  return true;
-}
-
-bool RecordingSession::abortRotationLocked() {
-  if (m_rotationState == RotationState::None)
-    return true;
-  if (m_rotationState != RotationState::Pending)
-    return false; // A cut already happened; it cannot be rolled back.
-
-  const QString nextPath = m_rotationNextPath;
-  std::vector<EncodedPacket> held;
-  held.swap(m_heldAudio);
-  m_heldAudioBytes = 0;
-  bool ok = true;
-  for (auto &pkt : held) {
-    if (!writeToMuxer(m_muxer, pkt)) {
-      ok = false;
-      break;
-    }
-    noteOutgoingLocked(pkt);
-  }
-  m_rotationNext.reset();
-  m_rotationNextPath.clear();
-  m_rotationFencePending.clear();
-  m_rotationState = RotationState::None;
-  m_rotationArmedAtMs = 0;
-  m_rotationCutAtMs = 0;
-
-  if (!nextPath.isEmpty()) {
-    RotationEvent event;
-    event.aborted = true;
-    event.newPath = nextPath;
-    m_rotationEvents.push_back(std::move(event));
-  }
-  if (!ok) {
-    setOutputError(QStringLiteral(
-        "Failed to write held audio after aborting segment rotation"));
-    m_outputFailed = true;
-  }
-  return ok;
-}
-
-void RecordingSession::flushRotationEvents() {
-  std::vector<RotationEvent> events;
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    events.swap(m_rotationEvents);
-  }
-  for (auto &event : events) {
-    if (event.aborted)
-      emit outputRotationAborted(event.newPath);
-    else
-      emit outputRotated(event.oldPath, event.newPath, event.oldBytes,
-                         event.audioHistory);
-  }
-}
-
-bool RecordingSession::beginOutputRotation(
-    std::unique_ptr<IMuxer> &nextMuxer, std::unique_ptr<IMuxer> &currentMuxer,
-    const QString &nextPath, const QMap<QString, QString> &metadata) {
-  if (!nextMuxer || nextPath.isEmpty())
-    return false;
-
-  std::lock_guard<std::mutex> lock(m_rotationMutex);
-  if (m_rotationState != RotationState::None || !m_muxer)
-    return false;
-  if (m_streamInfos.empty())
-    return false;
-  // No video packet has reached the file yet: there is no known cut point,
-  // and cutting at the very first packet would leave an empty outgoing
-  // segment. Let the caller fall back to a full rebuild instead.
-  if (m_lastWrittenVideoPts == kNoPts)
-    return false;
-
-  if (!nextMuxer->initialize(nextPath) || !nextMuxer->setMetadata(metadata))
-    return false;
-  for (size_t i = 0; i < m_streamInfos.size(); ++i) {
-    const int idx = nextMuxer->addStream(m_streamInfos[i]);
-    if (idx < 0 || idx != static_cast<int>(i)) {
-      qWarning() << "Recording rotation: successor stream layout mismatch at"
-                 << i << "(got" << idx << ")";
-      return false;
-    }
-  }
-  if (!nextMuxer->writeHeader())
-    return false;
-
-  // From the first rotation on the session owns the live muxer so it can be
-  // swapped on the encoding thread without the owner's unique_ptr racing.
-  if (currentMuxer)
-    m_ownedCurrent = std::move(currentMuxer);
-  if (!m_ownedCurrent)
-    return false;
-  m_muxer = m_ownedCurrent.get();
-
-  m_rotationNext = std::move(nextMuxer);
-  m_rotationNextPath = nextPath;
-  m_heldAudio.clear();
-  m_heldAudioBytes = 0;
-  m_rotationHoldFrom =
-      (m_lastWrittenVideoPts == kNoPts) ? 0 : m_lastWrittenVideoPts + 1;
-  m_rotationArmedAtMs = steadyNowMs();
-  m_rotationCutAtMs = 0;
-  m_rotationState = RotationState::Pending;
-
-  // Ask for the next submitted frame to be an IDR. Under the lock so an
-  // audio-only write cannot observe Pending before the request is armed.
-  if (m_encoder)
-    m_encoder->requestKeyframe();
-  return true;
-}
-
-void RecordingSession::abortOutputRotation() {
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    if (m_rotationState == RotationState::Pending)
-      abortRotationLocked();
-  }
-  flushRotationEvents();
-}
-
-std::optional<RecordingSession::RotationResult>
-RecordingSession::settleRotation() {
-  std::optional<RotationResult> result;
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    // A synchronous settle is not signalled; the owner enlists the segment.
-    m_rotationEvents.clear();
-    if (m_rotationState == RotationState::Pending) {
-      abortRotationLocked();
-    } else if (m_rotationState == RotationState::Rotating && m_rotationOld) {
-      RotationResult r;
-      r.oldPath = m_rotationOldPath;
-      r.audioHistory = m_rotationOldHistory;
-      finalizeRotationOldLocked();
-      r.oldBytes = m_rotationOldBytes;
-      result = std::move(r);
-    }
-    m_rotationEvents.clear();
-  }
-  return result;
-}
-
-bool RecordingSession::rotationPending() const {
-  std::lock_guard<std::mutex> lock(m_rotationMutex);
-  return m_rotationState != RotationState::None;
-}
-
-std::vector<std::unique_ptr<IMuxer>> RecordingSession::takeRetiredMuxers() {
-  std::vector<std::unique_ptr<IMuxer>> retired;
-  std::lock_guard<std::mutex> lock(m_rotationMutex);
-  retired.swap(m_retiredMuxers);
-  return retired;
-}
-
-void RecordingSession::pollRotation() {
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    if (m_rotationState == RotationState::Pending && m_rotationArmedAtMs > 0 &&
-        steadyNowMs() - m_rotationArmedAtMs > kRotationKeyframeTimeoutMs) {
-      qWarning() << "Recording rotation: no keyframe arrived in time;"
-                 << "falling back to a segment rebuild";
-      abortRotationLocked();
-    } else if (m_rotationState == RotationState::Rotating) {
-      checkRotationFenceLocked();
-    }
-  }
-  flushRotationEvents();
-}
-
 bool RecordingSession::writeOutputPacket(const EncodedPacket &packet) {
-  bool ok = false;
-  {
-    std::lock_guard<std::mutex> lock(m_rotationMutex);
-    if (!m_muxer) {
-      setOutputError(QStringLiteral("Recording output is not available"));
-      m_outputFailed = true;
-      return false;
-    }
-    const bool isVideo = packet.streamIndex == 0;
-    const int64_t pts = packet.pts;
-
-    switch (m_rotationState) {
-    case RotationState::None:
-      ok = writeToMuxer(m_muxer, packet);
-      if (ok)
-        noteOutgoingLocked(packet);
-      break;
-
-    case RotationState::Pending:
-      if (isVideo) {
-        if (packet.isKeyframe && pts != kNoPts && pts >= m_rotationHoldFrom) {
-          ok = performRotationCutLocked(packet);
-          if (!ok) {
-            // The successor could not take the cut: roll it back and keep
-            // recording into the current file.
-            ok = abortRotationLocked();
-            if (ok) {
-              ok = writeToMuxer(m_muxer, packet);
-              if (ok)
-                noteOutgoingLocked(packet);
-            }
-          }
-        } else {
-          ok = writeToMuxer(m_muxer, packet);
-          if (ok)
-            noteOutgoingLocked(packet);
-        }
-      } else if (pts != kNoPts && pts >= m_rotationHoldFrom) {
-        // Audio past the cut point waits for the keyframe so it lands in the
-        // successor file in order.
-        m_heldAudio.push_back(packet);
-        m_heldAudioBytes += qint64(packet.data.size());
-        ok = true;
-        if (m_heldAudioBytes > kRotationHeldAudioLimit) {
-          qWarning() << "Recording rotation: held audio exceeded the budget;"
-                     << "falling back to a segment rebuild";
-          ok = abortRotationLocked();
-        }
-      } else {
-        ok = writeToMuxer(m_muxer, packet);
-        if (ok)
-          noteOutgoingLocked(packet);
-      }
-      break;
-
-    case RotationState::Rotating:
-      if (isVideo) {
-        ok = writeToMuxer(m_muxer, packet);
-        if (ok)
-          noteOutgoingLocked(packet);
-      } else if (pts != kNoPts && pts < m_rotationCutPts) {
-        // Late audio from before the cut still belongs to the outgoing file
-        // until that file is finalized; afterwards it is dropped.
-        if (m_rotationOld) {
-          ok = writeToMuxer(m_rotationOld.get(), packet);
-          if (ok)
-            noteOutgoingLocked(packet);
-        } else {
-          ok = true;
-        }
-      } else {
-        ok = writeToMuxer(m_muxer, packet);
-        if (ok)
-          markAudioCaughtUpLocked(packet.streamIndex);
-      }
-      if (ok)
-        checkRotationFenceLocked();
-      break;
-    }
-  }
-  if (!ok) {
+  std::lock_guard<std::mutex> lock(m_outputMutex);
+  if (!m_muxer) {
+    setOutputError(QStringLiteral("Recording output is not available"));
     m_outputFailed = true;
-    flushRotationEvents();
     return false;
   }
-  flushRotationEvents();
+  const bool ok = writeToMuxer(m_muxer, packet);
+  if (!ok) {
+    m_outputFailed = true;
+    return false;
+  }
   return true;
 }
 

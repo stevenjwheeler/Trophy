@@ -11,6 +11,7 @@
 #include "library/RecordingAnnotations.h"
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
@@ -78,24 +79,17 @@ protected:
     app.m_notificationService->setEnabled(false); // Never notify the real session.
     app.m_recordingManager = std::make_unique<RecordingManager>();
     auto &manager = *app.m_recordingManager;
-    manager.m_currentFilePath = path;
-    manager.m_captureSource = std::make_unique<ActionCapture>();
-    manager.m_videoEncoder = std::make_unique<ActionEncoder>();
-    manager.m_muxer = std::make_unique<ActionMuxer>();
-    manager.m_session = std::make_unique<RecordingSession>(path, manager.m_captureSource.get(),
-        manager.m_videoEncoder.get(), manager.m_muxer.get(), nullptr, true, 128, 0);
-    ASSERT_TRUE(manager.m_session->start());
+    manager.m_output = std::make_shared<RecordingManager::FileOutput>(QFileInfo(path).absolutePath());
+    manager.m_output->m_path = path;
+    manager.m_output->m_position.store(0);
     manager.m_state = RecordingManager::RecordingState::Recording;
-    auto *capture = static_cast<ActionCapture *>(manager.m_captureSource.get());
-    VideoFrame frame{}; frame.timestamp = 90000000;
-    capture->callback(frame);
     ASSERT_FALSE(app.m_replayManager);
     ASSERT_FALSE(app.m_settingsManager);
     app.requestReplay(); // Must route before any DVR/settings availability guard.
     const auto marks = RecordingAnnotations::bookmarks(path);
     ASSERT_EQ(marks.size(), 1);
     EXPECT_EQ(marks[0].toMap()["positionMs"].toLongLong(), 0);
-    manager.stopRecording();
+    manager.m_state = RecordingManager::RecordingState::Idle;
     app.requestReplay();
     EXPECT_EQ(RecordingAnnotations::bookmarks(path).size(), 1);
     app.m_recordingManager.reset(); // Join native retirement while fixtures exist.

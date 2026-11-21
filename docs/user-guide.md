@@ -8,6 +8,10 @@ Use **Record** or your recording-toggle shortcut to start a full recording, then
 
 With DVR enabled and ready, the clip shortcut saves recent gameplay from the replay buffer. **During a full recording, that same shortcut creates a bookmark instead**, even if DVR is disabled. Replay length and recording quality are configurable in Settings.
 
+Saving a DVR clip keeps the current capture, encoder and audio running. The save
+may briefly wait for a keyframe and segment finalization. If preparing the clip
+fails, Trophy reports that save failure without stopping a healthy DVR buffer.
+
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 ### Launcher and window handoffs
@@ -32,18 +36,25 @@ starting the game clears the wait and returns Trophy to Idle when nothing else
 is selected.
 
 If a captured loader/splash window disappears while the **same game instance**
-remains alive and selected, Trophy saves the completed part and retries full
-recording using the saved portal approval. It waits 1.5 seconds after cleanup
+remains alive and selected, Trophy retries capture using the saved portal
+approval for both full recording and DVR. It waits 1.5 seconds after cleanup
 before each attempt; there is no retry-count or total elapsed-time cutoff for
 recoverable window loss or an approved capture that returns no stream yet.
 The game can keep the same PID or hand off to another verified member of the
 same instance.
 
-Continuation is a **new recording file**, not DVR or an automatic merge.
+For full recording, continuation is a **new recording file**, not an automatic merge.
 The gap between parts is not recorded. Intermediate handoff parts are saved
 quietly; completion notification and sound follow your settings when recording
 ends. If a suspected handoff turns out to be game exit, completion feedback is
 delivered after recovery is cancelled rather than suppressed permanently.
+DVR keeps its valid buffered segments and resumes into a fresh segment. You can
+still save buffered footage while it waits; the window gap is not buffered video.
+In native-resolution mode, a replacement window is recorded at its own native
+size. Saving a clip across different resolutions takes longer: Trophy converts
+the video to the newest segment's resolution, preserving aspect ratio.
+This conversion requires the software H.264 encoder (libx264); compatible clips
+still save without re-encoding.
 Stop cancels pending recovery; game exit,
 changed selection, removed approval or blocked capture also prevents another
 attempt. A generic portal rejection, permission loss, startup timeout, or
@@ -55,6 +66,9 @@ window-loss evidence, Trophy saves any recorded footage and stops capture rather
 than assuming sharing permission still applies. A confirmed window-loss handoff
 can still recover when a portal closure arrives at the same time. This is
 distinct from waiting past a known launcher before capture.
+If sharing ends as the game exits, DVR settles the tracked instance's exit
+before reporting a capture error. Confirmed game exit stops DVR quietly and
+leaves already-saved clips intact; real output/finalization failures still report.
 An explicit recording start after session closure uses fresh portal authorization,
 not the old closed grant. Cancellation or denial never starts an automatic retry.
 
@@ -86,7 +100,7 @@ While recording or DVR is active, click **ⓘ** beside the recording control for
 - The Audio tab also refreshes per-source signal diagnostics at 100 ms: peak and RMS over approximately one second, five-second peak hold/full-scale warning, full-scale sample count since source binding, mute state and age of the last received audio buffer. Measurements use 100 ms buckets and post-mute source PCM before recording startup gating, mixing and encoding. Zero is **−∞ dBFS** (digital silence); **0 dBFS** is full scale. RMS averages sample power across channels, not LUFS. Full-scale samples warn of clipping risk, not proof of audible distortion or final mixed-track clipping; these are not true-peak or physical microphone-loudness measurements. Missing buffers show unavailable readings rather than fake silence. Replacing/restarting a source resets its history; DVR segment rotation alone does not. Voice included in the System mix has no separate signal measurements, and Mic retains its semantic identity.
 - Session duration and DVR coverage, retained segment count (including current footage and segments still finalizing), and retained video including the safety margin beyond the configured replay window.
 
-Video/session values refresh every second; source signal diagnostics refresh every 100 ms while the Audio tab is open. DVR counters cover the **current segment** and reset at rotation, not the whole replay buffer; DVR session duration and buffer coverage are separate. Source fields may be generic or unreported by the portal. Observed transport changes do not establish why a fallback happened. Encoder-call time is not end-to-end latency, and drop counters do not cover every compositor/PipeWire loss.
+Video/session values refresh every second; source signal diagnostics refresh every 100 ms while the Audio tab is open. DVR counters describe the current capture/encoder session: container-only rotations and clip saves do not reset them, but a source handoff or pipeline rebuild starts a new session. DVR session duration and buffer coverage are separate. Source fields may be generic or unreported by the portal. Observed transport changes do not establish why a fallback happened. Encoder-call time is not end-to-end latency, and drop counters do not cover every compositor/PipeWire loss.
 
 ## Discord Rich Presence
 

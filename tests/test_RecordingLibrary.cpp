@@ -288,6 +288,20 @@ TEST_F(RecordingLibraryTest, DashboardTotalsIgnoreViewFiltersAndUndoHiding) {
   EXPECT_EQ(lib.allRecordings().size(), 1);
 }
 
+TEST_F(RecordingLibraryTest, ReservedOutputPathIsExcludedBeforeItsHeaderExists) {
+  RecordingLibrary lib(tempDir.path());
+  const auto path = tempDir.filePath("Starting.mkv");
+  lib.setActiveRecordingPath(path);
+  QSignalSpy added(&lib, &RecordingLibrary::recordingAdded);
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+  file.close();
+  lib.refresh();
+  EXPECT_EQ(added.size(), 0);
+  EXPECT_EQ(lib.totalCount(), 0);
+  EXPECT_EQ(lib.getRecording(path), nullptr);
+}
+
 TEST_F(RecordingLibraryTest, PlayerBookmarksPersistAndRejectInvalidPositions) {
   const auto path = createFile("Bookmarked.mkv");
   {

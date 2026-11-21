@@ -1,290 +1,115 @@
-/*
- * Trophy - Game recording and clipping
- * Copyright (C) 2026
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
-
-#include <QElapsedTimer>
-#include <QList>
-#include <QObject>
-#include <QPointer>
-#include <QStringList>
+#include "RecordingEngine.h"
 #include <QTimer>
-#include <QVariantMap>
-#include <QJsonObject>
-#include <cstdint>
 #include <future>
-#include <functional>
-#include <atomic>
-#include <vector>
-#include <memory>
-#include <thread>
-
-#include "muxing/ReplayClipper.h"
+#include <QTemporaryDir>
+#include <deque>
+#include <mutex>
 
 namespace TrophyBackend {
-
 class SettingsManager;
-class GameDetectionService;
 class StorageManager;
-class AudioMixer;
-class IVideoCaptureSource;
-class IEncoder;
-class IMuxer;
-class RecordingSession;
 
-/**
- * @brief Instant-replay DVR: rolling 60s segments while a game runs.
- *
- * While active, a full capture→encode→mux pipeline writes segments into
- * a cache dir (configurable, e.g. /tmp for RAM-backed storage), keeping
- * enough to cover the clip length plus one segment of margin. saveReplay
- * finalizes the current segment and stream-copies the trailing window
- * into the library — no re-encode, ready in seconds.
- *
- * Paused (and cleared) during real recordings; the DVR owns a dedicated
- * mixer so stopping it can't tear down the recording's audio sources.
- */
+// DVR policy, packet retention and export only. No native recording resources.
 class ReplayManager : public QObject {
   Q_OBJECT
-
   Q_PROPERTY(bool active READ isActive NOTIFY replayStateChanged)
+  Q_PROPERTY(bool recoveringCapture READ isRecoveringCapture NOTIFY replayStateChanged)
   Q_PROPERTY(QString currentGame READ currentGame NOTIFY replayStateChanged)
-
 public:
-  static constexpr int kSegmentSeconds = 60;
-  static constexpr int kPruneMarginSeconds = 60;
-  static constexpr int kMinRetainedSegments = 2;
-
   explicit ReplayManager(QObject *parent = nullptr);
+  ReplayManager(std::shared_ptr<RecordingEngine> engine, QObject *parent = nullptr);
   ~ReplayManager() override;
-
   void setSettingsManager(SettingsManager *settings);
-  void setGameDetectionService(GameDetectionService *detector) { m_gameDetector = detector; }
-  void setStorageManager(StorageManager *storage);
-
-  bool isActive() const { return m_state == State::Running; }
-  bool isStarting() const { return m_state == State::StartingCapture; }
-  QString currentGame() const { return m_gameName; }
-  uint capturedSteamAppId() const { return m_detectedGameInfo.value("detectedSteamAppId").toUInt(); }
+  void setStorageManager(StorageManager *storage) { m_storage = storage; }
+  bool isActive() const { return m_id && m_started && !m_stopping; }
+  bool isStarting() const { return m_id && !m_stopping && (!m_started || isRecoveringCapture()); }
+  bool isRecoveringCapture() const {
+    return m_id && m_engine->state() == RecordingEngine::State::Recovering;
+  }
+  QString currentGame() const { return m_game; }
+  uint capturedSteamAppId() const { return m_engine->capturedSteamAppId(); }
   QVariantMap captureHealth() const;
-
-  // Pure helpers (unit-tested): window/retention over segment lists.
-  struct Segment {
-    QString path;
-    double startSec = 0.0; // since DVR start
-    double durationSec = 0.0;
-    QJsonObject audioHistory{};
-    double endSec() const { return startSec + durationSec; }
-  };
-  static QList<ReplaySegment> selectForWindow(const QList<Segment> &segments,
-                                              double nowSec, double windowSec);
-  static QStringList pruneList(const QList<Segment> &segments, double nowSec,
-                               double windowSec);
-
 public slots:
-  void startDvr(const QString &gameName);
+  void startDvr(const QString &game);
+  bool selectCaptureWindow();
   void stopDvr();
-  // Paused during real recordings: stops the loop and clears the buffer.
   void setPaused(bool paused);
   void saveReplay();
-
 signals:
-  // The capture source is ready; portal selection no longer needs guidance.
   void captureSelectionFinished();
+  void captureAuthorizationChanged();
   void replayStateChanged();
   void replaySaved(const QString &filePath, double seconds);
   void replayFailed(const QString &reason);
-  /**
-   * The portal rejected our saved restore token. The app deletes it and
-   * re-authorizes through the New Game prompt — never a bare picker.
-   */
   void restoreAuthNeeded(const QString &gameName, const QString &identity = {});
-
-private slots:
-  void onCaptureReady();
-  void onCaptureError(const QString &error);
-  void onRestoreTokenStale(const QString &oldToken);
-  void rotateSegment();
-
 private:
-  GameDetectionService *m_gameDetector = nullptr; // owner outlives this manager
-  QString m_captureIdentity;
-  QVariantMap m_detectedGameInfo;
-  enum class State { Idle, StartingCapture, Running, Stopping };
-
-  void setState(State s);
-  bool beginCapture();
-  void connectCaptureSignals();
-  // Gapless segment switch (rotation and clip saves): builds and starts
-  // the successor session while the current one keeps recording, then
-  // retires the old leg with a handoff stop. The old break-before-make
-  // order dropped ~300ms of A/V on every switch (visible as a freeze in
-  // any clip spanning the seam).
-  bool switchSegment();
-  // Persistent rotation: swap only the container on a forced keyframe while
-  // the encoder/session/audio stay live. Returns false when a rebuild is
-  // required (settings changed or the successor could not be armed).
-  bool armPersistentRotation();
-  // Abort a pending persistent rotation and finalize a cut that already
-  // happened, enlisting the outgoing segment. No rotation signals fire.
-  bool settlePendingRotation();
-  void drainRetiredMuxers();
-  QString encoderSetupKey() const;
-  void onOutputRotated(const QString &oldPath, const QString &newPath,
-                       qint64 oldBytes, const QJsonObject &audioHistory);
-  void onOutputRotationAborted(const QString &nextPath);
-  bool retireOpenSegment(double switchSec);
-  void pollRetirements();
-  void completeDvrStop();
-  void beginReplayRemux(double now);
-  struct RetiringSegment {
-    std::unique_ptr<RecordingSession> session;
-    std::unique_ptr<IEncoder> encoder;
-    std::unique_ptr<IMuxer> muxer;
-    Segment segment;
+  friend class EncodedOutputsTest;
+  struct Buffer final : EncodedOutput {
+    struct Block {
+      EncodedStream stream;
+      QString path;
+      qint64 startMs = 0, endMs = 0;
+      QJsonObject history;
+      std::shared_ptr<QTemporaryDir> directory;
+      mutable std::mutex mutex;
+      std::vector<EncodedFrame> packets;
+      QVector<qint64> videoDtsMs;
+      bool persisted = false;
+      ~Block();
+    };
+    struct Piece {
+      std::shared_ptr<Block> block;
+      std::vector<EncodedFrame> packets;
+      QVector<qint64> videoDtsMs;
+    };
+    struct Snapshot {
+      QList<Piece> pieces;
+      qint64 endMs = 0;
+      int seconds = 30;
+      QJsonObject history;
+      bool save(const QString &path, QString *error, double *keptSeconds) const;
+    };
+    Buffer(QString cacheRoot, int seconds);
+    ~Buffer() override;
+    bool begin(const EncodedStream &stream) override;
+    bool write(const EncodedFrame &packet) override;
+    bool end() override;
+    bool started() const override;
+    QString error() const override;
+    void setAudioHistory(quint64 generation, const QJsonObject &history) override;
+    Snapshot snapshot(int seconds) const;
+    QVariantMap health() const;
+    void clear();
+    static bool persist(const std::shared_ptr<Block> &block);
+    static bool dump(const Block &block, const std::vector<EncodedFrame> &packets,
+                     const QString &path, QString *error);
+    void prune();
+    mutable std::mutex m_mutex;
+    std::deque<std::shared_ptr<Block>> m_blocks;
+    std::shared_ptr<Block> m_current;
+    std::shared_ptr<QTemporaryDir> m_directory;
+    EncodedStream m_stream;
+    int m_seconds = 30, m_sequence = 0;
+    qint64 m_endMs = 0;
+    QString m_error;
   };
-  std::vector<std::unique_ptr<RetiringSegment>> m_retiringSegments;
-  QTimer *m_retirementTimer = nullptr;
-  std::future<void> m_captureStopWorker;
-  QString m_pendingGameName;
-  bool m_shuttingDown = false;
-  bool m_saveWaitingForRetirement = false;
-  double m_saveRequestNow = 0.0;
-  double m_saveRequestWindow = 0.0;
-  QString m_saveRequestOutput;
-  std::shared_ptr<std::atomic<bool>> m_saveDone;
-  struct ReplaySaveResult {
+  void start(const QString &game, bool fresh);
+  void pollSave();
+  struct SaveResult {
     bool ok = false;
     QString path, error;
-    double seconds = 0.0;
-    QJsonObject audioHistory{};
+    double seconds = 0;
   };
-  std::shared_ptr<ReplaySaveResult> m_saveResult;
-  QString audioSetupKey() const;
-  void pruneOldSegments(double now);
-  void clearSegments();
-  QString cacheDir() const;
-  // The pre-/tmp default (CacheLocation + "/trophy/replay"). Never written
-  // anymore; cacheDir() removes it once so upgraders don't keep the stale
-  // dir (it used to sit next to Qt's own caches as Trophy/trophy/replay).
-  static QString legacyCacheDir();
-  QString clipOutputPath() const;
-  double elapsedSec() const;
-  uint32_t gameAudioPid() const;
-  void setupAudioSources(int &trackCount, QStringList &gameHints,
-                           uint32_t &gamePid, bool &gameFound, int &voiceTrack,
-                           bool &voiceFound, int &micTrack,
-                           bool createSources);
-  // Pure PipeWire lookup (no mixer/QObject state): verified game membership,
-  // then configured Voice. Registry access runs in an owned background
-  // preparation/cache operation.
-  struct DvrNodeLookup {
-    uint32_t gameNodeId = 0xFFFFFFFFu;
-    QString gameNodeName;
-    QString gameNodeSerial;
-    bool gameFound = false;
-    uint32_t voiceNodeId = 0xFFFFFFFFu;
-    QString voiceNodeName;
-    QString voiceNodeSerial;
-    bool voiceFound = false;
-  };
-  static DvrNodeLookup lookupDvrNodes(uint32_t gamePid,
-                                      const QStringList &gameHints,
-                                      const QString &voiceApp);
-  // Snapshot current inputs and refresh m_lookupCache on a worker for the
-  // NEXT rotation. Never applies results to the live session (it runs its
-  // own reconcile); stale deliveries are dropped by generation.
-  void refreshLookupCacheAsync();
-  void applyLookupCacheResult(quint64 generation, const DvrNodeLookup &fresh);
-  void pollLookupWorker();
-  std::future<DvrNodeLookup> m_lookupWorker;
-  quint64 m_workerLookupGeneration = 0;
-  QString m_workerAudioKey, m_lookupAudioKey;
-  QPointer<IVideoCaptureSource> m_workerLookupCapture;
-  QTimer *m_lookupTimer = nullptr;
-  std::function<DvrNodeLookup(uint32_t, const QStringList &, const QString &)>
-      m_nodeLookup = lookupDvrNodes;
-  std::function<bool()> m_segmentBuilder;
-  std::function<std::unique_ptr<IVideoCaptureSource>()> m_captureFactory;
-
-  State m_state = State::Idle;
-  QString m_gameName;
-  bool m_paused = false;
-  bool m_saving = false;
-  std::thread m_saveThread;
-  QStringList m_saveInputPaths;
-
- public:
-  // Live audio retargeting, mirroring RecordingManager (acts on the open
-  // segment's session; no-ops when the DVR is idle — the next segment
-  // picks the new setting up).
-  void applyMicrophoneDevice();
-  void applyGameAudioDevice();
-  void applyVoiceChatApp();
-
-  // Mixer passthroughs for the Application-level mute proxy.
-  void setTrackMuted(int trackIndex, bool muted);
-  bool isTrackMuted(int trackIndex) const;
-  float trackLevel(int trackIndex) const;
-  void setSemanticTrackMuted(int role, bool muted);
-  bool isSemanticTrackMuted(int role) const;
-  float semanticTrackLevel(int role) const;
-
- private:
-  // Mixer slots assigned per segment (needed to retarget mid-segment).
-  int m_micTrack = -1;
-  int m_voiceTrack = -1;
-  // Audio configuration the live mixer sources were built from. While the
-  // key matches, segment switches keep the running PipeWire streams and
-  // only rotate encoders (gapless); a mismatch rebuilds sources.
-  QString m_audioSetupKey;
-   // Last node-lookup results. Retained-source rotations now take routing
-    // directly from the current session (the cache cannot describe late-adopted
-    // slots); startup awaits owned background preparation before publishing.
-  DvrNodeLookup m_lookupCache;
-  bool m_lookupCacheValid = false;
-  quint64 m_lookupGeneration = 0;
-  bool m_lookupInflight = false;
-  bool m_captureReadyForPipeline = false;
-  uint64_t m_captureGeneration = 0;
-
-  // Test seam (same pattern as GameDetectionServiceTest).
-  friend class ReplayManagerTest;
-
+  std::shared_ptr<RecordingEngine> m_engine;
+  std::shared_ptr<Buffer> m_buffer;
   SettingsManager *m_settings = nullptr;
-  // Optional storage gate: when set, saveReplay refuses while the
-  // library is over its limit (or when the clip would push it over),
-  // instead of writing past the limit. Never deletes (unlike the
-  // recording path's enforce call) — clips must not eat library files.
   StorageManager *m_storage = nullptr;
-  // Dedicated mixer: sharing RecordingManager's mixer caused teardown
-  // races (DVR stop ripped out the recording's just-added sources).
-  // PipeWire happily serves both while they briefly overlap.
-  std::unique_ptr<AudioMixer> m_audioMixer;
-
-  std::unique_ptr<IVideoCaptureSource> m_capture;
-  std::unique_ptr<IEncoder> m_encoder;
-  std::unique_ptr<IMuxer> m_muxer;
-  std::unique_ptr<RecordingSession> m_session;
-
-  QList<Segment> m_segments;
-  QElapsedTimer m_dvrClock;
-  QTimer *m_rotationTimer = nullptr;
-  int m_segmentIndex = 0;
-  double m_openSegmentStart = 0.0;
-  QString m_openSegmentPath;
-  // Persistent-rotation bookkeeping (owner thread). m_muxer is null once the
-  // session owns the live muxer after the first successful arm.
-  QTimer *m_rotationWatchdog = nullptr;
-  bool m_rotationPending = false;
-  QString m_pendingRotationPath;
-  // Settings snapshot the live session/encoder was built from. A mismatch
-  // at rotation time forces the make-before-break rebuild instead.
-  QString m_encoderSetupKey;
+  QString m_game, m_pendingGame;
+  quint64 m_id = 0;
+  bool m_paused = false, m_started = false, m_stopping = false, m_errorReported = false;
+  QTimer m_saveTimer;
+  std::future<SaveResult> m_save;
 };
-
 } // namespace TrophyBackend

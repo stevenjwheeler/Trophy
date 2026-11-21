@@ -25,6 +25,7 @@
 #include "encoding/IEncoder.h"
 #include "muxing/FFmpegMuxer.h"
 #include "muxing/ReplayClipper.h"
+#include "muxing/ReplayExporter.h"
 #include "muxing/TrophyMetadata.h"
 
 extern "C" {
@@ -119,11 +120,12 @@ protected:
 
   // Encode a segment: x264 @30fps GOP30 + AAC stereo. All timestamps
   // restart at 0 (as DVR rotation produces).
-  void makeSegment(const QString &path, int videoFrames, const QString &preset = "ultrafast") {
+  void makeSegment(const QString &path, int videoFrames, const QString &preset = "ultrafast",
+                   int width = 320, int height = 240) {
     FFmpegEncoder venc(IEncoder::EncoderType::Software_x264, "libx264");
     EncoderConfig vcfg;
-    vcfg.width = 320;
-    vcfg.height = 240;
+    vcfg.width = width;
+    vcfg.height = height;
     vcfg.fps = 30;
     vcfg.bitrate = 500;
     vcfg.preset = preset;
@@ -147,8 +149,8 @@ protected:
     vinfo.codecId = venc.codecId();
     vinfo.extraData = venc.extraData();
     vinfo.pixelFormat = venc.encodedPixelFormat();
-    vinfo.width = 320;
-    vinfo.height = 240;
+    vinfo.width = width;
+    vinfo.height = height;
     vinfo.fps = 30;
     vinfo.bitrate = 500;
     ASSERT_GE(muxer.addStream(vinfo), 0);
@@ -174,11 +176,11 @@ protected:
 
     ASSERT_TRUE(muxer.writeHeader());
 
-    std::vector<uint8_t> bgra(320 * 240 * 4, 0x80);
+    std::vector<uint8_t> bgra(width * height * 4, 0x80);
     for (int f = 0; f < videoFrames; ++f) {
       bgra[f % bgra.size()] = static_cast<uint8_t>(f);
       VideoFrame frame{
-          bgra.data(),    320, 240, 320 * 4, (int64_t)f * 1000000 / 30,
+          bgra.data(),    width, height, width * 4, (int64_t)f * 1000000 / 30,
           AV_PIX_FMT_BGRA};
       EncodedPacket pkt;
       if (venc.encodeFrame(frame, pkt)) {
@@ -335,10 +337,9 @@ TEST_F(ReplayClipperTest, ReorderedSegmentHeadsRetainReferenceKeyframes) {
   ASSERT_EQ(packets.size(), 2);
   int keys = 0;
   for (const auto &packet : packets[0]) if (packet.key) ++keys;
-  // First input cuts at its first usable DTS-bearing keyframe (1s).
-  // All three GOPs of both subsequent inputs must survive, including IDR.
-  EXPECT_EQ(keys, 8);
-  EXPECT_EQ(packets[0].size(), 240);
+  // The bounded DTS-head recovery also retains the first input's IDR.
+  EXPECT_EQ(keys, 9);
+  EXPECT_EQ(packets[0].size(), 270);
   AVFormatContext *input = nullptr;
   ASSERT_GE(avformat_open_input(&input, output.toUtf8().constData(), nullptr, nullptr), 0);
   ASSERT_GE(avformat_find_stream_info(input, nullptr), 0);
@@ -372,9 +373,49 @@ TEST_F(ReplayClipperTest, ReorderedSegmentHeadsRetainReferenceKeyframes) {
   }
   EXPECT_EQ(result, AVERROR_EOF);
   EXPECT_GE(avcodec_send_packet(decoder, nullptr), 0); drain();
-  EXPECT_EQ(frames, 240);
+  EXPECT_EQ(frames, 270);
   av_frame_free(&frame); av_packet_free(&packet);
   avcodec_free_context(&decoder); avformat_close_input(&input);
+}
+
+TEST_F(ReplayClipperTest, MissingDecodeClockIsNotGuessedFromPresentationTimestamps) {
+  if (!haveCodecs()) GTEST_SKIP() << "libx264/AAC unavailable";
+  const auto source = tempDir.filePath("no-decode-clock.mkv");
+  makeSegment(source, 60, "medium");
+  ASSERT_FALSE(HasFatalFailure());
+  ReplayClipperInternal::Operations operations;
+  operations.readFrame = [](AVFormatContext *context, AVPacket *packet) {
+    const int result = av_read_frame(context, packet);
+    if (result >= 0 && packet->stream_index == 0) packet->dts = AV_NOPTS_VALUE;
+    return result;
+  };
+  ReplayClipperTestAccess scopedOperations(operations);
+  const auto output = tempDir.filePath("must-not-exist.mkv");
+  QString error;
+  EXPECT_FALSE(ReplayClipper::saveTail({{source, 0}}, 30, output, &error));
+  EXPECT_TRUE(error.contains("no usable keyframe")) << error.toStdString();
+  EXPECT_FALSE(QFileInfo::exists(output));
+}
+
+TEST_F(ReplayClipperTest, SaveTailCanFreezeRequestEndBeforeAsynchronousRotationFinishes) {
+  if (!haveCodecs()) GTEST_SKIP() << "Requires software codecs";
+  for (const bool mixed : {false, true}) {
+    const auto first = tempDir.filePath("first.mkv");
+    const auto last = tempDir.filePath("last.mkv");
+    makeSegment(first, 90);
+    makeSegment(last, 90, "ultrafast", mixed ? 640 : 320, mixed ? 360 : 240);
+    ASSERT_FALSE(HasFatalFailure());
+    const auto output = tempDir.filePath(mixed ? "mixed-tail.mkv" : "copied-tail.mkv");
+    QString error;
+    double kept = 0;
+    ASSERT_TRUE(ReplayExporter::saveTail({{first, 0}, {last, 3}}, 10,
+                                        output, &error, &kept, 4.0))
+        << error.toStdString();
+    EXPECT_GT(kept, 3.5);
+    EXPECT_LE(kept, 4.05); // Inputs contain six seconds; the click tail was four.
+    EXPECT_TRUE(QFileInfo::exists(first));
+    EXPECT_TRUE(QFileInfo::exists(last));
+  }
 }
 
 TEST_F(ReplayClipperTest, TailCutKeepsTrailingWindow) {
@@ -876,6 +917,7 @@ struct CutFaultState {
   CutFault fault;
   QString partialPath;
   bool copying = false;
+  bool copyClockReady = false;
   bool fired = false;
   bool partialExisted = false;
   int scanReads = 0;
@@ -941,6 +983,9 @@ int faultRead(AVFormatContext *ctx, AVPacket *pkt) {
     return AVERROR(EIO); // Not EOF: a partial scan/copy must not succeed.
   }
   const int result = av_read_frame(ctx, pkt);
+  if (s.copying && result >= 0 && pkt->stream_index == 0 &&
+      pkt->dts != AV_NOPTS_VALUE)
+    s.copyClockReady = true;
   if (result == AVERROR_EOF)
     s.copying = true; // One real fixture input, reopened for the copy pass.
   return result;
@@ -950,8 +995,8 @@ AVPacket *faultAlloc() {
   auto &s = *cutFault;
   const int n = ++s.allocations;
   if ((s.fault == CutFault::ScanPacket && n == 1) ||
-      (s.fault == CutFault::InputPacket && n == 2) ||
-      (s.fault == CutFault::OutputPacket && n == 3)) {
+      (s.fault == CutFault::InputPacket && s.copying && !s.fired) ||
+      (s.fault == CutFault::OutputPacket && s.copyClockReady && !s.fired)) {
     s.fire();
     return nullptr;
   }

@@ -22,6 +22,18 @@
 #include <algorithm>
 
 namespace TrophyBackend {
+QString StorageManager::newRecordingPath(const QString &directory, const QString &game, const QString &suffix) {
+  QString safe = game;
+  safe.replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+  safe.replace(QRegularExpression("[_-]{2,}"), "_");
+  safe.remove(QRegularExpression("^[_-]+|[_-]+$"));
+  if (safe.isEmpty()) safe = game.isEmpty() ? QStringLiteral("Recording") : QStringLiteral("Game");
+  const auto stem = safe + "_" + QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + suffix;
+  QString path = QDir(directory).filePath(stem + ".mkv");
+  for (int i = 2; QFileInfo::exists(path) || QFileInfo::exists(path + ".part"); ++i)
+    path = QDir(directory).filePath(stem + "_" + QString::number(i) + ".mkv");
+  return path;
+}
 
 namespace {
 
