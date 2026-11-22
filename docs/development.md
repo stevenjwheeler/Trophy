@@ -186,6 +186,16 @@ exclude GPU-capable groups and set `CUDA_VISIBLE_DEVICES=-1` in test children
 as an additional safeguard, not a substitute for selecting safe tests. Run the
 hardware groups separately when the GPU is available, and record exclusions.
 
+`test_RecordingEngine` uses fake capture, encoding and packet outputs, gated
+audio-lookup workers, and owned helper processes. It covers process-instance
+fences, launcher/census handoffs, manual-source naming, startup audio layouts,
+stale completions and explicit portal reselection without using desktop services
+or the GPU. Run it with the isolated environment above and
+`ctest -R 'RecordingEngineTest|Engine(Naming|AudioIdentity|Startup|Routing|Census|IdentityFence|StaleCallback|PortalFence)Test'`.
+Routing-layout tests exercise the same planner used by native startup; they do
+not establish PCM delivery. Keep the private-service recording/audio regressions
+for real media and consumer-specific recording/DVR completion behavior.
+
 For AppImage payload/startup smoke checks, see [packaging notes](../packaging/README.md). Those checks have narrower scope than live recording tests.
 
 Package harness regressions can run independently without a build or desktop:

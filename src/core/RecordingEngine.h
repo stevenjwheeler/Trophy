@@ -119,6 +119,7 @@ private:
   static AudioPreparation lookupAudioPreparation(AudioPreparation input);
   static AudioPreparation snapshotAudio(const SettingsManager &settings,
       IVideoCaptureSource *capture, const QString &game, const QVariantMap &identity, bool manual);
+  static AudioRouting planAudioRouting(const AudioPreparation &input);
   static AudioRouting configureAudio(AudioMixer *mixer, const AudioPreparation &input);
   std::unique_ptr<IEncoder> createEncoder();
   bool startCapture(bool windowOnly, const QString &restoreToken);

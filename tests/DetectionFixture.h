@@ -30,6 +30,30 @@ public:
     ProcessGames::publish(service.m_instances);
     service.updateCurrentGame(instance.name, pid, instance.key);
   }
+  static void replaceProcessRecord(GameDetectionService &service, const ProcessInfo &process) {
+    service.m_instances.first().processes = {{process.pid, process}};
+    ProcessGames::publish(service.m_instances);
+  }
+  static void addIndependentInstance(GameDetectionService &service, qint64 pid,
+                                     const QString &key, bool select = false) {
+    const auto process = ProcessCensus::inspect(pid);
+    const auto name = service.m_whitelist->getWhitelistName(key);
+    const auto id = key + "@" + process.identity();
+    service.m_instances.append({id, key, name, pid, {{pid, process}}});
+    ProcessGames::publish(service.m_instances);
+    if (select) {
+      service.m_selectedId = id;
+      service.updateCurrentGame(name, pid, key);
+    }
+  }
+  static void selectInstance(GameDetectionService &service, const QString &id) {
+    for (const auto &instance : service.m_instances)
+      if (instance.id == id) {
+        service.m_selectedId = id;
+        service.updateCurrentGame(instance.name, instance.primaryPid, instance.key);
+        return;
+      }
+  }
   static void clear(GameDetectionService &service) {
     service.m_instances.clear();
     service.m_selectedId.clear();

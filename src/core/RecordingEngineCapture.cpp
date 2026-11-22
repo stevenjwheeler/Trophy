@@ -91,21 +91,11 @@ RecordingEngine::AudioPreparation RecordingEngine::snapshotAudio(
   return input;
 }
 
-RecordingEngine::AudioRouting RecordingEngine::configureAudio(
-    AudioMixer *mixer, const AudioPreparation &input) {
+RecordingEngine::AudioRouting RecordingEngine::planAudioRouting(const AudioPreparation &input) {
   AudioRouting routing;
-#ifdef HAVE_PIPEWIRE
-  if (!mixer) return routing;
-  const auto device = [](const QString &id) { return id == "default" ? QString() : id; };
   if (input.mode == "desktop") {
     routing.trackCount = 2;
     routing.micTrack = 1;
-    auto system = PipeWireAudioSource::createMonitorSource(device(input.gameDevice), true);
-    system->setStreamName(QStringLiteral("trophy-desktop"));
-    mixer->addSourceAsync(std::move(system), 0);
-    auto mic = PipeWireAudioSource::createInputSource(device(input.micDevice), true);
-    mic->setStreamName(QStringLiteral("trophy-mic"));
-    mixer->addSourceAsync(std::move(mic), 1);
     return routing;
   }
   routing.gameFound = input.gameNode != 0xffffffffu;
@@ -115,6 +105,24 @@ RecordingEngine::AudioRouting RecordingEngine::configureAudio(
   routing.voiceTrack = !input.voiceApp.isEmpty() && (input.separate || routing.voiceFound) ? 1 : -1;
   routing.micTrack = input.separate ? 2 : (routing.voiceFound ? 2 : 1);
   routing.trackCount = input.separate ? 3 : (routing.voiceFound ? 3 : 2);
+  return routing;
+}
+
+RecordingEngine::AudioRouting RecordingEngine::configureAudio(
+    AudioMixer *mixer, const AudioPreparation &input) {
+#ifdef HAVE_PIPEWIRE
+  if (!mixer) return {};
+  const auto routing = planAudioRouting(input);
+  const auto device = [](const QString &id) { return id == "default" ? QString() : id; };
+  if (input.mode == "desktop") {
+    auto system = PipeWireAudioSource::createMonitorSource(device(input.gameDevice), true);
+    system->setStreamName(QStringLiteral("trophy-desktop"));
+    mixer->addSourceAsync(std::move(system), 0);
+    auto mic = PipeWireAudioSource::createInputSource(device(input.micDevice), true);
+    mic->setStreamName(QStringLiteral("trophy-mic"));
+    mixer->addSourceAsync(std::move(mic), 1);
+    return routing;
+  }
   if (routing.gameFound) {
     auto game = PipeWireAudioSource::createApplicationSource(
         input.gameNode, input.gameNodeName, input.gameSerial, {},
@@ -135,11 +143,12 @@ RecordingEngine::AudioRouting RecordingEngine::configureAudio(
   auto mic = PipeWireAudioSource::createInputSource(device(input.micDevice), true);
   mic->setStreamName(QStringLiteral("trophy-mic"));
   mixer->addSourceAsync(std::move(mic), routing.micTrack);
+  return routing;
 #else
   Q_UNUSED(mixer)
   Q_UNUSED(input)
+  return {};
 #endif
-  return routing;
 }
 
 QVariantMap RecordingEngine::captureHealth() const {
@@ -358,26 +367,6 @@ void RecordingEngine::finishPipelineAndStart() {
 
   if (m_captureSource) {
     QString label = m_captureSource->sourceLabel();
-
-    // Wayland Fallback: If XDG Portal/PipeWire hides the application name,
-    // query the GameDetectionService for the foreground active game.
-    if (label.isEmpty() || label.toLower().contains("kwin") ||
-        label.toLower().contains("wayland") ||
-        label.toLower().contains("gnome") ||
-        label.toLower().contains("mutter") ||
-        label.toLower().contains("sway") ||
-        label.toLower().contains("hypr") || label == "Unknown Game") {
-      if (m_gameDetector && m_gameDetector->isGameRunning()) {
-        label = m_gameDetector->currentGameName();
-        qDebug() << "RecordingManager: Using GameDetectionService name fallback:"
-                << label;
-      } else {
-        qDebug()
-            << "RecordingManager: Wayland captured generic node, but no "
-               "game is currently detected. Falling back to generic system "
-               "audio routing.";
-      }
-    }
 
     if (m_isManualRecording) {
       // Adopt the portal label only when it names something real. The
