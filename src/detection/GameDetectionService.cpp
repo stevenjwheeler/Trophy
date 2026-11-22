@@ -17,6 +17,9 @@
 #include <algorithm>
 
 namespace TrophyBackend {
+namespace {
+constexpr int libraryRefreshIntervalMs = 60000;
+}
 void GameDetectionService::setAudioApplicationRegistry(AudioApplicationRegistry *registry) {
   if (m_audioRegistry)
     disconnect(m_audioRegistry, nullptr, this, nullptr);
@@ -46,7 +49,7 @@ void GameDetectionService::queueLibraryRefresh() {
   const bool alreadyPending = m_libraryRefresh;
   m_libraryRefresh = true;
   if (!alreadyPending)
-    emit gameLibrariesChanged();
+    emit librariesScanningChanged();
 }
 void GameDetectionService::updateLibraryWatches(const QStringList &paths) {
   const auto current = m_libraryWatcher.files() + m_libraryWatcher.directories();
@@ -65,44 +68,8 @@ void GameDetectionService::updateLibraryWatches(const QStringList &paths) {
     const auto failed = m_libraryWatcher.addPaths(added);
     if (!failed.isEmpty())
       qWarning() << "Could not watch" << failed.size()
-                 << "game library paths; timed and candidate refresh remain available";
+                  << "game library paths; timed refresh remains available";
   }
-}
-void GameDetectionService::refreshForNewCandidates(
-    const ProcessCensus::Snapshot &previous, bool requestRefresh) {
-  if (!m_running)
-    return;
-  bool found = false;
-  QSet<QStringList> liveCandidates;
-  for (const auto &process : m_processes) {
-    const auto payload = process.payload();
-    if (payload.isEmpty() || (ProcessGames::excluded(payload) &&
-                             !ProcessGames::bootstrapCandidate(payload)))
-      continue;
-    const bool recognized = std::any_of(m_instances.begin(), m_instances.end(),
-        [&](const auto &instance) { return instance.processes.contains(process.pid); });
-    if (recognized)
-      continue;
-    // These are refresh hints, not game evidence. Include unknown native
-    // payloads too, without rescanning for every PID of a respawning helper.
-    const QStringList key{payload, process.winePrefix, QString::number(process.steamId)};
-    if (liveCandidates.size() < 4096)
-      liveCandidates.insert(key);
-    const auto old = previous.constFind(process.pid);
-    if (old != previous.cend() && old->identity() == process.identity() &&
-        old->payload() == payload && old->winePrefix == process.winePrefix &&
-        old->steamId == process.steamId)
-      continue;
-    if (m_seenLibraryCandidates.contains(key))
-      continue;
-    found = true;
-  }
-  m_seenLibraryCandidates = std::move(liveCandidates);
-  if (!requestRefresh || !found || m_libraryRefresh || m_libraryScanning ||
-      m_candidateRefresh.isActive())
-    return;
-  const auto elapsed = m_libraryRefreshClock.isValid() ? m_libraryRefreshClock.elapsed() : 5000;
-  m_candidateRefresh.start(int(std::max<qint64>(0, 5000 - elapsed)));
 }
 void GameDetectionService::saveLibraryPreferences(
     const QString &id, const QVariantMap &preference) {
@@ -112,6 +79,7 @@ void GameDetectionService::saveLibraryPreferences(
   ++m_libraryGeneration; // Only preference changes invalidate in-flight results.
   QSettings().setValue("detection/libraryLocations", m_libraryPreferences);
   // Reflect controls immediately while the worker validates the locations.
+  const auto previousStatus = m_libraryStatus;
   for (auto &value : m_libraryStatus) {
     auto row = value.toMap();
     if (row.value("id").toString() == id) {
@@ -120,6 +88,8 @@ void GameDetectionService::saveLibraryPreferences(
       value = row;
     }
   }
+  if (m_libraryStatus != previousStatus)
+    emit gameLibrariesChanged();
   rescanGameLibraries();
 }
 void GameDetectionService::setLibraryAutomatic(const QString &id, bool automatic) {
@@ -275,21 +245,21 @@ GameDetectionService::GameDetectionService(QObject *parent)
   m_gamesFilter->setShowDefaultEntries(false);
   m_timer.setInterval(1000);
   connect(&m_timer, &QTimer::timeout, this, &GameDetectionService::poll);
-  m_libraryFallback.setInterval(30000);
+  m_libraryFallback.setInterval(libraryRefreshIntervalMs);
+  m_libraryFallback.setTimerType(Qt::PreciseTimer);
   connect(&m_libraryFallback, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
   m_libraryDebounce.setSingleShot(true);
   m_libraryDebounce.setInterval(250);
   connect(&m_libraryDebounce, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
   const auto changed = [this](const QString &) {
-    // Coalesce a burst without indefinitely delaying a continuously busy DB.
-    if (m_running && !m_libraryDebounce.isActive())
+    // Coalesce a notification burst without postponing the deadline on each
+    // event. File changes can refresh sooner than the timed fallback.
+    if (m_running && !m_libraryRefresh && !m_libraryDebounce.isActive())
       m_libraryDebounce.start();
   };
   connect(&m_libraryWatcher, &QFileSystemWatcher::fileChanged, this, changed);
   connect(&m_libraryWatcher, &QFileSystemWatcher::directoryChanged, this, changed);
-  m_candidateRefresh.setSingleShot(true);
-  m_candidateRefresh.setTimerType(Qt::PreciseTimer);
-  connect(&m_candidateRefresh, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
+  m_libraryDebounce.setTimerType(Qt::PreciseTimer);
   rebuildModels();
 }
 GameDetectionService::~GameDetectionService() {
@@ -303,6 +273,7 @@ void GameDetectionService::start() {
   if (m_audioRegistry)
     m_audioMetadata = m_audioRegistry->applications();
   m_libraryRefresh = true;
+  emit librariesScanningChanged();
   m_libraryFallback.start();
   m_timer.start();
   poll();
@@ -312,9 +283,7 @@ void GameDetectionService::stop() {
   m_timer.stop();
   m_libraryFallback.stop();
   m_libraryDebounce.stop();
-  m_candidateRefresh.stop();
   updateLibraryWatches({});
-  m_seenLibraryCandidates.clear();
   if (m_scan.valid())
     m_scan.wait();
   m_scan = {};
@@ -331,7 +300,7 @@ void GameDetectionService::stop() {
   ProcessGames::publish({});
   updateCurrentGame({}, 0);
   emit instancesChanged();
-  emit gameLibrariesChanged();
+  emit librariesScanningChanged();
 }
 void GameDetectionService::poll() {
   if (!m_running)
@@ -351,10 +320,9 @@ void GameDetectionService::poll() {
   if (refreshCatalogue) {
     m_libraryRefresh = false;
     m_libraryScanning = true;
-    m_libraryRefreshClock.start();
     m_libraryFallback.start();
-    m_candidateRefresh.stop();
-    emit gameLibrariesChanged();
+    m_libraryDebounce.stop();
+    emit librariesScanningChanged();
   }
   if (!m_running)
     return;
@@ -393,19 +361,19 @@ void GameDetectionService::applyScanResult(ScanResult result) {
     m_audioStreams = std::move(result.audioStreams);
   if (result.catalogueUpdated && result.libraryGeneration == m_libraryGeneration) {
     m_catalogue = std::move(result.catalogue);
+    const bool changed = !m_librariesReady || m_libraryStatus != result.libraryStatus;
     m_libraryStatus = std::move(result.libraryStatus);
+    m_librariesReady = true;
     m_applicationExecutables = std::move(result.applicationExecutables);
     updateLibraryWatches(result.libraryWatchPaths);
+    if (changed)
+      emit gameLibrariesChanged();
   }
   if (result.catalogueUpdated) {
     m_libraryScanning = false;
-    emit gameLibrariesChanged();
+    emit librariesScanningChanged();
   }
-  // A fresh catalogue already covers this census's candidates. Other
-  // censuses can request an early refresh after a missed file notification.
-  const auto previousProcesses = m_processes;
   apply(result.processes);
-  refreshForNewCandidates(previousProcesses, !result.catalogueUpdated);
 }
 void GameDetectionService::apply(const ProcessCensus::Snapshot &snapshot) {
   const auto previousProcesses = m_processes;

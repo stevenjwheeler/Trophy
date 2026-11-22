@@ -3,7 +3,6 @@
 #include "GameListModel.h"
 #include "ProcessGames.h"
 #include <QObject>
-#include <QElapsedTimer>
 #include <QFileSystemWatcher>
 #include <QTimer>
 #include <QVariantMap>
@@ -29,10 +28,12 @@ class GameDetectionService : public QObject {
                  setShowDefaultExclusions NOTIFY showDefaultExclusionsChanged)
   Q_PROPERTY(QVariantList instances READ instances NOTIFY instancesChanged)
   Q_PROPERTY(QVariantList gameLibraries READ gameLibraries NOTIFY gameLibrariesChanged)
-  Q_PROPERTY(bool librariesScanning READ librariesScanning NOTIFY gameLibrariesChanged)
+  Q_PROPERTY(bool librariesScanning READ librariesScanning NOTIFY librariesScanningChanged)
+  Q_PROPERTY(bool gameLibrariesReady READ gameLibrariesReady NOTIFY gameLibrariesChanged)
 public:
   QVariantList gameLibraries() const { return m_libraryStatus; }
   bool librariesScanning() const { return m_libraryRefresh || m_libraryScanning; }
+  bool gameLibrariesReady() const { return m_librariesReady; }
   Q_INVOKABLE void rescanGameLibraries();
   Q_INVOKABLE void setLibraryAutomatic(const QString &id, bool automatic);
   Q_INVOKABLE void addLibraryLocation(const QString &id, const QUrl &directory);
@@ -102,6 +103,7 @@ signals:
   void showDefaultExclusionsChanged();
   void tokenGamesChanged();
   void gameLibrariesChanged();
+  void librariesScanningChanged();
 
 private:
   friend class GameDetectionServiceTest;
@@ -111,8 +113,6 @@ private:
   void poll();
   void queueLibraryRefresh();
   void updateLibraryWatches(const QStringList &paths);
-  void refreshForNewCandidates(const ProcessCensus::Snapshot &previous,
-                               bool requestRefresh = true);
   void apply(const ProcessCensus::Snapshot &snapshot);
   // Values must outlive synchronous slots that rebuild the instance list.
   void updateCurrentGame(QString name, qint64 pid, QString key = {});
@@ -136,12 +136,11 @@ private:
   void applyScanResult(ScanResult result);
   std::future<ScanResult> m_scan;
   QFileSystemWatcher m_libraryWatcher;
-  QTimer m_libraryFallback, m_libraryDebounce, m_candidateRefresh;
-  QElapsedTimer m_libraryRefreshClock;
-  QSet<QStringList> m_seenLibraryCandidates;
+  QTimer m_libraryFallback, m_libraryDebounce;
   QVariantMap m_libraryPreferences;
   QVariantList m_libraryStatus;
   bool m_libraryRefresh = true, m_libraryScanning = false;
+  bool m_librariesReady = false;
   unsigned m_libraryGeneration = 0;
   void saveLibraryPreferences(const QString &id, const QVariantMap &preference);
   AudioApplicationRegistry *m_audioRegistry = nullptr;

@@ -19,16 +19,33 @@ Rectangle {
     property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
     property var libraryDetector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
     readonly property bool librariesScanning: libraryDetector ? libraryDetector.librariesScanning : false
-    readonly property var detectedLaunchers: libraryDetector
-        ? libraryDetector.gameLibraries.filter(function(library) { return library.detected }) : []
-    readonly property int libraryGameCount: {
+    readonly property bool initialLibraryScan: librariesScanning
+        && libraryDetector && !libraryDetector.gameLibrariesReady
+    property var detectedLaunchers: []
+    property int libraryGameCount: 0
+    function updateLibrarySummary() {
         // The same installation may be listed by more than one launcher.
         var installations = new Set()
-        for (var library of detectedLaunchers) {
+        var launchers = []
+        for (var library of (libraryDetector ? libraryDetector.gameLibraries : [])) {
+            if (!library.detected)
+                continue
+            launchers.push({id: library.id, name: library.name})
             for (var game of (library.games || []))
                 installations.add(JSON.stringify([game.name, game.directory]))
         }
-        return installations.size
+        if (libraryGameCount !== installations.size)
+            libraryGameCount = installations.size
+        // Preserve icon objects/hover state when only scan status or unrelated
+        // location metadata changes. Replace presentation only when it differs.
+        if (JSON.stringify(detectedLaunchers) !== JSON.stringify(launchers))
+            detectedLaunchers = launchers
+    }
+    onLibraryDetectorChanged: updateLibrarySummary()
+    Component.onCompleted: updateLibrarySummary()
+    Connections {
+        target: root.libraryDetector
+        function onGameLibrariesChanged() { root.updateLibrarySummary() }
     }
 
     anchors.fill: parent
@@ -382,18 +399,18 @@ Rectangle {
                             Label {
                                 objectName: "wizardLibraryGameCount"
                                 Layout.alignment: Qt.AlignHCenter
-                                text: root.librariesScanning ? "…" : root.libraryGameCount.toLocaleString()
+                                text: root.initialLibraryScan ? "…" : root.libraryGameCount.toLocaleString()
                                 font.pixelSize: 80
                                 font.weight: Font.ExtraBold
                                 color: Theme.accentColor
-                                Accessible.name: root.librariesScanning ? qsTr("Scanning game libraries")
+                                Accessible.name: root.initialLibraryScan ? qsTr("Scanning game libraries")
                                     : qsTr("%n games found", "", root.libraryGameCount)
                             }
                             Label {
                                 objectName: "wizardLibrarySummary"
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
-                                text: root.librariesScanning ? qsTr("Scanning local game libraries…")
+                                text: root.initialLibraryScan ? qsTr("Scanning local game libraries…")
                                     : root.libraryGameCount > 0 ? qsTr("Games found in your launcher libraries")
                                     : qsTr("No supported launcher games found. You can still add games manually.")
                                 wrapMode: Text.WordWrap
@@ -402,7 +419,7 @@ Rectangle {
                             RowLayout {
                                 objectName: "wizardDetectedLaunchers"
                                 Layout.alignment: Qt.AlignHCenter
-                                visible: !root.librariesScanning && root.detectedLaunchers.length > 0
+                                visible: root.detectedLaunchers.length > 0
                                 spacing: Theme.spacingLarge
                                 Repeater {
                                     model: root.detectedLaunchers

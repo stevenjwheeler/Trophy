@@ -106,7 +106,6 @@ protected:
     service.m_running = true;
     service.m_libraryRefresh = false;
     service.m_libraryScanning = false;
-    service.m_libraryRefreshClock.invalidate();
     service.updateLibraryWatches(paths);
   }
   static bool waitFor(const std::function<bool()> &condition, int timeout = 2000) {
@@ -121,7 +120,6 @@ protected:
   static void clearRefresh(GameDetectionService &service) {
     service.m_libraryRefresh = false;
     service.m_libraryDebounce.stop();
-    service.m_candidateRefresh.stop();
   }
   static void watch(GameDetectionService &service, const QStringList &paths) {
     service.updateLibraryWatches(paths);
@@ -136,17 +134,23 @@ protected:
       result.catalogue = service.m_catalogue;
     service.applyScanResult(std::move(result));
   }
-  static bool candidatePending(const GameDetectionService &service) {
-    return service.m_candidateRefresh.isActive();
+  static bool watchPending(const GameDetectionService &service) {
+    return service.m_libraryDebounce.isActive();
   }
-  static int candidateDelay(const GameDetectionService &service) {
-    return service.m_candidateRefresh.remainingTime();
+  static int watchDelay(const GameDetectionService &service) {
+    return service.m_libraryDebounce.remainingTime();
   }
-  static void recentRefresh(GameDetectionService &service) {
-    service.m_libraryRefreshClock.start();
+  static void publishLibraryStatus(GameDetectionService &service, const QVariantList &status,
+                                   bool stale = false) {
+    GameDetectionService::ScanResult result;
+    result.catalogueUpdated = true;
+    result.libraryGeneration = service.m_libraryGeneration + (stale ? 1 : 0);
+    result.libraryStatus = status;
+    result.processes = service.m_processes;
+    service.applyScanResult(std::move(result));
   }
   static bool fallbackWithoutCensus(GameDetectionService &service) {
-    const bool productionInterval = service.m_libraryFallback.interval() == 30000;
+    const bool productionInterval = service.m_libraryFallback.interval() == 60000;
     service.m_libraryFallback.start(25);
     return productionInterval;
   }
@@ -417,39 +421,36 @@ TEST_F(GameDetectionServiceTest, FallbackRefreshUsesElapsedTimeNotProcessScans) 
   EXPECT_TRUE(noWorker(service));
 }
 
-TEST_F(GameDetectionServiceTest, CandidateRefreshIsDeduplicatedRateLimitedAndNotGameEvidence) {
+TEST_F(GameDetectionServiceTest, UnfamiliarProcessesNeverRequestLibraryRefresh) {
   GameDetectionService service;
   readyLibraries(service);
-  recentRefresh(service);
+  QSignalSpy scanning(&service, &GameDetectionService::librariesScanningChanged);
   const auto candidate = process(31, "/games/NewGame");
   census(service, {{31, candidate}});
-  ASSERT_TRUE(candidatePending(service));
-  EXPECT_GT(candidateDelay(service), 4000);
-  EXPECT_LE(candidateDelay(service), 5000);
-  EXPECT_TRUE(service.games().isEmpty()); // Refresh hints never identify a game.
-  clearRefresh(service);
+  EXPECT_FALSE(service.librariesScanning());
+  EXPECT_TRUE(service.games().isEmpty());
   census(service, {{31, candidate}});
-  EXPECT_FALSE(candidatePending(service));
   auto respawn = candidate;
   respawn.start++;
   census(service, {{31, respawn}});
-  EXPECT_FALSE(candidatePending(service));
   census(service, {});
   census(service, {{31, respawn}});
-  EXPECT_TRUE(candidatePending(service)); // A later independent launch may retry.
+  EXPECT_FALSE(waitFor([&] { return service.librariesScanning(); }, 350));
+  EXPECT_EQ(scanning.size(), 0);
+  EXPECT_TRUE(noWorker(service));
 }
 
-TEST_F(GameDetectionServiceTest, CandidateRefreshIgnoresHelpersAndFreshCatalogueCensuses) {
+TEST_F(GameDetectionServiceTest, ProcessCensusUsesCachedCatalogueWithoutRequestingRefresh) {
   GameDetectionService service;
   readyLibraries(service);
   census(service, {{31, process(31, "/usr/bin/wineserver")}});
-  EXPECT_FALSE(candidatePending(service));
+  EXPECT_FALSE(service.librariesScanning());
   census(service, {{32, process(32, "/games/FreshlyScanned")}}, true);
-  EXPECT_FALSE(candidatePending(service));
+  EXPECT_FALSE(service.librariesScanning());
   clearRefresh(service);
   setCatalogue(service, {{123, "Known Game", "/games/known"}});
   census(service, {{33, process(33, "/games/known/Game", 1, 123)}});
-  EXPECT_FALSE(candidatePending(service));
+  EXPECT_FALSE(service.librariesScanning());
   EXPECT_EQ(service.games().size(), 1);
 }
 
@@ -460,21 +461,88 @@ TEST_F(GameDetectionServiceTest, RefreshRequestsCoalesceWithoutDiscardingUsableI
   EXPECT_TRUE(noWorker(service));
 }
 
-TEST_F(GameDetectionServiceTest, StopCancelsWatchDebounceFallbackAndCandidateRequests) {
+TEST_F(GameDetectionServiceTest, BackgroundRefreshOnlyPublishesChangedLibraryResults) {
+  GameDetectionService service;
+  readyLibraries(service);
+  QSignalSpy results(&service, &GameDetectionService::gameLibrariesChanged);
+  QSignalSpy scanning(&service, &GameDetectionService::librariesScanningChanged);
+  EXPECT_FALSE(service.gameLibrariesReady());
+  publishLibraryStatus(service, {});
+  EXPECT_TRUE(service.gameLibrariesReady()); // A completed empty catalogue is a real result.
+  EXPECT_EQ(results.size(), 1);
+  results.clear();
+  const QVariantList rows{QVariantMap{{"id", "steam"}, {"detected", true}, {"count", 45}}};
+  publishLibraryStatus(service, rows);
+  ASSERT_EQ(results.size(), 1);
+  EXPECT_EQ(service.gameLibraries(), rows);
+  results.clear();
+  service.rescanGameLibraries();
+  EXPECT_TRUE(service.librariesScanning());
+  EXPECT_EQ(results.size(), 0);
+  EXPECT_EQ(service.gameLibraries(), rows);
+  EXPECT_TRUE(service.gameLibrariesReady());
+  clearRefresh(service);
+  publishLibraryStatus(service, rows);
+  EXPECT_EQ(results.size(), 0); // Unchanged results do not rebuild QML models.
+  auto updated = rows;
+  auto steam = updated[0].toMap();
+  steam["count"] = 46;
+  updated[0] = steam;
+  publishLibraryStatus(service, updated, true);
+  EXPECT_EQ(results.size(), 0); // Obsolete location settings cannot replace the snapshot.
+  EXPECT_EQ(service.gameLibraries(), rows);
+  publishLibraryStatus(service, updated);
+  EXPECT_EQ(results.size(), 1);
+  EXPECT_EQ(service.gameLibraries(), updated);
+  EXPECT_GT(scanning.size(), 0);
+}
+
+TEST_F(GameDetectionServiceTest, MetadataChangesRefreshPromptlyAndCoalesceNotificationBursts) {
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto file = root.path() + "/installed.json";
+  writeFile(file, "{}");
+  GameDetectionService service;
+  readyLibraries(service, {root.path(), file});
+  QSignalSpy scanning(&service, &GameDetectionService::librariesScanningChanged);
+  writeFile(file, "{\"first\":true}");
+  ASSERT_TRUE(waitFor([&] { return watchPending(service); }));
+  const auto delay = watchDelay(service);
+  EXPECT_GT(delay, 0);
+  EXPECT_LE(delay, 250);
+  writeFile(file, "{\"second\":true}");
+  QCoreApplication::processEvents();
+  EXPECT_LE(watchDelay(service), delay); // More notifications do not move the deadline.
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  EXPECT_EQ(scanning.size(), 1);
+  EXPECT_TRUE(noWorker(service));
+  writeFile(file, "{\"third\":true}");
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(watchPending(service)); // One pending refresh covers further events.
+  EXPECT_EQ(scanning.size(), 1);
+  clearRefresh(service); // A later file change need not wait for the fallback.
+  writeFile(file, "{\"after_refresh\":true}");
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  EXPECT_EQ(scanning.size(), 2);
+  clearRefresh(service);
+  service.rescanGameLibraries(); // User requests do not wait for debounce either.
+  EXPECT_TRUE(service.librariesScanning());
+  service.stop();
+  EXPECT_FALSE(watchPending(service));
+}
+
+TEST_F(GameDetectionServiceTest, StopCancelsWatchDebounceAndFallbackRequests) {
   QTemporaryDir root;
   ASSERT_TRUE(root.isValid());
   const auto file = root.path() + "/installed.json";
   writeFile(file, "{}");
   GameDetectionService service;
   readyLibraries(service, {file, root.path()});
-  recentRefresh(service);
-  census(service, {{31, process(31, "/games/Pending")}});
-  ASSERT_TRUE(candidatePending(service));
   ASSERT_TRUE(fallbackWithoutCensus(service));
   writeFile(file, "{\"pending\":true}");
   service.stop();
   EXPECT_FALSE(waitFor([&] { return service.librariesScanning(); }, 350));
-  EXPECT_FALSE(candidatePending(service));
+  EXPECT_FALSE(watchPending(service));
 }
 
 TEST_F(GameDetectionServiceTest, LibraryLocationsPersistAndCanBeReset) {

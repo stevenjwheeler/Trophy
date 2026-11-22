@@ -40,9 +40,14 @@ class LibraryUiBackend : public QObject {
   Q_OBJECT
   Q_PROPERTY(QVariantList gameLibraries MEMBER rows NOTIFY changed)
   Q_PROPERTY(bool librariesScanning MEMBER scanning NOTIFY changed)
+  Q_PROPERTY(bool gameLibrariesReady MEMBER ready NOTIFY changed)
 public:
+  LibraryUiBackend() {
+    connect(this, &LibraryUiBackend::changed, this, &LibraryUiBackend::gameLibrariesChanged);
+  }
   QVariantList rows;
   bool scanning = false;
+  bool ready = true;
   int rescans = 0;
   QString automaticLauncher;
   bool automatic = true;
@@ -64,6 +69,7 @@ public:
     emit changed();
   }
 signals:
+  void gameLibrariesChanged();
   void changed();
 };
 
@@ -150,6 +156,7 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
   SetupUiShortcuts shortcuts;
   LibraryUiBackend detector;
   detector.scanning = true;
+  detector.ready = false;
   QQmlEngine engine;
   engine.rootContext()->setContextProperty("settingsManager", &settings);
   engine.rootContext()->setContextProperty("app", &app);
@@ -215,6 +222,7 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
       EXPECT_EQ(font.pixelSize(), 80);
       EXPECT_EQ(font.weight(), QFont::ExtraBold);
       detector.scanning = false;
+      detector.ready = true;
       emit detector.changed();
       QCoreApplication::processEvents();
       EXPECT_EQ(count->property("text").toString(), "0");
@@ -238,6 +246,43 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
         EXPECT_EQ(icon->property("status").toInt(), 1);
       }
       EXPECT_EQ(findItem(item, "wizardLauncherIcon_nile"), nullptr);
+      QPointer<QQuickItem> steamIcon = findItem(item, "wizardLauncherIcon_steam");
+      auto *summary = findItem(item, "wizardLibrarySummary");
+      ASSERT_NE(summary, nullptr);
+      const auto previousSummary = summary->property("text");
+      for (int refresh = 0; refresh < 3; ++refresh) {
+        detector.scanning = true;
+        emit detector.changed();
+        QCoreApplication::processEvents();
+        EXPECT_EQ(count->property("text").toString(), "2");
+        EXPECT_EQ(summary->property("text"), previousSummary);
+        ASSERT_FALSE(steamIcon.isNull());
+        EXPECT_EQ(findItem(item, "wizardLauncherIcon_steam"), steamIcon.data());
+        EXPECT_TRUE(steamIcon->isVisible());
+        detector.scanning = false;
+        emit detector.changed();
+        QCoreApplication::processEvents();
+        EXPECT_EQ(findItem(item, "wizardLauncherIcon_steam"), steamIcon.data());
+      }
+      // Changed results update the visible count and icon set without another
+      // navigation action. An unchanged icon set keeps its existing objects.
+      auto steam = detector.rows[0].toMap();
+      auto games = steam["games"].toList();
+      games.append(QVariantMap{{"name", "New Game"}, {"directory", "/games/new"}});
+      steam["games"] = games;
+      detector.rows[0] = steam;
+      emit detector.changed();
+      QCoreApplication::processEvents();
+      EXPECT_EQ(count->property("text").toString(), "3");
+      EXPECT_EQ(findItem(item, "wizardLauncherIcon_steam"), steamIcon.data());
+      auto nile = detector.rows[3].toMap();
+      nile["detected"] = true;
+      detector.rows[3] = nile;
+      emit detector.changed();
+      QTest::qWait(20);
+      auto *nileIcon = findItem(item, "wizardLauncherIcon_nile");
+      ASSERT_NE(nileIcon, nullptr);
+      EXPECT_TRUE(nileIcon->isVisible());
       EXPECT_EQ(detector.rescans, 0);
       ASSERT_TRUE(QMetaObject::invokeMethod(back, "clicked"));
       QCoreApplication::processEvents();

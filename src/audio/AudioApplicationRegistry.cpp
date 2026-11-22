@@ -301,7 +301,6 @@ void AudioApplicationRegistry::publish(quint64 generation, QVariantList applicat
   if (m_applications == applications)
     return;
   m_applications = std::move(applications);
-  qDebug() << "Audio applications changed:" << m_applications.size() << "playback streams";
   emit applicationsChanged();
 }
 } // namespace TrophyBackend

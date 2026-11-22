@@ -57,9 +57,12 @@ The table's status indicators distinguish detected, missing and invalid metadata
 **Manage** opens each launcher's location settings; **Rescan now** refreshes
 the list in the background.
 Trophy also watches local metadata for changes, so completed installations can
-appear without a manual refresh. An independent 30-second check covers missed
-notifications; a new unrecognized game candidate can request an earlier,
-rate-limited refresh. These checks never run overlapping library scans.
+appear without a manual refresh. File-change bursts are combined over 250 ms;
+an independent 60-second check covers missed notifications. Starting an
+unfamiliar process does not trigger a library refresh. **Rescan now** and
+location changes request an immediate refresh. These checks never run overlapping library
+scans. The setup wizard keeps the previous game count and launcher icons visible
+while refreshing in the background, updating them only when results change.
 
 Automatic discovery checks standard XDG locations and common Steam, Heroic and
 Lutris and Faugus Flatpak locations. Use **Add location…** for a custom launcher metadata

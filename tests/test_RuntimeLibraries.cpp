@@ -107,8 +107,50 @@ TEST(RuntimeLibraries, ReportNamesBothSectionsAndCounts) {
   EXPECT_TRUE(report.contains(QStringLiteral("1 from the host, 1 from the bundle")));
   EXPECT_TRUE(report.contains(QStringLiteral("host (1):")));
   EXPECT_TRUE(report.contains(QStringLiteral("bundle under /opt/app (1):")));
-  EXPECT_TRUE(report.contains(QStringLiteral("/usr/lib/libva.so.2")));
-  EXPECT_TRUE(report.contains(QStringLiteral("/opt/app/usr/lib/libQt6Core.so.6")));
+  EXPECT_TRUE(report.contains(QStringLiteral("/usr/lib: libva.so.2")));
+  EXPECT_TRUE(report.contains(QStringLiteral("/opt/app/usr/lib: libQt6Core.so.6")));
+}
+
+TEST(RuntimeLibraries, ReportGroupsExactDirectoriesAndSortsLibraryNamesWithinEachOrigin) {
+  LibraryInventory inventory;
+  inventory.host = {"/usr/lib/libz.so.1", "/usr/lib/qt6/plugins/libsame.so",
+                    "/opt/driver libs/libsame.so", "/usr/lib/liba.so.2"};
+  inventory.bundle = {"/opt/Trophy bundle/lib/libz.so", "/opt/Trophy bundle/lib/liba.so"};
+  inventory.bundleRoots = {"/opt/Trophy bundle"};
+  const QString expected =
+      "Runtime libraries: 4 from the host, 2 from the bundle\n"
+      "  host (4):\n"
+      "    /opt/driver libs: libsame.so\n"
+      "    /usr/lib: liba.so.2, libz.so.1\n"
+      "    /usr/lib/qt6/plugins: libsame.so\n"
+      "  bundle under /opt/Trophy bundle (2):\n"
+      "    /opt/Trophy bundle/lib: liba.so, libz.so";
+  EXPECT_EQ(formatLibraryInventory(inventory), expected);
+  inventory.host = {"/usr/lib/liba.so.2", "/opt/driver libs/libsame.so",
+                    "/usr/lib/qt6/plugins/libsame.so", "/usr/lib/libz.so.1"};
+  EXPECT_EQ(formatLibraryInventory(inventory), expected);
+}
+
+TEST(RuntimeLibraries, GroupedReportRetainsEntryLimitAndFullCounts) {
+  LibraryInventory inventory;
+  for (int i = 0; i < 405; ++i)
+    inventory.host.append(QString("/usr/lib/libfixture%1.so").arg(i, 3, 10, QLatin1Char('0')));
+  const auto report = formatLibraryInventory(inventory);
+  EXPECT_TRUE(report.startsWith("Runtime libraries: 405 from the host, 0 from the bundle\n"));
+  EXPECT_TRUE(report.contains("  host (405):\n"));
+  EXPECT_TRUE(report.contains("/usr/lib: libfixture000.so, libfixture001.so"));
+  EXPECT_TRUE(report.contains("libfixture399.so"));
+  EXPECT_FALSE(report.contains("libfixture400.so"));
+  EXPECT_TRUE(report.contains("    ... 5 more\n"));
+  EXPECT_TRUE(report.endsWith("  bundle (0):"));
+  EXPECT_EQ(report.count("/usr/lib"), 1);
+}
+
+TEST(RuntimeLibraries, EmptyGroupedReportKeepsBothOriginSections) {
+  EXPECT_EQ(formatLibraryInventory({}),
+      "Runtime libraries: 0 from the host, 0 from the bundle\n"
+      "  host (0):\n"
+      "  bundle (0):");
 }
 
 TEST(RuntimeLibraries, NonLibrariesAreIgnored) {

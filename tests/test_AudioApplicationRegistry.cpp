@@ -2,7 +2,13 @@
 #include "audio/AudioApplicationRegistry.h"
 #include <QCoreApplication>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <gtest/gtest.h>
+#include <atomic>
+
+namespace {
+std::atomic<int> publicationDebugMessages{0};
+}
 
 namespace TrophyBackend {
 class AudioApplicationRegistryTest : public ::testing::Test {
@@ -51,6 +57,26 @@ TEST_F(AudioApplicationRegistryTest, StopClearsSnapshotAndRejectsQueuedPublicati
   EXPECT_FALSE(registry.available());
   stale(registry, rows);
   EXPECT_TRUE(registry.applications().isEmpty());
+}
+TEST_F(AudioApplicationRegistryTest, PlaybackStreamChurnNotifiesWithoutRoutineDebugLogging) {
+  AudioApplicationRegistry registry;
+  QSignalSpy apps(&registry, &AudioApplicationRegistry::applicationsChanged);
+  publicationDebugMessages = 0;
+  const auto previous = qInstallMessageHandler(
+      [](QtMsgType type, const QMessageLogContext &, const QString &) {
+        if (type == QtDebugMsg)
+          ++publicationDebugMessages;
+      });
+  const auto restore = qScopeGuard([&] { qInstallMessageHandler(previous); });
+  const QVariantMap game{{"binary", "game"}, {"nodeId", 17}};
+  const QVariantMap transient{{"binary", "browser"}, {"nodeId", 18}};
+  accept(registry, {game});
+  accept(registry, {game, transient});
+  accept(registry, {game});
+  accept(registry, {game});
+  EXPECT_EQ(apps.count(), 3);
+  EXPECT_EQ(registry.applications(), QVariantList{game});
+  EXPECT_EQ(publicationDebugMessages.load(), 0);
 }
 TEST_F(AudioApplicationRegistryTest, ReentrantStopOnAvailabilityDoesNotRepublishStaleApps) {
   AudioApplicationRegistry registry;

@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMap>
 #include <QSet>
 
 namespace TrophyBackend {
@@ -149,8 +150,15 @@ QString formatLibraryInventory(const LibraryInventory &inventory) {
   const auto appendSection = [&lines](const QString &title, const QStringList &paths) {
     lines << QStringLiteral("  %1 (%2):").arg(title).arg(paths.size());
     const int shown = qMin(paths.size(), kMaxEntriesPerSection);
-    for (int i = 0; i < shown; ++i)
-      lines << QStringLiteral("    ") + paths.at(i);
+    QMap<QString, QStringList> directories;
+    for (int i = 0; i < shown; ++i) {
+      const QFileInfo library(paths.at(i));
+      directories[library.path()].append(library.fileName());
+    }
+    for (auto it = directories.begin(); it != directories.end(); ++it) {
+      it.value().sort();
+      lines << QStringLiteral("    %1: %2").arg(it.key(), it.value().join(QStringLiteral(", ")));
+    }
     if (shown < paths.size())
       lines << QStringLiteral("    ... %1 more").arg(paths.size() - shown);
   };

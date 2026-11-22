@@ -63,8 +63,9 @@ There are five domain components:
 
 The process timer is one second, with at most one census outstanding.
 Launcher metadata is refreshed on the census worker at startup, on local metadata
-notifications and by an independent 30-second fallback timer, not by counting
-process scans. `QFileSystemWatcher` notifications are coalesced over 250 ms.
+notifications and by an independent 60-second fallback timer, not by counting
+process scans. File notifications are coalesced over 250 ms; repeated events do
+not extend the deadline. There is no minimum scan interval after a file change.
 The worker resolves watches for metadata files and parent directories, including
 the nearest existing parent of missing paths, Steam's secondary library
 directories/manifests, GOG product info, Amazon library/Fuel metadata and Lutris
@@ -72,16 +73,17 @@ YAML/SQLite WAL files. Completed refreshes repair watches after atomic replaceme
 deletion or directory creation. Watch targets are bounded to 8192; unavailable
 watches and filesystems without reliable notifications retain the fallback.
 
-A newly observed unrecognized payload also requests a refresh, with a five-second
-minimum interval after the previous refresh began. Repeated observations and
-continuously present copies of the same payload/prefix/App ID are deduplicated;
-Steam/Wine/runtime helpers are excluded. Unknown native payloads are included,
-but this is only a refresh hint, never recognition or window-ownership evidence.
-A census accompanied by fresh metadata does not request another candidate scan.
+New, unfamiliar or respawning processes never request a library refresh.
+The process census uses the cached catalogue until metadata changes, the timed
+fallback, or an explicit request refreshes it.
 All triggers, including **Rescan now**, share one pending refresh flag and the
-existing non-overlapping worker. Changes during a refresh queue a follow-up;
+existing non-overlapping worker. Manual rescans and location changes request
+refresh immediately, without the file-notification debounce. Changes during a refresh queue a follow-up;
 only changed location preferences invalidate an in-flight result. Stop cancels
-the timers and watches.
+the timers and watches. Scan status has a separate notification from library
+results; unchanged results do not republish the library list. The setup wizard
+keeps the previous count/icons visible during background scans, including a
+completed empty result, and only shows initial loading before the first result.
 
 This notices installed/renamed games without a network catalogue update. `/proc` reads
 kernel-provided process metadata, not game binaries or gameplay state. Link targets use
@@ -94,8 +96,9 @@ libraries can delay that worker. On the local warm-cache benchmark (100
 iterations, 146 same-user processes and 49 installed Steam manifests), census
 CPU averaged 13.79 ms, identification 0.44 ms and metadata refresh 3.79 ms.
 At one census per second this is about 1.4% of **one CPU core**, not 1.4% of the
-whole machine; metadata contributes about 0.013% of one core averaged over
-30 seconds. These numbers exclude PipeWire/audio/video work and are not a
+whole machine; that metadata measurement would contribute about 0.006% of one
+core with only the 60-second fallback (file changes can add refreshes).
+These numbers exclude PipeWire/audio/video work and are not a
 worst-case or battery-life guarantee. Reproduce with `detection_probe --benchmark`.
 They predate both the desktop-launcher hint index used by the filtered Add Game
 picker and the additional non-Steam metadata readers; those periodic worker
