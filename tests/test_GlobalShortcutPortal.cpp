@@ -24,7 +24,7 @@ class FakeGlobalShortcuts : public QObject, protected QDBusContext {
   Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.GlobalShortcuts")
   Q_PROPERTY(uint version READ version CONSTANT)
 public:
-  uint version() const { return 1; }
+  uint version() const { return 2; }
 public slots:
   QDBusObjectPath CreateSession(const QVariantMap &) {
     ++m_creates;
@@ -123,6 +123,7 @@ private:
 // explicit method/property dispatch must still work without consulting XML.
 class NoIntrospectionPortal : public QDBusVirtualObject {
 public:
+  explicit NoIntrospectionPortal(uint initialVersion = 2) : version(initialVersion) {}
   QString introspect(const QString &) const override {
     ++introspections;
     return {};
@@ -136,8 +137,16 @@ public:
       ++gets;
       if (holdAvailability)
         held = message;
+      else if (availabilityError)
+        bus.send(message.createErrorReply(QDBusError::Failed, "version unavailable"));
       else
-        bus.send(message.createReply({QVariant::fromValue(QDBusVariant(1u))}));
+        bus.send(message.createReply({QVariant::fromValue(QDBusVariant(version))}));
+    } else if (method == "SetVersion") {
+      version = message.arguments().first();
+      bus.send(message.createReply());
+    } else if (method == "SetAvailabilityError") {
+      availabilityError = message.arguments().first().toBool();
+      bus.send(message.createReply());
     } else if (method == "Configure") {
       holdAvailability = message.arguments().first().toString() == "HoldAvailability";
       bus.send(message.createReply());
@@ -150,7 +159,8 @@ public:
       bus.send(message.createReply());
     } else if (method == "Counts") {
       bus.send(message.createReply(QVariantList{QVariantMap{{"introspection", introspections},
-          {"get", gets}, {"create", creates}, {"bind", binds}, {"configure", configures}}}));
+          {"get", gets}, {"held", held.type() == QDBusMessage::MethodCallMessage},
+          {"create", creates}, {"bind", binds}, {"configure", configures}}}));
     } else if (method == "CreateSession" || method == "BindShortcuts") {
       method == "CreateSession" ? ++creates : ++binds;
       bus.send(message.createReply({QVariant::fromValue(QDBusObjectPath(
@@ -166,6 +176,13 @@ public:
     } else if (method == "ConfigureShortcuts") {
       ++configures;
       bus.send(message.createReply());
+    } else if (method == "Activate") {
+      auto signal = QDBusMessage::createSignal(
+          "/org/freedesktop/portal/desktop",
+          "org.freedesktop.portal.GlobalShortcuts", "Activated");
+      signal.setArguments({message.arguments().first(), "toggle-recording", 1ull, QVariantMap{}});
+      bus.send(signal);
+      bus.send(message.createReply());
     } else {
       bus.send(message.createErrorReply(QDBusError::UnknownMethod, "unsupported"));
     }
@@ -175,6 +192,8 @@ private:
   mutable int introspections = 0;
   int gets = 0, creates = 0, binds = 0, configures = 0;
   bool holdAvailability = false;
+  bool availabilityError = false;
+  QVariant version = 2u;
   QDBusMessage held;
 };
 
@@ -186,7 +205,7 @@ int main(int argc, char **argv) {
     if (qgetenv("TROPHY_PRIVATE_PORTAL_TESTS") != "1")
       return 2;
     FakeGlobalShortcuts portal;
-    NoIntrospectionPortal noIntrospection;
+    NoIntrospectionPortal noIntrospection(app.arguments().contains("--version-one") ? 1u : 2u);
     auto bus = QDBusConnection::sessionBus();
     if (!bus.registerService("org.freedesktop.portal.Desktop"))
       return 2;
@@ -268,6 +287,15 @@ protected:
   static bool busy(const GlobalShortcutManager &manager) {
     return manager.m_requestInFlight;
   }
+  static void queryAvailability(GlobalShortcutManager &manager) {
+    manager.queryAvailability();
+  }
+  static void shortenAvailabilityTimeout(GlobalShortcutManager &manager) {
+    manager.m_availabilityTimeout.start(1);
+  }
+  static bool availabilityPending(const GlobalShortcutManager &manager) {
+    return manager.m_availabilityTimeout.isActive();
+  }
   static bool hasHeld(const QString &stage) {
     const auto reply = control("HasHeld", {stage});
     return reply.type() == QDBusMessage::ReplyMessage &&
@@ -348,6 +376,125 @@ TEST_F(GlobalShortcutNoIntrospectionTest, HeldAvailabilityDoesNotBlockOrOverride
   QCoreApplication::processEvents();
   EXPECT_TRUE(manager.isAvailable());
   EXPECT_EQ(counts().value("introspection").toInt(), 0);
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, VersionOneBindsAndActivatesWithoutCallingEditor) {
+  control("SetVersion", {1u});
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([&] { return manager.isAvailable(); }));
+  EXPECT_FALSE(manager.canConfigure());
+  finishRetry(manager);
+  QSignalSpy toggle(&manager, &GlobalShortcutManager::toggleRecordingRequested);
+  manager.reconfigureShortcuts();
+  EXPECT_FALSE(manager.lastError().isEmpty());
+  EXPECT_TRUE(manager.isBound());
+  EXPECT_EQ(counts().value("configure").toInt(), 0);
+  control("Activate", {QVariant::fromValue(QDBusObjectPath("/fake/retry"))});
+  ASSERT_TRUE(waitUntil([&] { return toggle.count() == 1; }));
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, VersionReplyAfterBindingStillEnablesEditor) {
+  control("Configure", {"HoldAvailability"});
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([] { return counts().value("held").toBool(); }));
+  finishRetry(manager);
+  EXPECT_TRUE(manager.isAvailable());
+  EXPECT_FALSE(manager.canConfigure());
+  manager.reconfigureShortcuts();
+  EXPECT_FALSE(manager.lastError().isEmpty());
+  EXPECT_EQ(counts().value("configure").toInt(), 0);
+  QSignalSpy capability(&manager, &GlobalShortcutManager::capabilitiesChanged);
+  control("ReleaseAvailability", {2u});
+  ASSERT_TRUE(waitUntil([&] { return manager.canConfigure(); }));
+  EXPECT_EQ(capability.count(), 1);
+  manager.reconfigureShortcuts();
+  ASSERT_TRUE(waitUntil([&] {
+    return counts().value("configure").toInt() == 1 && manager.lastError().isEmpty();
+  }));
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, FailedVersionQueriesClearCapability) {
+  for (const QVariant &version : {QVariant(0u), QVariant(QString("2")), QVariant(-1)}) {
+    SCOPED_TRACE(version.toString().toStdString());
+    control("SetVersion", {2u});
+    GlobalShortcutManager manager;
+    ASSERT_TRUE(waitUntil([&] { return manager.canConfigure(); }));
+    QSignalSpy capability(&manager, &GlobalShortcutManager::capabilitiesChanged);
+    control("SetVersion", {version});
+    const int gets = counts().value("get").toInt();
+    queryAvailability(manager);
+    EXPECT_FALSE(manager.canConfigure());
+    EXPECT_EQ(capability.count(), 1);
+    ASSERT_TRUE(waitUntil([&] {
+      return counts().value("get").toInt() > gets && !manager.isAvailable();
+    }));
+    EXPECT_FALSE(manager.canConfigure());
+  }
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, PropertyErrorDoesNotRestoreOldEditorCapability) {
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([&] { return manager.canConfigure(); }));
+  control("SetAvailabilityError", {true});
+  queryAvailability(manager);
+  ASSERT_TRUE(waitUntil([&] { return !manager.isAvailable(); }));
+  EXPECT_FALSE(manager.canConfigure());
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, TimedOutVersionReplyCannotRestoreCapability) {
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([&] { return manager.canConfigure(); }));
+  control("Configure", {"HoldAvailability"});
+  queryAvailability(manager);
+  ASSERT_TRUE(waitUntil([] { return counts().value("held").toBool(); }));
+  shortenAvailabilityTimeout(manager);
+  ASSERT_TRUE(waitUntil([&] { return !manager.isAvailable(); }));
+  control("ReleaseAvailability", {2u});
+  // A fresh call/reply is a barrier behind the stale reply on this connection.
+  control("Counts");
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(manager.canConfigure());
+  EXPECT_FALSE(manager.isAvailable());
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, VersionTimeoutKeepsIndependentlyProvenBindings) {
+  control("Configure", {"HoldAvailability"});
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([] { return counts().value("held").toBool(); }));
+  finishRetry(manager);
+  shortenAvailabilityTimeout(manager);
+  ASSERT_TRUE(waitUntil([&] { return !availabilityPending(manager); }));
+  EXPECT_TRUE(manager.isAvailable());
+  EXPECT_TRUE(manager.isBound());
+  EXPECT_FALSE(manager.canConfigure());
+}
+
+TEST_F(GlobalShortcutNoIntrospectionTest, PortalRestartDropsCapabilityAndRequeriesNewOwner) {
+  GlobalShortcutManager manager;
+  ASSERT_TRUE(waitUntil([&] { return manager.canConfigure(); }));
+  finishRetry(manager);
+  QSignalSpy capability(&manager, &GlobalShortcutManager::capabilitiesChanged);
+  fake.terminate();
+  ASSERT_TRUE(fake.waitForFinished(3000));
+  ASSERT_TRUE(waitUntil([&] { return !manager.isAvailable(); }));
+  EXPECT_FALSE(manager.canConfigure());
+  EXPECT_FALSE(manager.isBound());
+  EXPECT_TRUE(session(manager).isEmpty());
+  EXPECT_EQ(capability.count(), 1);
+
+  fake.start(QCoreApplication::applicationFilePath(), fakeArguments() + QStringList{"--version-one"});
+  ASSERT_TRUE(fake.waitForStarted(3000));
+  ASSERT_TRUE(waitUntil([] {
+    return QDBusConnection::sessionBus().interface()->isServiceRegistered(
+        "org.freedesktop.portal.Desktop").value();
+  }));
+  ASSERT_TRUE(waitUntil([&] { return manager.isAvailable() && !availabilityPending(manager); }));
+  EXPECT_TRUE(manager.isAvailable());
+  EXPECT_FALSE(manager.canConfigure());
+  EXPECT_EQ(counts().value("get").toInt(), 1);
+  finishRetry(manager);
+  manager.reconfigureShortcuts();
+  EXPECT_EQ(counts().value("configure").toInt(), 0);
 }
 
 TEST_F(GlobalShortcutPortalTest, RealCreateBindRemapAndActivation) {

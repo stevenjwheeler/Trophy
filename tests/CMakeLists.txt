@@ -508,12 +508,12 @@ target_include_directories(test_GlobalShortcutPortal PRIVATE ${TEST_INCLUDE_DIRS
 target_link_libraries(test_GlobalShortcutPortal PRIVATE ${TEST_LINK_LIBS} Qt6::DBus Qt6::Test)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
     set_property(TARGET test_GlobalShortcutPortal PROPERTY TEST_LAUNCHER
-        "${TROPHY_DBUS_RUN_SESSION};--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
+        "${TROPHY_DBUS_RUN_SESSION};--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf;--;${CMAKE_COMMAND};-E;env;TROPHY_PRIVATE_PORTAL_TESTS=1")
 endif()
 gtest_discover_tests(test_GlobalShortcutPortal)
 if(TROPHY_DBUS_RUN_SESSION AND CMAKE_VERSION VERSION_LESS 3.29)
     add_test(NAME GlobalShortcutPortalTest.PrivateBusIntegration
-        COMMAND "${TROPHY_DBUS_RUN_SESSION}" -- "${CMAKE_COMMAND}" -E env
+        COMMAND "${TROPHY_DBUS_RUN_SESSION}" "--config-file=${CMAKE_CURRENT_SOURCE_DIR}/private-session-bus.conf" -- "${CMAKE_COMMAND}" -E env
             TROPHY_PRIVATE_PORTAL_TESTS=1 $<TARGET_FILE:test_GlobalShortcutPortal>)
 endif()
 

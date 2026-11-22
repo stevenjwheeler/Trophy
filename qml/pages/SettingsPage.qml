@@ -1357,8 +1357,10 @@ Page {
 
                     SettingRow {
                         label: qsTr("Change keys")
-                        help: qsTr("Opens the system dialog to remap Trophy's global keys.")
-                        rowEnabled: globalShortcuts ? globalShortcuts.bound : false
+                        help: (globalShortcuts && !globalShortcuts.canConfigure)
+                              ? qsTr("Your desktop does not offer a portal shortcut editor. Existing shortcuts still work; use your desktop's shortcut settings to change keys.")
+                              : qsTr("Opens the system dialog to remap Trophy's global keys.")
+                        rowEnabled: globalShortcuts ? (globalShortcuts.bound && globalShortcuts.canConfigure) : false
 
                         TrophyButton {
                             Layout.alignment: Qt.AlignVCenter
