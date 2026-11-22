@@ -168,9 +168,11 @@ waits for its game payload before automatic capture. Use Games to block
 applications, define standalone games, or select among concurrent instances.
 
 Supported local metadata sources include **Steam**, **Heroic** (Epic, GOG and
-Amazon), **Legendary** (Epic), **Nile** (Amazon) and **Lutris**. Games without a
+Amazon), **Legendary** (Epic), **Nile** (Amazon), **Lutris** and **Faugus**. Games without a
 usable metadata match can be added manually through **Games → Add Game**; see
 [Adding a standalone game](#adding-a-standalone-game).
+View discovered libraries and configure their locations in
+**Settings → Game Detection & Libraries**.
 
 Automatic recording and DVR wait for game audio during startup, with a bounded
 fallback for silent games; see [Launcher and window handoffs](user-guide.md#launcher-and-window-handoffs).
@@ -190,7 +192,7 @@ to sign out and back in to clear the old launch environment. See
 ### Adding a standalone game
 
 Start the game, open **Games → Add Game**, select its process and choose
-**Watch** or **Block**. The default **Likely applications** view reduces
+**Watch** or **Deny**. The default **Likely applications** view reduces
 background-process noise; enable **Show all processes** if your game is not
 listed. These suggestions are not a list of verified visible windows.
 Rows show the executable/payload path and PID, including

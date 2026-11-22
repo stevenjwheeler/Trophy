@@ -64,7 +64,7 @@ location changes request an immediate refresh. These checks never run overlappin
 scans. The setup wizard keeps the previous game count and launcher icons visible
 while refreshing in the background, updating them only when results change.
 
-Automatic discovery checks standard XDG locations and common Steam, Heroic and
+Automatic discovery checks standard XDG locations and common Steam, Heroic,
 Lutris and Faugus Flatpak locations. Use **Add location…** for a custom launcher metadata
 directory, not a game installation folder. The section explains which directory
 each launcher expects. You can add multiple locations, remove them, turn off

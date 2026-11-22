@@ -23,18 +23,18 @@ Trophy is a game recorder and clipping app built for Linux on Wayland. Keep a fu
 - **Make a clip, not a project.** Use the built-in player, timeline bookmarks, and clip editor to find and snip the parts worth keeping.
 - **Share without changing the original.** Export H.264/AAC MP4 copies, choose the audio to include, and queue multiple exports in the background.
 - **Keep your library manageable.** Browse animated previews, search and filter captures, protect favorites from automatic cleanup, and manage your library with ease.
-- **Keep your private stuff private.** Trophy only records the games you approve. It only sees screens you share through your desktop's screen-sharing portal, and you can withdraw approval from the Games page at any time.
+- **Keep your private stuff private.** Capture uses the screens you share through your desktop's screen-sharing portal. Use **Revoke** on the Games page to forget Trophy's saved approval; it does not change desktop-wide portal permissions.
 - **Make it yours.** Customization options let you change the look, feel and colors of Trophy to match your style.
 
 ## Take a look around
 
 <p align="center">
-  <a href="docs/images/games-list.png"><img src="docs/images/games-list.png" alt="Trophy Games page listing approved games with a Ready status and a Withdraw action for each" width="48%" /></a>
+  <a href="docs/images/games-list.png"><img src="docs/images/games-list.png" alt="Trophy Games page with a collapsible Steam group, Ready to capture statuses, and a Revoke action for each approved game" width="48%" /></a>
   &nbsp;
   <a href="docs/images/settings.png"><img src="docs/images/settings.png" alt="Trophy Settings page listing sections for customization, video recording, background clips, audio recording, storage management, notifications, and game detection" width="48%" /></a>
 </p>
 
-<p align="center"><sub>Approve each detected game from the notification before Trophy can capture it, and withdraw that permission in your Games list.
+<p align="center"><sub>Finding a game does not authorize capture: approve it through the desktop portal, then manage Trophy's saved approval with Revoke in the Games list.
 Tune video, audio, clips, storage, appearance and more in Settings.</sub></p>
 
 <p align="center">

@@ -130,7 +130,7 @@ one catalogue:
 Steam discovery reads local libraryfolders and app
 manifests, including extra drives and common Flatpak locations. Heroic and Lutris
 also check their standard Flatpak metadata directories, as does Faugus.
-**Settings → Game Libraries**
+**Settings → Game Detection & Libraries → Game Libraries**
 shows every supported launcher, including **Not detected** entries, discovered
 metadata locations, read errors and usable-game counts. Each launcher's dropdown
 lists its usable installed games. **Rescan now** requests a fresh background scan.
