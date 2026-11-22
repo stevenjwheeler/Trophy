@@ -129,7 +129,12 @@ login is needed for the renamed autostart entry to take effect.
 Also see [Closing and the tray](user-guide.md#closing-and-the-tray) for what
 closing the window does on each desktop.
 
-Trophy writes an inventory of the runtime libraries it loaded to the log at startup, split into those taken from the host and those taken from the bundle. When reporting a problem, include that section: it shows which `libva`, driver and system libraries were actually in use.
+Trophy writes an inventory of the runtime libraries it loaded to its detailed
+`trophy.log` at startup, split into host and bundled libraries. This inventory
+and encoded-stream start/stop messages are debug-level diagnostics, hidden from
+normal console output; launch with `TROPHY_DEBUG=1 trophy` to show them there.
+When reporting a problem, include the inventory section: it shows which `libva`,
+driver and system libraries were actually in use.
 
 The AppImage bundles application libraries, but still depends on compatible host system libraries, graphics drivers, PipeWire, and desktop portal services. It is not a guarantee of compatibility with every Linux distribution.
 

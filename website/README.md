@@ -136,6 +136,10 @@ lists the landing page and the three documentation URLs, not their section ancho
   compatible ScreenCast portal requirements. Backend features and saved
   approval restoration vary; do not imply all compositor/GPU combinations
   have been verified.
+- Keep recording/replay descriptions aligned with the shared `RecordingEngine`:
+  saving a clip snapshots encoded footage, not a separate capture pipeline or
+  encoder restart. File completion and replay export remain different policies;
+  do not promise identical behavior or freedom from mode-specific regressions.
 - `docs/getting-started.md#requirements` is the canonical requirements section;
   its `#package-compatibility` table covers AppImage, native packages and the
   friend-testing kit. Keep the hero, compatibility and download links pointing

@@ -43,6 +43,10 @@ live input and encoder; releasing the last consumer drains and stops the
 producer. Mode switches attach the successor before releasing the previous
 consumer. An individual output failure closes only that output while surviving
 consumers continue receiving the same stream.
+Capture, encoding, recording-audio and permission/recovery changes therefore
+apply to both full recording and DVR. File writing/completion and replay
+retention/export remain separate consumer policies and need their own tests;
+shared producer ownership is not a guarantee against mode-specific regressions.
 
 `CaptureLifecycle` supplies instance-bound recovery, attempt-scoped source/token
 events and shared authorization fences. Recovery and pipeline reconfiguration
@@ -68,7 +72,8 @@ terminal and fenced. Output failures take precedence over exit classification,
 and explicit Stop cancels only delayed capture-closure feedback, not output errors.
 
 Native resolution is chosen from each new capture, not a previous loader.
-Only rotations within the same live source retain their encoded canvas.
+In-place size changes within the same capture keep that generation's encoded
+canvas; persisting a GOP or saving a clip does not create a new generation.
 `ReplayExporter` stream-copies compatible clips; clips spanning incompatible
 video formats normalize video to the newest segment's canvas on the export
 worker, preserving aspect ratio and copying audio. This fallback requires
@@ -172,6 +177,14 @@ HOME="$test_root/home" \
 ```
 
 Integration tests launch private D-Bus or PipeWire environments. Hardware and optional-codec tests skip when requirements are unavailable. Passing automated tests does not establish compatibility with every compositor, GPU, or game runtime. Process tests do not use a fixed reporter socket.
+
+Isolated configuration and services do **not** isolate the physical GPU or its
+memory. Do not run GPU encoder/import tests or export tests that probe hardware
+while someone is gaming or validating live capture. Select software-only and
+private-service groups instead, with at most two reduced-priority workers;
+exclude GPU-capable groups and set `CUDA_VISIBLE_DEVICES=-1` in test children
+as an additional safeguard, not a substitute for selecting safe tests. Run the
+hardware groups separately when the GPU is available, and record exclusions.
 
 For AppImage payload/startup smoke checks, see [packaging notes](../packaging/README.md). Those checks have narrower scope than live recording tests.
 

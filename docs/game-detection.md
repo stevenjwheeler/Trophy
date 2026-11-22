@@ -350,8 +350,9 @@ When a captured window disappears while its exact pinned game instance remains
 alive, recording and DVR use the same capture lifecycle to retry the existing
 portal approval after 1.5 seconds. A PID change is not required. Full recording
 saves the completed part in the library and continues into a new output file.
-DVR retains finalized rolling segments and continues into a fresh cache segment;
-an in-progress clip export keeps its reserved inputs. The window gap is not
+DVR retains its cached GOP packet blocks and appends the new capture generation;
+an in-progress clip export keeps its immutable packet snapshot and cache-file
+leases. Saving a clip does not rotate capture or restart the encoder. The window gap is not
 counted as buffered footage. Recovery has no
 attempt-count or elapsed-time cutoff while that exact game instance is alive.
 Each attempt is delayed by 1.5 seconds after teardown; requests never overlap.
