@@ -147,6 +147,10 @@ support likewise does not guarantee every DMA-BUF capture path works.
 ## First-run setup
 
 1. Complete the setup wizard, choosing your recording location, video, and audio settings.
+   Its Game Libraries step shows games found in local launcher metadata and the
+   detected launcher icons. Discovery does not block setup or authorize capture.
+   You can change launcher locations later in **Settings → Game Detection & Libraries**.
+   For a missing game, start it and use **Games → Add Game**.
 2. Assign your recording and clip/bookmark shortcuts. If your desktop does not support configuring them in Trophy, use the [native keyboard shortcut instructions](#keyboard-shortcuts).
 3. Start a game. If Trophy does not detect it, open **Games → Add Game**, select its process, and choose **Watch**.
 4. Authorize capture when prompted and select your game window in the desktop's capture picker.

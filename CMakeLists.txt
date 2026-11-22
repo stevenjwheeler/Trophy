@@ -270,6 +270,8 @@ endif()
 set(AUDIO_SOURCES
     src/audio/AudioMixer.cpp
     src/audio/AudioDeviceEnumerator.cpp
+    src/audio/AudioApplicationRegistry.cpp
+    src/audio/AudioApplicationRegistry.h
     src/audio/PipeWireAudioSource.cpp
     src/audio/AudioDriftCorrector.cpp
 )
@@ -463,6 +465,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/TrophyButton.qml
         qml/controls/AccentColorPicker.qml
         qml/controls/SettingsSectionCard.qml
+        qml/controls/GameLibrariesTable.qml
         qml/controls/TrophyIcon.qml
         qml/controls/TrophyComboBox.qml
         qml/controls/VoiceAppComboBox.qml
@@ -630,6 +633,12 @@ install(FILES resources/icons/trophy.svg
 
 install(FILES resources/icons/default-apps/README.md LICENSE
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
+)
+install(FILES resources/icons/launchers/README.md
+    resources/icons/launchers/Legendary-LICENSE
+    resources/icons/launchers/Nile-LICENSE
+    resources/icons/launchers/Faugus-LICENSE LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/launcher-icons
 )
 
 # The installed desktop file now uses the reverse-DNS app id, matching the

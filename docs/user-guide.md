@@ -14,6 +14,38 @@ fails, Trophy reports that save failure without stopping a healthy DVR buffer.
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+### Game library locations
+
+Open **Settings → Game Detection & Libraries → Game Libraries** to see Steam, Heroic, Legendary, Nile,
+Lutris and Faugus, including launchers marked **Not detected**. Detection refers to local
+metadata, not a running launcher. Each dropdown lists the usable installed games
+found for that launcher: use the arrow beside its game count to open the list.
+The table's status indicators distinguish detected, missing and invalid metadata.
+**Manage** opens each launcher's location settings; **Rescan now** refreshes
+the list in the background.
+Trophy also watches local metadata for changes, so completed installations can
+appear without a manual refresh. An independent 30-second check covers missed
+notifications; a new unrecognized game candidate can request an earlier,
+rate-limited refresh. These checks never run overlapping library scans.
+
+Automatic discovery checks standard XDG locations and common Steam, Heroic and
+Lutris and Faugus Flatpak locations. Use **Add location…** for a custom launcher metadata
+directory, not a game installation folder. The section explains which directory
+each launcher expects. You can add multiple locations, remove them, turn off
+**Use automatic locations** to replace the defaults, or **Reset to automatic**.
+For a custom Lutris location, the selected directory needs both `pga.db` and the
+`games/` YAML files.
+For Faugus, select the directory containing `games.json` (normally
+`~/.local/share/faugus-launcher`). Exact Windows game paths with their configured
+Wine prefix and explicit Linux-native executable entries are supported. Steam
+shortcuts, shared storefronts, script/batch launch tasks and generic launchers
+without installation evidence may still need an exact Trophy rule.
+
+All reads are local and read-only. An empty list does not necessarily mean you
+have no games: unsupported launch tasks or missing executable metadata cannot
+be used for automatic recognition. Missing external drives do not remove saved
+game rules.
+
 ### Launcher and window handoffs
 
 Automatic full recording and DVR wait past a locally verified game-specific launcher until
@@ -115,6 +147,12 @@ Discord's activity privacy settings still apply, and Discord controls which acti
 ## Audio
 
 Choose **Game** or **Desktop** capture. Game mode supports separate or mixed tracks; Desktop mode mixes audio. Select your microphone and optional voice-chat application in Settings.
+
+The voice-application list updates automatically as PipeWire playback streams
+appear, disappear or change; no manual refresh is needed. Both the wizard and
+Audio Recording settings follow the same live metadata cache. If PipeWire restarts, stale
+entries clear and discovery reconnects in the background; your saved voice
+selection is retained.
 
 When game-specific audio is unavailable, Trophy deliberately falls back to the **desktop mix** rather than losing the game sound. The Dashboard calls this source **System** and hides the redundant Voice row. Separate voice capture resumes when game-specific capture binds, avoiding a second copy of voice chat already present in the desktop mix.
 

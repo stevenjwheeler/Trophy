@@ -17,17 +17,28 @@ Rectangle {
     id: root
     // Explicit dependency; this default preserves engine/creation-context hosts.
     property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
+    property var libraryDetector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
+    readonly property bool librariesScanning: libraryDetector ? libraryDetector.librariesScanning : false
+    readonly property var detectedLaunchers: libraryDetector
+        ? libraryDetector.gameLibraries.filter(function(library) { return library.detected }) : []
+    readonly property int libraryGameCount: {
+        // The same installation may be listed by more than one launcher.
+        var installations = new Set()
+        for (var library of detectedLaunchers) {
+            for (var game of (library.games || []))
+                installations.add(JSON.stringify([game.name, game.directory]))
+        }
+        return installations.size
+    }
 
     anchors.fill: parent
     color: Theme.withOpacity(Theme.backgroundColor, 0.95)
     z: 1000 
 
     property int currentStep: 0
-    property int totalSteps: 7 // Welcome, Storage, Audio, Modules, Hardware, Shortcuts, Finish
+    readonly property int totalSteps: 7 // Welcome, Storage, Audio, Libraries, Hardware, Shortcuts, Finish
 
-    // Reset to first page whenever the wizard is (re-)shown
-    // Registration needs a restart, so remember the step and resume there
-    // instead of making the user walk through the wizard again.
+    // Resume unfinished setup; completing the wizard resets the saved step.
     onCurrentStepChanged: if (settingsManager) settingsManager.wizardStep = currentStep
 
     onVisibleChanged: {
@@ -38,8 +49,6 @@ Rectangle {
             wizardCard.opacity = 0
             wizardCard.scale = 0.96
             wizardCardAnimation.start()
-            // Its voice picker has no Refresh button — populate on open.
-            if (audioDeviceEnumerator) audioDeviceEnumerator.refreshAudioApps()
         }
     }
 
@@ -156,6 +165,7 @@ Rectangle {
 
                 StackLayout {
                     id: stepStack
+                    objectName: "setupWizardSteps"
                     anchors.fill: parent
                     anchors.margins: Theme.spacingMedium
                     currentIndex: root.currentStep
@@ -337,6 +347,7 @@ Rectangle {
                                         Label { text: qsTr("Voice Chat Application"); font.weight: Font.Bold; color: Theme.textColor }
                                         VoiceAppComboBox {
                                             id: voiceAppBox; Layout.fillWidth: true
+                                            objectName: "wizardVoiceAppPicker"
                                             apps: audioDeviceEnumerator ? audioDeviceEnumerator.audioApps : []
                                             savedApp: settingsManager ? settingsManager.voiceChatApp : ""
                                             onAppSelected: function(binary) {
@@ -350,55 +361,92 @@ Rectangle {
                         }
                     }
 
-                    /// Step 4: Compositor-independent process detection
+                    // Step 4: Local game libraries (uses the existing background scan).
                     ScrollView {
-                        id: step4Scroll
+                        id: librariesScroll
                         ScrollBar.vertical: TrophyScrollBar {}
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         clip: true
                         ColumnLayout {
-                            width: step4Scroll.availableWidth
-                            height: Math.max(implicitHeight, step4Scroll.availableHeight)
+                            width: librariesScroll.availableWidth
+                            height: Math.max(implicitHeight, librariesScroll.availableHeight)
                             spacing: Theme.spacingMedium
                             Item { Layout.fillHeight: true }
-                            ColumnLayout {
+                            Label {
+                                text: qsTr("Game Libraries")
                                 Layout.alignment: Qt.AlignHCenter
-                                spacing: 2
-                                Label { text: qsTr("Game Detection Setup"); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeLarge; font.weight: Font.Bold; color: Theme.textColor }
-                                Label { text: qsTr("Games are detected from Linux processes. Audio is associated through PipeWire."); Layout.alignment: Qt.AlignHCenter; font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor }
+                                font.pixelSize: Theme.fontSizeLarge
+                                font.weight: Font.Bold
+                                color: Theme.textColor
                             }
-                            Rectangle {
+                            Label {
+                                objectName: "wizardLibraryGameCount"
                                 Layout.alignment: Qt.AlignHCenter
-                                Layout.preferredWidth: 500
-                                implicitHeight: modTrackCol.height + (Theme.spacingMedium * 2)
-                                color: Theme.withOpacity(Theme.textColor, 0.05)
-                                radius: Theme.radiusMedium
-                                border.width: 1
-                                border.color: Theme.borderColor
-                                Behavior on border.color { ColorAnimation { duration: Theme.animationNormal } }
-                                ColumnLayout {
-                                    id: modTrackCol
-                                    anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Theme.spacingMedium; anchors.verticalCenter: parent.verticalCenter
-                                    spacing: Theme.spacingSmall
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: Theme.spacingMedium
-                                        Label { text: qsTr("No desktop helper required"); font.weight: Font.Bold; color: Theme.textColor; Layout.fillWidth: true; elide: Text.ElideRight }
-                                    }
-                                    Label {
-                                        text: qsTr("Steam games are identified from local metadata and running processes. Add standalone games from the process list in Games. Window and screen capture use the system portal and require your authorization.")
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.textSecondaryColor
-                                        wrapMode: Text.WordWrap
-                                        Layout.fillWidth: true
+                                text: root.librariesScanning ? "…" : root.libraryGameCount.toLocaleString()
+                                font.pixelSize: 80
+                                font.weight: Font.ExtraBold
+                                color: Theme.accentColor
+                                Accessible.name: root.librariesScanning ? qsTr("Scanning game libraries")
+                                    : qsTr("%n games found", "", root.libraryGameCount)
+                            }
+                            Label {
+                                objectName: "wizardLibrarySummary"
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: root.librariesScanning ? qsTr("Scanning local game libraries…")
+                                    : root.libraryGameCount > 0 ? qsTr("Games found in your launcher libraries")
+                                    : qsTr("No supported launcher games found. You can still add games manually.")
+                                wrapMode: Text.WordWrap
+                                color: Theme.textSecondaryColor
+                            }
+                            RowLayout {
+                                objectName: "wizardDetectedLaunchers"
+                                Layout.alignment: Qt.AlignHCenter
+                                visible: !root.librariesScanning && root.detectedLaunchers.length > 0
+                                spacing: Theme.spacingLarge
+                                Repeater {
+                                    model: root.detectedLaunchers
+                                    delegate: Image {
+                                        required property var modelData
+                                        objectName: "wizardLauncherIcon_" + modelData.id
+                                        Layout.preferredWidth: 40
+                                        Layout.preferredHeight: 40
+                                        sourceSize: Qt.size(80, 80)
+                                        fillMode: Image.PreserveAspectFit
+                                        source: modelData.id === "steam" ? "qrc:/icons/default-apps/steam.svg"
+                                            : "qrc:/icons/launchers/" + modelData.id
+                                                + (modelData.id === "legendary" ? ".ico" : ".svg")
+                                        Accessible.role: Accessible.Graphic
+                                        Accessible.name: modelData.name
+                                        HoverHandler { id: launcherHover }
+                                        ToolTip.visible: launcherHover.hovered
+                                        ToolTip.text: modelData.name
                                     }
                                 }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: Theme.spacingLarge
+                                Layout.rightMargin: Theme.spacingLarge
+                                text: qsTr("Trophy reads local launcher metadata to recognize and name games when they run. Libraries update automatically; finding a game here does not authorize recording.")
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                color: Theme.textSecondaryColor
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: Theme.spacingLarge
+                                Layout.rightMargin: Theme.spacingLarge
+                                text: qsTr("Missing a game or playing outside a supported launcher? Start it, then use Add Game in the Games tab.\n\nYou can adjust launcher locations later in Settings → Game Detection & Libraries.")
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                color: Theme.textSecondaryColor
                             }
                             Item { Layout.fillHeight: true }
                         }
                     }
 
-                    /// Step 5: Hardware & Performance
+                    // Step 5: Hardware & Performance
                     ScrollView {
                         id: stepHwScroll
                         ScrollBar.vertical: TrophyScrollBar {}
@@ -626,7 +674,7 @@ Rectangle {
                         }
                     }
 
-                    /// Step 6: Keyboard Shortcuts
+                    // Step 6: Keyboard Shortcuts
                     ScrollView {
                         id: stepKeysScroll
                         ScrollBar.vertical: TrophyScrollBar {}
@@ -750,7 +798,7 @@ Rectangle {
                         }
                     }
 
-                    /// Step 7: Finish
+                    // Step 7: Finish
                     ScrollView {
                         id: step5Scroll
                         ScrollBar.vertical: TrophyScrollBar {}
@@ -808,7 +856,7 @@ Rectangle {
                                             Layout.fillWidth: true
                                             Label { text: qsTr("Enable Auto-Record"); font.weight: Font.Bold; color: Theme.textColor }
                                             Label { 
-                                                text: qsTr("Start recording when a game is detected."); 
+                                                text: qsTr("Automatically record authorized games when detected.");
                                                 font.pixelSize: Theme.fontSizeSmall; 
                                                 color: Theme.textSecondaryColor; 
                                                 wrapMode: Text.WordWrap; 
@@ -857,12 +905,11 @@ Rectangle {
                 Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.borderColor }
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: Theme.spacingXLarge; anchors.rightMargin: Theme.spacingXLarge; spacing: Theme.spacingMedium
-                    TrophyButton { text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
+                    TrophyButton { objectName: "wizardBackButton"; text: qsTr("Back"); visible: root.currentStep > 0; onClicked: root.currentStep-- }
                     Item { Layout.fillWidth: true }
                     TrophyButton {
-                        // Registration happens before the app starts, so
-                        // finishing needs no restart: this just closes the
-                        // wizard.
+                        objectName: "wizardNextButton"
+                        // Finishing closes setup without restarting Trophy.
                         text: root.currentStep === root.totalSteps - 1 ? qsTr("Get Started") : qsTr("Next")
                         highlighted: true
                         onClicked: {

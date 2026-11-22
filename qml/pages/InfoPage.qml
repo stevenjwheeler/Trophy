@@ -364,7 +364,7 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, one-press clipping, smart game detection, and separate audio tracks for easier editing.")
+                        text: qsTr("Record games and save recent moments on Linux. Trophy recognizes running games from local process and launcher metadata, with capture authorized through your desktop's ScreenCast portal.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
@@ -405,37 +405,37 @@ Page {
                         FeatureItem {
                             iconSource: "qrc:/icons/gpu.svg"
                             title: qsTr("Hardware Acceleration")
-                            description: qsTr("NVIDIA NVENC and AMD/Intel VA-API support")
+                            description: qsTr("NVENC or VA-API on supported hardware, with x264 software encoding available")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/volume-high.svg"
                             title: qsTr("Multi-Track Audio")
-                            description: qsTr("Separate game, voice chat, and mic tracks")
+                            description: qsTr("Optional separate game, voice and mic tracks; desktop fallback may include voice")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/gamepad.svg"
                             title: qsTr("Auto Game Detection")
-                            description: qsTr("Steam, Proton, and custom game support with automatic detection")
+                            description: qsTr("Process-based detection with local launcher libraries and custom rules; recording requires authorization")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/storage.svg"
                             title: qsTr("Smart Storage")
-                            description: qsTr("Auto-cleanup and crash-resilient formats")
+                            description: qsTr("Configurable storage limits, automatic cleanup and crash-resilient recording formats")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/scissors.svg"
-                            title: qsTr("Instant Clips")
-                            description: qsTr("Background DVR — save recent moments anytime, buffer length adjustable")
+                            title: qsTr("Recording & Background Clips")
+                            description: qsTr("Full recording and DVR share capture and encoding; save buffered moments or bookmark a full recording")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/refresh.svg"
-                            title: qsTr("Automatic Updates")
-                            description: qsTr("Daily release check with a one-click download page and automatic install on AppImage")
+                            title: qsTr("Update Checks")
+                            description: qsTr("Daily release checks with download links; AppImage updates install when you choose")
                         }
 
                     }
@@ -467,7 +467,7 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Trophy is built on the shoulders of giants. Special thanks to:")
+                        text: qsTr("Thanks to the projects behind Trophy's recording, interface and artwork:")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
@@ -486,31 +486,7 @@ Page {
                         }
 
                         CreditLabel {
-                            text: qsTr('• <a href="https://invent.kde.org/plasma/kwin">KDE KWin</a> for Wayland compositing (<a href="https://invent.kde.org/plasma/kwin/-/tree/master/LICENSES">component licenses</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://hypr.land/">Hyprland</a> for Wayland compositing (<a href="https://github.com/hyprwm/Hyprland/blob/main/LICENSE">BSD-3-Clause</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://swaywm.org/">Sway</a> for Wayland compositing (<a href="https://github.com/swaywm/sway/blob/master/LICENSE">MIT</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://gitlab.gnome.org/GNOME/mutter">GNOME / Mutter</a> for Wayland compositing (<a href="https://gitlab.gnome.org/GNOME/mutter/-/blob/main/COPYING">GPL license</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://flatpak.github.io/xdg-desktop-portal/">xdg-desktop-portal</a> for secure screen capture (<a href="https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES">LGPLv2.1+ and component licenses</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://www.khronos.org/vulkan/">The Khronos Group</a> for Vulkan and its headers (<a href="https://github.com/KhronosGroup/Vulkan-Headers/blob/main/LICENSE.md">Vulkan-Headers: Apache-2.0 / MIT</a>)')
-                        }
-
-                        CreditLabel {
-                            text: qsTr('• <a href="https://github.com/linuxdeploy/linuxdeploy">linuxdeploy</a> for AppImage distribution (<a href="https://github.com/linuxdeploy/linuxdeploy/blob/master/LICENSE.txt">MIT</a>)')
+                            text: qsTr('• <a href="https://flatpak.github.io/xdg-desktop-portal/">xdg-desktop-portal</a> and desktop portal backends for capture authorization and global shortcuts (<a href="https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES">LGPLv2.1+ and component licenses</a>)')
                         }
 
                         CreditLabel {
@@ -518,7 +494,15 @@ Page {
                         }
 
                         CreditLabel {
-                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for the Steam, Heroic and Lutris icons, and other bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/legendary-gl/legendary">Legendary</a> and <a href="https://github.com/imLinguin/nile">Nile</a> contributors for bundled launcher artwork (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• Felix Ribeiro for the <a href="https://github.com/Faugus/faugus-launcher">Faugus Launcher</a> icon, copyright 2026, used unmodified (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>)')
                         }
 
                         CreditLabel {
@@ -529,7 +513,7 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("License links describe the upstream projects; terms can vary by component and build. Desktop compositors and portals are system integrations, not bundled components.")
+                        text: qsTr("Bundled artwork notices and licenses are included with the application. Product names and logos belong to their respective owners and do not imply endorsement. Dependency licenses vary by component and build.")
                         wrapMode: Text.WordWrap
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall

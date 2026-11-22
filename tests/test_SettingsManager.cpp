@@ -74,6 +74,41 @@ protected:
 
 // --- Default Values ---
 
+TEST_F(SettingsManagerTest, WizardResumeMigratesLibrarySummaryExactlyOnce) {
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(mgr->settingsFilePath()).absolutePath()));
+  for (int version = 1; version <= 2; ++version) {
+    for (int oldStep = 0; oldStep < 7; ++oldStep) {
+      QFile file(mgr->settingsFilePath());
+      ASSERT_TRUE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+      file.write(QJsonDocument(QJsonObject{{"general", QJsonObject{
+          {"wizardStep", oldStep}, {"wizardStepVersion", version}}}}).toJson());
+      file.close();
+      mgr->load();
+      const int sixPageStep = version == 1 && oldStep >= 4 ? oldStep - 1 : oldStep;
+      const int expected = qMin(6, sixPageStep >= 3 ? sixPageStep + 1 : sixPageStep);
+      EXPECT_EQ(mgr->wizardStep(), expected);
+      mgr->save();
+      SettingsManager reloaded;
+      reloaded.load();
+      EXPECT_EQ(reloaded.wizardStep(), expected);
+    }
+  }
+}
+
+TEST_F(SettingsManagerTest, WizardStepPersistsSevenPageLayoutAndClampsToFinish) {
+  for (int step = 0; step < 7; ++step) {
+    mgr->setWizardStep(step);
+    mgr->save();
+    SettingsManager reloaded;
+    reloaded.load();
+    EXPECT_EQ(reloaded.wizardStep(), step);
+  }
+  mgr->setWizardStep(99);
+  EXPECT_EQ(mgr->wizardStep(), 6);
+  mgr->setWizardStep(-1);
+  EXPECT_EQ(mgr->wizardStep(), 0);
+}
+
 TEST_F(SettingsManagerTest, DiscordDefaultsPersistenceNotificationsAndReset) {
   EXPECT_FALSE(mgr->discordPresenceEnabled());
   EXPECT_TRUE(mgr->discordShowGameNames());
@@ -118,8 +153,7 @@ TEST_F(SettingsManagerTest, ShareExportFolderPersistsAndResets) {
   EXPECT_TRUE(mgr->shareExportFolder().isEmpty());
 }
 
-// Registering the AppImage restarts Trophy, so the wizard has to resume where
-// it was rather than starting over.
+// Unfinished setup resumes at the saved page rather than starting over.
 TEST_F(SettingsManagerTest, WizardStepPersistsAndResets) {
   EXPECT_EQ(mgr->wizardStep(), 0);
   QSignalSpy changed(mgr.get(), &SettingsManager::wizardStepChanged);

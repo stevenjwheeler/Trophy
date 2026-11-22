@@ -59,6 +59,16 @@
     <file>icons/window-restore.svg</file>
     <file>icons/window-close.svg</file>
     <file>icons/default-apps/steam.svg</file>
+    <file>icons/launchers/heroic.svg</file>
+    <file>icons/launchers/legendary.ico</file>
+    <file>icons/launchers/nile.svg</file>
+    <file>icons/launchers/lutris.svg</file>
+    <file>icons/launchers/faugus.svg</file>
+    <file>icons/launchers/README.md</file>
+    <file>icons/launchers/Legendary-LICENSE</file>
+    <file>icons/launchers/Nile-LICENSE</file>
+    <file>icons/launchers/Faugus-LICENSE</file>
+    <file alias="icons/launchers/Papirus-LICENSE">../LICENSE</file>
     <file>icons/default-apps/discord.svg</file>
     <file>icons/default-apps/obs.svg</file>
     <file>icons/default-apps/firefox.svg</file>

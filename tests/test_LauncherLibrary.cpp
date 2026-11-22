@@ -114,6 +114,289 @@ protected:
   }
 };
 
+TEST_F(LauncherLibraryTest, DiscoveryAlwaysListsSupportedLaunchers) {
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.launchers.size(), 6);
+  for (const auto &value : result.launchers) {
+    const auto launcher = value.toMap();
+    EXPECT_FALSE(launcher.value("detected").toBool());
+    EXPECT_TRUE(launcher.value("automatic").toBool());
+    EXPECT_EQ(launcher.value("count").toInt(), 0);
+    EXPECT_TRUE(launcher.value("games").toList().isEmpty());
+  }
+}
+
+TEST_F(LauncherLibraryTest, FaugusReadsExactWinePayloadAndConfiguredPrefix) {
+  const auto prefix = home + "/Faugus/a-game";
+  array(data + "/faugus-launcher/games.json",
+        {QJsonObject{{"gameid", "a-game"}, {"title", "A Faugus Game"},
+                     {"path", exe}, {"prefix", prefix}, {"runner", "Proton-GE Latest"}}});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games[0].sources, QStringList{"Faugus"});
+  EXPECT_EQ(result.games[0].executable, exe);
+  EXPECT_EQ(result.games[0].winePrefix, prefix);
+  EXPECT_TRUE(result.games[0].directory.isEmpty());
+  EXPECT_TRUE(result.launchers[5].toMap().value("detected").toBool());
+  EXPECT_TRUE(result.watchPaths.contains(data + "/faugus-launcher/games.json"));
+  auto p = process();
+  p.winePrefix = prefix;
+  EXPECT_EQ(identify({{p.pid, p}}, result.games).size(), 1);
+  p.winePrefix = home + "/Other Prefix";
+  EXPECT_TRUE(identify({{p.pid, p}}, result.games).isEmpty());
+  p.winePrefix = prefix;
+  p.executable = directory + "/Unrelated.exe";
+  p.arguments = {p.executable};
+  EXPECT_TRUE(identify({{p.pid, p}}, result.games).isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, FaugusNativeAndFlatpakAndLegacyLocationsAreCombined) {
+  write(directory + "/NativeGame", QByteArray("\x7f""ELFfixture", 11));
+  const auto flatpak = home + "/.var/app/io.github.Faugus.faugus-launcher";
+  const QJsonObject entry{{"title", "Native Faugus Game"},
+      {"path", directory + "/NativeGame"}, {"runner", "Linux-Native"}};
+  for (const auto &path : QStringList{data + "/faugus-launcher",
+       config + "/faugus-launcher", flatpak + "/data/faugus-launcher",
+       flatpak + "/config/faugus-launcher"})
+    array(path + "/games.json", {entry});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_TRUE(result.games[0].winePrefix.isEmpty());
+  EXPECT_FALSE(result.games[0].bootstrap);
+  EXPECT_EQ(result.launchers[5].toMap().value("locations").toList().size(), 4);
+  EXPECT_EQ(result.launchers[5].toMap().value("count").toInt(), 1);
+}
+
+TEST_F(LauncherLibraryTest, FaugusCustomLocationsRespectAutomaticToggleAndHomeExpansion) {
+  const QJsonObject entry{{"title", "Custom Faugus Game"}, {"path", "~/Games/A Game/bin/Game.exe"},
+      {"prefix", "~/Faugus/a-game"}, {"runner", "Default"}};
+  array(home + "/custom-faugus/games.json", {entry});
+  array(data + "/faugus-launcher/games.json", {QJsonObject{
+      {"title", "Automatic Game"}, {"path", exe}, {"prefix", home + "/prefix"}}});
+  const auto result = LauncherLibrary::discover(home, config, data,
+      {{"faugus", QVariantMap{{"automatic", false},
+                              {"paths", QStringList{home + "/custom-faugus"}}}}});
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games[0].name, "Custom Faugus Game");
+  EXPECT_EQ(result.games[0].executable, exe);
+  EXPECT_EQ(result.games[0].winePrefix, home + "/Faugus/a-game");
+}
+
+TEST_F(LauncherLibraryTest, FaugusSkipsSteamScriptsCommandsMissingPrefixesAndAdditionalAppModes) {
+  QJsonArray entries;
+  const QJsonObject valid{{"title", "A Game"}, {"path", exe}, {"prefix", home + "/prefix"},
+                          {"runner", "Proton-GE Latest"}};
+  for (const auto &change : QList<QPair<QString, QJsonValue>>{
+       {"runner", "Steam"}, {"runner", QJsonObject{}}, {"prefix", ""},
+       {"path", "bin/Game.exe"}, {"path", "C:\\Game.exe"}, {"path", "$HOME/Game.exe"},
+       {"path", "/missing/Game.exe"}, {"title", ""}, {"addapp_enabled", true},
+       {"addapp_enabled", "addapp_enabled"}, {"addapp_enabled", QJsonObject{}},
+       {"runner", "Linux-Native"}}) {
+    auto entry = valid;
+    entry[change.first] = change.second;
+    entries.append(entry);
+  }
+  write(directory + "/start.sh", "#!/bin/sh\n");
+  auto script = valid;
+  script["path"] = directory + "/start.sh";
+  entries.append(script);
+  array(data + "/faugus-launcher/games.json", entries);
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, FaugusDoesNotAttestGenericBootstrapsOrSharedStorefronts) {
+  write(directory + "/Launcher.exe", "MZfixture");
+  write(directory + "/Amazon Games.exe", "MZfixture");
+  write(directory + "/wgc.exe", "MZfixture");
+  QJsonArray entries;
+  for (const auto &path : QStringList{"Launcher.exe", "Amazon Games.exe", "wgc.exe"})
+    entries.append(QJsonObject{{"title", "A Game"}, {"path", directory + "/" + path},
+                               {"prefix", home + "/prefix"}});
+  entries.append(QJsonObject{{"gameid", "epic"}, {"title", "Storefront"},
+                            {"path", exe}, {"prefix", home + "/prefix"}});
+  array(data + "/faugus-launcher/games.json", entries);
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, FaugusMalformedWrongShapeAndOversizedMetadataIsRejected) {
+  const auto file = data + "/faugus-launcher/games.json";
+  for (const auto &contents : QList<QByteArray>{"{malformed", "{\"games\":[]}",
+                                               QByteArray(4 * 1024 * 1024 + 1, ' ')}) {
+    write(file, contents);
+    const auto result = LauncherLibrary::discover(home, config, data);
+    EXPECT_TRUE(result.games.isEmpty());
+    const auto locations = result.launchers[5].toMap().value("locations").toList();
+    ASSERT_EQ(locations.size(), 1);
+    EXPECT_EQ(locations[0].toMap().value("status").toString(), "Unreadable or invalid metadata");
+  }
+}
+
+TEST_F(LauncherLibraryTest, FaugusConflictingNamesNeedUserRulesAndKeepConcurrentInstances) {
+  const auto prefix = home + "/prefix";
+  array(data + "/faugus-launcher/games.json", {
+      QJsonObject{{"title", "First Name"}, {"path", exe}, {"prefix", prefix}},
+      QJsonObject{{"title", "Second Name"}, {"path", exe}, {"prefix", prefix}}});
+  auto a = process(71), b = process(72);
+  a.winePrefix = b.winePrefix = prefix;
+  const auto catalogue = read();
+  EXPECT_TRUE(identify({{71, a}, {72, b}}, catalogue).isEmpty());
+  const QMap<QString, QString> rules{{
+      GameWhitelist::normalizeKey("wine:" + prefix + ":" + exe), "User Name"}};
+  EXPECT_EQ(identify({{71, a}, {72, b}}, catalogue, rules).size(), 2);
+}
+
+TEST_F(LauncherLibraryTest, MissingMetadataWatchesNearestParentThenNewDirectoriesAndFiles) {
+  const auto path = home + "/missing/nested/legendary";
+  const QVariantMap preferences{{"legendary", QVariantMap{
+      {"automatic", false}, {"paths", QStringList{path}}}}};
+  auto result = LauncherLibrary::discover(home, config, data, preferences);
+  EXPECT_TRUE(result.watchPaths.contains(home));
+  ASSERT_TRUE(QDir().mkpath(path));
+  result = LauncherLibrary::discover(home, config, data, preferences);
+  EXPECT_TRUE(result.watchPaths.contains(path));
+  object(path + "/installed.json", {{"game", epic()}});
+  result = LauncherLibrary::discover(home, config, data, preferences);
+  EXPECT_TRUE(result.watchPaths.contains(path + "/installed.json"));
+  EXPECT_TRUE(result.watchPaths.contains(path));
+}
+
+TEST_F(LauncherLibraryTest, WatchPathsIncludeSteamExtraLibraryAndManifests) {
+  const auto steam = home + "/.steam/steam";
+  const auto extra = home + "/Extra Drive/steamapps";
+  write(steam + "/steamapps/libraryfolders.vdf",
+        ("\"libraryfolders\" { \"1\" { \"path\" \"" + home + "/Extra Drive\" } }").toUtf8());
+  write(extra + "/appmanifest_123.acf",
+        "\"AppState\" { \"appid\" \"123\" \"name\" \"Game\" \"installdir\" \"Game\" }");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.watchPaths.contains(steam + "/steamapps/libraryfolders.vdf"));
+  EXPECT_TRUE(result.watchPaths.contains(extra));
+  EXPECT_TRUE(result.watchPaths.contains(extra + "/appmanifest_123.acf"));
+}
+
+TEST_F(LauncherLibraryTest, WatchPathsIncludeLutrisWalAndSeparateYamlFiles) {
+  lutris("game:\n  exe: bin/Game.exe\n", "linux");
+  const auto database = data + "/lutris/pga.db";
+  sqlite3 *db = nullptr;
+  ASSERT_EQ(sqlite3_open(QFile::encodeName(database).constData(), &db), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(db, "PRAGMA journal_mode=WAL; UPDATE games SET name='WAL Game';",
+                        nullptr, nullptr, nullptr), SQLITE_OK);
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.watchPaths.contains(database));
+  EXPECT_TRUE(result.watchPaths.contains(database + "-wal"));
+  EXPECT_TRUE(result.watchPaths.contains(config + "/lutris/games"));
+  EXPECT_TRUE(result.watchPaths.contains(config + "/lutris/games/a-game.yml"));
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games[0].name, "WAL Game");
+  sqlite3_close(db);
+}
+
+TEST_F(LauncherLibraryTest, WatchPathsIncludeGogInfoAndAmazonLibraryAndFuel) {
+  object(config + "/heroic/gog_store/installed.json",
+         {{"installed", QJsonArray{QJsonObject{{"appName", "123"}, {"install_path", directory}}}}});
+  object(directory + "/goggame-123.info", {{"gameId", "123"}});
+  const auto path = config + "/heroic/nile_config/nile";
+  array(path + "/installed.json", {QJsonObject{{"id", "amazon-id"}, {"path", directory}}});
+  array(path + "/library.json", {});
+  object(directory + "/fuel.json", {});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.watchPaths.contains(directory + "/goggame-123.info"));
+  EXPECT_TRUE(result.watchPaths.contains(directory + "/fuel.json"));
+  EXPECT_TRUE(result.watchPaths.contains(path + "/library.json"));
+  EXPECT_TRUE(result.watchPaths.contains(path + "/installed.json"));
+}
+
+TEST_F(LauncherLibraryTest, FindsFlatpakHeroicAndDeduplicatesCustomSymlink) {
+  const auto path = home + "/.var/app/com.heroicgameslauncher.hgl/config/heroic";
+  object(path + "/legendaryConfig/legendary/installed.json", {{"game", epic()}});
+  const auto alias = home + "/heroic-alias";
+  ASSERT_TRUE(QFile::link(path, alias));
+  const QVariantMap preferences{{"heroic", QVariantMap{{"paths", QStringList{alias}}}}};
+  const auto result = LauncherLibrary::discover(home, config, data, preferences);
+  ASSERT_EQ(result.games.size(), 1);
+  const auto heroic = result.launchers[1].toMap();
+  EXPECT_TRUE(heroic.value("detected").toBool());
+  EXPECT_EQ(heroic.value("locations").toList().size(), 1);
+  ASSERT_EQ(heroic.value("games").toList().size(), 1);
+  EXPECT_EQ(heroic.value("games").toList()[0].toMap().value("name").toString(), "An Epic Game");
+}
+
+TEST_F(LauncherLibraryTest, CustomLocationsCanReplaceAutomaticAndReportMissing) {
+  object(config + "/legendary/installed.json", {{"native", epic()}});
+  const auto custom = home + "/custom metadata";
+  auto entry = epic();
+  entry["title"] = "Custom Game";
+  object(custom + "/installed.json", {{"custom", entry}});
+  const QVariantMap preferences{{"legendary", QVariantMap{
+      {"automatic", false}, {"paths", QStringList{custom, home + "/missing"}}}}};
+  const auto result = LauncherLibrary::discover(home, config, data, preferences);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games[0].name, "Custom Game");
+  const auto launcher = result.launchers[2].toMap();
+  EXPECT_FALSE(launcher.value("automatic").toBool());
+  const auto locations = launcher.value("locations").toList();
+  ASSERT_EQ(locations.size(), 2);
+  EXPECT_EQ(locations[1].toMap().value("status").toString(), "Not found");
+}
+
+TEST_F(LauncherLibraryTest, ReportsInvalidMetadataRatherThanAnEmptyLibrary) {
+  write(config + "/legendary/installed.json", "{invalid");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  const auto launcher = result.launchers[2].toMap();
+  EXPECT_TRUE(launcher.value("detected").toBool());
+  EXPECT_EQ(launcher.value("locations").toList()[0].toMap().value("status").toString(),
+            "Unreadable or invalid metadata");
+  EXPECT_TRUE(result.games.isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, LegendaryEnvironmentLocationRespectsAutomaticToggle) {
+  const auto alternate = home + "/legendary-config";
+  object(alternate + "/installed.json", {{"game", epic()}});
+  auto result = LauncherLibrary::discover(home, config, data, {}, alternate);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_TRUE(result.launchers[2].toMap().value("detected").toBool());
+  result = LauncherLibrary::discover(home, config, data,
+      {{"legendary", QVariantMap{{"automatic", false}}}}, alternate);
+  EXPECT_TRUE(result.games.isEmpty());
+  EXPECT_FALSE(result.launchers[2].toMap().value("detected").toBool());
+}
+
+TEST_F(LauncherLibraryTest, EmptyMetadataIsDetectedWithoutInventingGames) {
+  object(config + "/legendary/installed.json", {});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.games.isEmpty());
+  EXPECT_TRUE(result.launchers[2].toMap().value("detected").toBool());
+  EXPECT_EQ(result.launchers[2].toMap().value("count").toInt(), 0);
+}
+
+TEST_F(LauncherLibraryTest, SteamSharedSecondaryLibraryIsOnlyCountedOnce) {
+  const auto first = home + "/.steam/steam";
+  const auto second = home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam";
+  const auto library = home + "/other drive";
+  for (const auto &path : {first, second})
+    write(path + "/steamapps/libraryfolders.vdf",
+          ("\"libraryfolders\" { \"1\" { \"path\" \"" + library + "\" } }").toUtf8());
+  write(library + "/steamapps/appmanifest_123.acf",
+        "\"AppState\" { \"appid\" \"123\" \"name\" \"A Steam Game\" \"installdir\" \"Game\" }");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.launchers[0].toMap().value("count").toInt(), 1);
+  EXPECT_EQ(result.launchers[0].toMap().value("locations").toList().size(), 2);
+}
+
+TEST_F(LauncherLibraryTest, FindsFlatpakLutrisWithSeparateConfigAndData) {
+  lutris("game:\n  exe: " + exe + "\n  prefix: " + home + "/prefix\n");
+  const auto base = home + "/.var/app/net.lutris.Lutris";
+  ASSERT_TRUE(QDir().mkpath(base + "/data/lutris"));
+  ASSERT_TRUE(QDir().mkpath(base + "/config/lutris/games"));
+  ASSERT_TRUE(QFile::rename(data + "/lutris/pga.db", base + "/data/lutris/pga.db"));
+  ASSERT_TRUE(QFile::rename(config + "/lutris/games/a-game.yml",
+                           base + "/config/lutris/games/a-game.yml"));
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games[0].name, "A Lutris Game");
+  EXPECT_TRUE(result.launchers[4].toMap().value("detected").toBool());
+}
+
 TEST_F(LauncherLibraryTest, MissingLibrariesDoNotCreateFiles) {
   EXPECT_TRUE(read().isEmpty());
   EXPECT_FALSE(QFileInfo(data).exists());

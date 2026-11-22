@@ -23,7 +23,7 @@ There are five domain components:
   Zombies, unreadable processes and oversized input are skipped.
 * `src/detection/LauncherLibrary.{h,cpp}` reads installed-game metadata from
   local launchers into one catalogue. Steam discovery lives here alongside
-  Heroic, Legendary, Nile and Lutris; process identification does not enumerate
+  Heroic, Legendary, Nile, Lutris and Faugus; process identification does not enumerate
   launcher files.
 * `src/detection/GameLaunchContext.{h,cpp}` attests a private runtime targeting
   an already identified payload and checks installation, prefix and ancestry
@@ -43,7 +43,27 @@ There are five domain components:
   and `waiting`/`associated` audio state; `selectInstance()` selects capture.
 
 The process timer is one second, with at most one census outstanding.
-Launcher metadata is refreshed on the census worker at startup and every 30 scans.
+Launcher metadata is refreshed on the census worker at startup, on local metadata
+notifications and by an independent 30-second fallback timer, not by counting
+process scans. `QFileSystemWatcher` notifications are coalesced over 250 ms.
+The worker resolves watches for metadata files and parent directories, including
+the nearest existing parent of missing paths, Steam's secondary library
+directories/manifests, GOG product info, Amazon library/Fuel metadata and Lutris
+YAML/SQLite WAL files. Completed refreshes repair watches after atomic replacement,
+deletion or directory creation. Watch targets are bounded to 8192; unavailable
+watches and filesystems without reliable notifications retain the fallback.
+
+A newly observed unrecognized payload also requests a refresh, with a five-second
+minimum interval after the previous refresh began. Repeated observations and
+continuously present copies of the same payload/prefix/App ID are deduplicated;
+Steam/Wine/runtime helpers are excluded. Unknown native payloads are included,
+but this is only a refresh hint, never recognition or window-ownership evidence.
+A census accompanied by fresh metadata does not request another candidate scan.
+All triggers, including **Rescan now**, share one pending refresh flag and the
+existing non-overlapping worker. Changes during a refresh queue a follow-up;
+only changed location preferences invalidate an in-flight result. Stop cancels
+the timers and watches.
+
 This notices installed/renamed games without a network catalogue update. `/proc` reads
 kernel-provided process metadata, not game binaries or gameplay state. Link targets use
 bounded `readlink()` calls without repeatedly resolving filesystem components.
@@ -83,9 +103,29 @@ one catalogue:
 | Heroic GOG | `heroic/gog_store/installed.json` and the installed product's `goggame-<id>.info` | Matching product ID and primary file launch task |
 | Nile / Heroic Amazon | `nile/` or `heroic/nile_config/nile/` under XDG config | Installed ID joined to local `library.json` title and `fuel.json` main executable |
 | Lutris | XDG data `lutris/pga.db` and XDG config `lutris/games/<configpath>.yml` | Installed Linux/Wine entry's exact executable, plus configured Wine prefix |
+| Faugus | XDG data `faugus-launcher/games.json` (also checks the config directory and standard Flatpak data/config locations) | Exact configured `path`, with configured `prefix` for Windows entries; explicit `Linux-Native` ELF entries need no Wine prefix |
 
 Steam discovery reads local libraryfolders and app
-manifests, including extra drives and common Flatpak locations.
+manifests, including extra drives and common Flatpak locations. Heroic and Lutris
+also check their standard Flatpak metadata directories, as does Faugus.
+**Settings → Game Libraries**
+shows every supported launcher, including **Not detected** entries, discovered
+metadata locations, read errors and usable-game counts. Each launcher's dropdown
+lists its usable installed games. **Rescan now** requests a fresh background scan.
+Legendary's `LEGENDARY_CONFIG_PATH` is honored when inherited by Trophy and set
+to an absolute directory.
+Users can add up to 16 custom metadata directories per launcher, remove them,
+disable automatic locations or reset to automatic discovery. Overrides supplement
+automatic discovery unless it is disabled; canonical paths are deduplicated.
+Custom Lutris directories contain `pga.db` and a `games/` YAML subdirectory;
+automatic native/Flatpak discovery pairs separate config and data directories.
+Custom Faugus directories contain `games.json`. Faugus entries must name an
+existing ELF (explicit `Linux-Native` runner) or PE payload with an absolute host
+Wine prefix. Home-relative `~/` paths are supported; arbitrary environment
+expansion, command/script launch tasks, Steam-ID entries and additional-app batch
+mode are not inferred. Shared storefronts are excluded. A configured Faugus
+path does not attest an installation root, so it cannot grant generic-bootstrap,
+directory-wide, prefix-wide or private-runtime sibling ownership.
 An executable must be inside an installed app's directory; a matching
 Steam App ID is strong corroboration when available. Inherited
 `SteamAppId` alone does not make Steam, Proton, a runtime helper or Wine
@@ -201,8 +241,9 @@ Non-Steam executable files are checked for an ELF/PE header to avoid treating
 wrapper scripts as game binaries or verified bootstraps.
 
 Coverage is intentionally conservative: native launcher metadata in standard
-XDG locations is supported; custom database/config locations, launcher-specific
-executable overrides, emulator/ROM entries, script-only launch tasks, and
+XDG locations, common Steam/Heroic/Lutris Flatpak paths and user-added metadata
+directories are supported. Launcher-specific executable overrides,
+emulator/ROM entries, script-only launch tasks, and
 Wine drive-letter paths in launcher configuration may still need an exact
 Trophy rule. GOG detection currently requires a matching `.info` primary file
 task; Linux packages that only expose `start.sh` are not inferred from their
@@ -264,9 +305,25 @@ strict binary verification. A removed primary is rebound by recording's
 existing retry against a fresh serial; late streams, changed devices and
 daemon reconnection use the same bounded lookup/retry path.
 
-The service's independent audio scan runs on a worker and reports stream
-snapshots without blocking process discovery. Audio that appears after a
-game starts does not change the game identity.
+`src/audio/AudioApplicationRegistry.{h,cpp}` maintains one persistent discovery
+connection shared by game status and the Voice application picker. A dedicated
+worker observes node/client additions, current-info property changes and removals.
+It publishes changed playback metadata only after core-sync barriers; announce-only
+identity is never promoted to verified current properties. Proxy storage remains
+stable until removal, and discovery binds at most 4096 node/client objects.
+An idle observer blocks on native events rather than periodically reconnecting or
+enumerating applications. Picker refresh reads the same cached snapshot.
+
+Stream snapshots contain metadata, not cached game ownership. The process census
+worker rechecks association against live process identity without another PipeWire
+enumeration; changed stream metadata invalidates in-flight association results.
+Audio that appears after a game starts does not change the game identity.
+Service loss clears cached node IDs immediately; reconnect attempts back off from
+250 ms to five seconds and rebuild current-info state. Shutdown interrupts both the
+native wait and reconnect delay, and rejects queued publications from older runs.
+Application-change notifications/logging occur only when the cached list changes.
+Capture target lookup, strict Voice identity verification and the recording
+engine's owned-audio fallback/retry policy remain separate and unchanged.
 
 ## Recording integration
 

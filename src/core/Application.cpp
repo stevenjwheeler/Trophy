@@ -34,6 +34,7 @@
 #include "UpdateChecker.h"
 #include "UpdateInstaller.h"
 #include "audio/AudioDeviceEnumerator.h"
+#include "audio/AudioApplicationRegistry.h"
 #include "audio/AudioMixer.h"
 #include "audio/PipeWireAudioSource.h"
 #include "capture/CaptureFactory.h"
@@ -422,8 +423,12 @@ void Application::initializeServices() {
   m_filmstripCache = std::make_unique<FilmstripCache>(this);
   m_previewCache = std::make_unique<PreviewCache>(this);
   m_audioMixer = std::make_unique<AudioMixer>(48000, 2, this);
+  m_audioApplicationRegistry = std::make_unique<AudioApplicationRegistry>(this);
   m_audioDeviceEnumerator = std::make_unique<AudioDeviceEnumerator>(this);
   m_gameDetector = std::make_unique<GameDetectionService>(this);
+  m_audioDeviceEnumerator->setApplicationRegistry(m_audioApplicationRegistry.get());
+  m_gameDetector->setAudioApplicationRegistry(m_audioApplicationRegistry.get());
+  m_audioApplicationRegistry->start();
   m_recordingEngine = std::make_shared<RecordingEngine>();
   m_recordingEngine->setSettingsManager(m_settingsManager.get());
   m_recordingEngine->setAudioMixer(m_audioMixer.get());

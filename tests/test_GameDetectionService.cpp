@@ -2,6 +2,7 @@
 #include "detection/GameDetectionService.h"
 #include "detection/GameWhitelist.h"
 #include "detection/LegacyDetectionCleanup.h"
+#include "audio/AudioApplicationRegistry.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
@@ -12,6 +13,10 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QSettings>
+#include <QScopeGuard>
+#include <QSaveFile>
+#include <functional>
 #include <gtest/gtest.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -83,7 +88,234 @@ protected:
                                      "SteamAppId=1973530" + '\0');
     return ProcessCensus::inspect(31, root + "/proc");
   }
+  // Exercise the scheduler and real local file notifications without starting
+  // /proc/audio workers or connecting to the user's desktop services.
+  static void readyLibraries(GameDetectionService &service, const QStringList &paths = {}) {
+    service.m_running = true;
+    service.m_libraryRefresh = false;
+    service.m_libraryScanning = false;
+    service.m_libraryRefreshClock.invalidate();
+    service.updateLibraryWatches(paths);
+  }
+  static bool waitFor(const std::function<bool()> &condition, int timeout = 2000) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!condition() && elapsed.elapsed() < timeout) {
+      QCoreApplication::processEvents();
+      QThread::msleep(5);
+    }
+    return condition();
+  }
+  static void clearRefresh(GameDetectionService &service) {
+    service.m_libraryRefresh = false;
+    service.m_libraryDebounce.stop();
+    service.m_candidateRefresh.stop();
+  }
+  static void watch(GameDetectionService &service, const QStringList &paths) {
+    service.updateLibraryWatches(paths);
+  }
+  static void census(GameDetectionService &service, const ProcessCensus::Snapshot &snapshot,
+                     bool catalogueUpdated = false) {
+    GameDetectionService::ScanResult result;
+    result.processes = snapshot;
+    result.catalogueUpdated = catalogueUpdated;
+    result.libraryGeneration = service.m_libraryGeneration;
+    if (catalogueUpdated)
+      result.catalogue = service.m_catalogue;
+    service.applyScanResult(std::move(result));
+  }
+  static bool candidatePending(const GameDetectionService &service) {
+    return service.m_candidateRefresh.isActive();
+  }
+  static int candidateDelay(const GameDetectionService &service) {
+    return service.m_candidateRefresh.remainingTime();
+  }
+  static void recentRefresh(GameDetectionService &service) {
+    service.m_libraryRefreshClock.start();
+  }
+  static bool fallbackWithoutCensus(GameDetectionService &service) {
+    const bool productionInterval = service.m_libraryFallback.interval() == 30000;
+    service.m_libraryFallback.start(25);
+    return productionInterval;
+  }
+  static bool noWorker(const GameDetectionService &service) { return !service.m_scan.valid(); }
+  static void publishAudio(AudioApplicationRegistry &registry, const QVariantList &rows) {
+    registry.m_running = true;
+    registry.publish(registry.m_generation, rows, true);
+  }
+  static void checkStaleAudio(GameDetectionService &service) {
+    GameDetectionService::ScanResult result;
+    result.audioRevision = service.m_audioRevision;
+    result.audioStreams = {QVariantMap{{"nodeId", 42}, {"gameInstance", "old-owner"}}};
+    ++service.m_audioRevision;
+    service.applyScanResult(result);
+    EXPECT_TRUE(service.m_audioStreams.isEmpty());
+    result.audioRevision = service.m_audioRevision;
+    service.applyScanResult(result);
+    EXPECT_EQ(service.m_audioStreams.size(), 1);
+  }
+  static void checkQueuedRefreshResult(GameDetectionService &service) {
+    service.m_libraryScanning = true;
+    GameDetectionService::ScanResult result;
+    result.catalogueUpdated = true;
+    result.libraryGeneration = service.m_libraryGeneration;
+    result.catalogue.append({123, "Queued result", "/games/queued"});
+    service.rescanGameLibraries();
+    service.rescanGameLibraries();
+    service.applyScanResult(result);
+    ASSERT_EQ(service.m_catalogue.size(), 1);
+    EXPECT_EQ(service.m_catalogue[0].name, "Queued result");
+    EXPECT_TRUE(service.m_libraryRefresh); // One follow-up, no lost invalidation.
+    EXPECT_FALSE(service.m_libraryScanning);
+    ++service.m_libraryGeneration; // A changed location invalidates the old result.
+    result.catalogue[0].name = "Stale result";
+    service.applyScanResult(std::move(result));
+    EXPECT_EQ(service.m_catalogue[0].name, "Queued result");
+  }
 };
+
+TEST_F(GameDetectionServiceTest, SharedAudioMetadataInvalidatesOldAssociationsWithoutNativeQueries) {
+  GameDetectionService service;
+  AudioApplicationRegistry registry;
+  service.setAudioApplicationRegistry(&registry);
+  publishAudio(registry, {QVariantMap{{"nodeId", 1}, {"binary", "first"}}});
+  checkStaleAudio(service);
+  publishAudio(registry, {QVariantMap{{"nodeId", 2}, {"binary", "second"}}});
+  checkStaleAudio(service);
+  service.setAudioApplicationRegistry(nullptr);
+  EXPECT_TRUE(service.instances().isEmpty());
+}
+
+TEST_F(GameDetectionServiceTest, MetadataWatcherHandlesInPlaceAndAtomicReplacement) {
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto file = root.path() + "/installed.json";
+  writeFile(file, "{}");
+  GameDetectionService service;
+  readyLibraries(service, {root.path(), file});
+  writeFile(file, "{\"changed\":true}");
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  clearRefresh(service);
+  QSaveFile replacement(file);
+  ASSERT_TRUE(replacement.open(QIODevice::WriteOnly));
+  replacement.write("{\"replaced\":true}");
+  ASSERT_TRUE(replacement.commit());
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  watch(service, {root.path(), file}); // A completed worker scan repairs the watch.
+  clearRefresh(service);
+  writeFile(file, "{\"changed_again\":true}");
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  EXPECT_TRUE(noWorker(service));
+}
+
+TEST_F(GameDetectionServiceTest, FallbackRefreshUsesElapsedTimeNotProcessScans) {
+  GameDetectionService service;
+  readyLibraries(service);
+  ASSERT_TRUE(fallbackWithoutCensus(service));
+  ASSERT_TRUE(waitFor([&] { return service.librariesScanning(); }));
+  EXPECT_TRUE(noWorker(service));
+}
+
+TEST_F(GameDetectionServiceTest, CandidateRefreshIsDeduplicatedRateLimitedAndNotGameEvidence) {
+  GameDetectionService service;
+  readyLibraries(service);
+  recentRefresh(service);
+  const auto candidate = process(31, "/games/NewGame");
+  census(service, {{31, candidate}});
+  ASSERT_TRUE(candidatePending(service));
+  EXPECT_GT(candidateDelay(service), 4000);
+  EXPECT_LE(candidateDelay(service), 5000);
+  EXPECT_TRUE(service.games().isEmpty()); // Refresh hints never identify a game.
+  clearRefresh(service);
+  census(service, {{31, candidate}});
+  EXPECT_FALSE(candidatePending(service));
+  auto respawn = candidate;
+  respawn.start++;
+  census(service, {{31, respawn}});
+  EXPECT_FALSE(candidatePending(service));
+  census(service, {});
+  census(service, {{31, respawn}});
+  EXPECT_TRUE(candidatePending(service)); // A later independent launch may retry.
+}
+
+TEST_F(GameDetectionServiceTest, CandidateRefreshIgnoresHelpersAndFreshCatalogueCensuses) {
+  GameDetectionService service;
+  readyLibraries(service);
+  census(service, {{31, process(31, "/usr/bin/wineserver")}});
+  EXPECT_FALSE(candidatePending(service));
+  census(service, {{32, process(32, "/games/FreshlyScanned")}}, true);
+  EXPECT_FALSE(candidatePending(service));
+  clearRefresh(service);
+  setCatalogue(service, {{123, "Known Game", "/games/known"}});
+  census(service, {{33, process(33, "/games/known/Game", 1, 123)}});
+  EXPECT_FALSE(candidatePending(service));
+  EXPECT_EQ(service.games().size(), 1);
+}
+
+TEST_F(GameDetectionServiceTest, RefreshRequestsCoalesceWithoutDiscardingUsableInFlightResults) {
+  GameDetectionService service;
+  readyLibraries(service);
+  checkQueuedRefreshResult(service);
+  EXPECT_TRUE(noWorker(service));
+}
+
+TEST_F(GameDetectionServiceTest, StopCancelsWatchDebounceFallbackAndCandidateRequests) {
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto file = root.path() + "/installed.json";
+  writeFile(file, "{}");
+  GameDetectionService service;
+  readyLibraries(service, {file, root.path()});
+  recentRefresh(service);
+  census(service, {{31, process(31, "/games/Pending")}});
+  ASSERT_TRUE(candidatePending(service));
+  ASSERT_TRUE(fallbackWithoutCensus(service));
+  writeFile(file, "{\"pending\":true}");
+  service.stop();
+  EXPECT_FALSE(waitFor([&] { return service.librariesScanning(); }, 350));
+  EXPECT_FALSE(candidatePending(service));
+}
+
+TEST_F(GameDetectionServiceTest, LibraryLocationsPersistAndCanBeReset) {
+  QSettings settings;
+  const auto previous = settings.value("detection/libraryLocations");
+  const auto restore = qScopeGuard([&] {
+    if (previous.isValid())
+      settings.setValue("detection/libraryLocations", previous);
+    else
+      settings.remove("detection/libraryLocations");
+  });
+  settings.remove("detection/libraryLocations");
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  {
+    GameDetectionService service;
+    ASSERT_EQ(service.gameLibraries().size(), 6);
+    service.setLibraryAutomatic("heroic", false);
+    service.addLibraryLocation("heroic", QUrl::fromLocalFile(root.path()));
+    service.addLibraryLocation("heroic", QUrl::fromLocalFile(root.path()));
+    const auto heroic = service.gameLibraries()[1].toMap();
+    EXPECT_FALSE(heroic.value("automatic").toBool());
+    EXPECT_EQ(heroic.value("paths").toStringList(), QStringList{root.path()});
+    EXPECT_TRUE(service.librariesScanning());
+  }
+  GameDetectionService restored;
+  EXPECT_EQ(restored.gameLibraries()[1].toMap().value("paths").toStringList(),
+            QStringList{root.path()});
+  restored.removeLibraryLocation("heroic", root.path());
+  EXPECT_TRUE(restored.gameLibraries()[1].toMap().value("paths").toStringList().isEmpty());
+  restored.resetLibraryLocations("heroic");
+  EXPECT_TRUE(restored.gameLibraries()[1].toMap().value("automatic").toBool());
+  restored.setLibraryAutomatic("faugus", false);
+  restored.addLibraryLocation("faugus", QUrl::fromLocalFile(root.path()));
+  EXPECT_FALSE(restored.gameLibraries()[5].toMap().value("automatic").toBool());
+  EXPECT_EQ(restored.gameLibraries()[5].toMap().value("paths").toStringList(),
+            QStringList{root.path()});
+  const auto before = settings.value("detection/libraryLocations");
+  restored.addLibraryLocation("invalid-launcher", QUrl::fromLocalFile(root.path()));
+  restored.addLibraryLocation("heroic", QUrl("https://example.invalid/metadata"));
+  EXPECT_EQ(settings.value("detection/libraryLocations"), before);
+}
 
 TEST_F(GameDetectionServiceTest,
        WineCustomDriveAndZDriveIdentifySameSteamGame) {

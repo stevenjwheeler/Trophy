@@ -3,6 +3,8 @@
 #include <QList>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
+#include <QVariantMap>
 
 namespace TrophyBackend {
 struct LauncherGame {
@@ -19,6 +21,16 @@ struct LauncherGame {
 // Local installed metadata only. Call on the census worker, never from QML.
 class LauncherLibrary {
 public:
+  struct Discovery {
+    QList<LauncherGame> games;
+    QVariantList launchers;
+    // Resolved on the worker, including parents for missing/replaced metadata.
+    QStringList watchPaths;
+  };
+  static Discovery discover(const QString &home, const QString &config,
+                            const QString &data, const QVariantMap &preferences = {},
+                            const QString &legendaryConfigPath = {});
+  static Discovery discover(const QVariantMap &preferences = {});
   static QList<LauncherGame> installed();
   static QList<LauncherGame> read(const QString &home, const QString &config,
                                   const QString &data);

@@ -2,7 +2,8 @@
 #include "GameDetectionService.h"
 #include "GameIconSource.h"
 #include "GameWhitelist.h"
-#include "audio/PipeWireAudioSource.h"
+#include "audio/AudioApplicationRegistry.h"
+#include "audio/ApplicationAudioIdentity.h"
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -11,9 +12,142 @@
 #include <QStandardPaths>
 #include <QRegularExpression>
 #include <QDebug>
+#include <QSettings>
 #include <algorithm>
 
 namespace TrophyBackend {
+void GameDetectionService::setAudioApplicationRegistry(AudioApplicationRegistry *registry) {
+  if (m_audioRegistry)
+    disconnect(m_audioRegistry, nullptr, this, nullptr);
+  m_audioRegistry = registry;
+  const auto update = [this] {
+    const auto streams = m_audioRegistry ? m_audioRegistry->applications() : QVariantList{};
+    if (m_audioMetadata == streams)
+      return;
+    m_audioMetadata = streams;
+    ++m_audioRevision;
+    m_audioStreams.clear(); // Do not display ownership for superseded identities.
+    emit instancesChanged();
+  };
+  if (registry) {
+    connect(registry, &AudioApplicationRegistry::applicationsChanged, this, update);
+    connect(registry, &QObject::destroyed, this, [this, update] {
+      m_audioRegistry = nullptr;
+      update();
+    });
+  }
+  update();
+}
+void GameDetectionService::rescanGameLibraries() {
+  queueLibraryRefresh();
+}
+void GameDetectionService::queueLibraryRefresh() {
+  const bool alreadyPending = m_libraryRefresh;
+  m_libraryRefresh = true;
+  if (!alreadyPending)
+    emit gameLibrariesChanged();
+}
+void GameDetectionService::updateLibraryWatches(const QStringList &paths) {
+  const auto current = m_libraryWatcher.files() + m_libraryWatcher.directories();
+  const QSet<QString> currentSet(current.cbegin(), current.cend());
+  const QSet<QString> desired(paths.cbegin(), paths.cend());
+  QStringList removed, added;
+  for (const auto &path : current)
+    if (!desired.contains(path))
+      removed.append(path);
+  for (const auto &path : paths)
+    if (!currentSet.contains(path))
+      added.append(path);
+  if (!removed.isEmpty())
+    m_libraryWatcher.removePaths(removed);
+  if (!added.isEmpty()) {
+    const auto failed = m_libraryWatcher.addPaths(added);
+    if (!failed.isEmpty())
+      qWarning() << "Could not watch" << failed.size()
+                 << "game library paths; timed and candidate refresh remain available";
+  }
+}
+void GameDetectionService::refreshForNewCandidates(
+    const ProcessCensus::Snapshot &previous, bool requestRefresh) {
+  if (!m_running)
+    return;
+  bool found = false;
+  QSet<QStringList> liveCandidates;
+  for (const auto &process : m_processes) {
+    const auto payload = process.payload();
+    if (payload.isEmpty() || (ProcessGames::excluded(payload) &&
+                             !ProcessGames::bootstrapCandidate(payload)))
+      continue;
+    const bool recognized = std::any_of(m_instances.begin(), m_instances.end(),
+        [&](const auto &instance) { return instance.processes.contains(process.pid); });
+    if (recognized)
+      continue;
+    // These are refresh hints, not game evidence. Include unknown native
+    // payloads too, without rescanning for every PID of a respawning helper.
+    const QStringList key{payload, process.winePrefix, QString::number(process.steamId)};
+    if (liveCandidates.size() < 4096)
+      liveCandidates.insert(key);
+    const auto old = previous.constFind(process.pid);
+    if (old != previous.cend() && old->identity() == process.identity() &&
+        old->payload() == payload && old->winePrefix == process.winePrefix &&
+        old->steamId == process.steamId)
+      continue;
+    if (m_seenLibraryCandidates.contains(key))
+      continue;
+    found = true;
+  }
+  m_seenLibraryCandidates = std::move(liveCandidates);
+  if (!requestRefresh || !found || m_libraryRefresh || m_libraryScanning ||
+      m_candidateRefresh.isActive())
+    return;
+  const auto elapsed = m_libraryRefreshClock.isValid() ? m_libraryRefreshClock.elapsed() : 5000;
+  m_candidateRefresh.start(int(std::max<qint64>(0, 5000 - elapsed)));
+}
+void GameDetectionService::saveLibraryPreferences(
+    const QString &id, const QVariantMap &preference) {
+  if (!QStringList{"steam", "heroic", "legendary", "nile", "lutris", "faugus"}.contains(id))
+    return;
+  m_libraryPreferences[id] = preference;
+  ++m_libraryGeneration; // Only preference changes invalidate in-flight results.
+  QSettings().setValue("detection/libraryLocations", m_libraryPreferences);
+  // Reflect controls immediately while the worker validates the locations.
+  for (auto &value : m_libraryStatus) {
+    auto row = value.toMap();
+    if (row.value("id").toString() == id) {
+      row["automatic"] = preference.value("automatic", true);
+      row["paths"] = preference.value("paths").toStringList();
+      value = row;
+    }
+  }
+  rescanGameLibraries();
+}
+void GameDetectionService::setLibraryAutomatic(const QString &id, bool automatic) {
+  auto preference = m_libraryPreferences.value(id).toMap();
+  preference["automatic"] = automatic;
+  saveLibraryPreferences(id, preference);
+}
+void GameDetectionService::addLibraryLocation(const QString &id, const QUrl &directory) {
+  if (!directory.isLocalFile() || !QDir::isAbsolutePath(directory.toLocalFile()))
+    return;
+  auto preference = m_libraryPreferences.value(id).toMap();
+  auto paths = preference.value("paths").toStringList();
+  const auto path = QDir::cleanPath(directory.toLocalFile());
+  if (paths.contains(path) || paths.size() >= 16)
+    return;
+  paths.append(path);
+  preference["paths"] = paths;
+  saveLibraryPreferences(id, preference);
+}
+void GameDetectionService::removeLibraryLocation(const QString &id, const QString &directory) {
+  auto preference = m_libraryPreferences.value(id).toMap();
+  auto paths = preference.value("paths").toStringList();
+  paths.removeAll(directory);
+  preference["paths"] = paths;
+  saveLibraryPreferences(id, preference);
+}
+void GameDetectionService::resetLibraryLocations(const QString &id) {
+  saveLibraryPreferences(id, {});
+}
 QSet<QString> GameDetectionService::desktopApplicationExecutables(
     const QStringList &dataRoots) {
   QSet<QString> executables;
@@ -126,10 +260,35 @@ GameDetectionService::GameDetectionService(QObject *parent)
       m_gamesModel(std::make_unique<GameListModel>(this)),
       m_gamesFilter(new GameListFilterModel(this)) {
   m_whitelist->load();
+  m_libraryPreferences = QSettings().value("detection/libraryLocations").toMap();
+  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus"};
+  const QStringList names{"Steam", "Heroic", "Legendary", "Nile", "Lutris", "Faugus"};
+  for (int i = 0; i < ids.size(); ++i) {
+    const auto preference = m_libraryPreferences.value(ids[i]).toMap();
+    m_libraryStatus.append(QVariantMap{{"id", ids[i]}, {"name", names[i]},
+        {"automatic", preference.value("automatic", true)},
+        {"paths", preference.value("paths").toStringList()}, {"detected", false},
+        {"count", 0}, {"locations", QVariantList{}}});
+  }
   m_gamesFilter->setSourceModel(m_gamesModel.get());
   m_gamesFilter->setShowDefaultEntries(false);
   m_timer.setInterval(1000);
   connect(&m_timer, &QTimer::timeout, this, &GameDetectionService::poll);
+  m_libraryFallback.setInterval(30000);
+  connect(&m_libraryFallback, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
+  m_libraryDebounce.setSingleShot(true);
+  m_libraryDebounce.setInterval(250);
+  connect(&m_libraryDebounce, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
+  const auto changed = [this](const QString &) {
+    // Coalesce a burst without indefinitely delaying a continuously busy DB.
+    if (m_running && !m_libraryDebounce.isActive())
+      m_libraryDebounce.start();
+  };
+  connect(&m_libraryWatcher, &QFileSystemWatcher::fileChanged, this, changed);
+  connect(&m_libraryWatcher, &QFileSystemWatcher::directoryChanged, this, changed);
+  m_candidateRefresh.setSingleShot(true);
+  m_candidateRefresh.setTimerType(Qt::PreciseTimer);
+  connect(&m_candidateRefresh, &QTimer::timeout, this, &GameDetectionService::queueLibraryRefresh);
   rebuildModels();
 }
 GameDetectionService::~GameDetectionService() {
@@ -140,20 +299,29 @@ void GameDetectionService::start() {
   if (m_running)
     return;
   m_running = true;
-  m_scanCount = 0;
+  if (m_audioRegistry)
+    m_audioMetadata = m_audioRegistry->applications();
+  m_libraryRefresh = true;
+  m_libraryFallback.start();
   m_timer.start();
   poll();
 }
 void GameDetectionService::stop() {
   m_running = false;
   m_timer.stop();
+  m_libraryFallback.stop();
+  m_libraryDebounce.stop();
+  m_candidateRefresh.stop();
+  updateLibraryWatches({});
+  m_seenLibraryCandidates.clear();
   if (m_scan.valid())
     m_scan.wait();
-  if (m_audioScan.valid())
-    m_audioScan.wait();
   m_scan = {};
-  m_audioScan = {};
+  m_libraryScanning = false;
+  m_libraryRefresh = false;
   m_audioStreams.clear();
+  m_audioMetadata.clear();
+  ++m_audioRevision;
   m_instances.clear();
   m_processes.clear();
   m_applicationExecutables.clear();
@@ -162,41 +330,81 @@ void GameDetectionService::stop() {
   ProcessGames::publish({});
   updateCurrentGame({}, 0);
   emit instancesChanged();
+  emit gameLibrariesChanged();
 }
 void GameDetectionService::poll() {
   if (!m_running)
     return;
-  if (m_audioScan.valid() && m_audioScan.wait_for(std::chrono::seconds(0)) ==
-                                 std::future_status::ready) {
-    m_audioStreams = m_audioScan.get();
-    emit instancesChanged();
-  }
-  if (!m_audioScan.valid())
-    m_audioScan = std::async(std::launch::async, [] {
-      return PipeWireAudioSource::enumerateAudioApps();
-    });
   if (m_scan.valid()) {
     if (m_scan.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
       return;
-    auto result = m_scan.get();
-    if (result.catalogueUpdated) {
-      m_catalogue = std::move(result.catalogue);
-      m_applicationExecutables = std::move(result.applicationExecutables);
-    }
-    apply(result.processes);
+    applyScanResult(m_scan.get());
   }
-  const bool refreshCatalogue = m_scanCount++ % 30 == 0;
-  m_scan = std::async(std::launch::async, [refreshCatalogue] {
+  if (!m_running)
+    return;
+  const bool refreshCatalogue = m_libraryRefresh;
+  const auto preferences = m_libraryPreferences;
+  const auto generation = m_libraryGeneration;
+  const auto audioMetadata = m_audioMetadata;
+  const auto audioRevision = m_audioRevision;
+  if (refreshCatalogue) {
+    m_libraryRefresh = false;
+    m_libraryScanning = true;
+    m_libraryRefreshClock.start();
+    m_libraryFallback.start();
+    m_candidateRefresh.stop();
+    emit gameLibrariesChanged();
+  }
+  if (!m_running)
+    return;
+  m_scan = std::async(std::launch::async,
+      [refreshCatalogue, preferences, generation, audioMetadata, audioRevision] {
     ScanResult result;
     result.processes = ProcessCensus::scan();
+    result.audioRevision = audioRevision;
+    // Re-evaluate process ownership on the census worker, never on the GUI
+    // thread and never by caching a game association with a PipeWire node.
+    for (const auto &stream : audioMetadata) {
+      auto row = stream.toMap();
+      const auto pid = detail::audioProcessId(row.value("pid").toString());
+      const auto owner = ProcessGames::associate(pid, row.value("binary").toString(),
+                                                row.value("applicationName").toString());
+      row["gameInstance"] = owner;
+      row["associationEvidence"] = owner.isEmpty() ? "unassigned"
+          : pid ? "process-membership" : "unique-executable";
+      result.audioStreams.append(row);
+    }
     result.catalogueUpdated = refreshCatalogue;
     if (refreshCatalogue) {
-      result.catalogue = LauncherLibrary::installed();
+      auto discovery = LauncherLibrary::discover(preferences);
+      result.catalogue = std::move(discovery.games);
+      result.libraryStatus = std::move(discovery.launchers);
+      result.libraryWatchPaths = std::move(discovery.watchPaths);
+      result.libraryGeneration = generation;
       result.applicationExecutables = desktopApplicationExecutables(
           QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation));
     }
     return result;
   });
+}
+void GameDetectionService::applyScanResult(ScanResult result) {
+  if (result.audioRevision == m_audioRevision)
+    m_audioStreams = std::move(result.audioStreams);
+  if (result.catalogueUpdated && result.libraryGeneration == m_libraryGeneration) {
+    m_catalogue = std::move(result.catalogue);
+    m_libraryStatus = std::move(result.libraryStatus);
+    m_applicationExecutables = std::move(result.applicationExecutables);
+    updateLibraryWatches(result.libraryWatchPaths);
+  }
+  if (result.catalogueUpdated) {
+    m_libraryScanning = false;
+    emit gameLibrariesChanged();
+  }
+  // A fresh catalogue already covers this census's candidates. Other
+  // censuses can request an early refresh after a missed file notification.
+  const auto previousProcesses = m_processes;
+  apply(result.processes);
+  refreshForNewCandidates(previousProcesses, !result.catalogueUpdated);
 }
 void GameDetectionService::apply(const ProcessCensus::Snapshot &snapshot) {
   const auto previousProcesses = m_processes;

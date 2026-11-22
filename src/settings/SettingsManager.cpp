@@ -126,7 +126,15 @@ void SettingsManager::load() {
   m_startOnLogin = general["startOnLogin"].toBool(false);
   m_instantReplayEnabled = general["instantReplay"].toBool(true);
   m_globalShortcutsEnabled = general["globalShortcuts"].toBool(true);
-  m_wizardStep = qBound(0, general["wizardStep"].toInt(0), 6);
+  int wizardStep = general["wizardStep"].toInt(0);
+  // Layout 2 removes the old informational detection page (index 3).
+  // Resume on Hardware for that page, and retain later pages' meaning.
+  if (general["wizardStepVersion"].toInt(1) < 2 && wizardStep >= 4)
+    --wizardStep;
+  // Layout 3 inserts the library summary before Hardware (index 3).
+  if (general["wizardStepVersion"].toInt(1) < 3 && wizardStep >= 3)
+    ++wizardStep;
+  m_wizardStep = qBound(0, wizardStep, 6);
   m_updateCheckEnabled = general["updateCheck"].toBool(true);
   m_replayCachePath = general["replayCachePath"].toString();
   // Absent keys keep the built-in defaults, so an older settings file still
@@ -284,6 +292,7 @@ void SettingsManager::save() {
   general["instantReplay"] = m_instantReplayEnabled;
   general["globalShortcuts"] = m_globalShortcutsEnabled;
   general["wizardStep"] = m_wizardStep;
+  general["wizardStepVersion"] = 3;
   general["updateCheck"] = m_updateCheckEnabled;
   general["replayCachePath"] = m_replayCachePath;
   general["libraryListView"] = m_libraryListView;

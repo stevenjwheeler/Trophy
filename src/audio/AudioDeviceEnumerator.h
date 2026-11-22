@@ -13,6 +13,7 @@
 #include <QVariantList>
 
 namespace TrophyBackend {
+class AudioApplicationRegistry;
 
 /**
  * @brief Audio device information
@@ -57,6 +58,7 @@ public:
 
   Q_INVOKABLE void refresh();
   Q_INVOKABLE void refreshAudioApps();
+  void setApplicationRegistry(AudioApplicationRegistry *registry);
 
   Q_INVOKABLE QString defaultInputDevice() const;
   Q_INVOKABLE QString defaultOutputDevice() const;
@@ -71,6 +73,7 @@ private:
   QList<AudioDeviceInfo> m_inputDevices;
   QList<AudioDeviceInfo> m_outputDevices;
   QVariantList m_audioApps;
+  AudioApplicationRegistry *m_applicationRegistry = nullptr;
 };
 
 } // namespace TrophyBackend

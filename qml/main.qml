@@ -358,16 +358,17 @@ ApplicationWindow {
 
         // Search settings (names must match SettingsPage sections)
         var settings = [
-            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "original", "navy", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
             { name: "Video Recording", section: "Video Recording", keywords: ["video", "encoder", "auto", "av1", "nvenc", "vaapi", "h264", "hevc", "x264", "quality", "bitrate", "fps", "frame", "resolution", "720p", "1080p", "1440p", "4k", "preset", "container", "mkv", "mp4", "zero-copy", "dma-buf"] },
-            { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
             { name: "Audio Recording", section: "Audio Recording", keywords: ["audio", "sound", "microphone", "mic", "voice", "chat", "tracks", "single track", "separate tracks", "desktop mode", "game mode", "system audio", "device", "input", "output"] },
+            { name: "Background Clips", section: "Background Clips", keywords: ["background clips", "clip buffer", "clip cache", "instant clips", "replay", "buffer", "cache folder"] },
+            { name: "Game Detection & Libraries", section: "Game Detection & Libraries", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game", "libraries"] },
+            { name: "Game Libraries", section: "Game Libraries", keywords: ["launcher", "steam", "heroic", "legendary", "nile", "lutris", "faugus", "library", "metadata", "rescan"] },
+            { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] },
             { name: "Storage Management", section: "Storage Management", keywords: ["storage", "path", "folder", "recordings folder", "limit", "cleanup", "auto-cleanup", "size", "delete", "usage", "library", "unlimited"] },
+            { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
             { name: "Discord Rich Presence", section: "Discord Rich Presence", keywords: ["discord", "rich presence", "activity", "profile", "privacy", "game names", "idle"] },
-            { name: "Game Detection", section: "Game Detection", keywords: ["detection", "detect", "auto-detect", "auto-record", "auto", "record", "launch", "game"] },
-            { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
-            { name: "Keyboard Shortcuts", section: "Keyboard Shortcuts", keywords: ["shortcut", "shortcuts", "global", "hotkey", "keys", "keybind", "record key", "clip key", "save clip", "configure", "bind", "remap"] }
+            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "original", "navy", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] }
         ];
 
         for (let j = 0; j < settings.length; j++) {

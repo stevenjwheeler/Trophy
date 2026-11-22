@@ -49,6 +49,15 @@ target_compile_definitions(test_DesktopIntegrationUi PRIVATE SETTINGS_QML_FILE="
 target_link_libraries(test_DesktopIntegrationUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_DesktopIntegrationUi)
 
+add_executable(test_GameLibrariesUi test_GameLibrariesUi.cpp)
+target_include_directories(test_GameLibrariesUi PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test_GameLibrariesUi PRIVATE
+    SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml"
+    WIZARD_QML_FILE="${CMAKE_SOURCE_DIR}/qml/components/SetupWizard.qml"
+    INFO_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/InfoPage.qml")
+target_link_libraries(test_GameLibrariesUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_GameLibrariesUi)
+
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
@@ -410,6 +419,8 @@ add_library(test_RecordingBackend STATIC
     ${CMAKE_SOURCE_DIR}/src/audio/AudioMixer.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/AudioDriftCorrector.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/AudioDeviceEnumerator.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/AudioApplicationRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/AudioApplicationRegistry.h
     ${CMAKE_SOURCE_DIR}/src/audio/PipeWireAudioSource.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/IAudioSource.h
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
@@ -513,6 +524,11 @@ add_executable(test_PipeWireAudioSource test_PipeWireAudioSource.cpp
 target_include_directories(test_PipeWireAudioSource PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_PipeWireAudioSource PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE trophy_processes)
 gtest_discover_tests(test_PipeWireAudioSource)
+
+add_executable(test_AudioApplicationRegistry test_AudioApplicationRegistry.cpp)
+target_include_directories(test_AudioApplicationRegistry PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_AudioApplicationRegistry PRIVATE Trophy ${TEST_LINK_LIBS})
+gtest_discover_tests(test_AudioApplicationRegistry)
 
 if(Python3_Interpreter_FOUND)
     add_executable(test_AppAudioGroup test_AppAudioGroup.cpp)

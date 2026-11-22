@@ -7,6 +7,7 @@
 
 #include "AudioDeviceEnumerator.h"
 #include "PipeWireAudioSource.h"
+#include "AudioApplicationRegistry.h"
 #include <QDebug>
 
 #ifdef HAVE_PIPEWIRE
@@ -19,10 +20,6 @@ namespace TrophyBackend {
 AudioDeviceEnumerator::AudioDeviceEnumerator(QObject *parent)
     : QObject(parent) {
   refresh();
-  // Populate the app list too (voice-chat picker): it has no other
-  // automatic trigger — previously it stayed empty until the user hit
-  // Refresh, so a saved app always read as "(not running)".
-  refreshAudioApps();
 }
 
 AudioDeviceEnumerator::~AudioDeviceEnumerator() = default;
@@ -58,9 +55,25 @@ void AudioDeviceEnumerator::refresh() {
 }
 
 void AudioDeviceEnumerator::refreshAudioApps() {
-  m_audioApps = PipeWireAudioSource::enumerateAudioApps();
+  const auto apps = m_applicationRegistry ? m_applicationRegistry->applications() : QVariantList{};
+  if (apps == m_audioApps)
+    return;
+  m_audioApps = apps;
   emit audioAppsChanged();
-  qInfo() << "Audio apps enumeration: found" << m_audioApps.size() << "apps";
+}
+void AudioDeviceEnumerator::setApplicationRegistry(AudioApplicationRegistry *registry) {
+  if (m_applicationRegistry)
+    disconnect(m_applicationRegistry, nullptr, this, nullptr);
+  m_applicationRegistry = registry;
+  if (registry) {
+    connect(registry, &AudioApplicationRegistry::applicationsChanged,
+            this, &AudioDeviceEnumerator::refreshAudioApps);
+    connect(registry, &QObject::destroyed, this, [this] {
+      m_applicationRegistry = nullptr;
+      refreshAudioApps();
+    });
+  }
+  refreshAudioApps();
 }
 
 QString AudioDeviceEnumerator::defaultInputDevice() const {

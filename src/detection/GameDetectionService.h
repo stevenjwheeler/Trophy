@@ -3,6 +3,8 @@
 #include "GameListModel.h"
 #include "ProcessGames.h"
 #include <QObject>
+#include <QElapsedTimer>
+#include <QFileSystemWatcher>
 #include <QTimer>
 #include <QVariantMap>
 #include <future>
@@ -11,6 +13,7 @@
 class RecordingManagerTest;
 namespace TrophyBackend {
 class GameWhitelist;
+class AudioApplicationRegistry;
 class GameDetectionService : public QObject {
   Q_OBJECT
   Q_PROPERTY(
@@ -25,11 +28,21 @@ class GameDetectionService : public QObject {
   Q_PROPERTY(bool showDefaultExclusions READ showDefaultExclusions WRITE
                  setShowDefaultExclusions NOTIFY showDefaultExclusionsChanged)
   Q_PROPERTY(QVariantList instances READ instances NOTIFY instancesChanged)
+  Q_PROPERTY(QVariantList gameLibraries READ gameLibraries NOTIFY gameLibrariesChanged)
+  Q_PROPERTY(bool librariesScanning READ librariesScanning NOTIFY gameLibrariesChanged)
 public:
+  QVariantList gameLibraries() const { return m_libraryStatus; }
+  bool librariesScanning() const { return m_libraryRefresh || m_libraryScanning; }
+  Q_INVOKABLE void rescanGameLibraries();
+  Q_INVOKABLE void setLibraryAutomatic(const QString &id, bool automatic);
+  Q_INVOKABLE void addLibraryLocation(const QString &id, const QUrl &directory);
+  Q_INVOKABLE void removeLibraryLocation(const QString &id, const QString &directory);
+  Q_INVOKABLE void resetLibraryLocations(const QString &id);
   explicit GameDetectionService(QObject *parent = nullptr);
   ~GameDetectionService() override;
   void start();
   void stop();
+  void setAudioApplicationRegistry(AudioApplicationRegistry *registry);
   bool isGameRunning() const { return m_currentGamePid > 0; }
   // Process readiness only: the portal still owns actual window selection.
   bool isGamePayloadReady() const;
@@ -88,6 +101,7 @@ signals:
   void gameFilterTextChanged();
   void showDefaultExclusionsChanged();
   void tokenGamesChanged();
+  void gameLibrariesChanged();
 
 private:
   friend class GameDetectionServiceTest;
@@ -95,6 +109,10 @@ private:
   friend class ApplicationAuthorizePromptTest;
   friend class ::RecordingManagerTest;
   void poll();
+  void queueLibraryRefresh();
+  void updateLibraryWatches(const QStringList &paths);
+  void refreshForNewCandidates(const ProcessCensus::Snapshot &previous,
+                               bool requestRefresh = true);
   void apply(const ProcessCensus::Snapshot &snapshot);
   // Values must outlive synchronous slots that rebuild the instance list.
   void updateCurrentGame(QString name, qint64 pid, QString key = {});
@@ -109,10 +127,26 @@ private:
     QList<LauncherGame> catalogue;
     QSet<QString> applicationExecutables;
     bool catalogueUpdated = false;
+    QVariantList libraryStatus;
+    unsigned libraryGeneration = 0;
+    QStringList libraryWatchPaths;
+    QVariantList audioStreams;
+    quint64 audioRevision = 0;
   };
+  void applyScanResult(ScanResult result);
   std::future<ScanResult> m_scan;
-  unsigned m_scanCount = 0;
-  std::future<QVariantList> m_audioScan;
+  QFileSystemWatcher m_libraryWatcher;
+  QTimer m_libraryFallback, m_libraryDebounce, m_candidateRefresh;
+  QElapsedTimer m_libraryRefreshClock;
+  QSet<QStringList> m_seenLibraryCandidates;
+  QVariantMap m_libraryPreferences;
+  QVariantList m_libraryStatus;
+  bool m_libraryRefresh = true, m_libraryScanning = false;
+  unsigned m_libraryGeneration = 0;
+  void saveLibraryPreferences(const QString &id, const QVariantMap &preference);
+  AudioApplicationRegistry *m_audioRegistry = nullptr;
+  QVariantList m_audioMetadata;
+  quint64 m_audioRevision = 0;
   QVariantList m_audioStreams;
   ProcessCensus::Snapshot m_processes;
   QList<LauncherGame> m_catalogue;

@@ -3,6 +3,7 @@
 
 #include "ApplicationAudioIdentity.h"
 #include <QMap>
+#include <QVariantMap>
 #include <pipewire/keys.h>
 #include <spa/utils/dict.h>
 
@@ -64,5 +65,21 @@ inline AudioLookupProperties gameAudioLookupProperties(
       result.values[QString::fromUtf8(key)] = client.get(key);
   }
   return result;
+}
+
+// Plain presentation/identity metadata only. Process ownership must be
+// evaluated against the current census, not cached with PipeWire properties.
+inline QVariantMap audioApplicationRow(const AudioLookupProperties &props, uint32_t id) {
+  const auto binary = props.get(PW_KEY_APP_PROCESS_BINARY);
+  const auto appName = props.get(PW_KEY_APP_NAME);
+  const auto nodeName = props.get(PW_KEY_NODE_NAME);
+  const auto display = !binary.isEmpty() ? binary : !appName.isEmpty() ? appName : nodeName;
+  if (display.isEmpty())
+    return {};
+  return {{"name", display}, {"binary", binary}, {"applicationName", appName},
+          {"nodeId", id}, {"nodeName", nodeName},
+          {"serial", props.get(PW_KEY_OBJECT_SERIAL)},
+          {"pid", props.get(PW_KEY_APP_PROCESS_ID)},
+          {"applicationId", props.get(PW_KEY_APP_ID)}};
 }
 } // namespace TrophyBackend::detail

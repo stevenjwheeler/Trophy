@@ -36,6 +36,7 @@ class NotificationService;
 class AudioMixer;
 class HardwareInfo;
 class AudioDeviceEnumerator;
+class AudioApplicationRegistry;
 class SystemTrayManager;
 class AutostartManager;
 class ReplayManager;
@@ -202,6 +203,7 @@ private:
   std::unique_ptr<StorageManager> m_storageManager;
   std::unique_ptr<RecordingLibrary> m_recordingLibrary;
   std::unique_ptr<ActivityFeed> m_activityFeed;
+  std::unique_ptr<AudioApplicationRegistry> m_audioApplicationRegistry;
   std::unique_ptr<GameDetectionService> m_gameDetector;
   std::unique_ptr<NotificationService> m_notificationService;
   std::unique_ptr<HardwareInfo> m_hardwareInfo;

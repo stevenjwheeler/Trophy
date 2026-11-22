@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "DetectionFixture.h"
 #include "audio/PipeWireAudioSource.h"
+#include "audio/AudioApplicationRegistry.h"
+#include "audio/AudioDeviceEnumerator.h"
 #include "audio/AudioMixer.h"
 #include "capture/IVideoCaptureSource.h"
 #include "core/RecordingManager.h"
@@ -19,6 +21,8 @@
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QSignalSpy>
+#include <QScopeGuard>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -43,6 +47,12 @@ public:
 };
 
 namespace TrophyBackend {
+class AudioApplicationRegistryTest : public ::testing::Test {
+protected:
+  static unsigned attempts(const AudioApplicationRegistry &registry) {
+    return registry.connectionAttempts();
+  }
+};
 struct RecordingEngineTestAccess {
   static void prepareAudioOnly(RecordingEngine &engine, uint32_t node, uint32_t pid,
                                GenericAudioTestCapture *&capture) {
@@ -237,7 +247,221 @@ struct PlaybackClient {
     EXPECT_GE(pw_stream_update_properties(stream->stream, &props), 0);
     pw_thread_loop_unlock(loop);
   }
+  void updateClient(const spa_dict &props) {
+    pw_thread_loop_lock(loop);
+    EXPECT_GE(pw_client_update_properties(pw_core_get_client(core), &props), 0);
+    pw_thread_loop_unlock(loop);
+  }
 };
+
+QVariantMap cachedNode(const AudioApplicationRegistry &registry, const QString &name) {
+  for (const auto &value : registry.applications())
+    if (value.toMap().value("nodeName").toString() == name)
+      return value.toMap();
+  return {};
+}
+
+TEST_F(AudioApplicationRegistryTest, SharedConsumersReceiveChangesWithoutPeriodicConnections) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-shared-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  AudioApplicationRegistry registry;
+  registry.start();
+  ASSERT_TRUE(waitFor([&] { return registry.available(); }));
+  AudioDeviceEnumerator picker;
+  picker.setApplicationRegistry(&registry);
+  GameDetectionService detector;
+  detector.setAudioApplicationRegistry(&registry);
+  PlaybackClient playback;
+  auto *stream = playback.add(0.1f, "registry-shared-node", "registry-shared-binary");
+  ASSERT_TRUE(waitFor([&] {
+    return cachedNode(registry, "registry-shared-node").value("binary") == "registry-shared-binary"
+        && picker.audioApps() == registry.applications();
+  }));
+  const auto connections = attempts(registry);
+  QSignalSpy changes(&registry, &AudioApplicationRegistry::applicationsChanged);
+  QSignalSpy pickerChanges(&picker, &AudioDeviceEnumerator::audioAppsChanged);
+  for (int i = 0; i < 100; ++i)
+    picker.refreshAudioApps(); // Reads the cache, not a registry round trip.
+  QTest::qWait(1200);
+  EXPECT_EQ(attempts(registry), connections);
+  EXPECT_EQ(connections, 1u);
+  EXPECT_EQ(changes.count(), 0);
+  EXPECT_EQ(pickerChanges.count(), 0);
+  const spa_dict_item items[] = {{PW_KEY_APP_PROCESS_BINARY, "registry-updated-binary"}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  playback.update(stream, props);
+  ASSERT_TRUE(waitFor([&] {
+    return cachedNode(registry, "registry-shared-node").value("binary") == "registry-updated-binary"
+        && picker.audioApps() == registry.applications();
+  }));
+  EXPECT_GT(changes.count(), 0);
+  EXPECT_EQ(attempts(registry), connections);
+  playback.remove(stream);
+  ASSERT_TRUE(waitFor([&] {
+    return cachedNode(registry, "registry-shared-node").isEmpty()
+        && picker.audioApps() == registry.applications();
+  }));
+  registry.stop(); // Also exercises wakeup of an idle blocking native loop.
+  EXPECT_TRUE(picker.audioApps().isEmpty());
+}
+
+TEST_F(AudioApplicationRegistryTest, CurrentClientUpdatesFillOnlyNonContradictoryNodeIdentity) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-client-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  AudioApplicationRegistry registry;
+  registry.start();
+  PlaybackClient playback;
+  auto *stream = playback.add(0.1f, "registry-client-node", "initial-node-binary");
+  const spa_dict_item blankItems[] = {{PW_KEY_APP_PROCESS_BINARY, ""},
+                                     {PW_KEY_APP_PROCESS_ID, ""}, {PW_KEY_APP_ID, ""}};
+  const spa_dict blank = SPA_DICT_INIT_ARRAY(blankItems);
+  playback.update(stream, blank);
+  const spa_dict_item clientItems[] = {{PW_KEY_APP_PROCESS_BINARY, "registry-client-binary"},
+                                      {PW_KEY_APP_ID, "org.trophy.RegistryClient"}};
+  const spa_dict client = SPA_DICT_INIT_ARRAY(clientItems);
+  playback.updateClient(client);
+  ASSERT_TRUE(waitFor([&] {
+    const auto row = cachedNode(registry, "registry-client-node");
+    return row.value("binary") == "registry-client-binary"
+        && row.value("applicationId") == "org.trophy.RegistryClient";
+  }));
+  const spa_dict_item conflictItems[] = {{PW_KEY_APP_PROCESS_ID, "invalid-pid"},
+                                        {PW_KEY_APP_PROCESS_BINARY, ""}};
+  const spa_dict conflict = SPA_DICT_INIT_ARRAY(conflictItems);
+  playback.update(stream, conflict);
+  ASSERT_TRUE(waitFor([&] {
+    const auto row = cachedNode(registry, "registry-client-node");
+    return row.value("pid") == "invalid-pid" && row.value("binary").toString().isEmpty()
+        && row.value("applicationId").toString().isEmpty();
+  }));
+  EXPECT_EQ(attempts(registry), 1u);
+}
+
+TEST_F(AudioApplicationRegistryTest, GameAssociationUpdatesWithoutNewStreamMetadata) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-process-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  QProcess child;
+  child.start("/usr/bin/sleep", {"30"});
+  ASSERT_TRUE(child.waitForStarted());
+  const auto cleanup = qScopeGuard([&] {
+    if (child.state() != QProcess::NotRunning) {
+      child.kill();
+      child.waitForFinished();
+    }
+  });
+  const auto pid = child.processId();
+  const auto process = ProcessCensus::inspect(pid);
+  ASSERT_EQ(process.pid, pid);
+  AudioApplicationRegistry registry;
+  registry.start();
+  PlaybackClient playback;
+  auto *stream = playback.add(0.1f, "registry-process-node", "sleep");
+  const auto pidText = QByteArray::number(pid);
+  const spa_dict_item items[] = {{PW_KEY_APP_PROCESS_ID, pidText.constData()}};
+  const spa_dict props = SPA_DICT_INIT_ARRAY(items);
+  playback.update(stream, props);
+  ASSERT_TRUE(waitFor([&] {
+    return cachedNode(registry, "registry-process-node").value("pid").toString() ==
+           QString::number(pid);
+  }));
+  QSignalSpy changes(&registry, &AudioApplicationRegistry::applicationsChanged);
+  GameDetectionService detector;
+  detector.addCustomGame("exe:" + process.executable, "Registry Process Game", false);
+  detector.setAudioApplicationRegistry(&registry);
+  detector.start();
+  ASSERT_TRUE(waitFor([&] {
+    for (const auto &value : detector.instances()) {
+      const auto row = value.toMap();
+      if (row.value("pid").toLongLong() == pid &&
+          row.value("audioState").toString() == "associated")
+        return true;
+    }
+    return false;
+  }));
+  EXPECT_EQ(changes.count(), 0); // Process ownership changed, not the stream.
+  child.kill();
+  ASSERT_TRUE(child.waitForFinished());
+  ASSERT_TRUE(waitFor([&] {
+    for (const auto &value : detector.instances())
+      if (value.toMap().value("pid").toLongLong() == pid)
+        return false;
+    return true;
+  }));
+  EXPECT_FALSE(cachedNode(registry, "registry-process-node").isEmpty());
+  EXPECT_EQ(changes.count(), 0);
+  EXPECT_EQ(attempts(registry), 1u);
+}
+
+TEST_F(AudioApplicationRegistryTest, ServiceRestartClearsStaleNodesAndRebuildsCache) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-reconnect-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  AudioApplicationRegistry registry;
+  registry.start();
+  auto playback = std::make_unique<PlaybackClient>();
+  playback->add(0.1f, "registry-old-service-node", "registry-old-service-binary");
+  ASSERT_TRUE(waitFor([&] { return !cachedNode(registry, "registry-old-service-node").isEmpty(); }));
+  bool stopped = false;
+  const auto restore = qScopeGuard([&] { if (stopped) privateServices("start"); });
+  ASSERT_TRUE(privateServices("stop"));
+  stopped = true;
+  ASSERT_TRUE(waitFor([&] { return !registry.available() && registry.applications().isEmpty(); }));
+  playback.reset();
+  ASSERT_TRUE(privateServices("start"));
+  stopped = false;
+  playback = std::make_unique<PlaybackClient>();
+  playback->add(0.1f, "registry-new-service-node", "registry-new-service-binary");
+  ASSERT_TRUE(waitFor([&] {
+    return registry.available() && !cachedNode(registry, "registry-new-service-node").isEmpty();
+  }));
+  EXPECT_TRUE(cachedNode(registry, "registry-old-service-node").isEmpty());
+  EXPECT_GE(attempts(registry), 2u);
+  registry.stop();
+  QTest::qWait(100);
+  EXPECT_FALSE(registry.available());
+  EXPECT_TRUE(registry.applications().isEmpty());
+}
+
+TEST_F(AudioApplicationRegistryTest, StopInterruptsUnavailableServiceRetryAndCanRestart) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-stop-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  bool stopped = false;
+  const auto restore = qScopeGuard([&] { if (stopped) privateServices("start"); });
+  ASSERT_TRUE(privateServices("stop"));
+  stopped = true;
+  AudioApplicationRegistry registry;
+  registry.start();
+  ASSERT_TRUE(waitFor([&] { return attempts(registry) > 0; }));
+  QElapsedTimer elapsed;
+  elapsed.start();
+  registry.stop();
+  EXPECT_LT(elapsed.elapsed(), 500);
+  EXPECT_FALSE(registry.available());
+  EXPECT_TRUE(registry.applications().isEmpty());
+  ASSERT_TRUE(privateServices("start"));
+  stopped = false;
+  registry.start();
+  ASSERT_TRUE(waitFor([&] { return registry.available(); }));
+}
 
 TEST(AppAudioGroupTest, GenericPortalManagersFindWwiseByPinnedGamePid) {
   if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")

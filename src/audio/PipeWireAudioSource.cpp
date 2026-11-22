@@ -752,31 +752,12 @@ struct InfoMatchData {
 };
 
 static void infoMatchGather(const detail::AudioLookupProperties &props, uint32_t id,
-                             InfoMatchRequest *req) {
+                              InfoMatchRequest *req) {
   const QString binary = props.get(PW_KEY_APP_PROCESS_BINARY);
   const QString appName = props.get(PW_KEY_APP_NAME);
-  const QString nodeName = props.get(PW_KEY_NODE_NAME);
-  // Display prefers the binary: it is the stable, recognizable product
-  // name ("Discord") while node names are engine-internal
-  // ("WEBRTC VoiceEngine"). The voice setting stores the binary, so the
-  // dropdown value and the matcher speak the same language.
-  QString display;
-  if (!binary.isEmpty())
-    display = binary;
-  else if (!appName.isEmpty())
-    display = appName;
-  else
-    display = nodeName;
-  if (display.isEmpty())
+  auto app = detail::audioApplicationRow(props, id);
+  if (app.isEmpty())
     return;
-  QVariantMap app;
-  app["name"] = display;
-  app["binary"] = binary;
-  app["nodeId"] = id;
-  app["nodeName"] = nodeName;
-  app["serial"] = props.get(PW_KEY_OBJECT_SERIAL);
-  app["pid"] = props.get(PW_KEY_APP_PROCESS_ID);
-  app["applicationId"] = props.get(PW_KEY_APP_ID);
   app["gameInstance"] = ProcessGames::associate(
       detail::audioProcessId(props.get(PW_KEY_APP_PROCESS_ID)), binary,
       appName);
@@ -1115,11 +1096,6 @@ QVariantList PipeWireAudioSource::enumerateAudioApps() {
   InfoMatchRequest req;
   req.gatherAll = true;
   runInfoMatch(req);
-  for (const QVariant &app : req.apps) {
-    const QVariantMap m = app.toMap();
-    qDebug() << "Audio app found:" << m.value("name").toString()
-             << "-> ID:" << m.value("nodeId").toUInt();
-  }
   return req.apps;
 }
 
