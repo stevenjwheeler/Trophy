@@ -6,8 +6,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <tuple>
 
 #include "core/StorageManager.h"
 #include "library/RecordingAnnotations.h"
@@ -78,6 +81,95 @@ TEST_F(FormatSizeTest, FiftyGB) {
   qint64 fiftyGB = 50LL * 1024 * 1024 * 1024;
   EXPECT_EQ(StorageManager::formatSize(fiftyGB), "50.00 GB");
 }
+
+// The same path helper serves full recordings and replay clips. These fixtures
+// create only private files; they never start capture or construct a disk watcher.
+class RecordingPathTest : public ::testing::TestWithParam<
+    std::tuple<std::tuple<QString, QString>, QString>> {};
+
+TEST_P(RecordingPathTest, SanitizesGameNameAndKeepsMkvInsideConfiguredDirectory) {
+  const auto [names, suffix] = GetParam();
+  const auto [game, expected] = names;
+  QTemporaryDir root;
+  ASSERT_TRUE(root.isValid());
+  const auto directory = root.filePath("recordings with spaces");
+  ASSERT_TRUE(QDir().mkpath(directory));
+  const auto path = StorageManager::newRecordingPath(directory, game, suffix);
+  const QFileInfo file(path);
+  EXPECT_EQ(file.absolutePath(), directory);
+  const QRegularExpression namePattern(
+      "^" + QRegularExpression::escape(expected) +
+      "_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}" +
+      QRegularExpression::escape(suffix) + "\\.mkv$");
+  EXPECT_TRUE(namePattern.match(file.fileName()).hasMatch())
+      << file.fileName().toStdString();
+  EXPECT_EQ(file.suffix(), "mkv");
+  EXPECT_FALSE(file.exists()); // Choosing a path does not create/truncate a file.
+  EXPECT_TRUE(QDir(directory).entryList(QDir::Files | QDir::Hidden).isEmpty());
+}
+
+INSTANTIATE_TEST_SUITE_P(FullRecordingsAndReplayClips, RecordingPathTest,
+    ::testing::Combine(::testing::Values(
+        std::make_tuple(QString(), QString("Recording")),
+        std::make_tuple(QString("   "), QString("Game")),
+        std::make_tuple(QString("._- /\\:*?<>|\""), QString("Game")),
+        std::make_tuple(QString("../../Other/Folder"), QString("Other_Folder")),
+        std::make_tuple(QString("Game\\..\\Outside"), QString("Game_Outside")),
+        std::make_tuple(QString("Baldur's Gate 3"), QString("Baldur_s_Gate_3")),
+        std::make_tuple(QString("__--Game__Name---"), QString("Game_Name")),
+        std::make_tuple(QString("Half-Life_2"), QString("Half-Life_2")),
+        std::make_tuple(QString("Game.mkv"), QString("Game_mkv")),
+        std::make_tuple(QString::fromUtf8("游戏"), QString("Game")),
+        std::make_tuple(QString::fromUtf8("Pokémon"), QString("Pok_mon")),
+        std::make_tuple(QString(".hidden"), QString("hidden")),
+        std::make_tuple(QString("Game\n\tTitle"), QString("Game_Title")),
+        std::make_tuple(QString("c:/Games/Title.exe"), QString("c_Games_Title_exe"))),
+        ::testing::Values(QString(), QString("_clip"))));
+
+class RecordingPathCollisionTest : public ::testing::TestWithParam<
+    std::tuple<QString, bool, int>> {};
+
+TEST_P(RecordingPathCollisionTest, SkipsRecordingsAndPartFilesWithoutTouchingExistingContents) {
+  const auto [suffix, baseIsPart, layout] = GetParam();
+  // Timestamp precision is one second. Retry only if that clock tick changes
+  // during fixture setup/the call, never merely because an assertion failed.
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    QTemporaryDir root;
+    ASSERT_TRUE(root.isValid());
+    const auto stamp = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss");
+    const auto stem = "CollisionGame_" + stamp + suffix;
+    QStringList occupied{
+        root.filePath(stem + (baseIsPart ? ".mkv.part" : ".mkv"))};
+    if (layout == 1) {
+      occupied << root.filePath(stem + "_2.mkv.part") << root.filePath(stem + "_3.mkv");
+    } else if (layout == 2) {
+      occupied << root.filePath(stem + "_3.mkv"); // Fill the first gap, not max+1.
+    }
+    for (const auto &path : occupied) {
+      QFile existing(path);
+      ASSERT_TRUE(existing.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+      ASSERT_EQ(existing.write("preserved footage"), 17);
+    }
+    const auto path = StorageManager::newRecordingPath(root.path(), "CollisionGame", suffix);
+    if (stamp != QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss"))
+      continue;
+    const auto expected = root.filePath(stem + (layout == 1 ? "_4.mkv" : "_2.mkv"));
+    EXPECT_EQ(path, expected);
+    EXPECT_FALSE(QFileInfo::exists(path));
+    EXPECT_EQ(QDir(root.path()).entryList(QDir::Files).size(), occupied.size());
+    for (const auto &old : occupied) {
+      QFile existing(old);
+      ASSERT_TRUE(existing.open(QIODevice::ReadOnly));
+      EXPECT_EQ(existing.readAll(), "preserved footage");
+    }
+    return;
+  }
+  FAIL() << "Wall-clock second changed during all five short collision fixtures";
+}
+
+INSTANTIATE_TEST_SUITE_P(FullRecordingsAndReplayClips, RecordingPathCollisionTest,
+    ::testing::Combine(::testing::Values(QString(), QString("_clip")),
+                       ::testing::Bool(), ::testing::Values(0, 1, 2)));
 
 // --- StorageManager instance tests ---
 

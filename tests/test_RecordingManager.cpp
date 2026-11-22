@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
@@ -113,6 +114,29 @@ TEST_F(RecordingManagerTest, RepeatedStartKeepsOneDemandAndOneReservedPath) {
   EXPECT_TRUE(engine->hasDemand());
   EXPECT_FALSE(QFileInfo::exists(path));
   manager.stopRecording(); // Cancel before queued producer startup.
+  EXPECT_FALSE(engine->hasDemand());
+}
+
+TEST_F(RecordingManagerTest, PreparedOutputUsesSafeMkvPathBeforeAnyCaptureOrFileCreation) {
+  SettingsManager settings;
+  settings.setRecordingsPath(root.path());
+  StorageManager storage(root.path());
+  auto engine = std::make_shared<RecordingEngine>();
+  RecordingManager manager(engine);
+  manager.setSettingsManager(&settings);
+  manager.setStorageManager(&storage);
+  QSignalSpy prepared(&manager, &RecordingManager::recordingPathPrepared);
+  manager.startRecording("../../Outside:Title\\name.mp4");
+  ASSERT_EQ(prepared.size(), 1);
+  const auto path = manager.currentFilePath();
+  EXPECT_EQ(prepared.first()[0].toString(), path);
+  EXPECT_EQ(QFileInfo(path).absolutePath(), root.path());
+  EXPECT_TRUE(QRegularExpression(
+      "^Outside_Title_name_mp4_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\\.mkv$")
+      .match(QFileInfo(path).fileName()).hasMatch());
+  EXPECT_FALSE(QFileInfo::exists(path));
+  EXPECT_EQ(engine->state(), RecordingEngine::State::Idle); // Queued startup has not run.
+  manager.stopRecording(); // Retire demand before any real capture can start.
   EXPECT_FALSE(engine->hasDemand());
 }
 
