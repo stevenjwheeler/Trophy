@@ -29,7 +29,7 @@ bool alwaysExcluded(const QString &payload) {
          name.startsWith("pressure-vessel-") ||
          name.endsWith("-srt-launcher-service") ||
          name.endsWith("-srt-launch-client") ||
-         prerequisiteInstallerNames().contains(name) ||
+         gameSupportHelper(name) ||
          QStringList{"steam",
                      "heroic",
                      "lutris",

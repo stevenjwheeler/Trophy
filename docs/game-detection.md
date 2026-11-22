@@ -25,6 +25,25 @@ There are five domain components:
   local launchers into one catalogue. Steam discovery lives here alongside
   Heroic, Legendary, Nile, Lutris and Faugus; process identification does not enumerate
   launcher files.
+  The Games page prelists non-runtime catalogue entries. Running games lead in
+  Now Playing; inactive games group by local launcher provenance, with ready
+  rows first and denied rows last. Explicit custom rules retain
+  their own group; missing catalogue metadata never deletes those rules.
+  Presentation keys and grouping do not enroll games or grant capture approval.
+  Prefix-free Windows metadata may expose an exact-executable block veto, but
+  cannot inherit a prefix-scoped restore token. Known prefix-scoped identities
+  retain independent rows and approvals.
+  Steam support tools are identified by exact known Steam IDs or explicit
+  `toolmanifest.vdf` compatibility-layer roles, never title substrings. They
+  remain in the worker catalogue to exclude their own processes, are omitted
+  from launcher game counts, and appear only with Default Exclusions enabled.
+  Prerequisite installers and Xalia also use the read-only Excluded state; their
+  internal detection vetoes cannot be overridden by row controls.
+  Collapsed sections retain one invisible representative in the filter model
+  so their QML headings survive without instantiating every hidden row. Counts
+  reflect all search/default-filter matches, independently of collapse state.
+  The legacy desktop-app default veto list is retired through a versioned load
+  migration; recorded custom definitions and later explicit Deny edits survive.
 * `src/detection/GameLaunchContext.{h,cpp}` attests a private runtime targeting
   an already identified payload and checks installation, prefix and ancestry
   boundaries. This reusable mechanism applies to ordinary catalogue games as

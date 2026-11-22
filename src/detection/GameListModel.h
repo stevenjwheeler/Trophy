@@ -12,6 +12,7 @@
 #include <QSortFilterProxyModel>
 #include <QString>
 #include <QUrl>
+#include <QVariantMap>
 #include "DefaultAppCatalog.h"
 #include "GameIconSource.h"
 
@@ -31,8 +32,10 @@ struct GameListEntry {
   bool hasToken = false; // portal restore token held: silent capture, no
                          // prompt. This is the only "approved" state.
   QString tokenKey;      // exact settings-map key for withdrawal
-  QString section;      // list grouping: Now playing / Ready to capture
-                        // / Apps
+  QString section;      // launcher, Custom Games or Default Exclusions
+  QString library;      // presentation provenance only; never capture approval
+  QString blockKey;     // exact executable veto when metadata lacks a Wine prefix
+  bool supportTool = false; // runtime, installer or support helper, never a game
   bool operator==(const GameListEntry &) const = default;
 };
 
@@ -59,6 +62,9 @@ public:
     SectionRole,
     IconSourceRole,
     IdentifiersRole,
+    LibraryRole,
+    BlockKeyRole,
+    SupportToolRole,
   };
   Q_ENUM(Roles)
 
@@ -123,6 +129,12 @@ public:
           return QStringList{app->key} + app->aliases;
       }
       return QStringList{};
+    case LibraryRole:
+      return e.library;
+    case BlockKeyRole:
+      return e.blockKey;
+    case SupportToolRole:
+      return e.supportTool;
     default:
       return {};
     }
@@ -142,6 +154,9 @@ public:
         {SectionRole, "section"},
         {IconSourceRole, "iconSource"},
         {IdentifiersRole, "identifiers"},
+        {LibraryRole, "library"},
+        {BlockKeyRole, "blockKey"},
+        {SupportToolRole, "supportTool"},
     };
   }
 
@@ -159,7 +174,11 @@ class GameListFilterModel : public QSortFilterProxyModel {
   Q_PROPERTY(QString filterText READ filterText WRITE setFilterText NOTIFY
                  filterTextChanged)
   Q_PROPERTY(bool showDefaultEntries READ showDefaultEntries WRITE
-                 setShowDefaultEntries NOTIFY showDefaultEntriesChanged)
+                  setShowDefaultEntries NOTIFY showDefaultEntriesChanged)
+  Q_PROPERTY(QStringList collapsedSections READ collapsedSections WRITE setCollapsedSections
+                 NOTIFY collapsedSectionsChanged)
+  Q_PROPERTY(QVariantMap sectionCounts READ sectionCounts NOTIFY sectionCountsChanged)
+  Q_PROPERTY(int matchingGameCount READ matchingGameCount NOTIFY sectionCountsChanged)
 
 public:
   explicit GameListFilterModel(QObject *parent = nullptr)
@@ -167,18 +186,71 @@ public:
     setFilterCaseSensitivity(Qt::CaseInsensitive);
   }
 
+  void setSourceModel(QAbstractItemModel *model) override {
+    for (const auto &connection : m_sourceConnections)
+      disconnect(connection);
+    m_sourceConnections.clear();
+    m_matchesDirty = true;
+    QSortFilterProxyModel::setSourceModel(model);
+    if (model) {
+      const auto refresh = [this] {
+        m_matchesDirty = true;
+        invalidateFilter();
+        emit sectionCountsChanged();
+      };
+      m_sourceConnections = {
+          connect(model, &QAbstractItemModel::dataChanged, this, refresh),
+          connect(model, &QAbstractItemModel::modelReset, this, refresh),
+          connect(model, &QAbstractItemModel::rowsInserted, this, refresh),
+          connect(model, &QAbstractItemModel::rowsRemoved, this, refresh),
+          connect(model, &QAbstractItemModel::rowsMoved, this, refresh),
+          connect(model, &QAbstractItemModel::layoutChanged, this, refresh)};
+    }
+    emit sectionCountsChanged();
+  }
+
   QString filterText() const { return m_text; }
+  Q_INVOKABLE int sectionCount(const QString &section) const {
+    ensureMatches();
+    return m_sectionCounts.value(section).toInt();
+  }
+  QVariantMap sectionCounts() const {
+    ensureMatches();
+    return m_sectionCounts;
+  }
+  int matchingGameCount() const {
+    ensureMatches();
+    return m_matchingGameCount;
+  }
+  QStringList collapsedSections() const { return m_collapsedSections; }
+  void setCollapsedSections(const QStringList &sections) {
+    if (sections == m_collapsedSections)
+      return;
+    m_collapsedSections = sections;
+    invalidateFilter();
+    emit collapsedSectionsChanged();
+  }
+  Q_INVOKABLE void toggleSection(const QString &section) {
+    auto sections = m_collapsedSections;
+    if (!sections.removeAll(section))
+      sections.append(section);
+    setCollapsedSections(sections);
+  }
   void setFilterText(const QString &text) {
     if (m_text == text)
       return;
     m_text = text;
+    m_matchesDirty = true;
     invalidateFilter();
     emit filterTextChanged();
+    emit sectionCountsChanged();
   }
 
 signals:
   void filterTextChanged();
   void showDefaultEntriesChanged();
+  void collapsedSectionsChanged();
+  void sectionCountsChanged();
 
 public:
   bool showDefaultEntries() const { return m_showDefault; }
@@ -186,12 +258,26 @@ public:
     if (m_showDefault == show)
       return;
     m_showDefault = show;
+    m_matchesDirty = true;
     invalidateFilter();
     emit showDefaultEntriesChanged();
+    emit sectionCountsChanged();
   }
 
 protected:
   bool filterAcceptsRow(int row, const QModelIndex &parent) const override {
+    if (!matchesRow(row, parent))
+      return false;
+    const auto section = sourceModel()->index(row, 0, parent)
+                             .data(GameListModel::SectionRole).toString();
+    if (!m_collapsedSections.contains(section))
+      return true;
+    // Keep one invisible representative so ListView retains the heading.
+    // Filtering out the other rows preserves virtualization for large libraries.
+    ensureMatches();
+    return m_firstMatches.value(section, -1) == row;
+  }
+  bool matchesRow(int row, const QModelIndex &parent = {}) const {
     const QModelIndex idx = sourceModel()->index(row, 0, parent);
     if (!m_showDefault &&
         sourceModel()->data(idx, GameListModel::DefaultRole).toBool())
@@ -211,8 +297,34 @@ protected:
   }
 
 private:
+  void ensureMatches() const {
+    if (!m_matchesDirty)
+      return;
+    m_matchesDirty = false;
+    m_sectionCounts.clear();
+    m_firstMatches.clear();
+    m_matchingGameCount = 0;
+    if (!sourceModel())
+      return;
+    for (int row = 0; row < sourceModel()->rowCount(); ++row) {
+      if (!matchesRow(row))
+        continue;
+      const auto section = sourceModel()->index(row, 0)
+                               .data(GameListModel::SectionRole).toString();
+      if (!m_firstMatches.contains(section))
+        m_firstMatches.insert(section, row);
+      m_sectionCounts[section] = m_sectionCounts.value(section).toInt() + 1;
+      ++m_matchingGameCount;
+    }
+  }
   QString m_text;
   bool m_showDefault = true;
+  QStringList m_collapsedSections;
+  QList<QMetaObject::Connection> m_sourceConnections;
+  mutable bool m_matchesDirty = true;
+  mutable QVariantMap m_sectionCounts;
+  mutable QMap<QString, int> m_firstMatches;
+  mutable int m_matchingGameCount = 0;
 };
 
 } // namespace TrophyBackend

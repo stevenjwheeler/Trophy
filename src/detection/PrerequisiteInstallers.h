@@ -18,4 +18,9 @@ inline const QStringList &prerequisiteInstallerNames() {
   return names;
 }
 
+inline bool gameSupportHelper(const QString &normalizedBasename) {
+  return normalizedBasename == "xalia" || normalizedBasename == "vc_redist" ||
+         prerequisiteInstallerNames().contains(normalizedBasename);
+}
+
 } // namespace TrophyBackend

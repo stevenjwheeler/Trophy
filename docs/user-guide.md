@@ -14,6 +14,39 @@ fails, Trophy reports that save failure without stopping a healthy DVR buffer.
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+### Games and library entries
+
+The **Games** tab prelists usable installed games from supported local launcher
+libraries, grouped by launcher. **Custom Games** contains manually added rules
+and saved games without current launcher metadata. **Default Exclusions** stays
+hidden unless you enable its toggle. Search filters all groups.
+Click a group heading to collapse or expand it. Counts still include its
+matching games while collapsed. Running games appear in **Now Playing** at the
+top without row action buttons. Within each other group, approved games come
+first, unapproved games next and denied games last.
+Installed Proton versions, Steam Linux Runtimes, anti-cheat runtimes and Steamworks
+redistributables appear under Default Exclusions, not their launcher's game list.
+They show **Excluded** and cannot be enabled as games from this table.
+The prerequisite installers `dxsetup` and `vc_redist`, and the Xalia support
+helper, use the same read-only Excluded state rather than offering rule controls.
+Browsers, chat apps, editors and other general desktop applications are no longer
+seeded as default exclusions. Old saved defaults are cleaned up when settings
+load; recorded custom rules and new Deny choices are retained.
+
+Status stays on each row: **Waiting for launch** (unapproved and not running),
+**Waiting for approval** (running without saved approval), **Ready to capture**,
+**Active** (running with saved approval), or **Denied**. Finding a game in a
+library never grants recording permission. Use **Prompt / Deny** to control
+automatic capture policy and **Revoke** to remove saved capture approval.
+Hover these controls for an explanation; clicking them also shows a brief
+in-app notice. Revoke forgets Trophy's saved approval, not desktop-wide permission.
+Only custom entries without saved approval have **Remove**; revoke approval first
+if needed. Launcher entries and internal helpers have no Remove control.
+Hover a game name for its identity details.
+
+If a game is missing, start it and use **Games → Add Game**. Launcher metadata
+remains local and read-only. Trophy does not launch games or modify launcher files.
+
 ### Game library locations
 
 Open **Settings → Game Detection & Libraries → Game Libraries** to see Steam, Heroic, Legendary, Nile,

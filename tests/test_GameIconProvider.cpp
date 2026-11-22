@@ -830,7 +830,8 @@ QtObject {
   ASSERT_NE(label(prompt), nullptr);
   ASSERT_NE(label(block), nullptr);
   EXPECT_EQ(label(prompt)->property("text").toString(), "Prompt");
-  EXPECT_EQ(label(block)->property("text").toString(), "Block");
+  EXPECT_EQ(label(block)->property("text").toString(), "Deny");
+  EXPECT_EQ(label(prompt)->property("color").value<QColor>(), QColor("#fbbf24"));
   const QColor active = prompt->property("color").value<QColor>();
   EXPECT_GT(active.alpha(), 0);
   EXPECT_EQ(block->property("color").value<QColor>().alpha(), 0);
@@ -856,6 +857,233 @@ QtObject {
   for (const auto &warning : warnings)
     EXPECT_FALSE(warning.contains("ReferenceError") || warning.contains("TypeError"))
         << warning.toStdString();
+}
+
+TEST_F(GameIconTest, GamesTableAlignsColumnsAndPreservesApprovalAndRuleActions) {
+  GameListEntry ready, prompt, blocked;
+  ready.key = "steam_app_42";
+  ready.display = "Ready game";
+  ready.hasToken = true;
+  ready.tokenKey = "pinned-token-key";
+  ready.steamAppId = 42;
+  ready.section = "Custom Games";
+  prompt.key = "wine:/very/long/prefix/game.exe";
+  prompt.display = "Prompt game";
+  prompt.running = true;
+  prompt.section = "Custom Games";
+  blocked.key = blocked.display = "Blocked game";
+  blocked.listed = 2;
+  blocked.library = blocked.section = "Steam";
+  blocked.blockKey = "exe:/library-test/executable";
+  GameListModel model;
+  model.setEntries({ready, prompt, blocked});
+  GameListFilterModel filtered;
+  filtered.setSourceModel(&model);
+  QQmlEngine engine;
+  engine.addImageProvider("gameicon", new GameIconProvider({root()}, {}, "", {}));
+  QQmlComponent fake(&engine);
+  fake.setData(R"(import QtQml
+QtObject {
+  property var gamesModel
+  property string gameFilterText: ""
+  property bool showDefaultExclusions: false
+  property string withdrawnKey: ""
+  property bool resetModelOnWithdraw: false
+  property string forgottenKey: ""
+  property string deniedKey: ""
+  property var unblockedKeys: []
+  property var instances: []
+  property string themeMode: "amoled"
+  property string accentColor: "rose"
+  function removeRestoreToken(key) {
+    withdrawnKey = key
+    if (resetModelOnWithdraw) gamesModel = null
+  }
+  function forgetGame(key) { forgottenKey = key }
+  function moveToBlacklist(key) { deniedKey = key }
+  function unblockGame(key) { unblockedKeys = unblockedKeys.concat([key]) }
+})", QUrl());
+  std::unique_ptr<QObject> detector(fake.createWithInitialProperties({
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&filtered))}}));
+  ASSERT_NE(detector, nullptr);
+  engine.rootContext()->setContextProperty("gameDetector", detector.get());
+  engine.rootContext()->setContextProperty("settingsManager", detector.get());
+  QStringList warnings;
+  QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+      [&](const QList<QQmlError> &errors) {
+        for (const auto &error : errors) warnings.append(error.toString());
+      });
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr) << component.errorString().toStdString();
+  QSignalSpy policyNotices(object.get(), SIGNAL(policyNoticeRequested(QString,QString,QString)));
+  ASSERT_TRUE(policyNotices.isValid());
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(page, nullptr);
+  QQuickWindow window;
+  page->setParentItem(window.contentItem());
+  window.show();
+  auto items = [](QQuickItem *rootItem, const QString &name) {
+    QList<QQuickItem *> found;
+    std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+      if (item->objectName() == name) found.append(item);
+      for (auto *child : item->childItems()) visit(child);
+    };
+    visit(rootItem);
+    return found;
+  };
+  for (const QSize &size : {QSize(1113, 700), QSize(640, 650), QSize(1280, 800)}) {
+    window.resize(size);
+    page->setSize(size);
+    ASSERT_TRUE(waitUntil([&] { return items(page, "gameEntryStatus").size() == 3; }));
+    QTest::qWait(50);
+    auto *statusHeader = items(page, "gamesStatusColumnHeader").value(0);
+    auto *actionsHeader = items(page, "gamesActionsColumnHeader").value(0);
+    ASSERT_NE(statusHeader, nullptr);
+    ASSERT_NE(actionsHeader, nullptr);
+    for (auto *status : items(page, "gameEntryStatus"))
+      EXPECT_NEAR(status->mapToItem(page, QPointF()).x(),
+                  statusHeader->mapToItem(page, QPointF()).x(), 1);
+    for (auto *actions : items(page, "gameEntryActions")) {
+      EXPECT_NEAR(actions->mapToItem(page, QPointF()).x(),
+                  actionsHeader->mapToItem(page, QPointF()).x(), 1);
+      EXPECT_LE(actions->mapToItem(page, QPointF(actions->width(), 0)).x(), size.width());
+    }
+    for (auto *status : items(page, "gameEntryStatusText"))
+      EXPECT_FALSE(status->property("truncated").toBool());
+    for (auto *withdraw : items(page, "withdrawGameApprovalButton")) {
+      if (withdraw->isVisible())
+        EXPECT_NEAR(withdraw->width(), page->property("actionsColumnWidth").toInt(), 1);
+    }
+  }
+  const auto statuses = items(page, "gameEntryStatusText");
+  ASSERT_EQ(statuses.size(), 3);
+  EXPECT_EQ(statuses[0]->property("text").toString(), "Ready to capture");
+  EXPECT_EQ(statuses[1]->property("text").toString(), "Waiting for approval");
+  EXPECT_EQ(statuses[1]->property("color").value<QColor>(), QColor("#fbbf24"));
+  EXPECT_NE(statuses[0]->property("color").value<QColor>(),
+            statuses[1]->property("color").value<QColor>());
+  EXPECT_EQ(statuses[2]->property("text").toString(), "Denied");
+  QStringList headings;
+  for (auto *heading : items(page, "gamesSectionHeading"))
+    headings.append(heading->property("text").toString());
+  EXPECT_TRUE(headings.contains("Steam (1)"));
+  EXPECT_TRUE(headings.contains("Custom Games (2)"));
+  ready.running = true;
+  model.setEntries({ready, prompt, blocked});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(statuses[0]->property("text").toString(), "Active");
+  EXPECT_FALSE(items(page, "withdrawGameApprovalButton").value(0)->isVisible());
+  prompt.running = false;
+  model.setEntries({ready, prompt, blocked});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(statuses[1]->property("text").toString(), "Waiting for launch");
+  ready.running = false;
+  model.setEntries({ready, prompt, blocked});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(statuses[0]->property("text").toString(), "Ready to capture");
+  for (auto *subtitle : items(page, "gameEntrySubtitle"))
+    EXPECT_FALSE(subtitle->isVisible());
+  const auto names = items(page, "gameEntryName");
+  ASSERT_EQ(names.size(), 3);
+  EXPECT_TRUE(QQmlProperty(names[1], "ToolTip.text", qmlContext(names[1])).read()
+                  .toString().contains(prompt.key));
+  auto *withdraw = items(page, "withdrawGameApprovalButton").value(0);
+  ASSERT_NE(withdraw, nullptr);
+  ASSERT_TRUE(withdraw->isVisible());
+  ASSERT_TRUE(QMetaObject::invokeMethod(withdraw, "clicked"));
+  EXPECT_EQ(detector->property("withdrawnKey").toString(), ready.tokenKey);
+  ASSERT_EQ(policyNotices.size(), 1);
+  EXPECT_TRUE(policyNotices.last()[1].toString().contains("Approval revoked"));
+  EXPECT_TRUE(policyNotices.last()[2].toString().contains("Saved capture approval was removed"));
+  const auto forget = items(page, "forgetGameButton");
+  ASSERT_EQ(forget.size(), 3);
+  EXPECT_FALSE(forget[0]->isVisible());
+  EXPECT_FALSE(forget[2]->isVisible()); // Discovered library entries have no Remove.
+  ASSERT_TRUE(QMetaObject::invokeMethod(forget[1], "clicked"));
+  EXPECT_EQ(detector->property("forgottenKey").toString(), prompt.key);
+  const auto denyPoles = items(page, "blockPole");
+  ASSERT_EQ(denyPoles.size(), 3);
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      denyPoles[2]->mapToScene(QPointF(denyPoles[2]->width() / 2,
+                                     denyPoles[2]->height() / 2)).toPoint());
+  EXPECT_EQ(detector->property("deniedKey").toString(), blocked.blockKey);
+  ASSERT_EQ(policyNotices.size(), 2);
+  EXPECT_TRUE(policyNotices.last()[1].toString().startsWith("Deny"));
+  EXPECT_TRUE(policyNotices.last()[2].toString().contains("files are unchanged"));
+  const auto promptPoles = items(page, "promptPole");
+  ASSERT_EQ(promptPoles.size(), 3);
+  QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+      promptPoles[2]->mapToScene(QPointF(promptPoles[2]->width() / 2,
+                                       promptPoles[2]->height() / 2)).toPoint());
+  ASSERT_EQ(policyNotices.size(), 3);
+  EXPECT_TRUE(policyNotices.last()[1].toString().startsWith("Prompt"));
+  EXPECT_TRUE(policyNotices.last()[2].toString().contains("does not start recording"));
+  blocked.supportTool = true;
+  blocked.hasToken = true;
+  blocked.tokenKey = "old-helper-token";
+  model.setEntries({ready, prompt, blocked});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(statuses[2]->property("text").toString(), "Excluded");
+  EXPECT_FALSE(denyPoles[2]->isVisible());
+  EXPECT_FALSE(forget[2]->isVisible());
+  EXPECT_FALSE(items(page, "withdrawGameApprovalButton").value(2)->isVisible());
+  if (!qEnvironmentVariableIsEmpty("TROPHY_GAMES_UI_SCREENSHOT"))
+    window.grabWindow().save(qEnvironmentVariable("TROPHY_GAMES_UI_SCREENSHOT"));
+  auto *header = items(page, "gamesSection_Custom Games").value(0);
+  ASSERT_NE(header, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(header, "clicked"));
+  QTest::qWait(30);
+  EXPECT_TRUE(filtered.collapsedSections().contains("Custom Games"));
+  EXPECT_EQ(filtered.rowCount(), 2); // One representative plus Steam, not three full rows.
+  EXPECT_EQ(filtered.matchingGameCount(), 3);
+  EXPECT_EQ(filtered.sectionCount("Custom Games"), 2);
+  header = items(page, "gamesSection_Custom Games").value(0);
+  ASSERT_NE(header, nullptr); // Heading survives collapse.
+  ASSERT_TRUE(QMetaObject::invokeMethod(header, "clicked"));
+  QTest::qWait(30);
+  EXPECT_FALSE(filtered.collapsedSections().contains("Custom Games"));
+  EXPECT_EQ(filtered.rowCount(), 3);
+  detector->setProperty("resetModelOnWithdraw", true);
+  withdraw = items(page, "withdrawGameApprovalButton").value(0);
+  ASSERT_NE(withdraw, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(withdraw, "clicked"));
+  EXPECT_EQ(policyNotices.size(), 4); // Delivered even when the action destroys its row.
+  EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST_F(GameIconTest, CollapsedLibrariesKeepOnlyOneRepresentativeAndFilterCountsStayAccurate) {
+  QList<GameListEntry> entries;
+  for (int i = 0; i < 1000; ++i) {
+    GameListEntry entry;
+    entry.key = entry.display = QString("Game %1").arg(i);
+    entry.section = entry.library = "Steam";
+    entries.append(entry);
+  }
+  GameListModel model;
+  model.setEntries(entries);
+  GameListFilterModel filtered;
+  filtered.setShowDefaultEntries(false);
+  filtered.setSourceModel(&model);
+  filtered.toggleSection("Steam");
+  EXPECT_EQ(filtered.rowCount(), 1);
+  EXPECT_EQ(filtered.matchingGameCount(), 1000);
+  EXPECT_EQ(filtered.sectionCount("Steam"), 1000);
+  filtered.setFilterText("Game 99");
+  EXPECT_EQ(filtered.rowCount(), 1);
+  EXPECT_EQ(filtered.matchingGameCount(), 11);
+  EXPECT_EQ(filtered.index(0, 0).data(GameListModel::KeyRole).toString(), "Game 99");
+  entries[99].isDefault = true;
+  model.setEntries(entries);
+  EXPECT_EQ(filtered.rowCount(), 1);
+  EXPECT_EQ(filtered.matchingGameCount(), 10);
+  EXPECT_EQ(filtered.index(0, 0).data(GameListModel::KeyRole).toString(), "Game 990");
+  filtered.toggleSection("Steam");
+  EXPECT_EQ(filtered.rowCount(), 10);
+  filtered.setFilterText("");
+  EXPECT_EQ(filtered.rowCount(), 999);
+  filtered.setShowDefaultEntries(true);
+  EXPECT_EQ(filtered.rowCount(), 1000);
 }
 
 TEST_F(GameIconTest, StateOnlyGameUpdatesPreserveModelAndFilteredIndices) {

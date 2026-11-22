@@ -15,61 +15,31 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QSet>
 
 namespace TrophyBackend {
 
+namespace {
+bool retiredDesktopDefault(const QString &key) {
+  static const QStringList retired{
+      "steam", "discord", "obs", "unknown vulkan game", "vkcube",
+      "firefox", "chrome", "chromium", "brave", "msedge", "opera", "vivaldi",
+      "librewolf", "thunderbird", "slack", "telegram", "signal", "element",
+      "zoom", "spotify", "vlc", "mpv", "gimp", "krita", "inkscape", "blender",
+      "code", "konsole", "gnome-terminal", "alacritty", "kitty", "foot",
+      "wezterm", "dolphin", "nautilus", "thunar"};
+  return retired.contains(key);
+}
+}
+
 QStringList GameWhitelist::defaultBlacklistEntries() {
-  // Canonical forms only (see normalizeKey): case and .exe variants of
-  // the same app collapse to one row instead of three. Covers launchers,
-  // browsers, chat, media, creative tools, terminals and file managers —
-  // the usual false positives (GPU-accelerated, often focused/fullscreen).
+  // Only prerequisite/accessibility helpers remain seeded here. Desktop apps
+  // require installation evidence or explicit rules, not blanket vetoes.
+  // Runtime tools are classified from Steam IDs/manifests on the census worker.
   return {
       "vc_redist",
       "dxsetup",
       "xalia",
-      "steam",
-      "discord",
-      "obs",
-      "unknown vulkan game",
-      "vkcube",
-      // Browsers
-      "firefox",
-      "chrome",
-      "chromium",
-      "brave",
-      "msedge",
-      "opera",
-      "vivaldi",
-      "librewolf",
-      "thunderbird",
-      // Chat / social
-      "slack",
-      "telegram",
-      "signal",
-      "element",
-      "zoom",
-      // Media
-      "spotify",
-      "vlc",
-      "mpv",
-      // Creative
-      "gimp",
-      "krita",
-      "inkscape",
-      "blender",
-      // Dev
-      "code",
-      // Terminals
-      "konsole",
-      "gnome-terminal",
-      "alacritty",
-      "kitty",
-      "foot",
-      "wezterm",
-      // File managers
-      "dolphin",
-      "nautilus",
-      "thunar",
   };
 }
 
@@ -175,20 +145,29 @@ void GameWhitelist::load() {
       m_whitelist[key] = it.value().toString();
   }
 
-  // Load blacklist (same normalization; first display spelling wins)
-  QJsonArray blacklistArr = root["blacklist"].toArray();
-  for (const QJsonValue &val : blacklistArr) {
-    QString entry = defaultExclusionKey(normalizeKey(val.toString()));
-    if (!entry.isEmpty() && !m_blacklist.contains(entry)) {
-        m_blacklist.append(entry);
-    }
-  }
-
   QJsonArray customArr = root["customKeys"].toArray();
   for (const QJsonValue &val : customArr) {
     const QString entry = normalizeKey(val.toString());
     if (!entry.isEmpty() && !m_customKeys.contains(entry))
       m_customKeys.append(entry);
+  }
+
+  // Retire the old seeded desktop-app list once. Recorded custom identities
+  // and definitions are explicit user choices; subsequent Deny edits are
+  // distinguished by the policy version written on every save.
+  const bool migrateDefaults = root["defaultPolicyVersion"].toInt(1) < 2;
+  QSet<QString> explicitKeys;
+  for (const auto &key : m_customKeys + m_whitelist.keys())
+    explicitKeys.insert(defaultExclusionKey(key));
+  QJsonArray blacklistArr = root["blacklist"].toArray();
+  for (const QJsonValue &val : blacklistArr) {
+    const auto entry = defaultExclusionKey(normalizeKey(val.toString()));
+    if (migrateDefaults && retiredDesktopDefault(entry) && !explicitKeys.contains(entry)) {
+      m_blacklist.removeAll(entry);
+      continue;
+    }
+    if (!entry.isEmpty() && !m_blacklist.contains(entry))
+      m_blacklist.append(entry);
   }
 
   // Honor explicit removals of built-ins: the constructor seeded them,
@@ -199,29 +178,24 @@ void GameWhitelist::load() {
   for (const QJsonValue &val : removedArr) {
     const QString entry = defaultExclusionKey(normalizeKey(val.toString()));
     if (!entry.isEmpty()) {
-      if (!m_removedDefaults.contains(entry))
+      if (retiredDesktopDefault(entry))
+        m_removedDefaults.removeAll(entry);
+      else if (!m_removedDefaults.contains(entry))
         m_removedDefaults.append(entry);
       m_blacklist.removeAll(entry);
     }
   }
 
-  // One-time repair: the authorize path used to whitelist the Vulkan
-  // layer's null-name placeholder ("unknown vulkan game") under whichever
-  // game authorized last, so every unidentified reporter instantly
-  // (mis)detected as that game. The placeholder carries no identity, so
-  // drop the mapping and let the built-in default blacklist entry stand
-  // again. Steam-identified reporters now key off steam_app_<id> instead
-  // (see onSocketReadyRead); re-applied on every load, so a stale file
-  // can never resurrect the alias.
+  // Retired reporter placeholders have no process identity. Remove their
+  // legacy bookkeeping rather than resurrecting a configurable exclusion.
   if (m_whitelist.contains(QStringLiteral("unknown vulkan game"))) {
     qInfo() << "Dropping placeholder whitelist entry for 'unknown vulkan "
                "game' - null-name reporters carry no game identity";
     m_whitelist.remove(QStringLiteral("unknown vulkan game"));
   }
-  if (m_removedDefaults.removeAll(QStringLiteral("unknown vulkan game")) >
-          0 &&
-      !m_blacklist.contains(QStringLiteral("unknown vulkan game")))
-    m_blacklist.append(QStringLiteral("unknown vulkan game"));
+  m_blacklist.removeAll(QStringLiteral("unknown vulkan game"));
+  m_removedDefaults.removeAll(QStringLiteral("unknown vulkan game"));
+  m_customKeys.removeAll(QStringLiteral("unknown vulkan game"));
 
   qDebug() << "Loaded" << m_whitelist.size() << "whitelisted and"
           << m_blacklist.size() << "blacklisted entries";
@@ -237,6 +211,7 @@ void GameWhitelist::save() const {
   }
 
   QJsonObject root;
+  root["defaultPolicyVersion"] = 2;
 
   // Save whitelist
   QJsonObject whitelistObj;

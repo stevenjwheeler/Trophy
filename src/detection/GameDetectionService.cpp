@@ -2,6 +2,7 @@
 #include "GameDetectionService.h"
 #include "GameIconSource.h"
 #include "GameWhitelist.h"
+#include "PrerequisiteInstallers.h"
 #include "audio/AudioApplicationRegistry.h"
 #include "audio/ApplicationAudioIdentity.h"
 #include <QFileInfo>
@@ -750,8 +751,99 @@ QUrl GameDetectionService::iconSourceForGame(const QString &name) const {
 void GameDetectionService::rebuildModels() {
   QList<GameListEntry> rows;
   QSet<QString> claimed;
+  const QStringList libraryOrder{"Steam", "Heroic", "Legendary", "Nile", "Lutris", "Faugus"};
+  const auto customKeys = m_whitelist->customKeys();
+  QSet<QString> knownKeys(m_recentKeys.begin(), m_recentKeys.end());
+  knownKeys.unite(m_tokenGames);
+  for (const auto &key : whitelist() + blacklist() + customKeys)
+    knownKeys.insert(key);
+  for (const auto &instance : m_instances)
+    knownKeys.insert(instance.key);
+  const auto reversed = [](QString value) {
+    std::reverse(value.begin(), value.end());
+    return value;
+  };
+  // Exact suffix index avoids a catalogue × known-games scan on every census.
+  QMap<QString, QString> scopedWindowsKeys;
+  for (const auto &key : knownKeys)
+    if (key.startsWith("wine:"))
+      scopedWindowsKeys.insert(reversed(key), key);
+
+  struct LibraryRow {
+    QString name, library, blockKey;
+    bool supportTool = false;
+  };
+  QMap<QString, LibraryRow> libraryRows;
+  // Group aliases supplied by the worker without filesystem reads. Never
+  // merge different Wine prefixes, Steam IDs or physical installations.
+  QMap<QStringList, QList<const LauncherGame *>> installations;
+  for (const auto &game : m_catalogue) {
+    if (!game.steamId && game.executable.isEmpty())
+      continue;
+    const QStringList identity = game.steamId
+        ? QStringList{"steam", QString::number(game.steamId)}
+        : QStringList{game.name, game.directory, game.winePrefix};
+    installations[identity].append(&game);
+  }
+  for (const auto &aliases : installations) {
+    QString library = aliases.first()->steamId ? QStringLiteral("Steam") : QString();
+    for (const auto &candidate : libraryOrder) {
+      for (const auto *game : aliases)
+        for (const auto &source : game->sources)
+          if (source == candidate || source.startsWith(candidate + " ("))
+            library = library.isEmpty() ? candidate : library;
+    }
+    if (library.isEmpty())
+      continue;
+    QMap<QString, QString> candidates;
+    for (const auto *game : aliases) {
+      if (game->steamId) {
+        candidates.insert(QString("steam_app_%1").arg(game->steamId), {});
+      } else if (!game->executable.endsWith(".exe", Qt::CaseInsensitive)) {
+        candidates.insert(GameWhitelist::normalizeKey("exe:" + game->executable), {});
+      } else if (!game->winePrefix.isEmpty()) {
+        candidates.insert(GameWhitelist::normalizeKey(
+            "wine:" + game->winePrefix + ":" + game->executable), {});
+      } else {
+        // Prefix-free metadata cannot confer prefix-scoped capture approval.
+        // Prelisting can still use the existing exact-executable block veto.
+        const auto blockKey = GameWhitelist::normalizeKey("exe:" + game->executable);
+        bool scoped = false;
+        const auto suffix = reversed(GameWhitelist::normalizeKey(":" + game->executable));
+        for (auto it = scopedWindowsKeys.lowerBound(suffix);
+             it != scopedWindowsKeys.cend() && it.key().startsWith(suffix); ++it) {
+          candidates.insert(it.value(), blockKey);
+          scoped = true;
+        }
+        if (!scoped)
+          candidates.insert(blockKey, blockKey);
+      }
+    }
+    bool hasKnownAlias = false;
+    for (auto it = candidates.cbegin(); it != candidates.cend(); ++it)
+      hasKnownAlias |= knownKeys.contains(it.key());
+    for (auto it = candidates.cbegin(); it != candidates.cend(); ++it) {
+      if (hasKnownAlias && !knownKeys.contains(it.key()))
+        continue;
+      const LibraryRow value{aliases.first()->name, library, it.value(),
+                            aliases.first()->runtimeTool};
+      if (!libraryRows.contains(it.key()))
+        libraryRows.insert(it.key(), value);
+      if (!hasKnownAlias)
+        break;
+    }
+  }
+  QSet<QString> representedAliases;
+  for (auto it = libraryRows.cbegin(); it != libraryRows.cend(); ++it) {
+    if (!it->blockKey.isEmpty() && it->blockKey != it.key())
+      representedAliases.insert(it->blockKey);
+    if (knownKeys.contains(it.key()) && m_tokenGames.contains(it->name) &&
+        it->name != it.key())
+      representedAliases.insert(it->name);
+  }
   const auto append = [&](const QString &key, QString name, qint64 pid = 0) {
-    if (key.isEmpty() || claimed.contains(key))
+    if (key.isEmpty() || GameWhitelist::isPlaceholderReporterKey(key) || claimed.contains(key) ||
+        (representedAliases.contains(key) && !customKeys.contains(key)))
       return;
     claimed.insert(key);
     GameListEntry e;
@@ -764,19 +856,35 @@ void GameDetectionService::rebuildModels() {
     e.display = name.isEmpty() ? key : name;
     e.pid = pid;
     e.running = pid > 0;
-    e.listed = isBlocked(key) || isBlocked(e.display) ? 2
+    const auto library = libraryRows.constFind(key);
+    e.supportTool = (library != libraryRows.cend() && library->supportTool) ||
+                    gameSupportHelper(GameWhitelist::normalizeKey(QFileInfo(key).fileName()));
+    // Explicitly added rules stay in Custom Games even if a library later
+    // discovers the same exact identity.
+    if (library != libraryRows.cend() && !customKeys.contains(key)) {
+      e.library = library->library;
+      e.blockKey = library->blockKey;
+      if (name.isEmpty() || e.display == key)
+        e.display = library->name;
+    }
+    e.listed = e.supportTool || isBlocked(key) || isBlocked(e.display) ||
+                       (!e.blockKey.isEmpty() && isBlocked(e.blockKey)) ? 2
                : m_whitelist->isWhitelisted(key)      ? 1
                                                       : 0;
-    e.isDefault = GameWhitelist::defaultBlacklistEntries().contains(key);
-    if (e.isDefault)
+    e.isDefault = e.supportTool || GameWhitelist::defaultBlacklistEntries().contains(key);
+    if (e.isDefault && !e.supportTool)
       e.display = GameWhitelist::prettySystemName(key);
     e.tokenKey = m_tokenGames.contains(key)         ? key
                  : m_tokenGames.contains(e.display) ? e.display
                                                     : QString();
+    if (library != libraryRows.cend() && !knownKeys.contains(key))
+      e.tokenKey.clear(); // A discovered title must not inherit a namesake's approval.
+    if (!e.blockKey.isEmpty() && key == e.blockKey)
+      e.tokenKey.clear(); // Prefix-free Windows metadata is not a capture identity.
     e.hasToken = !e.tokenKey.isEmpty();
-    e.section = e.running    ? "Now playing"
-                : e.hasToken ? "Ready to capture"
-                             : "Apps";
+    e.section = e.running && !e.supportTool ? "Now Playing"
+                : e.isDefault ? "Default Exclusions"
+                : !e.library.isEmpty() ? e.library : "Custom Games";
     rows.append(e);
   };
   for (const auto &g : m_instances)
@@ -793,9 +901,34 @@ void GameDetectionService::rebuildModels() {
   for (const auto &key : blacklist())
     append(key, {});
   for (const auto &key : m_whitelist->removedDefaults())
-    append(key, {});
+    if (GameWhitelist::defaultBlacklistEntries().contains(key))
+      append(key, {});
   for (const auto &key : m_whitelist->customKeys())
     append(key, {});
+  for (auto it = libraryRows.cbegin(); it != libraryRows.cend(); ++it)
+    append(it.key(), it->name);
+  // Provenance determines placement; capture state never creates a section.
+  const auto sectionRank = [&](const GameListEntry &entry) {
+    if (entry.running && !entry.supportTool)
+      return 0;
+    if (entry.isDefault)
+      return 8;
+    const int rank = libraryOrder.indexOf(entry.library);
+    return rank < 0 ? 7 : rank + 1;
+  };
+  std::stable_sort(rows.begin(), rows.end(), [&](const auto &a, const auto &b) {
+    const int aRank = sectionRank(a), bRank = sectionRank(b);
+    if (aRank != bRank)
+      return aRank < bRank;
+    if (a.running && b.running)
+      return false; // Preserve the selected-instance-first ordering.
+    const auto stateRank = [](const GameListEntry &entry) {
+      return entry.listed == 2 ? 2 : entry.hasToken ? 0 : 1;
+    };
+    if (stateRank(a) != stateRank(b))
+      return stateRank(a) < stateRank(b);
+    return QString::localeAwareCompare(a.display, b.display) < 0;
+  });
   m_gamesModel->setEntries(rows);
 }
 } // namespace TrophyBackend

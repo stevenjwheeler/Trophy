@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "LauncherLibrary.h"
+#include "SteamSupportTools.h"
 #include "ProcessGames.h"
 #include <QDir>
 #include <QFile>
@@ -390,11 +391,14 @@ void steam(QList<LauncherGame> &games, const QStringList &roots,
       const auto directory = QDir::cleanPath(apps.filePath("common/" + install));
       if (id && !install.isEmpty() &&
           directory.startsWith(QDir::cleanPath(apps.filePath("common")) + "/")) {
-        // A container-runtime tool is installation metadata, not a game.
+        // Compatibility/support tools are installation metadata, not games.
         // Read its role on the census worker; never infer it from the title.
         watch(targets, directory + "/toolmanifest.vdf");
         const auto tool = QString::fromUtf8(bytes(directory + "/toolmanifest.vdf"));
-        const bool runtime = field(tool, "compatmanager_layer_name") == "container-runtime";
+        const auto layer = field(tool, "compatmanager_layer_name");
+        const bool runtime = knownSteamSupportAppId(id) ||
+            layer == "container-runtime" || layer == "proton" ||
+            layer == "scout-in-container";
         games.append({id, field(acf, "name"), directory, {}, {}, false, {"Steam"}, runtime});
       }
     }

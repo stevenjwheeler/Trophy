@@ -10,13 +10,46 @@ import "../controls"
 import "../styles"
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Effects
 import QtQuick.Layouts
 
 Page {
     id: root
     // Explicit dependency; this default preserves engine/creation-context hosts.
     property var detector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
+    property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
+    readonly property int statusColumnWidth: 150
+    readonly property int actionsColumnWidth: 186
+    readonly property var gamesModel: root.detector ? root.detector.gamesModel : null
+    signal policyNoticeRequested(string key, string heading, string detail)
+    // Run policy changes from the page context: sorting may destroy the pressed
+    // row synchronously, but the explanation still needs to be delivered.
+    function promptGame(key, blockKey, name) {
+        if (!detector)
+            return
+        detector.unblockGame(key)
+        if (blockKey && blockKey !== key)
+            detector.unblockGame(blockKey)
+        policyNoticeRequested("game-policy:" + key, qsTr("Prompt · %1").arg(name),
+            qsTr("Launch the game, then request capture to approve it. This does not start recording."))
+    }
+    function denyGame(key, blockKey, name) {
+        if (!detector)
+            return
+        detector.moveToBlacklist(blockKey || key)
+        policyNoticeRequested("game-policy:" + key, qsTr("Deny · %1").arg(name),
+            qsTr("Automatic capture is denied. The game and launcher files are unchanged."))
+    }
+    function withdrawApproval(key, tokenKey, name) {
+        if (!preferences)
+            return
+        preferences.removeRestoreToken(tokenKey)
+        policyNoticeRequested("game-policy:" + key, qsTr("Approval revoked · %1").arg(name),
+            qsTr("Saved capture approval was removed. A future capture may ask for approval again."))
+    }
+    function sectionCollapsed(section) {
+        return gamesModel && gamesModel.collapsedSections !== undefined
+            && gamesModel.collapsedSections.indexOf(section) >= 0
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -91,7 +124,8 @@ Page {
             spacing: Theme.spacingMedium
 
             Label {
-                text: qsTr("%n game(s)", "", gamesList.count)
+                text: qsTr("%n game(s)", "", root.gamesModel && root.gamesModel.matchingGameCount !== undefined
+                    ? root.gamesModel.matchingGameCount : gamesList.count)
                 color: Theme.textMutedColor
                 font.pixelSize: Theme.fontSizeSmall
             }
@@ -116,24 +150,61 @@ Page {
 
         }
 
-        // Unified list: Now playing / Ready to capture / Apps
+        // Installed launcher libraries, custom games and optional exclusions.
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: Theme.cardColor
-            radius: Theme.radiusMedium
+            radius: Theme.radiusSmall
             border.width: 1
             border.color: Theme.borderColor
 
             ColumnLayout {
                 id: gamesContent
                 anchors.fill: parent
-                anchors.margins: Theme.spacingMedium
+                anchors.margins: 1
+                spacing: 0
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12 + gamesScrollBar.width + Theme.spacingSmall
+                    Layout.preferredHeight: 36
+                    spacing: 12
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Game")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Label {
+                        objectName: "gamesStatusColumnHeader"
+                        Layout.preferredWidth: root.statusColumnWidth
+                        text: qsTr("Status")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Label {
+                        objectName: "gamesActionsColumnHeader"
+                        Layout.preferredWidth: root.actionsColumnWidth
+                        text: qsTr("Actions")
+                        color: Theme.textMutedColor
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 1
+                    color: Theme.borderColor
+                }
 
                 Label {
-                    text: qsTr("Games will appear here when detected")
+                    text: searchField.text ? qsTr("No games match your search")
+                        : qsTr("Add a running game or configure launcher libraries in Settings")
                     color: Theme.textMutedColor
                     Layout.alignment: Qt.AlignCenter
+                    Layout.fillHeight: true
+                    verticalAlignment: Text.AlignVCenter
                     visible: gamesList.count === 0
                 }
 
@@ -144,29 +215,73 @@ Page {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: Theme.spacingSmall
+                    spacing: 0
                     visible: count > 0
                     model: root.detector ? root.detector.gamesModel : null
                     ScrollBar.vertical: TrophyScrollBar { id: gamesScrollBar }
 
                     section.property: "section"
-                    section.delegate: Label {
+                    section.delegate: ItemDelegate {
+                        id: groupHeader
                         required property string section
-                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
-                        text: section
-                        color: Theme.textMutedColor
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.weight: Font.Bold
-                        font.capitalization: Font.AllUppercase
-                        font.letterSpacing: 0.5
-                        topPadding: 0
-                        bottomPadding: Theme.spacingTiny
-                        leftPadding: Theme.spacingTiny
+                        objectName: "gamesSection_" + section
+                        readonly property bool collapsed: root.sectionCollapsed(section)
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingSmall
+                        height: 36
+                        leftPadding: 12
+                        rightPadding: 12
+                        Accessible.name: section
+                        Accessible.description: collapsed ? qsTr("Collapsed") : qsTr("Expanded")
+                        onClicked: {
+                            if (root.gamesModel && typeof root.gamesModel.toggleSection === "function")
+                                root.gamesModel.toggleSection(section)
+                        }
+                        background: Rectangle {
+                            color: groupHeader.hovered ? Theme.withOpacity(Theme.textColor, 0.05) : Theme.surfaceColor
+                        }
+                        contentItem: RowLayout {
+                            spacing: 8
+                            Image {
+                                readonly property string launcher: groupHeader.section.toLowerCase()
+                                visible: ["steam", "heroic", "legendary", "nile", "lutris", "faugus"].indexOf(launcher) >= 0
+                                Layout.preferredWidth: 20
+                                Layout.preferredHeight: 20
+                                sourceSize: Qt.size(40, 40)
+                                fillMode: Image.PreserveAspectFit
+                                source: !visible ? "" : launcher === "steam" ? "qrc:/icons/default-apps/steam.svg"
+                                    : "qrc:/icons/launchers/" + launcher + (launcher === "legendary" ? ".ico" : ".svg")
+                            }
+                            Label {
+                                objectName: "gamesSectionHeading"
+                                text: {
+                                    const counts = root.gamesModel ? root.gamesModel.sectionCounts : null
+                                    return counts !== undefined && counts !== null
+                                        ? qsTr("%1 (%2)").arg(groupHeader.section).arg(counts[groupHeader.section] || 0)
+                                        : groupHeader.section
+                                }
+                                color: Theme.textMutedColor
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.weight: Font.Bold
+                                font.capitalization: Font.AllUppercase
+                                font.letterSpacing: 0.5
+                                Layout.fillWidth: true
+                            }
+                            Label {
+                                text: groupHeader.collapsed ? "›" : "⌄"
+                                color: Theme.textMutedColor
+                                font.pixelSize: Theme.fontSizeLarge
+                            }
+                        }
                     }
 
                     delegate: GameListItem {
                         required property var model
-                        width: gamesList.width - gamesScrollBar.width - Theme.spacingMedium
+                        required property int index
+                        readonly property bool collapsed: root.sectionCollapsed(model.section || "")
+                        height: collapsed ? 0 : 52
+                        visible: !collapsed
+                        rowIndex: index
+                        width: gamesList.width - gamesScrollBar.width - Theme.spacingSmall
                         entryKey: model.key || ""
                         entryDisplay: model.display || ""
                         entryRunning: model.running || false
@@ -177,6 +292,9 @@ Page {
                         entryTokenKey: model.tokenKey || ""
                         entryIconSource: model.iconSource || ""
                         entryIdentifiers: model.identifiers || []
+                        entryLibrary: model.library || ""
+                        entryBlockKey: model.blockKey || ""
+                        entrySupportTool: model.supportTool || false
                     }
 
                 }
@@ -500,7 +618,7 @@ Page {
                         id: blacklistRadio
                         objectName: "blockProcessRadio"
 
-                        text: qsTr("Block")
+                        text: qsTr("Deny")
                         checked: false
                         onClicked: {
                             whitelistRadio.checked = false
@@ -569,7 +687,7 @@ Page {
             Repeater {
                 model: [
                     { blocked: false, label: qsTr("Prompt") },
-                    { blocked: true, label: qsTr("Block") },
+                    { blocked: true, label: qsTr("Deny") },
                 ]
 
                 Rectangle {
@@ -584,7 +702,7 @@ Page {
                         if (!active)
                             return "transparent"
                         return pole.modelData.blocked ? Qt.alpha(Theme.errorColor, 0.25)
-                                                 : Qt.alpha(Theme.successColor, 0.15)
+                                                 : Qt.alpha(Theme.warningColor, 0.15)
                     }
 
                     Label {
@@ -595,13 +713,19 @@ Page {
                         color: {
                             if (duoSwitch.blocked !== pole.modelData.blocked)
                                 return Theme.textMutedColor
-                            return pole.modelData.blocked ? Theme.errorColor : Theme.successColor
+                            return pole.modelData.blocked ? Theme.errorColor : Theme.warningColor
                         }
                     }
 
                     HoverHandler {
+                        id: poleHover
                         cursorShape: Qt.PointingHandCursor
                     }
+                    ToolTip.visible: poleHover.hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: pole.modelData.blocked
+                        ? qsTr("Prevent automatic capture of this game. Launcher files are unchanged.")
+                        : qsTr("Allow Trophy to request capture approval. This does not approve or start recording.")
                     TapHandler {
                         onTapped: {
                             if (pole.modelData.blocked)
@@ -632,38 +756,40 @@ Page {
         property string entryTokenKey: ""
         property url entryIconSource: ""
         property var entryIdentifiers: []
-
-
-        height: 60
-
-        // Backdrop: plain rows stay flat on the card, the running game
-        // gets a green-tinted lift (drawn by the effect below).
-        Rectangle {
-            id: rowCard
-
-            anchors.fill: parent
-            radius: Theme.radiusSmall
-            color: gameItem.entryRunning ? Theme.withOpacity(Theme.successColor, 0.1) : "transparent"
-            border.color: gameItem.entryRunning ? Theme.successColor : "transparent"
-            border.width: gameItem.entryRunning ? 1 : 0
-            visible: false
+        property string entryLibrary: ""
+        property string entryBlockKey: ""
+        property bool entrySupportTool: false
+        property int rowIndex: 0
+        readonly property string identifierDetails: {
+            if (entryDefault)
+                return entryIdentifiers.join("\n")
+            return entryKey + (entrySteamAppId > 0 ? "\nSteam App ID: " + entrySteamAppId : "")
         }
+        readonly property string statusText: {
+            if (entrySupportTool)
+                return qsTr("Excluded")
+            if (entryListed === 2)
+                return qsTr("Denied")
+            if (!entryHasToken)
+                return entryRunning ? qsTr("Waiting for approval") : qsTr("Waiting for launch")
+            return entryRunning ? qsTr("Active") : qsTr("Ready to capture")
+        }
+        readonly property color statusColor: entrySupportTool ? Theme.textMutedColor
+            : entryListed === 2 ? Theme.errorColor
+            : entryHasToken ? Theme.successColor : Theme.warningColor
 
-        MultiEffect {
-            anchors.fill: rowCard
-            source: rowCard
-            visible: gameItem.entryRunning
-            shadowEnabled: true
-            shadowBlur: 0.4
-            shadowColor: "#70000000"
-            shadowVerticalOffset: 2
+        height: 52
+        Rectangle {
+            anchors.fill: parent
+            color: gameItem.entryRunning ? Theme.withOpacity(gameItem.statusColor, 0.06)
+                : gameItem.rowIndex % 2 === 0 ? Theme.withOpacity(Theme.textColor, 0.025) : "transparent"
         }
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Theme.spacingSmall
-            anchors.rightMargin: Theme.spacingSmall
-            spacing: Theme.spacingMedium
+            anchors.leftMargin: 12
+            anchors.rightMargin: 12
+            spacing: 12
 
             Rectangle {
                 objectName: "gameIconTile"
@@ -679,7 +805,7 @@ Page {
                     objectName: "gameIconFallback"
                     visible: !gameIcon.hasArtwork
                     font.pixelSize: Theme.fontSizeLarge
-                    color: gameItem.entryRunning ? Theme.successColor : Theme.primaryColor
+                    color: gameItem.entryRunning ? gameItem.statusColor : Theme.primaryColor
                 }
 
                 Image {
@@ -700,38 +826,45 @@ Page {
 
             ColumnLayout {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.alignment: Qt.AlignVCenter
                 Layout.topMargin: 4
                 Layout.bottomMargin: 4
                 spacing: 3
 
                 Label {
+                    objectName: "gameEntryName"
                     text: gameItem.entryDisplay || gameItem.entryKey
                     color: Theme.textColor
                     font.pixelSize: Theme.fontSizeNormal
-                    font.weight: gameItem.entryRunning ? Font.Bold : Font.Normal
+                    font.weight: gameItem.entryRunning ? Font.Bold : Font.Medium
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    HoverHandler { id: nameHover }
+                    ToolTip.visible: nameHover.hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: (gameItem.entryDisplay || gameItem.entryKey) + "\n" + gameItem.identifierDetails
+                        + (gameItem.entryLibrary ? "\n" + gameItem.entryLibrary : "")
                 }
 
                 Label {
                     objectName: "gameEntrySubtitle"
                     text: {
+                        if (gameItem.entrySupportTool)
+                            return gameItem.entrySteamAppId > 0
+                                ? qsTr("Steam compatibility / support tool") : qsTr("Game installer or support helper")
                         if (gameItem.entryDefault) {
                             const count = gameItem.entryIdentifiers.length
                             return count === 1 ? qsTr("Default exclusion · 1 identifier")
                                                : qsTr("Default exclusion · %1 identifiers").arg(count)
                         }
-                        let sub = gameItem.entryKey
-                        if (gameItem.entrySteamAppId > 0 && gameItem.entryKey.indexOf("steam_app_") !== 0)
-                            sub += " • AppID " + gameItem.entrySteamAppId
-                        return sub
+                        return ""
                     }
                     color: Theme.textMutedColor
                     font.pixelSize: Theme.fontSizeSmall
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    visible: gameItem.entryDefault || (text !== "" && text !== gameItem.entryDisplay)
+                    visible: gameItem.entryDefault
                     ToolTip.visible: gameItem.entryDefault && identifierHover.hovered
                     ToolTip.delay: 500
                     ToolTip.text: gameItem.entryIdentifiers.join("\n")
@@ -744,79 +877,88 @@ Page {
             }
 
             RowLayout {
+                objectName: "gameEntryStatus"
+                Layout.preferredWidth: root.statusColumnWidth
+                Layout.minimumWidth: root.statusColumnWidth
+                Layout.maximumWidth: root.statusColumnWidth
                 Layout.alignment: Qt.AlignVCenter
-                spacing: Theme.spacingSmall
-
+                spacing: 8
                 Rectangle {
-                    visible: gameItem.entryRunning
-                    color: Theme.successColor
-                    radius: 3
-                    Layout.preferredWidth: liveLabel.width + 12
-                    Layout.preferredHeight: liveLabel.height + 6
-
-                    Label {
-                        id: liveLabel
-
-                        anchors.centerIn: parent
-                        text: qsTr("LIVE")
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.weight: Font.Bold
-                        color: "black"
-                    }
-
+                    Layout.preferredWidth: 8
+                    Layout.preferredHeight: 8
+                    radius: 4
+                    color: gameItem.entryHasToken || gameItem.entryRunning || gameItem.entryListed === 2
+                        ? gameItem.statusColor : "transparent"
+                    border.width: color.a === 0 ? 1 : 0
+                    border.color: gameItem.statusColor
                 }
-
-                Rectangle {
-                    visible: gameItem.entryHasToken
-                    color: "transparent"
-                    border.color: Theme.successColor
-                    border.width: 1
-                    radius: 3
-                    Layout.preferredWidth: readyLabel.width + 12
-                    Layout.preferredHeight: readyLabel.height + 6
-
-                    Label {
-                        id: readyLabel
-
-                        anchors.centerIn: parent
-                        text: qsTr("Ready")
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.successColor
-                    }
-
-                    HoverHandler {
-                        id: readyHover
-                    }
-
-                    ToolTip.text: qsTr("Restore token saved — captures start silently, no portal prompt")
-                    ToolTip.visible: readyHover.hovered
+                Label {
+                    objectName: "gameEntryStatusText"
+                    Layout.fillWidth: true
+                    text: gameItem.statusText
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: gameItem.statusColor
+                    elide: Text.ElideRight
+                    HoverHandler { id: statusHover }
+                    ToolTip.text: gameItem.entrySupportTool ? qsTr("Support tools are excluded from game detection")
+                        : gameItem.entryListed === 2 ? qsTr("Automatic capture denied")
+                        : gameItem.entryHasToken ? qsTr("Capture approval saved; the desktop portal may still require authorization")
+                        : qsTr("No saved capture approval; the desktop portal will ask for authorization")
+                    ToolTip.visible: statusHover.hovered
                     ToolTip.delay: 500
                 }
+            }
 
+            RowLayout {
+                objectName: "gameEntryActions"
+                Layout.preferredWidth: root.actionsColumnWidth
+                Layout.minimumWidth: root.actionsColumnWidth
+                Layout.maximumWidth: root.actionsColumnWidth
+                Layout.alignment: Qt.AlignVCenter
+                spacing: 8
                 TrophyButton {
-                    visible: gameItem.entryHasToken
-                    text: qsTr("Withdraw")
+                    objectName: "withdrawGameApprovalButton"
+                    visible: gameItem.entryHasToken && !gameItem.entryRunning && !gameItem.entrySupportTool
+                    Layout.fillWidth: true
+                    implicitHeight: 32
+                    text: qsTr("Revoke")
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: qsTr("Forget saved capture approval. Future capture may ask for approval again.")
                     onClicked: {
-                        const tokenKey = entryTokenKey
-                        settingsManager.removeRestoreToken(tokenKey)
+                        root.withdrawApproval(gameItem.entryKey, gameItem.entryTokenKey,
+                            gameItem.entryDisplay || gameItem.entryKey)
                     }
                 }
 
                 TwoPoleSwitch {
-                    visible: !gameItem.entryHasToken
+                    visible: !gameItem.entryHasToken && !gameItem.entrySupportTool && !gameItem.entryRunning
+                    Layout.preferredWidth: gameItem.entryLibrary ? root.actionsColumnWidth : 148
+                    Layout.minimumWidth: Layout.preferredWidth
+                    Layout.maximumWidth: Layout.preferredWidth
                     blocked: gameItem.entryListed === 2
                     onPromptSelected: {
-                        gameDetector.unblockGame(gameItem.entryKey)
+                        root.promptGame(gameItem.entryKey, gameItem.entryBlockKey,
+                            gameItem.entryDisplay || gameItem.entryKey)
                     }
                     onBlockSelected: {
-                        gameDetector.moveToBlacklist(gameItem.entryKey)
+                        root.denyGame(gameItem.entryKey, gameItem.entryBlockKey,
+                            gameItem.entryDisplay || gameItem.entryKey)
                     }
                 }
 
                 TrophyButton {
-                    visible: !gameItem.entryHasToken
+                    objectName: "forgetGameButton"
+                    visible: !gameItem.entryHasToken && !gameItem.entryLibrary && !gameItem.entrySupportTool && !gameItem.entryRunning
                     text: qsTr("×")
                     implicitWidth: 30
+                    Layout.preferredWidth: 30
+                    Layout.minimumWidth: 30
+                    Layout.maximumWidth: 30
+                    implicitHeight: 32
+                    Accessible.name: qsTr("Forget %1").arg(gameItem.entryDisplay || gameItem.entryKey)
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Remove this game rule")
                     onClicked: {
                         gameDetector.forgetGame(gameItem.entryKey)
                     }
@@ -830,10 +972,8 @@ Page {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
-            anchors.leftMargin: 52
             height: 1
-            color: Theme.textMutedColor
-            opacity: 0.15
+            color: Theme.borderColor
         }
 
     }

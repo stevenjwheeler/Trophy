@@ -427,6 +427,34 @@ TEST_F(LauncherLibraryTest, SteamRejectsManifestDirectoryTraversal) {
   EXPECT_TRUE(read().isEmpty());
 }
 
+TEST_F(LauncherLibraryTest, SteamSupportToolsUseExactIdsAndManifestRolesNotTitles) {
+  const auto apps = data + "/Steam/steamapps";
+  const QList<uint> ids{228980, 1070560, 1161040, 1391110, 1493710, 1628350,
+                        1826330, 2180100, 2805730, 4183110, 4628710};
+  for (uint id : ids) {
+    write(apps + QString("/appmanifest_%1.acf").arg(id),
+          QString("\"appid\" \"%1\" \"name\" \"Support Tool %1\" \"installdir\" \"tool-%1\"")
+              .arg(id).toUtf8());
+  }
+  for (const auto &layer : QStringList{"proton", "scout-in-container"}) {
+    const uint id = layer == "proton" ? 4005 : 4006;
+    write(apps + QString("/appmanifest_%1.acf").arg(id),
+          QString("\"appid\" \"%1\" \"name\" \"Future Tool\" \"installdir\" \"future-%1\"")
+              .arg(id).toUtf8());
+    write(apps + QString("/common/future-%1/toolmanifest.vdf").arg(id),
+          QString("\"manifest\" { \"compatmanager_layer_name\" \"%1\" }").arg(layer).toUtf8());
+  }
+  write(apps + "/appmanifest_42.acf",
+        "\"appid\" \"42\" \"name\" \"Proton Runtime Adventures\" \"installdir\" \"RealGame\"");
+  const auto games = read();
+  ASSERT_EQ(games.size(), ids.size() + 3);
+  for (const auto &game : games)
+    EXPECT_EQ(game.runtimeTool, game.steamId != 42) << game.steamId;
+  const auto discovery = LauncherLibrary::discover(home, config, data);
+  ASSERT_FALSE(discovery.launchers.isEmpty());
+  EXPECT_EQ(discovery.launchers.first().toMap().value("count").toInt(), 1);
+}
+
 TEST_F(LauncherLibraryTest, SteamRuntimeManifestExcludesItsToolsWithoutExcludingHostedGames) {
   const auto apps = data + "/Steam/steamapps";
   const auto runtime = apps + "/common/SteamLinuxRuntime_4";

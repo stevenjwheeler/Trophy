@@ -14,6 +14,7 @@ ScrollView {
     property real maxToastHeight: 500
     property int successDuration: 5000
     property int errorDuration: 8000
+    property int infoDuration: 6000
     readonly property int count: notices.count
     implicitHeight: Math.min(stack.implicitHeight, maxToastHeight)
     visible: notices.count > 0
@@ -47,6 +48,12 @@ ScrollView {
         }
         for (const field in values)
             notices.setProperty(at, field, values[field]);
+    }
+
+    function showInformation(key, heading, detail) {
+        update(key, {kind: "information", heading: heading, detail: detail,
+            phase: "information", progress: -1, actionText: qsTr("Dismiss"),
+            actionEnabled: true, expiresAt: Date.now() + root.infoDuration});
     }
 
     function syncExports() {
@@ -122,16 +129,9 @@ ScrollView {
     }
     Timer {
         interval: 100
-        running: root.count > 0
+        running: root.queue.pending.length > 0
         repeat: true
-        onTriggered: {
-            root.syncDeletions();
-            const now = Date.now();
-            for (let i = notices.count - 1; i >= 0; --i) {
-                const expiry = notices.get(i).expiresAt;
-                if (expiry > 0 && now >= expiry) notices.remove(i);
-            }
-        }
+        onTriggered: root.syncDeletions()
     }
 
     Column {
@@ -151,16 +151,26 @@ ScrollView {
                 required property real progress
                 required property string actionText
                 required property bool actionEnabled
+                required property real expiresAt
                 readonly property color statusColor: phase === "success" ? Theme.successColor
-                    : phase === "error" ? Theme.errorColor : Theme.accentColor
+                    : phase === "error" ? Theme.errorColor
+                    : phase === "information" ? Theme.textSecondaryColor : Theme.accentColor
                 objectName: "toast:" + toastKey
                 width: stack.width
                 height: toastContent.implicitHeight + Theme.spacingMedium * 2
                 radius: Theme.radiusMedium
-                color: phase === "working" ? Theme.cardColor : Qt.tint(Theme.cardColor, Theme.withOpacity(statusColor, 0.15))
-                border.color: statusColor
+                color: phase === "working" || phase === "information" ? Theme.cardColor
+                    : Qt.tint(Theme.cardColor, Theme.withOpacity(statusColor, 0.15))
+                border.color: phase === "information" ? Theme.borderColor : statusColor
                 Behavior on color { ColorAnimation { duration: Theme.animationNormal } }
                 Behavior on border.color { ColorAnimation { duration: Theme.animationNormal } }
+                // Each settled notice owns its one-shot expiry. Informational
+                // toasts must not depend on the deletion progress refresh loop.
+                Timer {
+                    interval: Math.max(1, toast.expiresAt - Date.now())
+                    running: toast.expiresAt > 0
+                    onTriggered: root.dismiss(toast.toastKey)
+                }
                 ColumnLayout {
                     id: toastContent
                     anchors.fill: parent
@@ -175,7 +185,8 @@ ScrollView {
                                 Layout.fillWidth: true
                                 text: toast.heading
                                 textFormat: Text.PlainText
-                                color: toast.phase === "working" ? Theme.textColor : toast.statusColor
+                                color: toast.phase === "working" || toast.phase === "information"
+                                    ? Theme.textColor : toast.statusColor
                                 font.bold: true
                                 elide: Text.ElideMiddle
                             }

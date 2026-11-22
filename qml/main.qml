@@ -691,7 +691,12 @@ ApplicationWindow {
                         currentIndex: window.currentPage
 
                         DashboardPage { id: dashboardPage }
-                        GameListPage { id: gameListPage }
+                        GameListPage {
+                            id: gameListPage
+                            onPolicyNoticeRequested: function(key, heading, detail) {
+                                toastStack.showInformation(key, heading, detail)
+                            }
+                        }
                         SettingsPage { id: settingsPage }
                         InfoPage {
                             id: infoPage
@@ -830,6 +835,7 @@ ApplicationWindow {
     }
 
     ToastStack {
+        id: toastStack
         exporter: shareExporter
         queue: deletionQueue
         parent: Overlay.overlay

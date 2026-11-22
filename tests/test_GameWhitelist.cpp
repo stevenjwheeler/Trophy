@@ -94,11 +94,11 @@ TEST_F(GameWhitelistTest, DefaultListCollapsedToCanonical) {
   EXPECT_FALSE(entries.contains("Steam"));
   EXPECT_FALSE(entries.contains("Discord"));
   EXPECT_FALSE(entries.contains("xalia.exe"));
-  EXPECT_TRUE(entries.contains("steam"));
+  EXPECT_TRUE(entries.contains("xalia"));
   // ...but every spelling still matches.
-  EXPECT_TRUE(wl->isBlacklisted("Steam"));
-  EXPECT_TRUE(wl->isBlacklisted("steam.exe"));
-  EXPECT_TRUE(wl->isBlacklisted("DISCORD"));
+  EXPECT_FALSE(wl->isBlacklisted("Steam"));
+  EXPECT_FALSE(wl->isBlacklisted("steam.exe"));
+  EXPECT_FALSE(wl->isBlacklisted("DISCORD"));
   EXPECT_TRUE(wl->isBlacklisted("Xalia.EXE"));
 }
 
@@ -137,11 +137,10 @@ TEST_F(GameWhitelistTest, LegacyRedistributableRowsConsolidateOnLoad) {
   EXPECT_EQ(GameWhitelist::prettySystemName("vc_redist"), "vc_redist");
 }
 
-TEST_F(GameWhitelistTest, DefaultAliasesMatchExactlyAndStayOnOneVetoRow) {
-  const auto defaults = GameWhitelist::defaultBlacklistEntries();
+TEST_F(GameWhitelistTest, ExplicitAppVetoAliasesMatchExactlyAndStayOnOneRow) {
   for (const auto &app : defaultAppCatalog()) {
     SCOPED_TRACE(app.key.toStdString());
-    EXPECT_TRUE(defaults.contains(app.key));
+    wl->addToBlacklist(app.key);
     EXPECT_TRUE(wl->isBlacklisted(app.key));
     for (const QString &alias : app.aliases) {
       EXPECT_TRUE(wl->isBlacklisted(alias));
@@ -151,7 +150,6 @@ TEST_F(GameWhitelistTest, DefaultAliasesMatchExactlyAndStayOnOneVetoRow) {
       EXPECT_EQ(GameWhitelist::normalizeKey(alias), alias);
     }
   }
-  EXPECT_EQ(defaultAppCatalog().size(), defaults.size());
   EXPECT_TRUE(wl->isBlacklisted("com.obsproject.Studio"));
   EXPECT_FALSE(wl->isBlacklisted("exe:/games/com.obsproject.studio"));
   EXPECT_FALSE(wl->isBlacklisted("my-obs-game"));
@@ -210,7 +208,7 @@ TEST_F(GameWhitelistTest, LegacyAliasVetoesAndRemovalMarkersMigrateOnLoad) {
   EXPECT_FALSE(wl->isBlacklisted("obs"));
   EXPECT_FALSE(wl->isBlacklisted("com.obsproject.Studio"));
   EXPECT_FALSE(wl->blacklistEntries().contains("obs-studio"));
-  EXPECT_TRUE(wl->removedDefaults().contains("obs"));
+  EXPECT_FALSE(wl->removedDefaults().contains("obs"));
 }
 
 TEST_F(GameWhitelistTest, DuplicateDefaultsMergeAndPreserveEitherUnblockChoice) {
@@ -260,7 +258,7 @@ TEST_F(GameWhitelistTest, RemovedDefaultsPersistAcrossReload) {
   wl2->load();
   EXPECT_FALSE(wl2->isBlacklisted("xalia"));
   // ...while untouched built-ins still seed.
-  EXPECT_TRUE(wl2->isBlacklisted("steam"));
+  EXPECT_TRUE(wl2->isBlacklisted("dxsetup"));
 
   // Re-blocking clears the marker: present again after reload.
   wl2->addToBlacklist("xalia");
@@ -288,14 +286,15 @@ TEST_F(GameWhitelistTest, PrettySystemNames) {
 }
 
 TEST_F(GameWhitelistTest, BlacklistHasBuiltInDefaults) {
-  // Constructor pre-populates well-known non-games so the detector
-  // ignores launchers, chat apps, and test tools out of the box.
+  // Only prerequisite/accessibility helpers remain blanket defaults.
   QStringList entries = wl->blacklistEntries();
   EXPECT_FALSE(entries.isEmpty());
-  EXPECT_TRUE(wl->isBlacklisted("steam"));
-  EXPECT_TRUE(wl->isBlacklisted("discord"));
-  EXPECT_TRUE(wl->isBlacklisted("obs"));
-  EXPECT_TRUE(wl->isBlacklisted("vkcube"));
+  EXPECT_TRUE(wl->isBlacklisted("vc_redist"));
+  EXPECT_TRUE(wl->isBlacklisted("dxsetup"));
+  EXPECT_TRUE(wl->isBlacklisted("xalia"));
+  for (const auto *key : {"steam", "discord", "obs", "vkcube", "firefox", "chrome",
+       "vlc", "mpv", "gimp", "code", "konsole", "dolphin", "unknown vulkan game"})
+    EXPECT_FALSE(wl->isBlacklisted(key)) << key;
 }
 
 // --- Whitelist CRUD ---
@@ -400,7 +399,7 @@ TEST_F(GameWhitelistTest, LoadNonExistentFile) {
   // Should not crash; whitelist stays empty, built-in blacklist stays intact.
   wl->load();
   EXPECT_TRUE(wl->whitelistEntries().isEmpty());
-  EXPECT_TRUE(wl->isBlacklisted("steam"));
+  EXPECT_TRUE(wl->isBlacklisted("dxsetup"));
 }
 
 TEST_F(GameWhitelistTest, PlaceholderReporterKeyPredicate) {
@@ -416,20 +415,52 @@ TEST_F(GameWhitelistTest, PlaceholderWhitelistEntryRepairedOnLoad) {
   // Regression: the authorize path used to whitelist the Vulkan null-name
   // placeholder under whichever game authorized last, aliasing every
   // unidentified reporter to that game. Loading such a file must drop the
-  // mapping and restore the built-in default blacklist entry.
+  // mapping without resurrecting obsolete default-exclusion rows.
   ASSERT_TRUE(QDir().mkpath(configHome.path() + "/trophy"));
   QFile legacy(configHome.path() + "/trophy/game-whitelist.json");
   ASSERT_TRUE(legacy.open(QIODevice::WriteOnly));
   legacy.write(R"({"whitelist":{"unknown vulkan game":"Some Game"},
+                   "blacklist":["unknown vulkan game"],
+                   "customKeys":["unknown vulkan game"],
                    "removedDefaults":["unknown vulkan game"]})");
   legacy.close();
 
   auto reloaded = std::make_unique<GameWhitelist>();
   reloaded->load();
   EXPECT_FALSE(reloaded->isWhitelisted("unknown vulkan game"));
-  EXPECT_TRUE(reloaded->isBlacklisted("unknown vulkan game"));
+  EXPECT_FALSE(reloaded->isBlacklisted("unknown vulkan game"));
   EXPECT_FALSE(
       reloaded->removedDefaults().contains("unknown vulkan game"));
+  EXPECT_FALSE(reloaded->customKeys().contains("unknown vulkan game"));
+}
+
+TEST_F(GameWhitelistTest, RetiredDesktopDefaultsMigrateOnceAndPreserveRecordedCustomRules) {
+  ASSERT_TRUE(QDir().mkpath(configHome.path() + "/trophy"));
+  QFile legacy(configHome.path() + "/trophy/game-whitelist.json");
+  ASSERT_TRUE(legacy.open(QIODevice::WriteOnly));
+  legacy.write(R"({"blacklist":["firefox","com.obsproject.Studio","exe:/games/custom"],
+                   "customKeys":["exe:/games/custom","com.obsproject.studio"],
+                   "whitelist":{"exe:/games/custom":"Custom Game"}})");
+  legacy.close();
+  wl->load();
+  EXPECT_FALSE(wl->isBlacklisted("firefox"));
+  for (const auto *key : {"obs", "exe:/games/custom"}) {
+    EXPECT_TRUE(wl->isBlacklisted(key)) << key;
+    EXPECT_FALSE(GameWhitelist::defaultBlacklistEntries().contains(key)) << key;
+  }
+  EXPECT_TRUE(wl->customKeys().contains("exe:/games/custom"));
+  EXPECT_EQ(wl->getWhitelistName("exe:/games/custom"), "Custom Game");
+  wl->save();
+  GameWhitelist restored;
+  restored.load();
+  EXPECT_FALSE(restored.isBlacklisted("firefox"));
+  EXPECT_TRUE(restored.isBlacklisted("com.obsproject.Studio"));
+  EXPECT_TRUE(restored.customKeys().contains("exe:/games/custom"));
+  restored.addToBlacklist("firefox");
+  restored.save();
+  GameWhitelist edited;
+  edited.load();
+  EXPECT_TRUE(edited.isBlacklisted("firefox")); // New explicit Deny is not migrated away.
 }
 
 TEST_F(GameWhitelistTest, PlaceholderCannotBeWhitelistedThroughCrud) {

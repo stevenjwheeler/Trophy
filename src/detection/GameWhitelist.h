@@ -43,7 +43,7 @@ public:
   QStringList whitelistEntries() const;
 
   // Blacklist operations
-  // Known default app IDs resolve to the built-in row for veto CRUD only.
+  // Known app aliases resolve to a canonical key for veto CRUD only.
   // No fuzzy matching; whitelist/token/stable-identity keys are unchanged.
   void addToBlacklist(const QString &windowClass);
   void removeFromBlacklist(const QString &windowClass);
@@ -65,8 +65,9 @@ public:
   // carries no game identity, so it must never become a whitelist match
   // key — every unidentified reporter would alias to one game.
   static bool isPlaceholderReporterKey(const QString &key);
-  // Built-in exclusions (browsers, helpers, test cubes). Shown in their
-  // own collapsed section; user entries are never flagged as system.
+  // Seeded prerequisite/helper exclusions. General desktop app defaults were
+  // retired with a versioned migration; recorded custom definitions and
+  // subsequent user Deny choices are preserved.
   static QStringList defaultBlacklistEntries();
   // Friendly label for a built-in key ("steam" -> "Steam"); anything
   // else echoes back unchanged.

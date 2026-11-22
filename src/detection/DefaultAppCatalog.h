@@ -10,6 +10,7 @@
 namespace TrophyBackend {
 
 struct DefaultAppInfo {
+  // Presentation and exact veto aliases, not an automatic exclusion list.
   QString key;
   QString artwork;
   // Exact known application IDs/executable names, NOT substring patterns.

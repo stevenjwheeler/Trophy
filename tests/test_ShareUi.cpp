@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QDateTime>
 #include <QThread>
 #include <QTest>
 #include <QSignalSpy>
@@ -1117,6 +1118,74 @@ TEST_F(SharingUiTest, QueuePanelShowsAllJobsAndKeepsCancelButtonsAcrossProgress)
   exporter.queueRows.clear(); emit exporter.changed();
   EXPECT_FALSE(panel->isVisible());
 }
+TEST_F(SharingUiTest, StandaloneInformationToastIsNeutralAndExpiresFromInitiallyEmptyOverlay) {
+  queue.present = false;
+  exporter.queueRows.clear();
+  create("ToastStack.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"queue", QVariant::fromValue(&queue)}, {"width", 400}});
+  auto *panel = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(panel, nullptr);
+  QQmlExpression overlayExpression(QQmlEngine::contextForObject(object.get()), object.get(), "Overlay.overlay");
+  auto *overlay = qobject_cast<QQuickItem *>(overlayExpression.evaluate().value<QObject *>());
+  ASSERT_NE(overlay, nullptr);
+  panel->setParentItem(overlay);
+  EXPECT_EQ(object->property("count").toInt(), 0);
+  EXPECT_FALSE(panel->isVisible());
+  EXPECT_EQ(object->property("infoDuration").toInt(), 6000);
+  ASSERT_TRUE(QMetaObject::invokeMethod(object.get(), "showInformation",
+      Q_ARG(QVariant, QVariant("game-policy:standalone")),
+      Q_ARG(QVariant, QVariant("Prompt")),
+      Q_ARG(QVariant, QVariant("This does not approve or start recording."))));
+  ASSERT_TRUE(wait([&] { return panel->isVisible(); }));
+  QPointer<QQuickItem> card = findItem(panel, "toast:game-policy:standalone");
+  ASSERT_FALSE(card.isNull());
+  EXPECT_EQ(card->property("statusColor").value<QColor>(), QColor("#a0a0a0"));
+  const double expiry = card->property("expiresAt").toDouble();
+  EXPECT_GT(expiry, QDateTime::currentMSecsSinceEpoch() + 5000);
+  QTest::qWait(300);
+  EXPECT_FALSE(card.isNull()); // A six-second notice must not disappear immediately.
+  QTest::qWait(6300);
+  EXPECT_TRUE(card.isNull());
+  EXPECT_EQ(object->property("count").toInt(), 0);
+  EXPECT_FALSE(panel->isVisible());
+}
+
+TEST_F(SharingUiTest, InformationalToastsDeduplicateExpireAndLeaveExportJobsAlone) {
+  queue.present = false;
+  exporter.queueRows = {
+      QVariantMap{{"id", "active"}, {"sourcePath", "/fake/Game.mkv"}, {"active", true},
+                  {"progress", 0.2}, {"cancelling", false}}};
+  create("ToastStack.qml", {{"exporter", QVariant::fromValue(&exporter)},
+      {"queue", QVariant::fromValue(&queue)}, {"width", 400}, {"infoDuration", 150}});
+  auto *panel = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(panel, nullptr);
+  const auto notice = [&](const QString &heading) {
+    return QMetaObject::invokeMethod(object.get(), "showInformation",
+        Q_ARG(QVariant, QVariant("game-policy:game")),
+        Q_ARG(QVariant, QVariant(heading)),
+        Q_ARG(QVariant, QVariant("Capture approval explanation")));
+  };
+  ASSERT_TRUE(notice("Prompt"));
+  ASSERT_TRUE(wait([&] { return findItem(panel, "toast:game-policy:game") != nullptr; }));
+  QPointer<QQuickItem> card = findItem(panel, "toast:game-policy:game");
+  EXPECT_EQ(card->property("phase").toString(), "information");
+  EXPECT_EQ(object->property("count").toInt(), 2);
+  ASSERT_TRUE(notice("Deny"));
+  EXPECT_EQ(findItem(panel, "toast:game-policy:game"), card.data());
+  EXPECT_EQ(card->property("heading").toString(), "Deny");
+  EXPECT_EQ(object->property("count").toInt(), 2);
+  ASSERT_TRUE(wait([&] { return card.isNull(); }));
+  EXPECT_NE(findItem(panel, "toast:export:active"), nullptr);
+  EXPECT_EQ(object->property("count").toInt(), 1);
+  object->setProperty("infoDuration", 2000);
+  ASSERT_TRUE(notice("Approval revoked"));
+  auto *dismiss = findItem(panel, "toastAction:game-policy:game");
+  ASSERT_NE(dismiss, nullptr);
+  ASSERT_TRUE(QMetaObject::invokeMethod(dismiss, "clicked"));
+  EXPECT_EQ(findItem(panel, "toast:game-policy:game"), nullptr);
+  EXPECT_NE(findItem(panel, "toast:export:active"), nullptr);
+}
+
 TEST_F(SharingUiTest, MixedToastStackRetainsGreenCompletionsWithIndependentExpiry) {
   exporter.queueRows = {
       QVariantMap{{"id", "one"}, {"sourcePath", "/fake/First.mkv"}, {"active", true}, {"progress", 0.2}, {"cancelling", false}},

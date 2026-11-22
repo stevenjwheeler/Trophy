@@ -59,8 +59,20 @@ protected:
     service.m_applicationExecutables = apps;
   }
   static void setCatalogue(GameDetectionService &service,
-                           const QList<LauncherGame> &games) {
+                            const QList<LauncherGame> &games) {
     service.m_catalogue = games;
+  }
+  static void setRecentGames(GameDetectionService &service, const QStringList &keys) {
+    service.m_recentKeys = keys;
+    service.m_recentGames = keys;
+    service.rebuildModels();
+  }
+  static void publishCatalogue(GameDetectionService &service, const QList<LauncherGame> &games) {
+    GameDetectionService::ScanResult result;
+    result.catalogueUpdated = true;
+    result.libraryGeneration = service.m_libraryGeneration;
+    result.catalogue = games;
+    service.applyScanResult(std::move(result));
   }
   static void writeFile(const QString &path, const QByteArray &bytes) {
     QFile file(path);
@@ -173,6 +185,195 @@ protected:
     EXPECT_EQ(service.m_catalogue[0].name, "Queued result");
   }
 };
+
+TEST_F(GameDetectionServiceTest, ApprovalChangesKeepCustomGroupAndSortReadyFirst) {
+  GameDetectionService service;
+  const QString first = "approval-sort-first", middle = "approval-sort-middle",
+                last = "approval-sort-last";
+  setRecentGames(service, {first, middle, last});
+  auto *model = service.gamesModel();
+  auto *filtered = qobject_cast<GameListFilterModel *>(model);
+  ASSERT_NE(filtered, nullptr);
+  filtered->setFilterText("approval-sort");
+  const auto keys = [&] {
+    QStringList result;
+    for (int row = 0; row < model->rowCount(); ++row)
+      result.append(model->data(model->index(row, 0), GameListModel::KeyRole).toString());
+    return result;
+  };
+  service.setTokenGames({first, last});
+  EXPECT_EQ(keys(), (QStringList{first, last, middle}));
+  EXPECT_EQ(model->data(model->index(0, 0), GameListModel::SectionRole).toString(),
+            "Custom Games");
+  EXPECT_EQ(model->data(model->index(1, 0), GameListModel::SectionRole).toString(),
+            "Custom Games");
+  EXPECT_EQ(model->data(model->index(2, 0), GameListModel::SectionRole).toString(), "Custom Games");
+  service.setTokenGames({middle, last});
+  EXPECT_EQ(keys(), (QStringList{last, middle, first}));
+  service.setTokenGames({first, middle, last});
+  EXPECT_EQ(keys(), (QStringList{first, last, middle}));
+  service.setTokenGames({});
+  EXPECT_EQ(keys(), (QStringList{first, last, middle}));
+}
+
+TEST_F(GameDetectionServiceTest, PrelistsLibrariesWithoutApprovalAndKeepsManualRulesCustom) {
+  GameDetectionService service;
+  const QString native = "exe:/group-test/native";
+  const QString custom = "exe:/group-test/manual";
+  setCatalogue(service, {
+      {424242, "Library Steam Game", "/group-test/steam", {}, {}, false, {"Steam"}},
+      {0, "Library Native Game", "/group-test", "/group-test/native", {}, false, {"Heroic (GOG)", "Lutris"}},
+      {0, "Library Native Game", "/group-test", "/group-test/native", {}, false, {"Heroic (GOG)"}},
+      {0, "Manual Game", "/group-test", "/group-test/manual", {}, false, {"Lutris"}},
+      {1, "Runtime Tool", "/group-test/tool", {}, {}, false, {"Steam"}, true}});
+  service.addCustomGame(custom, "Manual Game", false);
+  setRecentGames(service, {});
+  auto *model = service.gamesModel();
+  auto *filtered = qobject_cast<GameListFilterModel *>(model);
+  ASSERT_NE(filtered, nullptr);
+  filtered->setFilterText("Game");
+  filtered->setShowDefaultEntries(false);
+  // Only fixture rows; existing isolated test data may contain other game rules.
+  QMap<QString, QModelIndex> rows;
+  for (int row = 0; row < model->rowCount(); ++row) {
+    const auto index = model->index(row, 0);
+    rows.insert(index.data(GameListModel::KeyRole).toString(), index);
+  }
+  ASSERT_TRUE(rows.contains("steam_app_424242"));
+  ASSERT_TRUE(rows.contains(native));
+  ASSERT_TRUE(rows.contains(custom));
+  EXPECT_EQ(rows["steam_app_424242"].data(GameListModel::SectionRole).toString(), "Steam");
+  EXPECT_EQ(rows[native].data(GameListModel::SectionRole).toString(), "Heroic");
+  EXPECT_EQ(rows[custom].data(GameListModel::SectionRole).toString(), "Custom Games");
+  EXPECT_TRUE(rows[custom].data(GameListModel::LibraryRole).toString().isEmpty());
+  EXPECT_FALSE(rows[native].data(GameListModel::HasTokenRole).toBool());
+  EXPECT_FALSE(service.whitelist().contains(native));
+  EXPECT_FALSE(rows.contains("steam_app_1"));
+  filtered->setShowDefaultEntries(true);
+  filtered->setFilterText("Runtime Tool");
+  ASSERT_EQ(model->rowCount(), 1);
+  EXPECT_TRUE(model->index(0, 0).data(GameListModel::DefaultRole).toBool());
+  EXPECT_TRUE(model->index(0, 0).data(GameListModel::SupportToolRole).toBool());
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::SectionRole).toString(), "Default Exclusions");
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::DisplayRole).toString(), "Runtime Tool");
+  filtered->setShowDefaultEntries(false);
+  EXPECT_EQ(model->rowCount(), 0);
+  service.setTokenGames({native});
+  filtered->setFilterText(native);
+  ASSERT_EQ(model->rowCount(), 1);
+  EXPECT_TRUE(model->index(0, 0).data(GameListModel::HasTokenRole).toBool());
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::SectionRole).toString(), "Heroic");
+  setCatalogue(service, {});
+  setRecentGames(service, {});
+  filtered->setFilterText(custom);
+  ASSERT_EQ(model->rowCount(), 1); // Manual rule survives library disappearance.
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::SectionRole).toString(), "Custom Games");
+}
+
+TEST_F(GameDetectionServiceTest, RunningGamesLeadAndDeniedGamesFollowReadyAndWaitingRows) {
+  GameDetectionService service;
+  const QString active = "exe:/group-sort/active", ready = "exe:/group-sort/ready",
+                waiting = "exe:/group-sort/waiting", denied = "exe:/group-sort/denied";
+  for (const auto &key : {active, ready, waiting, denied})
+    define(service, key, key);
+  setRecentGames(service, {denied, waiting, ready, active});
+  service.setTokenGames({ready, active});
+  service.moveToBlacklist(denied);
+  const auto running = process(4242, "/group-sort/active");
+  apply(service, {{running.pid, running}});
+  auto *model = service.gamesModel();
+  auto *filtered = qobject_cast<GameListFilterModel *>(model);
+  ASSERT_NE(filtered, nullptr);
+  filtered->setFilterText("group-sort");
+  ASSERT_EQ(model->rowCount(), 4);
+  QStringList keys;
+  for (int row = 0; row < model->rowCount(); ++row)
+    keys.append(model->index(row, 0).data(GameListModel::KeyRole).toString());
+  EXPECT_EQ(keys, (QStringList{active, ready, waiting, denied}));
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::SectionRole).toString(), "Now Playing");
+  EXPECT_EQ(model->index(1, 0).data(GameListModel::SectionRole).toString(), "Custom Games");
+}
+
+TEST_F(GameDetectionServiceTest, CompletedLibraryScansRefreshGamesCountsAndKeepCollapsedGroups) {
+  GameDetectionService service;
+  service.addCustomGame("exe:/scan-refresh/manual", "scan-refresh-manual", false);
+  auto *model = qobject_cast<GameListFilterModel *>(service.gamesModel());
+  ASSERT_NE(model, nullptr);
+  model->setFilterText("scan-refresh");
+  const LauncherGame first{71001, "scan-refresh-one", "/scan-refresh/one", {}, {}, false, {"Steam"}};
+  const LauncherGame second{71002, "scan-refresh-two", "/scan-refresh/two", {}, {}, false, {"Steam"}};
+  publishCatalogue(service, {first});
+  EXPECT_EQ(model->matchingGameCount(), 2);
+  EXPECT_EQ(model->sectionCount("Steam"), 1);
+  model->toggleSection("Steam");
+  publishCatalogue(service, {first, second});
+  EXPECT_EQ(model->matchingGameCount(), 3);
+  EXPECT_EQ(model->sectionCount("Steam"), 2);
+  EXPECT_EQ(model->rowCount(), 2); // One collapsed representative plus the custom rule.
+  EXPECT_TRUE(model->collapsedSections().contains("Steam"));
+  publishCatalogue(service, {second});
+  EXPECT_EQ(model->matchingGameCount(), 2);
+  EXPECT_EQ(model->sectionCount("Steam"), 1);
+  EXPECT_EQ(model->sectionCount("Custom Games"), 1);
+}
+
+TEST_F(GameDetectionServiceTest, InstallerAndAccessibilityHelpersAreReadOnlyDefaultExclusions) {
+  GameDetectionService service;
+  auto *model = qobject_cast<GameListFilterModel *>(service.gamesModel());
+  ASSERT_NE(model, nullptr);
+  model->setShowDefaultEntries(true);
+  for (const auto *key : {"dxsetup", "vc_redist", "xalia"}) {
+    model->setFilterText(key);
+    ASSERT_EQ(model->matchingGameCount(), 1) << key;
+    const auto index = model->index(0, 0);
+    EXPECT_TRUE(index.data(GameListModel::SupportToolRole).toBool());
+    EXPECT_TRUE(index.data(GameListModel::DefaultRole).toBool());
+    EXPECT_EQ(index.data(GameListModel::SectionRole).toString(), "Default Exclusions");
+    EXPECT_TRUE(ProcessGames::excluded(QString("/helpers/%1.exe").arg(key)));
+  }
+  EXPECT_FALSE(ProcessGames::excluded("/games/xalia-adventure"));
+  EXPECT_FALSE(ProcessGames::excluded("/games/setup.exe"));
+  model->setShowDefaultEntries(false);
+  EXPECT_EQ(model->matchingGameCount(), 0);
+}
+
+TEST_F(GameDetectionServiceTest, PrefixFreeLibraryRowsNeverShareScopedApproval) {
+  GameDetectionService service;
+  const QString payload = "/group-test/shared/game.exe";
+  const QString blockKey = GameWhitelist::normalizeKey("exe:" + payload);
+  const QString first = GameWhitelist::normalizeKey("wine:/group-test/prefix-one:" + payload);
+  const QString second = GameWhitelist::normalizeKey("wine:/group-test/prefix-two:" + payload);
+  setCatalogue(service, {
+      {0, "Prefix Test Game", "/group-test/shared", payload, {}, false, {"Heroic (GOG)"}}});
+  setRecentGames(service, {});
+  service.setTokenGames({"Prefix Test Game"});
+  auto *model = service.gamesModel();
+  auto *filtered = qobject_cast<GameListFilterModel *>(model);
+  ASSERT_NE(filtered, nullptr);
+  filtered->setFilterText(GameWhitelist::normalizeKey(payload));
+  ASSERT_EQ(model->rowCount(), 1);
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::KeyRole).toString(), blockKey);
+  EXPECT_FALSE(model->index(0, 0).data(GameListModel::HasTokenRole).toBool());
+  service.setTokenGames({first});
+  setRecentGames(service, {first, second});
+  ASSERT_EQ(model->rowCount(), 2);
+  QSet<QString> approved;
+  for (int row = 0; row < model->rowCount(); ++row) {
+    const auto index = model->index(row, 0);
+    EXPECT_EQ(index.data(GameListModel::SectionRole).toString(), "Heroic");
+    EXPECT_EQ(index.data(GameListModel::BlockKeyRole).toString(), blockKey);
+    if (index.data(GameListModel::HasTokenRole).toBool())
+      approved.insert(index.data(GameListModel::KeyRole).toString());
+  }
+  EXPECT_EQ(approved, (QSet<QString>{first}));
+  service.moveToBlacklist(blockKey);
+  ASSERT_EQ(model->rowCount(), 2); // A shared veto is not a third custom game.
+  for (int row = 0; row < model->rowCount(); ++row)
+    EXPECT_EQ(model->index(row, 0).data(GameListModel::ListedRole).toInt(), 2);
+  service.unblockGame(blockKey);
+  for (int row = 0; row < model->rowCount(); ++row)
+    EXPECT_NE(model->index(row, 0).data(GameListModel::ListedRole).toInt(), 2);
+}
 
 TEST_F(GameDetectionServiceTest, SharedAudioMetadataInvalidatesOldAssociationsWithoutNativeQueries) {
   GameDetectionService service;
