@@ -216,7 +216,10 @@ and Trophy never installs a global keyboard hook.
   you to approve the two actions. It suggests `F9` (recording toggle) and `F10`
   (clip/bookmark); **your assigned keys are authoritative**.
 - **Configure** opens your desktop's own shortcut editor (KDE System Settings or
-  the GNOME shortcut editor). You can also remap the keys there.
+  the GNOME shortcut editor) when its GlobalShortcuts portal supports version 2
+  or newer. Version 1 still supports binding and using shortcuts, but not opening
+  an editor from Trophy; **Configure** is disabled with an explanation. Use your
+  desktop's shortcut settings to change keys instead.
 - The portal keeps the key grab even if you turn the feature off; disabling it
   makes Trophy ignore activations rather than releasing the keys.
 - There is no separate global bookmark shortcut.

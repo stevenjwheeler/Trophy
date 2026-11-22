@@ -63,7 +63,11 @@ GlobalShortcutManager::GlobalShortcutManager(QObject *parent)
   m_availabilityTimeout.setSingleShot(true);
   m_availabilityTimeout.setInterval(5000);
   connect(&m_availabilityTimeout, &QTimer::timeout, this,
-          [this] { setAvailable(false); });
+          [this] {
+    ++m_availabilityGeneration; // A late property reply cannot restore capability.
+    setPortalVersion(0);
+    setAvailable(m_interfaceProven);
+  });
   auto *service = new QDBusServiceWatcher(kService, QDBusConnection::sessionBus(),
       QDBusServiceWatcher::WatchForOwnerChange, this);
   connect(service, &QDBusServiceWatcher::serviceOwnerChanged, this,
@@ -72,6 +76,7 @@ GlobalShortcutManager::GlobalShortcutManager(QObject *parent)
       clearRequest();
       retireUnboundSession();
     }
+    setAvailable(false);
     queryAvailability();
   });
   queryAvailability();
@@ -84,6 +89,8 @@ bool GlobalShortcutManager::isAvailable() const {
 
 void GlobalShortcutManager::queryAvailability() {
   const quint64 generation = ++m_availabilityGeneration;
+  m_interfaceProven = false;
+  setPortalVersion(0);
   m_availabilityTimeout.start();
   auto message = QDBusMessage::createMethodCall(
       kService, kPath, "org.freedesktop.DBus.Properties", "Get");
@@ -96,23 +103,40 @@ void GlobalShortcutManager::queryAvailability() {
     finished->deleteLater();
     if (generation != m_availabilityGeneration)
       return;
-    bool available = false;
+    m_availabilityTimeout.stop();
+    uint portalVersion = 0;
     if (reply.type() == QDBusMessage::ReplyMessage && reply.arguments().size() == 1 &&
         reply.arguments().first().metaType() == QMetaType::fromType<QDBusVariant>()) {
       const QVariant version = reply.arguments().first().value<QDBusVariant>().variant();
-      available = version.metaType() == QMetaType::fromType<uint>() && version.toUInt() > 0;
+      if (version.metaType() == QMetaType::fromType<uint>())
+        portalVersion = version.toUInt();
     }
-    setAvailable(available);
+    setPortalVersion(portalVersion);
+    // A working CreateSession/BindShortcuts proves v1 support, but not v2.
+    // Do not let a failed version query erase that independent evidence.
+    setAvailable(portalVersion > 0 || m_interfaceProven);
   });
 }
 
 void GlobalShortcutManager::setAvailable(bool available) {
-  ++m_availabilityGeneration;
-  m_availabilityTimeout.stop();
+  if (!available)
+    setPortalVersion(0);
   if (m_available == available)
     return;
   m_available = available;
   emit availabilityChanged();
+}
+
+void GlobalShortcutManager::setPortalVersion(uint version) {
+  const bool couldConfigure = canConfigure();
+  m_portalVersion = version;
+  if (couldConfigure != canConfigure())
+    emit capabilitiesChanged();
+}
+
+void GlobalShortcutManager::markInterfaceAvailable() {
+  m_interfaceProven = true;
+  setAvailable(true);
 }
 
 void GlobalShortcutManager::disconnectSessionSignals() {
@@ -208,7 +232,7 @@ void GlobalShortcutManager::watchRequest(const QDBusPendingCall &call,
     // ensureResponseSubscription() already covers this path. Just
     // publish the dispatch key the Response slot matches on.
     m_pendingRequestPath = requestPath;
-    setAvailable(true); // A valid method reply proves interface support too.
+    markInterfaceAvailable();
     // Do not restart the timer: method wait and Response share one budget.
   });
 }
@@ -274,7 +298,7 @@ void GlobalShortcutManager::onSessionResponse(unsigned int response,
     qWarning() << "GlobalShortcuts session gave no handle";
     return;
   }
-  setAvailable(true);
+  markInterfaceAvailable();
 
   // Activations + remaps for our session.
   QDBusConnection::sessionBus().connect(
@@ -378,6 +402,11 @@ void GlobalShortcutManager::reconfigureShortcuts() {
     requestShortcuts();
     return;
   }
+  if (!canConfigure()) {
+    setLastError(tr("Your desktop does not offer a portal shortcut editor. "
+                   "Existing shortcuts still work; use your desktop's shortcut settings to change keys."));
+    return;
+  }
   // Empirical (KDE 6.x GlobalShortcuts backend): a repeat BindShortcuts
   // on a live session returns the existing bindings WITHOUT showing any
   // dialog, so it cannot be used to re-pick keys. ConfigureShortcuts is
@@ -392,13 +421,17 @@ void GlobalShortcutManager::reconfigureShortcuts() {
   QVariantMap options;
   auto call = portalCall("ConfigureShortcuts",
       {QVariant::fromValue(QDBusObjectPath(m_sessionHandle)), QString(), options});
+  const auto generation = m_availabilityGeneration;
   auto pending = QDBusConnection::sessionBus().asyncCall(call, 10000);
   auto *watcher = new QDBusPendingCallWatcher(pending, this);
   connect(watcher, &QDBusPendingCallWatcher::finished, this,
-          [this](QDBusPendingCallWatcher *finished) {
+          [this, generation](QDBusPendingCallWatcher *finished) {
     const QDBusMessage reply = finished->reply();
     finished->deleteLater();
+    if (generation != m_availabilityGeneration)
+      return; // The old portal owner cannot report errors for a new session.
     if (reply.type() == QDBusMessage::ReplyMessage) {
+      setLastError({});
       qDebug() << "ConfigureShortcuts accepted by the portal";
       return;
     }

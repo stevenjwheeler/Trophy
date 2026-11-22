@@ -776,7 +776,9 @@ Rectangle {
                                     anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Theme.spacingMedium; anchors.verticalCenter: parent.verticalCenter
                                     spacing: Theme.spacingSmall
                                     Label {
-                                        text: stepKeysScroll.hasKeys ? qsTr("Enabled — remap anytime in Settings → Keyboard Shortcuts.") : (stepKeysScroll.portalBound ? qsTr("Almost there — the system came back with no keys chosen. Pick them in the dialog.") : qsTr("Not enabled yet. Nothing will pop up until you press the button."))
+                                        text: (stepKeysScroll.portalBound && globalShortcuts && !globalShortcuts.canConfigure)
+                                              ? qsTr("Your desktop does not offer a portal shortcut editor. Existing shortcuts still work; use your desktop's shortcut settings to change keys.")
+                                              : (stepKeysScroll.hasKeys ? qsTr("Enabled — remap anytime in Settings → Keyboard Shortcuts.") : (stepKeysScroll.portalBound ? qsTr("Almost there — the system came back with no keys chosen. Pick them in the dialog.") : qsTr("Not enabled yet. Nothing will pop up until you press the button.")))
                                         font.pixelSize: Theme.fontSizeSmall; color: Theme.textSecondaryColor; wrapMode: Text.WordWrap; Layout.fillWidth: true
                                     }
                                     Label {
@@ -790,6 +792,7 @@ Rectangle {
                                         TrophyButton {
                                             text: stepKeysScroll.hasKeys ? qsTr("Change keys") : (stepKeysScroll.portalBound ? qsTr("Choose keys") : qsTr("Enable global shortcuts"))
                                             highlighted: !stepKeysScroll.hasKeys
+                                            enabled: !stepKeysScroll.portalBound || (globalShortcuts && globalShortcuts.canConfigure)
                                             onClicked: {
                                                 if (settingsManager) settingsManager.globalShortcutsEnabled = true;
                                                 if (globalShortcuts) globalShortcuts.ensureSetup();

@@ -64,6 +64,7 @@ class GlobalShortcutManager : public QObject {
   Q_OBJECT
 
   Q_PROPERTY(bool available READ isAvailable NOTIFY availabilityChanged)
+  Q_PROPERTY(bool canConfigure READ canConfigure NOTIFY capabilitiesChanged)
   Q_PROPERTY(bool bound READ isBound NOTIFY boundChanged)
   Q_PROPERTY(QVariantMap boundShortcuts READ boundShortcuts NOTIFY boundChanged)
   Q_PROPERTY(bool enabled READ isEnabled WRITE setEnabled NOTIFY enabledChanged)
@@ -79,6 +80,7 @@ public:
   explicit GlobalShortcutManager(QObject *parent = nullptr);
 
   bool isAvailable() const;
+  bool canConfigure() const { return m_portalVersion >= 2; }
   bool isBound() const { return m_bound; }
   QVariantMap boundShortcuts() const { return m_boundShortcuts; }
   bool isEnabled() const { return m_enabled; }
@@ -116,6 +118,7 @@ public slots:
 
 signals:
   void availabilityChanged();
+  void capabilitiesChanged();
   void boundChanged();
   void enabledChanged();
   void lastErrorChanged();
@@ -139,6 +142,8 @@ private:
   // Emits availabilityChanged only on an actual flip (QML binds to
   // the available property for the no-portal fallback path).
   void setAvailable(bool available);
+  void setPortalVersion(uint version);
+  void markInterfaceAvailable();
   void disconnectSessionSignals();
   void retireUnboundSession();
   quint64 beginRequest(bool binding);
@@ -164,6 +169,8 @@ private:
   bool m_enabled = true;
   QString m_lastError;
   bool m_available = false;
+  uint m_portalVersion = 0; // Unknown until the current owner's version reply.
+  bool m_interfaceProven = false;
   quint64 m_availabilityGeneration = 0;
   QTimer m_availabilityTimeout;
   // Covers the method reply AND the subsequent portal Response. Expiry
