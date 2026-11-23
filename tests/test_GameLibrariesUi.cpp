@@ -403,6 +403,33 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   auto *refresh = page->findChild<QObject *>("rescanGameLibrariesButton");
   ASSERT_NE(refresh, nullptr);
   EXPECT_TRUE(refresh->property("enabled").toBool());
+  // Real pointer clicks (rather than emitting clicked()) exercise the popup's
+  // close policy, which is what made the opener toggle visibly fail. The
+  // expanded card is taller than the viewport, so scroll the settings flickable
+  // first to keep every clicked button on screen.
+  auto ensureVisible = [](QQuickItem *target) {
+    QQuickItem *scrollItem = target ? target->parentItem() : nullptr;
+    while (scrollItem && !scrollItem->property("contentY").isValid())
+      scrollItem = scrollItem->parentItem();
+    if (!scrollItem)
+      return;
+    const qreal top = target->mapToItem(scrollItem, QPointF(0, 0)).y();
+    const qreal bottom = top + target->height();
+    if (top >= 4 && bottom <= scrollItem->height() - 4)
+      return;
+    const qreal contentY = scrollItem->property("contentY").toReal();
+    const qreal maxY = qMax<qreal>(0, scrollItem->property("contentHeight").toReal()
+                                         - scrollItem->height());
+    scrollItem->setProperty("contentY", qBound<qreal>(0, contentY + top - 8, maxY));
+    QTest::qWait(400);
+  };
+  auto clickItem = [&window, &ensureVisible](QQuickItem *target) {
+    ASSERT_NE(target, nullptr);
+    ensureVisible(target);
+    const QPoint pos = target->mapToScene(QPointF(target->width() / 2, target->height() / 2)).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, pos);
+    QTest::qWait(180);
+  };
   for (const auto &id : ids) {
     auto *icon = findItem(item, id + "LibraryIcon");
     ASSERT_NE(icon, nullptr);
@@ -418,8 +445,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
     EXPECT_EQ(indicator->property("color").value<QColor>().alpha(), id == "steam" ? 255 : 0);
     auto *popup = dropdown->findChild<QObject *>(id + "DetectedGamesPopup");
     ASSERT_NE(popup, nullptr);
-    ASSERT_TRUE(QMetaObject::invokeMethod(dropdown, "clicked"));
-    QTest::qWait(180);
+    clickItem(dropdown);
     EXPECT_TRUE(popup->property("visible").toBool());
     auto *popupContent = popup->property("contentItem").value<QQuickItem *>();
     ASSERT_NE(popupContent, nullptr);
@@ -434,16 +460,25 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
       QTest::qWait(100);
       EXPECT_TRUE(containsText(popupContent, "Game 52"));
     }
+    clickItem(dropdown);
+    EXPECT_FALSE(popup->property("visible").toBool()) << "a second click should close the popup";
+    clickItem(dropdown);
+    EXPECT_TRUE(popup->property("visible").toBool()) << "a third click should reopen the popup";
     QTest::keyClick(&window, Qt::Key_Escape);
     QTest::qWait(180);
     EXPECT_FALSE(popup->property("visible").toBool());
     auto *locations = findItem(item, id + "LibraryLocationsButton");
     ASSERT_NE(locations, nullptr);
-    ASSERT_TRUE(QMetaObject::invokeMethod(locations, "clicked"));
-    QTest::qWait(180);
+    clickItem(locations);
     auto *locationPopup = locations->findChild<QObject *>(id + "LibraryLocationsPopup");
     ASSERT_NE(locationPopup, nullptr);
     EXPECT_TRUE(locationPopup->property("visible").toBool());
+    clickItem(locations);
+    EXPECT_FALSE(locationPopup->property("visible").toBool())
+        << "clicking Manage again should close its popup instead of reopening it";
+    clickItem(locations);
+    EXPECT_TRUE(locationPopup->property("visible").toBool())
+        << "clicking Manage should reopen the closed popup";
     auto *locationContent = locationPopup->property("contentItem").value<QQuickItem *>();
     ASSERT_NE(locationContent, nullptr);
     if (id == "steam") {
