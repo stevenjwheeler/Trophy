@@ -145,7 +145,11 @@ ColumnLayout {
                                 width: Math.min(360, root.width)
                                 padding: 16
                                 focus: true
-                                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                                // Pressing the opener must not close the popup before
+                                // its onClicked can toggle it, otherwise a second click
+                                // would close and immediately reopen it. Only presses
+                                // outside the opener (its parent item) dismiss it.
+                                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
                                 background: Rectangle { color: Theme.cardColor; radius: Theme.radiusMedium; border.color: Theme.borderColor }
                                 contentItem: ColumnLayout {
                                     spacing: 12
@@ -221,7 +225,9 @@ ColumnLayout {
                                 height: Math.min(locationContent.implicitHeight + 32, 460)
                                 padding: 16
                                 focus: true
-                                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                                // Keep the opener click from closing the popup before
+                                // onClicked runs; a second click on Manage then closes it.
+                                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
                                 background: Rectangle { color: Theme.cardColor; radius: Theme.radiusMedium; border.color: Theme.borderColor }
                                 contentItem: ScrollView {
                                     id: locationScroll
