@@ -101,6 +101,48 @@ public:
   static void clock(RecordingSession &session, std::shared_ptr<std::atomic<int64_t>> now) {
     session.m_clockNowUs = [now] { return now->load(); };
   }
+  static void verifyRetainedDmaBuf(RecordingSession &session) {
+    QTemporaryFile source;
+    ASSERT_TRUE(source.open());
+    const int first = dup(source.handle()), second = dup(source.handle());
+    ASSERT_GE(first, 0); ASSERT_GE(second, 0);
+    VideoFrame frame{};
+    frame.isDmaBuf = true;
+    frame.width = frame.height = 64;
+    frame.timestamp = 10000;
+    frame.dmaBufPlanes.count = 2;
+    frame.dmaBufPlanes.planes[0] = {first, 256, 0, 0};
+    frame.dmaBufPlanes.planes[1] = {second, 64, 4096, 0};
+    auto lease = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = lease;
+    frame.bufferLease = lease;
+    session.m_running = true;
+    session.m_videoFrameDurationUs = 1000;
+    session.queueCapturedFrame(frame);
+    close(first); close(second); // Simulate native buffer removal.
+    frame.bufferLease.reset(); lease.reset();
+    ASSERT_EQ(session.m_videoQueue.size(), 1u);
+    ASSERT_TRUE(session.m_lastFrame->dmaBufStorage);
+    const int primary = session.m_lastFrame->dmaBufFd;
+    const int auxiliary = session.m_lastFrame->dmaBufLayout().planes[1].fd;
+    session.m_videoQueue.pop();
+    EXPECT_FALSE(weak.expired()); // Retained image, not the queue, owns it now.
+    EXPECT_GE(fcntl(auxiliary, F_GETFD), 0);
+    session.m_frameClockOffsetUs -= 5000;
+    session.m_lastIssuedTimestampUs -= 10000;
+    session.emitStillFrames();
+    ASSERT_FALSE(session.m_videoQueue.empty());
+    while (!session.m_videoQueue.empty()) {
+      EXPECT_EQ(session.m_videoQueue.front().dmaBufFd, primary);
+      EXPECT_EQ(session.m_videoQueue.front().dmaBufLayout().planes[1].fd, auxiliary);
+      session.m_videoQueue.pop();
+    }
+    session.m_lastFrame.reset();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_LT(fcntl(primary, F_GETFD), 0);
+    EXPECT_LT(fcntl(auxiliary, F_GETFD), 0);
+    session.m_running = false;
+  }
   static bool admit(RecordingSession &session, int64_t timestamp) {
     return session.admitVideoFrame(timestamp);
   }
@@ -2324,6 +2366,14 @@ TEST(RecordingSessionTest, RealAndStillFramesShareOneProducerIndependentSnapshot
   FakeMuxer muxer;
   RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true, 48000, 0);
   RecordingSessionTestPeer::verifySharedSnapshots(session);
+}
+
+TEST(RecordingSessionTest, MultiPlaneStillFramesSurviveProducerRemovalAndReleaseAllHandles) {
+  FakeCapture capture;
+  FakeVideoEncoder encoder;
+  FakeMuxer muxer;
+  RecordingSession session("unused.mkv", &capture, &encoder, &muxer, nullptr, true, 48000, 0);
+  RecordingSessionTestPeer::verifyRetainedDmaBuf(session);
 }
 
 TEST(RecordingSessionTest, PendingStillFrameBatchCannotBeOvertakenByARealFrame) {

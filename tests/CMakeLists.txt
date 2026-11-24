@@ -812,6 +812,11 @@ gtest_discover_tests(test_DmaBufCudaImport)
 endif()
 
 if(VAAPI_FOUND)
+    add_executable(test_VaapiDmaBufImporter test_VaapiDmaBufImporter.cpp)
+    target_include_directories(test_VaapiDmaBufImporter PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_VaapiDmaBufImporter PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
+    gtest_discover_tests(test_VaapiDmaBufImporter)
+
     add_executable(test_VaapiVideoProcessor test_VaapiVideoProcessor.cpp)
     target_include_directories(test_VaapiVideoProcessor PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_VaapiVideoProcessor PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
@@ -819,6 +824,16 @@ if(VAAPI_FOUND)
 endif()
 
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---
+add_executable(test_DmaBufFrame test_DmaBufFrame.cpp)
+target_include_directories(test_DmaBufFrame PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_DmaBufFrame PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_DmaBufFrame)
+
+add_executable(test_PipeWireBufferLease test_PipeWireBufferLease.cpp)
+target_include_directories(test_PipeWireBufferLease PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireBufferLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+gtest_discover_tests(test_PipeWireBufferLease)
+
 add_executable(test_EncoderFactory test_EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp
