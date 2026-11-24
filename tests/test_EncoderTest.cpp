@@ -3,6 +3,7 @@
 #include "encoding/FFmpegEncoder.h"
 #include <QCoreApplication>
 #include <QSize>
+#include <QTemporaryFile>
 #include <gtest/gtest.h>
 #include <libavutil/pixfmt.h>
 #include <tuple>
@@ -39,6 +40,9 @@ public:
   static SwsContext *scaler(FFmpegEncoder &encoder) { return encoder.m_swsCtx; }
   static AVCodecContext *codecContext(FFmpegEncoder &encoder) {
     return encoder.m_codecCtx;
+  }
+  static void importerName(FFmpegEncoder &encoder, const QString &name) {
+    encoder.m_codecName = name;
   }
   static int fillUntilBackpressure(FFmpegEncoder &encoder, const VideoFrame &frame) {
     if (!encoder.convertSoftwareFrame(frame)) return -1;
@@ -118,6 +122,38 @@ TEST(EncoderRateTest, UncappedRetainsOneHundredFpsPacketTimestamps) {
   std::sort(timestamps.begin(), timestamps.end());
   ASSERT_EQ(timestamps.size(), 100u);
   for (int i = 0; i < 100; ++i) EXPECT_EQ(timestamps[i], i * 10);
+}
+
+TEST(EncoderDmaBufTest, UnsupportedMultiPlanePathsNeverUsePlaneZeroOrCpuPointer) {
+  if (!avcodec_find_encoder_by_name("libx264")) GTEST_SKIP() << "libx264 unavailable";
+  for (const auto *name : {"libx264", "h264_nvenc", "unsupported_hardware", "h264_vaapi"}) {
+    SCOPED_TRACE(name);
+    FFmpegEncoder encoder(IEncoder::EncoderType::Software_x264, "libx264");
+    EncoderConfig config;
+    config.width = config.height = 64;
+    config.preset = "ultrafast";
+    ASSERT_TRUE(encoder.initialize(config));
+    // Native device-free test of the real pre-import routing guard.
+    FFmpegEncoderTestAccess::importerName(encoder, QString::fromLatin1(name));
+    VideoFrame frame{};
+    frame.isDmaBuf = true;
+    frame.width = frame.height = 64;
+    frame.dmaBufPlanes.count = 2;
+    QTemporaryFile allocation;
+    ASSERT_TRUE(allocation.open());
+    ASSERT_TRUE(allocation.resize(65536));
+    frame.dmaBufPlanes.planes[0] = {allocation.handle(), 256, 0, 0};
+    frame.dmaBufPlanes.planes[1] = {allocation.handle(), 64, 32768, 0};
+    std::vector<uint8_t> pixels(64 * 64 * 4, 128);
+    frame.data = pixels.data(); frame.stride = 256;
+    frame.pixelFormat = AV_PIX_FMT_BGRA;
+    int fallbacks = 0;
+    frame.requestCpuFallback = [&] { ++fallbacks; };
+    std::vector<EncodedPacket> packets;
+    EXPECT_FALSE(encoder.encodeFrames(frame, packets));
+    EXPECT_TRUE(packets.empty());
+    EXPECT_EQ(fallbacks, 1);
+  }
 }
 
 TEST(EncoderRateTest, RealCodecBackpressurePreservesInputAndFlushesDelayedFrames) {

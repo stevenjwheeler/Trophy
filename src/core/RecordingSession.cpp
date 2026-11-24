@@ -931,6 +931,10 @@ void RecordingSession::queueCapturedFrame(const VideoFrame &frame) {
   // back to PipeWire, so the pixels are copied; DMA-BUF frames are kept alive
   // by their lease instead.
   VideoFrame snapshot = frame;
+  if (frame.isDmaBuf && !snapshot.retainDmaBuf()) {
+    ++m_queueDrops;
+    return;
+  }
   if (!frame.isDmaBuf && frame.data && frame.stride > 0 && frame.height > 0) {
     const size_t bytes = size_t(frame.stride) * size_t(frame.height);
     snapshot.cpuStorage = m_cpuFramePool.copy(frame.data, bytes);

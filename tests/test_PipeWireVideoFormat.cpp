@@ -123,3 +123,78 @@ TEST(PipeWireVideoFormatTest, ModifierOfferCannotAccidentallyMatchSharedMemory) 
   spa_pod *result = nullptr;
   EXPECT_LT(spa_pod_filter(&resultBuilder, &result, shm, dma), 0);
 }
+
+TEST(PipeWireVideoFormatTest, ProducerChoosesDmaBufPlaneCountButShmStillRequiresOneBlock) {
+  uint8_t storage[4096]{};
+  auto builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
+  const auto *format = buildPipeWireVideoFormat(&builder, {0});
+  const auto *dma = buildPipeWireBufferRequest(&builder, format, true);
+  ASSERT_NE(dma, nullptr);
+  EXPECT_EQ(spa_pod_find_prop(dma, nullptr, SPA_PARAM_BUFFERS_blocks), nullptr);
+  const auto *shm = buildPipeWireBufferRequest(&builder, format, false);
+  ASSERT_NE(shm, nullptr);
+  const auto *blocks = spa_pod_find_prop(shm, nullptr, SPA_PARAM_BUFFERS_blocks);
+  ASSERT_NE(blocks, nullptr);
+  int32_t count = 0;
+  ASSERT_EQ(spa_pod_get_int(&blocks->value, &count), 0);
+  EXPECT_EQ(count, 1);
+}
+
+TEST(PipeWireVideoFormatTest, PreservesImageAndAuxiliaryPlanesWithoutAssumingMaxsize) {
+  spa_chunk chunks[4]{};
+  spa_data data[4]{};
+  for (int i = 0; i < 4; ++i) {
+    chunks[i].offset = i * 4096;
+    chunks[i].stride = 256 >> i;
+    data[i].type = SPA_DATA_DmaBuf;
+    data[i].fd = 10 + i;
+    data[i].chunk = &chunks[i];
+  }
+  spa_buffer buffer{};
+  buffer.datas = data;
+  DmaBufLayout layout;
+  for (const auto count : {1u, 2u, 4u}) {
+    buffer.n_datas = count;
+    ASSERT_TRUE(pipeWireVideoDmaBufLayout(buffer, layout));
+    ASSERT_EQ(layout.count, count);
+    for (uint32_t i = 0; i < count; ++i) {
+      EXPECT_EQ(layout.planes[i].fd, data[i].fd);
+      EXPECT_EQ(layout.planes[i].offset, chunks[i].offset);
+      EXPECT_EQ(layout.planes[i].stride, chunks[i].stride);
+      EXPECT_EQ(layout.planes[i].size, 0u);
+    }
+  }
+  buffer.n_datas = 0;
+  EXPECT_FALSE(pipeWireVideoDmaBufLayout(buffer, layout));
+  EXPECT_EQ(layout.count, 0u);
+  buffer.n_datas = 5;
+  EXPECT_FALSE(pipeWireVideoDmaBufLayout(buffer, layout));
+}
+
+TEST(PipeWireVideoFormatTest, RejectsMalformedMixedAndExplicitSyncBlocksWithoutPartialOutput) {
+  spa_chunk chunks[2]{};
+  chunks[0].stride = chunks[1].stride = 256;
+  spa_data data[2]{};
+  data[0].type = data[1].type = SPA_DATA_DmaBuf;
+  data[0].fd = data[1].fd = 10;
+  data[0].chunk = &chunks[0]; data[1].chunk = &chunks[1];
+  spa_buffer buffer{};
+  buffer.n_datas = 2; buffer.datas = data;
+  const spa_data original = data[1];
+  for (int kind = 0; kind < 7; ++kind) {
+    SCOPED_TRACE(kind);
+    data[1] = original; chunks[1].flags = 0; chunks[1].stride = 256;
+    switch (kind) {
+    case 0: data[1].type = SPA_DATA_MemFd; break;
+    case 1: data[1].type = SPA_DATA_SyncObj; break;
+    case 2: data[1].fd = int64_t(INT_MAX) + 1; break;
+    case 3: data[1].fd = -1; break;
+    case 4: data[1].mapoffset = 4096; break;
+    case 5: data[1].chunk = nullptr; break;
+    case 6: chunks[1].flags = SPA_CHUNK_FLAG_CORRUPTED; break;
+    }
+    DmaBufLayout layout;
+    EXPECT_FALSE(pipeWireVideoDmaBufLayout(buffer, layout));
+    EXPECT_EQ(layout.count, 0u);
+  }
+}

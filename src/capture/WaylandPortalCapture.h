@@ -106,6 +106,7 @@ private:
   static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error);
   static void on_stream_param_changed(void *data, unsigned int id, const struct spa_pod *param);
   static void on_stream_process(void *data);
+  bool processBuffer(pw_buffer *buffer);
   static void on_core_error(void *data, uint32_t id, int sequence, int result,
                             const char *message);
   static void on_registry_global_remove(void *data, uint32_t id);
