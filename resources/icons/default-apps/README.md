@@ -3,7 +3,7 @@
 The 34 branded application SVGs in this directory are unmodified artwork
 from **Papirus icon theme**, copyright the Papirus Development Team and
 contributors, licensed under **GPL-3.0**. The full license is Trophy's root
-`LICENSE`, also embedded alongside this notice and installed with it.
+`LICENSE.md`, also embedded alongside this notice and installed with it.
 
 Upstream: https://github.com/PapirusDevelopmentTeam/papirus-icon-theme
 

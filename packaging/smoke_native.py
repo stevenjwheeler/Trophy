@@ -60,7 +60,7 @@ def check_tree(root):
     for relative in (
         "share/applications/io.github.stevenjwheeler.Trophy.desktop",
         "share/icons/hicolor/scalable/apps/trophy.svg",
-        "share/licenses/trophy/default-app-icons/LICENSE",
+        "share/licenses/trophy/default-app-icons/LICENSE.md",
         "share/licenses/trophy/default-app-icons/README.md",
     ):
         required(prefix, relative)

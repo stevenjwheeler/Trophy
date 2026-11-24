@@ -131,7 +131,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </article>
 </main>
 
-<footer class="site-footer wrap"><div><a class="brand" href="../"><img src="../assets/trophy.svg" width="28" height="28" alt="">Trophy</a><p>Game recording and clipping for Linux</p></div><nav aria-label="Footer navigation"><a href="https://github.com/stevenjwheeler/Trophy">Source</a><a href="https://github.com/stevenjwheeler/Trophy/issues">Issues</a><a href="./">Documentation</a><a href="https://github.com/stevenjwheeler/Trophy/blob/main/LICENSE">GPL-3.0</a></nav></footer>
+<footer class="site-footer wrap"><div><a class="brand" href="../"><img src="../assets/trophy.svg" width="28" height="28" alt="">Trophy</a><p>Game recording and clipping for Linux</p></div><nav aria-label="Footer navigation"><a href="https://github.com/stevenjwheeler/Trophy">Source</a><a href="https://github.com/stevenjwheeler/Trophy/issues">Issues</a><a href="./">Documentation</a><a href="https://github.com/stevenjwheeler/Trophy/blob/main/LICENSE.md">GPL-3.0</a></nav></footer>
 </body>
 </html>
 """
