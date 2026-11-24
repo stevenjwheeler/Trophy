@@ -92,7 +92,7 @@ You must have the necessary rights to submit your contribution and must preserve
 
 Contributors retain copyright over their own contributions.
 
-Please review the [LICENSE](LICENSE) and [Trademark and Attribution Policy](TRADEMARK.md) for further information.
+Please review the [LICENSE](LICENSE.md) and [Trademark and Attribution Policy](TRADEMARK.md) for further information.
 
 ## Forks and Branding
 

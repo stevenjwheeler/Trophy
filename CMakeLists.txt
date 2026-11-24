@@ -631,13 +631,13 @@ install(FILES resources/icons/trophy.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
 )
 
-install(FILES resources/icons/default-apps/README.md LICENSE
+install(FILES resources/icons/default-apps/README.md LICENSE.md
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
 )
 install(FILES resources/icons/launchers/README.md
     resources/icons/launchers/Legendary-LICENSE
     resources/icons/launchers/Nile-LICENSE
-    resources/icons/launchers/Faugus-LICENSE LICENSE
+    resources/icons/launchers/Faugus-LICENSE LICENSE.md
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/launcher-icons
 )
 
@@ -655,7 +655,7 @@ set(CPACK_PACKAGE_NAME "trophy")
 set(CPACK_PACKAGE_VENDOR "Trophy - Game recording and clipping")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_VERSION "${CPACK_STAMP}")
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md")
 set(CPACK_PACKAGE_CONTACT "Trophy Maintainers <trophy@users.noreply.github.com>")
 
 # Debian package metadata.
