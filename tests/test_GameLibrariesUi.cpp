@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "core/WheelScrollNormalizer.h"
 #include "settings/SettingsManager.h"
 #include <QFont>
 #include <QGuiApplication>
@@ -7,6 +8,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QStyleHints>
 #include <QTest>
 #include <gtest/gtest.h>
 #include <memory>
@@ -572,6 +574,79 @@ TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
         "Khronos", "Vulkan-Headers", "linuxdeploy"})
     EXPECT_FALSE(text.contains(obsolete)) << obsolete;
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST(SettingsPageUiTest, WheelScrollIsImmediateAndSectionJumpsAnimate) {
+  TrophyBackend::SettingsManager settings;
+  LibraryUiApp app;
+  SetupUiAudio audio;
+  LibraryUiBackend backend;
+  QQmlEngine engine;
+  engine.rootContext()->setContextProperty("settingsManager", &settings);
+  engine.rootContext()->setContextProperty("gameDetector", &backend);
+  engine.rootContext()->setContextProperty("app", &app);
+  engine.rootContext()->setContextProperty("audioDeviceEnumerator", &audio);
+  for (const auto *name : {"recordingManager", "replayManager", "storageManager",
+                           "globalShortcuts", "hardwareInfo",
+                           "desktopIntegration"})
+    engine.rootContext()->setContextProperty(name, static_cast<QObject *>(nullptr));
+  QStringList errors;
+  QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+      [&](const QList<QQmlError> &warnings) {
+        for (const auto &warning : warnings)
+          errors.append(warning.toString());
+      });
+  QQmlComponent component(&engine, QUrl::fromLocalFile(SETTINGS_QML_FILE));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  auto *item = qobject_cast<QQuickItem *>(page.get());
+  ASSERT_NE(item, nullptr);
+  QQuickWindow window;
+  window.resize(1024, 720);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(1024, 720));
+  window.show();
+  QTest::qWait(50);
+  auto *flick = findItem(item, "settingsFlick");
+  ASSERT_NE(flick, nullptr);
+  // Install the application-wide normalizer that main() also uses; without it
+  // Qt animates these writes and the assertions below would see partial moves.
+  TrophyBackend::WheelScrollNormalizer::install();
+  // The empty gutter left of the settings cards is part of the Flickable.
+  const QPointF gutter = flick->mapToScene(QPointF(4, flick->height() / 2));
+  const qreal step = QGuiApplication::styleHints()->wheelScrollLines() * 24.0;
+  // Every wheel event must move the content immediately. `Behavior on
+  // contentY` would animate these writes instead, which is exactly what
+  // throttles high-resolution wheels.
+  QTest::wheelEvent(&window, gutter, QPoint(0, -120));
+  EXPECT_NEAR(flick->property("contentY").toReal(), step, 0.5);
+  QTest::wheelEvent(&window, gutter, QPoint(0, -15));
+  EXPECT_NEAR(flick->property("contentY").toReal(), step + step / 8.0, 0.5);
+  // Section jumps keep their animation through the explicit animation.
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "scrollToSection",
+      Q_ARG(QVariant, QVariant(QStringLiteral("Customization")))));
+  QCoreApplication::processEvents();
+  auto *animation = page->findChild<QObject *>("sectionScrollAnimation");
+  ASSERT_NE(animation, nullptr);
+  ASSERT_TRUE(animation->property("running").toBool());
+  const qreal destination = animation->property("to").toReal();
+  EXPECT_GT(destination, step);
+  // Expanding the target section grows contentHeight, which re-targets the
+  // animation once the expansion finishes, so wait for the settled final run.
+  qreal lastContentY = -1.0;
+  bool settled = false;
+  for (int i = 0; i < 60 && !settled; ++i) {
+    QTest::qWait(50);
+    const qreal contentY = flick->property("contentY").toReal();
+    settled = !animation->property("running").toBool() &&
+              qAbs(contentY - lastContentY) < 0.01;
+    lastContentY = contentY;
+  }
+  EXPECT_TRUE(settled);
+  EXPECT_NEAR(flick->property("contentY").toReal(),
+              animation->property("to").toReal(), 1.0);
+  EXPECT_TRUE(errors.isEmpty()) << errors.join('\n').toStdString();
 }
 
 int main(int argc, char **argv) {
