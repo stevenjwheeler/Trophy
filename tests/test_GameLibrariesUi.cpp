@@ -576,7 +576,7 @@ TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
 }
 
-TEST(SettingsPageUiTest, WheelScrollIsImmediateAndSectionJumpsAnimate) {
+TEST(SettingsPageUiTest, WheelScrollStepsAndSectionJumpsAnimate) {
   TrophyBackend::SettingsManager settings;
   LibraryUiApp app;
   SetupUiAudio audio;
@@ -616,12 +616,15 @@ TEST(SettingsPageUiTest, WheelScrollIsImmediateAndSectionJumpsAnimate) {
   // The empty gutter left of the settings cards is part of the Flickable.
   const QPointF gutter = flick->mapToScene(QPointF(4, flick->height() / 2));
   const qreal step = QGuiApplication::styleHints()->wheelScrollLines() * 24.0;
-  // Every wheel event must move the content immediately. `Behavior on
-  // contentY` would animate these writes instead, which is exactly what
-  // throttles high-resolution wheels.
+  // Each wheel event adds its rotation-derived distance and the normalizer
+  // glides there (one 110 ms ease-out per step). A `Behavior on contentY`
+  // would animate every event separately, which is exactly what throttles
+  // high-resolution wheels.
   QTest::wheelEvent(&window, gutter, QPoint(0, -120));
+  QTest::qWait(250);
   EXPECT_NEAR(flick->property("contentY").toReal(), step, 0.5);
   QTest::wheelEvent(&window, gutter, QPoint(0, -15));
+  QTest::qWait(250);
   EXPECT_NEAR(flick->property("contentY").toReal(), step + step / 8.0, 0.5);
   // Section jumps keep their animation through the explicit animation.
   ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "scrollToSection",

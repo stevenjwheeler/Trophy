@@ -26,13 +26,22 @@ namespace TrophyBackend {
  * milliseconds apart, so each event only delivers the first fraction of its
  * distance and scrolling becomes several times slower than requested.
  *
- * The normalizer applies the exact rotation-derived distance immediately for
- * non-synthesized (mouse wheel) events. Touchpads keep Qt's pixel-delta path,
- * which is already rate independent. It only acts when the Flickable itself is
- * the event receiver, i.e. after every item under the cursor has ignored the
- * wheel: sliders, spinners, combo box popups and the player's zoom handlers
- * keep their own behaviour. When the Flickable cannot move any further the
- * event is left unhandled so a nested scrollable can consume it.
+ * The normalizer accumulates the exact rotation-derived distance for
+ * non-synthesized (mouse wheel) events and glides to it over a short
+ * ease-out, so every step is kept without snapping. Touchpads keep Qt's
+ * pixel-delta path, which is already rate independent. It only acts when the
+ * Flickable itself is the event receiver, i.e. after every item under the
+ * cursor has ignored the wheel: sliders, spinners, combo box popups and the
+ * player's zoom handlers keep their own behaviour.
+ *
+ * At the end of the content a nested Flickable leaves the event unhandled so
+ * an ancestor scrollable can consume it. The outermost Flickable instead
+ * recoils a few pixels inward and eases back (the content position cannot
+ * leave the Flickable's extents, so this is a rubber band rather than an
+ * overscroll), and consumes the event.
+ *
+ * Any external content move (a section jump animation, a drag, a layout
+ * change) cancels the current glide so the two never fight over contentY.
  */
 class WheelScrollNormalizer : public QObject {
     Q_OBJECT
@@ -44,9 +53,11 @@ public:
     /// installed, and kept alive for the lifetime of the application.
     static void install();
 
-    /// Move \a receiver by the rotation in \a event when it is a Flickable that
-    /// can consume the wheel, returning true when the event was consumed.
-    /// Exposed so tests can drive the decision without a window.
+    /// Start the scroll described by \a event on \a receiver when it is a
+    /// Flickable that can consume the wheel, returning true when the event was
+    /// consumed. The movement is animated, so the resting position is reached
+    /// shortly after this returns. Exposed so tests can drive the decision
+    /// without a window.
     static bool consumeWheel(QObject *receiver, QWheelEvent *event);
 
 protected:

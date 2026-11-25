@@ -14,6 +14,7 @@
 #include <QQuickWindow>
 #include <QStyleHints>
 #include <QTest>
+#include <QTimer>
 #include <QWheelEvent>
 #include <gtest/gtest.h>
 #include <memory>
@@ -180,6 +181,11 @@ void wheel(QQuickWindow *window, QPoint position, QPoint angleDelta,
         QTest::wheelEvent(window, position, angleDelta);
 }
 
+// Wheel steps glide for 110 ms and a step that reaches an end springs back over
+// a further 260 ms; wait for the longest sequence to come to rest.
+constexpr int kSettleMs = 450;
+void settle() { QTest::qWait(kSettleMs); }
+
 qreal contentPosition(const Scene &scene, const char *name, const char *axis) {
     QQuickItem *flickable = scene.item(name);
     EXPECT_NE(flickable, nullptr) << name;
@@ -194,6 +200,28 @@ qreal contentX(const Scene &scene, const char *name = "flick") {
     return contentPosition(scene, name, "contentX");
 }
 
+// Samples a content position while a bounce runs, so the recoil can be
+// asserted without relying on a single sample landing exactly on its peak.
+struct PositionRange {
+    qreal minimum = 0;
+    qreal maximum = 0;
+};
+
+std::shared_ptr<PositionRange> trackPosition(QQuickItem *item, const char *axis,
+                                             qreal initial) {
+    auto range = std::make_shared<PositionRange>();
+    range->minimum = range->maximum = initial;
+    auto *timer = new QTimer(item);
+    timer->setInterval(4);
+    QObject::connect(timer, &QTimer::timeout, timer, [range, item, axis] {
+        const qreal value = item->property(axis).toReal();
+        range->minimum = qMin(range->minimum, value);
+        range->maximum = qMax(range->maximum, value);
+    });
+    timer->start();
+    return range;
+}
+
 // A positive angleDelta is a wheel turned away from the user; QQuickFlickable
 // then decreases contentY/contentX. The stock implementation was measured to
 // move +72 px for angleDelta -120, which is what these expectations mirror.
@@ -201,6 +229,7 @@ TEST(WheelScrollNormalizer, OneNotchMovesOneScrollDistance) {
     Scene scene(kSingleFlickable);
     ASSERT_NE(scene.item("flick"), nullptr);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
 }
 
@@ -208,10 +237,25 @@ TEST(WheelScrollNormalizer, HorizontalWheelMovesContentX) {
     Scene scene(kHorizontalFlickable);
     ASSERT_NE(scene.item("flick"), nullptr);
     wheel(&scene.window, QPoint(200, 150), QPoint(-kNotch, 0));
+    settle();
     EXPECT_NEAR(contentX(scene), notchDistance(), 0.01);
     EXPECT_NEAR(contentY(scene), 0.0, 0.01);
     wheel(&scene.window, QPoint(200, 150), QPoint(kNotch, 0));
+    settle();
     EXPECT_NEAR(contentX(scene), 0.0, 0.01);
+}
+
+// The step is a short glide, not a jump: right after the event the view is
+// still on its way, and it lands exactly on the rotation-derived distance.
+TEST(WheelScrollNormalizer, EachStepGlidesToItsDestination) {
+    Scene scene(kSingleFlickable);
+    ASSERT_NE(scene.item("flick"), nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    const qreal moving = contentY(scene);
+    EXPECT_GE(moving, 0.0);
+    EXPECT_LT(moving, notchDistance() - 1.0);
+    settle();
+    EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
 }
 
 // A high-resolution wheel reports one notch as several sub-notch events a few
@@ -223,6 +267,21 @@ TEST(WheelScrollNormalizer, SubNotchEventsAddUpToOneNotch) {
     const int steps = 8;
     const int step = kNotch / steps;
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -step), steps);
+    settle();
+    EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
+}
+
+// Events that arrive while the previous step is still gliding must add onto
+// its destination. Adding onto the current (still animating) position would
+// silently throw away the in-flight distance.
+TEST(WheelScrollNormalizer, StepsDuringGlideAccumulateWithoutLoss) {
+    Scene scene(kSingleFlickable);
+    ASSERT_NE(scene.item("flick"), nullptr);
+    for (int i = 0; i < 8; ++i) {
+        QTest::wheelEvent(&scene.window, QPoint(200, 150), QPoint(0, -15));
+        QTest::qWait(5); // still mid-glide when the next event arrives
+    }
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
 }
 
@@ -231,10 +290,22 @@ TEST(WheelScrollNormalizer, RapidFullNotchesAreNotThrottled) {
     ASSERT_NE(scene.item("flick"), nullptr);
     // Ten ordinary notches in quick succession must travel ten notches.
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 10);
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance() * 10, 0.01);
     // Reversing immediately keeps every step.
     wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch), 4);
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance() * 6, 0.01);
+}
+
+TEST(WheelScrollNormalizer, ReversingMidGlideReturnsToTheStart) {
+    Scene scene(kSingleFlickable);
+    ASSERT_NE(scene.item("flick"), nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    QTest::qWait(20);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch));
+    settle();
+    EXPECT_NEAR(contentY(scene), 0.0, 0.01);
 }
 
 TEST(WheelScrollNormalizer, SameMillisecondEventsAreNotDropped) {
@@ -244,6 +315,7 @@ TEST(WheelScrollNormalizer, SameMillisecondEventsAreNotDropped) {
     // implementation drops all but the first because it cannot compute a
     // velocity from a zero elapsed time.
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -15), 32);
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance() * 32 / 8.0, 0.01);
 }
 
@@ -252,6 +324,7 @@ TEST(WheelScrollNormalizer, FractionalRotationAccumulatesWithoutRounding) {
     ASSERT_NE(scene.item("flick"), nullptr);
     // 40 events of 3 units are 1/40 of a notch each: 72 px in total, not 0.
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -3), 40);
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
 }
 
@@ -260,8 +333,10 @@ TEST(WheelScrollNormalizer, BothDirections) {
     ASSERT_NE(scene.item("flick"), nullptr);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch / 2));
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance() * 1.5, 0.01);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch));
+    settle();
     EXPECT_NEAR(contentY(scene), notchDistance() * 0.5, 0.01);
 }
 
@@ -287,21 +362,105 @@ Item {
     // height - contentHeight - bottomMargin in the negated coordinate.
     EXPECT_NEAR(contentY(scene), -30.0, 0.01);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch), 5);
+    settle();
     EXPECT_NEAR(contentY(scene), -30.0, 0.01);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 100);
+    settle();
     EXPECT_NEAR(contentY(scene), 710.0, 0.01);
 }
 
-TEST(WheelScrollNormalizer, StopsAtBoundsWithoutSwallowingTheEvent) {
+// The outermost Flickable cannot hand the wheel to anyone, so the end of the
+// content answers with a small recoil instead of dead silence.
+TEST(WheelScrollNormalizer, OutermostFlickableBouncesAndSettlesAtTheEnd) {
     Scene scene(kSingleFlickable);
-    ASSERT_NE(scene.item("flick"), nullptr);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
     // 4000 px of content in a 300 px viewport: 3700 px of travel.
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 200);
+    settle();
     EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
-    // Scrolling further does nothing, and the event stays available for a
-    // parent scrollable (see NestedFlickableTakesOverAtBounds).
-    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 5);
+
+    const auto range = trackPosition(flick, "contentY", 3700.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    settle();
+    // It recoiled inward (contentY decreases at the bottom) and returned.
+    EXPECT_LE(range->minimum, 3700.0 - 6.0);
     EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
+}
+
+TEST(WheelScrollNormalizer, BounceRecoilsAtTheTopToo) {
+    Scene scene(kSingleFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    const auto range = trackPosition(flick, "contentY", 0.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch));
+    settle();
+    EXPECT_GE(range->maximum, 6.0);
+    EXPECT_NEAR(contentY(scene), 0.0, 0.01);
+}
+
+// The same recoil applies to the axis that ran out of travel, whichever that
+// is: here the view scrolls sideways only.
+TEST(WheelScrollNormalizer, HorizontalBounceRecoilsAtTheRightEdge) {
+    Scene scene(kHorizontalFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(-kNotch, 0), 100);
+    settle();
+    EXPECT_NEAR(contentX(scene), 3600.0, 0.01);
+
+    const auto range = trackPosition(flick, "contentX", 3600.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(-kNotch, 0));
+    settle();
+    EXPECT_LE(range->minimum, 3600.0 - 6.0);
+    EXPECT_NEAR(contentX(scene), 3600.0, 0.01);
+}
+
+// A view whose content fits in its viewport has nowhere to go: it must not
+// fake a bounce, and the wheel event stays available for anything else.
+TEST(WheelScrollNormalizer, ContentThatFitsDoesNotBounce) {
+    Scene scene(R"(
+import QtQuick
+
+Item {
+    width: 400
+    height: 300
+    Flickable {
+        objectName: "flick"
+        anchors.fill: parent
+        contentHeight: 100
+        contentWidth: width
+    }
+}
+)");
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    const auto range = trackPosition(flick, "contentY", 0.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    settle();
+    EXPECT_NEAR(contentY(scene), 0.0, 0.01);
+    EXPECT_NEAR(range->minimum, 0.0, 0.01);
+    EXPECT_NEAR(range->maximum, 0.0, 0.01);
+
+    WheelEvent down(QPoint(0, -kNotch));
+    down.ignore();
+    EXPECT_FALSE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flick, &down));
+    EXPECT_FALSE(down.isAccepted());
+}
+
+// A wheel on an axis with no travel at all is left to Qt instead of being
+// swallowed with a recoil the view cannot use.
+TEST(WheelScrollNormalizer, AxisWithoutTravelIsNotConsumed) {
+    Scene scene(kSingleFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    WheelEvent sideways(QPoint(-kNotch, 0));
+    sideways.ignore();
+    EXPECT_FALSE(
+        TrophyBackend::WheelScrollNormalizer::consumeWheel(flick, &sideways));
+    EXPECT_FALSE(sideways.isAccepted());
+    EXPECT_NEAR(contentX(scene), 0.0, 0.01);
+    EXPECT_NEAR(contentY(scene), 0.0, 0.01);
 }
 
 TEST(WheelScrollNormalizer, NestedFlickableTakesOverAtBounds) {
@@ -310,15 +469,22 @@ TEST(WheelScrollNormalizer, NestedFlickableTakesOverAtBounds) {
     ASSERT_NE(scene.item("outer"), nullptr);
     // The inner Flickable can scroll: it keeps the wheel.
     wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch));
+    settle();
     EXPECT_NEAR(contentY(scene, "inner"), notchDistance(), 0.01);
     EXPECT_NEAR(contentY(scene, "outer"), 0.0, 0.01);
     // 53 further notches reach -3816; the 54th is clamped to the inner
     // Flickable's 3850 px end and still belongs to it.
     wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch), 53);
+    settle();
     EXPECT_NEAR(contentY(scene, "inner"), 3850.0, 0.01);
     EXPECT_NEAR(contentY(scene, "outer"), 0.0, 0.01);
-    // Once it is at its end the outer one scrolls instead.
+    // Once it is at its end the outer one scrolls instead, and the inner one
+    // does not recoil: the handoff wins over the bounce.
+    QQuickItem *inner = scene.item("inner");
+    const auto innerRange = trackPosition(inner, "contentY", 3850.0);
     wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch));
+    settle();
+    EXPECT_NEAR(innerRange->minimum, 3850.0, 0.01);
     EXPECT_NEAR(contentY(scene, "inner"), 3850.0, 0.01);
     EXPECT_NEAR(contentY(scene, "outer"), notchDistance(), 0.01);
 }
@@ -330,6 +496,7 @@ TEST(WheelScrollNormalizer, NestedFlickableTakesOverWhenInnerCannotScroll) {
     // The inner one has nowhere to go; the wheel must reach the outer
     // Flickable instead of being consumed by a no-op.
     wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch));
+    settle();
     EXPECT_NEAR(contentY(scene, "inner"), 0.0, 0.01);
     EXPECT_NEAR(contentY(scene, "outer"), notchDistance(), 0.01);
 }
@@ -344,8 +511,22 @@ TEST(WheelScrollNormalizer, PointerHandlerUnderTheCursorKeepsTheWheel) {
     EXPECT_NEAR(contentY(scene), 0.0, 0.01);
     // Below the handler the Flickable scrolls normally.
     wheel(&scene.window, QPoint(200, 250), QPoint(0, -kNotch));
+    settle();
     EXPECT_EQ(scene.root->property("wheelEvents").toInt(), 1);
     EXPECT_NEAR(contentY(scene), notchDistance(), 0.01);
+}
+
+// An external jump (Settings scrolls a section into view with its own
+// NumberAnimation) must take over from a glide that is still running.
+TEST(WheelScrollNormalizer, ExternalJumpCancelsARunningGlide) {
+    Scene scene(kSingleFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    QTest::qWait(20);
+    flick->setProperty("contentY", 500.0);
+    settle();
+    EXPECT_NEAR(contentY(scene), 500.0, 0.01);
 }
 
 // Direct checks of the decision helper: these cover event properties the
@@ -372,10 +553,12 @@ TEST(WheelScrollNormalizerTest, InvertedFlagFollowsTheAngleDelta) {
     WheelEvent inverted(QPoint(0, -kNotch), Qt::MouseEventNotSynthesized, true);
     ASSERT_TRUE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flickable,
                                                                   &normal));
+    settle();
     const qreal afterNormal = contentY(scene);
     flickable->setProperty("contentY", 0.0);
     ASSERT_TRUE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flickable,
                                                                   &inverted));
+    settle();
     EXPECT_NEAR(contentY(scene), afterNormal, 0.01);
 }
 
@@ -394,6 +577,7 @@ TEST(WheelScrollNormalizerTest, NonInteractiveOrDisabledFlickableIsIgnored) {
     flickable->setProperty("enabled", true);
     EXPECT_TRUE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flickable,
                                                                   &event));
+    settle();
 }
 
 TEST(WheelScrollNormalizerTest, EventsWithoutRotationAreIgnored) {
@@ -408,19 +592,17 @@ TEST(WheelScrollNormalizerTest, EventsWithoutRotationAreIgnored) {
 }
 
 TEST(WheelScrollNormalizerTest, EventIsReportedConsumedOnlyWhenSomethingMoved) {
-    Scene scene(kSingleFlickable);
-    QQuickItem *flickable = scene.item("flick");
-    ASSERT_NE(flickable, nullptr);
-    flickable->setProperty("contentY", 0.0);
-    // Declining lets the delivery loop pass the event to a parent Flickable
-    // (see NestedFlickableTakesOverAtBounds), so the return value matters.
+    // The inner Flickable rests at its top, so scrolling up cannot move it and
+    // the event must stay available for the outer Flickable.
+    Scene scene(kNestedFlickables);
+    QQuickItem *inner = scene.item("inner");
+    ASSERT_NE(inner, nullptr);
     WheelEvent up(QPoint(0, kNotch));
-    EXPECT_FALSE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flickable,
-                                                                   &up));
+    EXPECT_FALSE(TrophyBackend::WheelScrollNormalizer::consumeWheel(inner, &up));
     WheelEvent down(QPoint(0, -kNotch));
-    EXPECT_TRUE(TrophyBackend::WheelScrollNormalizer::consumeWheel(flickable,
-                                                                  &down));
+    EXPECT_TRUE(TrophyBackend::WheelScrollNormalizer::consumeWheel(inner, &down));
     EXPECT_TRUE(down.isAccepted());
+    settle();
 }
 
 } // namespace
