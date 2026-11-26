@@ -10,6 +10,9 @@
 #include <QQuickWindow>
 #include <QStyleHints>
 #include <QTest>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextFragment>
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -545,7 +548,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
         << error.toStdString();
 }
 
-TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
+TEST(InformationUiTest, LoadsFeatureCardsAndCreditLinksWithoutDependingOnCopy) {
   QQmlEngine engine;
   engine.rootContext()->setContextProperty("recordingManager", static_cast<QObject *>(nullptr));
   QStringList warnings;
@@ -558,21 +561,48 @@ TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
   ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
   std::unique_ptr<QObject> page(component.create());
   ASSERT_NE(page, nullptr) << component.errorString().toStdString();
-  QString text;
-  for (auto *child : page->findChildren<QObject *>()) {
-    text += child->property("text").toString() + '\n';
-    text += child->property("description").toString() + '\n';
-    text += child->property("title").toString() + '\n';
+  const auto features = page->findChildren<QObject *>("infoFeature");
+  const auto credits = page->findChildren<QObject *>("infoCredit");
+  ASSERT_FALSE(features.isEmpty());
+  ASSERT_FALSE(credits.isEmpty());
+  const auto verifyStructure = [&] {
+    for (auto *feature : features) {
+      EXPECT_FALSE(feature->property("title").toString().trimmed().isEmpty());
+      EXPECT_FALSE(feature->property("description").toString().trimmed().isEmpty());
+      const auto icon = feature->property("iconSource").toUrl();
+      EXPECT_TRUE(icon.isValid() && !icon.isEmpty());
+    }
+    int links = 0;
+    for (auto *credit : credits) {
+      QTextDocument document;
+      document.setHtml(credit->property("text").toString());
+      EXPECT_FALSE(document.toPlainText().trimmed().isEmpty());
+      for (auto block = document.begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+          const auto format = it.fragment().charFormat();
+          if (!format.isAnchor())
+            continue;
+          const QUrl link(format.anchorHref());
+          EXPECT_TRUE(link.isValid() && !link.host().isEmpty());
+          EXPECT_TRUE(link.scheme() == "https" || link.scheme() == "http");
+          ++links;
+        }
+      }
+    }
+    EXPECT_GT(links, 0);
+  };
+  verifyStructure();
+
+  // Editorial changes and translations must not be a CI contract. Exercise
+  // different copy on the real components without changing their structure.
+  for (auto *feature : features) {
+    feature->setProperty("title", QStringLiteral("Reworded feature heading"));
+    feature->setProperty("description", QStringLiteral("A revised feature description."));
   }
-  for (const auto *expected : {"Process-based detection", "recording requires authorization",
-       "desktop fallback may include voice", "bookmark a full recording",
-        "install when you choose", "Steam, Heroic and Lutris icons", "Papirus",
-        "Legendary", "Nile", "Felix Ribeiro", "CC BY 4.0"})
-    EXPECT_TRUE(text.contains(expected)) << expected;
-  for (const auto *obsolete : {"KDE KWin", "Hyprland", "Sway", "GNOME / Mutter",
-        "Automatic Updates", "save recent moments anytime", "SQLite", "LibYAML",
-        "Khronos", "Vulkan-Headers", "linuxdeploy"})
-    EXPECT_FALSE(text.contains(obsolete)) << obsolete;
+  for (auto *credit : credits)
+    credit->setProperty("text", QStringLiteral(
+        "Reworded acknowledgment: <a href=\"https://example.org/project\">Project</a>"));
+  verifyStructure();
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
 }
 

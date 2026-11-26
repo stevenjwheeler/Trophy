@@ -756,6 +756,7 @@ Page {
     // Shared rich-text credit style keeps project/license links usable and
     // wraps long acknowledgments without widening the scroll view.
     component CreditLabel: Label {
+        objectName: "infoCredit"
         Layout.fillWidth: true
         textFormat: Text.RichText
         wrapMode: Text.WordWrap
