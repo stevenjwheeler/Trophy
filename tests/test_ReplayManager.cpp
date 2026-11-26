@@ -215,10 +215,12 @@ TEST_F(ReplayManagerTest, SharedSourceBindingRejectsRetiredEventsAndManualTokens
   QCoreApplication::processEvents();
   EXPECT_EQ(ready, 1);
   EXPECT_EQ(stale, 1);
-  EXPECT_EQ(settings.getRestoreToken("fixture"), "replacement-token");
+  EXPECT_TRUE(settings.getRestoreToken("fixture").isEmpty());
+  settings.setRestoreToken("fixture", "separate-approved-token");
   generation = 3;
   bind(manual, 3, true);
   emit manual.restoreTokenUpdated("manual-token");
-  EXPECT_EQ(settings.getRestoreToken("fixture"), "replacement-token");
+  emit manual.restoreTokenStale("separate-approved-token");
+  EXPECT_EQ(settings.getRestoreToken("fixture"), "separate-approved-token");
   EXPECT_TRUE(settings.getRestoreToken("Manual Recording").isEmpty());
 }

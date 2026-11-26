@@ -898,9 +898,10 @@ void WaylandPortalCapture::onSourcesSelected(unsigned int response,
     // deletes the stale token and re-authorizes through the New Game prompt
     // (a picker following that click is the user's own action).
     if (m_restoreTokenUsed) {
-      qWarning() << "Wayland Portal: source selection rejected saved restore "
-                    "token; re-authorize instead of showing a picker";
+      qWarning() << "Wayland Portal: saved-token source selection did not complete; "
+                    "requesting authorization before another capture attempt";
       clearStartGuard();
+      closePortalSession();
       emit restoreTokenStale(m_restoreToken);
       return;
     }
@@ -982,9 +983,12 @@ void WaylandPortalCapture::onStartResponse(unsigned int response,
   if (response != 0) {
     // Same rule at Start stage: no silent picker retry — re-authorize.
     if (m_restoreTokenUsed) {
-      qWarning() << "Wayland Portal: Start rejected saved restore token; "
-                    "re-authorize instead of showing a picker";
+      // A nonzero response also covers cancellation of a picker opened by
+      // the portal itself. It does not prove that no picker was shown.
+      qWarning() << "Wayland Portal: saved-token restore did not complete; "
+                    "requesting authorization before another capture attempt";
       clearStartGuard();
+      closePortalSession();
       emit restoreTokenStale(m_restoreToken);
       return;
     }

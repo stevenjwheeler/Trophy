@@ -62,6 +62,7 @@ public slots:
   }
   bool HasHeld() { return m_held.type() == QDBusMessage::MethodCallMessage; }
   int SessionCloseCount() { return fakeSessionCloseCount; }
+  int RequestCount(const QString &stage) { return m_requests.value(stage); }
   void Respond(const QString &path, uint response, const QVariantMap &results) {
     auto msg = QDBusMessage::createSignal(path, "org.freedesktop.portal.Request", "Response");
     msg.setArguments({response, results});
@@ -74,6 +75,7 @@ public slots:
   }
 private:
   QDBusObjectPath request(const QString &stage, const QVariantMap &options) {
+    ++m_requests[stage];
     QString sender = message().service();
     sender.remove(':');
     sender.replace('.', '_');
@@ -108,6 +110,7 @@ private:
   }
   QString m_mode;
   QVariantMap m_lastSelectOptions;
+  QMap<QString, int> m_requests;
   QDBusMessage m_held;
   QString m_heldPath;
 };
@@ -1090,7 +1093,9 @@ TEST_F(WaylandPortalCaptureTest, UnansweredSavedRestoreTimesOutWithoutReauthoriz
   EXPECT_EQ(control("SessionCloseCount", {}).arguments().value(0).toInt(), 1);
 }
 
-TEST_F(WaylandPortalCaptureTest, SavedTokenRejectionEmitsStaleInsteadOfPickerRetry) {
+class PortalRestoreRejectionTest : public WaylandPortalCaptureTest,
+                                  public ::testing::WithParamInterface<bool> {};
+TEST_P(PortalRestoreRejectionTest, RejectionClosesRequestAndWaitsWithoutRetry) {
   if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";
   WaylandPortalCapture capture;
   restore(capture);
@@ -1101,14 +1106,30 @@ TEST_F(WaylandPortalCaptureTest, SavedTokenRejectionEmitsStaleInsteadOfPickerRet
   const QString create = pendingPath(capture);
   control("Respond", {create, 0u, QVariantMap{{"session_handle", "/test/session"}}});
   ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty() && pendingPath(capture) != create; }));
-  control("Respond", {pendingPath(capture), 1u, QVariantMap{}});
+  if (GetParam()) {
+    const auto select = pendingPath(capture);
+    control("Respond", {select, 0u, QVariantMap{}});
+    ASSERT_TRUE(waitUntil([&] { return captureStageIsStart(capture) &&
+                                      pendingPath(capture) != select; }));
+  }
+  const auto rejected = pendingPath(capture);
+  control("Respond", {rejected, 1u, QVariantMap{}});
   ASSERT_TRUE(waitUntil([&] { return stale.count() == 1; }));
   EXPECT_EQ(stale.first()[0].toString(), "saved-token");
   EXPECT_EQ(errors.count(), 0);
   EXPECT_FALSE(starting(capture));
   EXPECT_TRUE(pendingPath(capture).isEmpty());
   EXPECT_FALSE(watchdogActive(capture));
+  ASSERT_TRUE(waitUntil([&] {
+    return control("SessionCloseCount", {}).arguments().value(0).toInt() == 1;
+  }));
+  control("Respond", {rejected, 0u, QVariantMap{{"restore_token", "late-token"}}});
+  QTest::qWait(50);
+  EXPECT_EQ(stale.count(), 1);
+  EXPECT_EQ(control("RequestCount", {"CreateSession"}).arguments().value(0).toInt(), 1);
+  EXPECT_EQ(control("RequestCount", {"Start"}).arguments().value(0).toInt(), GetParam() ? 1 : 0);
 }
+INSTANTIATE_TEST_SUITE_P(SelectAndStart, PortalRestoreRejectionTest, ::testing::Bool());
 
 TEST_F(WaylandPortalCaptureTest, SuccessfulCreateWithoutSessionHandleFailsCleanly) {
   if (!startFake()) GTEST_SKIP() << "requires private dbus-run-session bus";

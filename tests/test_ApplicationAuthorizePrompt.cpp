@@ -160,6 +160,70 @@ protected:
   }
   bool dvrPendingEmpty() const { return app.m_pendingDvrGame.isEmpty(); }
   bool windowPendingEmpty() const { return app.m_pendingWindowGame.isEmpty(); }
+  void enableUnapprovedReplay() {
+    app.m_recordingManager = std::make_unique<RecordingManager>();
+    app.m_settingsManager->setInstantReplayEnabled(true);
+    app.onInstantReplayEnabledChanged();
+    EXPECT_FALSE(dvrPendingEmpty());
+    EXPECT_TRUE(app.m_detectionDebounceTimer->isActive());
+    EXPECT_TRUE(windowPendingEmpty());
+    EXPECT_TRUE(audioPendingEmpty());
+    EXPECT_FALSE(audioRetryActive());
+    EXPECT_TRUE(fullRecordingStarts.isEmpty());
+    app.m_recordingManager.reset();
+  }
+  void rejectedRestoreWaitsForPayload() {
+    const QString name = "Restore Launcher Fixture";
+    auto &detector = *app.m_gameDetector;
+    auto launcher = ProcessCensus::inspect(QCoreApplication::applicationPid());
+    launcher.executable = "/fixture/restore/Launcher.exe";
+    launcher.arguments = {launcher.executable};
+    launcher.winePrefix.clear();
+    launcher.steamId = 0;
+    detector.m_catalogue = {{0, name, "/fixture/restore", launcher.executable,
+                             {}, true, {"fixture metadata"}}};
+    detector.apply({{launcher.pid, launcher}});
+    ASSERT_EQ(detector.currentGameName(), name);
+    ASSERT_FALSE(detector.isGamePayloadReady());
+    app.onRestoreAuthorizationNeeded(name, detector.currentGameKey(), true);
+    fireDebounce();
+    EXPECT_FALSE(recordPendingEmpty());
+    EXPECT_TRUE(app.m_authorizePromptTokenInvalid);
+    EXPECT_TRUE(fullRecordingStarts.isEmpty());
+    EXPECT_TRUE(windowPendingEmpty());
+    EXPECT_TRUE(audioPendingEmpty());
+  }
+  void rejectedRestore(bool isRecord) {
+    const QString game = app.m_gameDetector->currentGameName();
+    const QString key = app.m_gameDetector->currentGameKey();
+    armWindowPending(game, isRecord);
+    armAudioPending(game, isRecord);
+    app.m_windowWaitTimer->start(1000);
+    app.m_audioWaitTimer->start(1000);
+    const auto generation = app.m_audioWaitGeneration;
+    const auto ticket = app.claimAudioProbe();
+    app.onRestoreAuthorizationNeeded(game, key, isRecord);
+    EXPECT_TRUE(windowPendingEmpty());
+    EXPECT_TRUE(audioPendingEmpty());
+    EXPECT_FALSE(app.m_windowWaitTimer->isActive());
+    EXPECT_FALSE(app.m_audioWaitTimer->isActive());
+    EXPECT_EQ(recordPendingEmpty(), !isRecord);
+    EXPECT_EQ(dvrPendingEmpty(), isRecord);
+    EXPECT_TRUE(app.m_authorizePromptTokenInvalid);
+    EXPECT_TRUE(app.m_detectionDebounceTimer->isActive());
+    bool delivered = false;
+    app.applyGameAudioProbeResult(ticket, generation, true,
+                                 [&](bool) { delivered = true; });
+    EXPECT_FALSE(delivered);
+    EXPECT_TRUE(fullRecordingStarts.isEmpty());
+    // A completion for another identity cannot replace this prompt or revoke
+    // a newer capability.
+    setToken(key, "newer-token");
+    app.onRestoreAuthorizationNeeded(game, "different-identity", !isRecord);
+    EXPECT_EQ(token(key), "newer-token");
+    EXPECT_EQ(recordPendingEmpty(), !isRecord);
+    EXPECT_EQ(dvrPendingEmpty(), isRecord);
+  }
   void finishDuringRecovery() {
     app.m_recordingManager = std::make_unique<RecordingManager>();
     app.m_recordingManager->m_id = 1;
@@ -422,6 +486,22 @@ protected:
   }
 };
 } // namespace TrophyBackend
+
+TEST_F(ApplicationAuthorizePromptTest, RejectedRecordingRestoreRetiresQueuedStartsBeforePrompt) {
+  rejectedRestore(true);
+}
+
+TEST_F(ApplicationAuthorizePromptTest, EnablingUnapprovedReplayWaitsForAuthorization) {
+  enableUnapprovedReplay();
+}
+
+TEST_F(ApplicationAuthorizePromptTest, RejectedRestoreKeepsPromptPendingAcrossLauncherHandoff) {
+  rejectedRestoreWaitsForPayload();
+}
+
+TEST_F(ApplicationAuthorizePromptTest, RejectedReplayRestoreRetiresQueuedStartsBeforePrompt) {
+  rejectedRestore(false);
+}
 
 TEST_F(ApplicationAuthorizePromptTest, FreshGameMayPrompt) {
   EXPECT_TRUE(gate("Brand New Game"));

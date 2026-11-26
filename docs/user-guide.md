@@ -179,6 +179,13 @@ attempt. A generic portal rejection, permission loss, startup timeout, or
 service/output failure is not treated as a temporarily absent window. Portal
 backends still control whether the replacement can be restored silently.
 
+If a saved-token restore is rejected or cancelled, Trophy discards that token,
+closes the attempt and waits for the **Authorize / Block** notification before
+another capture attempt. It does not retry without the token automatically.
+The portal itself can still show its picker during the original restore request:
+the standard ScreenCast API falls back to prompting when restoration fails and
+does not provide a silent-only option.
+
 If the desktop portal closes the entire sharing session without confirmed
 window-loss evidence, Trophy saves any recorded footage and stops capture rather
 than assuming sharing permission still applies. A confirmed window-loss handoff

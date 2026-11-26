@@ -121,6 +121,18 @@ void CaptureLifecycle::bindSource(IVideoCaptureSource *source, const QString &ga
       m_settings->setRestoreTokenForIdentity(tokenKey, game, token);
   });
   connect(source, &IVideoCaptureSource::restoreTokenStale, this,
-          [valid, stale](const QString &token) { if (valid()) stale(token); });
+          [this, valid, stale, game, tokenKey, manual](const QString &token) {
+    if (!valid()) return;
+    // Revoke the rejected capability before teardown or any observer can
+    // re-arm capture. This belongs to the originating attempt, even if its
+    // game/PID is no longer selected when the application receives the notice.
+    // A newer token saved in the meantime must not be removed.
+    if (m_settings && !manual && !token.isEmpty()) {
+      for (const auto &key : {tokenKey, game})
+        if (m_settings->getRestoreToken(key) == token)
+          m_settings->removeRestoreToken(key);
+    }
+    stale(token);
+  });
 }
 } // namespace TrophyBackend

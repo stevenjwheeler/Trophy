@@ -308,6 +308,8 @@ private:
   QString restoreTokenForGame(const QString &game) const;
   void onWindowWaitTimeout();
   void onAuthorizeDebounceFired();
+  void onRestoreAuthorizationNeeded(const QString &game, const QString &identity,
+                                    bool isRecord);
   friend class ApplicationAuthorizePromptTest;
   bool m_suppressNextStorageNotification = false;
   bool m_minimizeNotifyShown = false;
