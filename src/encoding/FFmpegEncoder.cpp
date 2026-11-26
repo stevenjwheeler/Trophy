@@ -21,7 +21,9 @@
 #include <type_traits>
 #include <new>
 #include <limits>
+#include <optional>
 #include <unistd.h>
+#include <fcntl.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -40,6 +42,7 @@ extern "C" {
 
 #ifdef HAVE_VAAPI
 #include "VaapiVideoProcessor.h"
+#include "VaapiDmaBufImporter.h"
 #endif
 
 #ifdef HAVE_EGL
@@ -213,11 +216,13 @@ struct CudaImportState {
 struct VaapiImportState {
 #ifdef HAVE_VAAPI
   std::unique_ptr<VaapiVideoProcessor> processor;
+  std::unique_ptr<VaapiDmaBufImporter> multiPlaneImporter;
   AVBufferRef *device = nullptr;
   AVBufferRef *inputFrames = nullptr;
   AVFrame *black = nullptr;
   ~VaapiImportState() {
     // Destroy VPP contexts before the VADisplay/device or pools disappear.
+    multiPlaneImporter.reset();
     processor.reset();
     av_frame_free(&black);
     av_buffer_unref(&inputFrames);
@@ -261,6 +266,10 @@ bool ensureVaapiBlackFrame(VaapiImportState &state, AVBufferRef *outputFrames) {
 AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
                           AVBufferRef *device, AVBufferRef *outputFrames) {
   AVFrame *drm = nullptr, *mapped = nullptr, *output = nullptr;
+  // Cache the libva entry points, but release each source surface/lease
+  // synchronously after VPP, on every success and error return.
+  auto releaseImport = [](VaapiDmaBufImporter *value) { value->release(); };
+  std::unique_ptr<VaapiDmaBufImporter, decltype(releaseImport)> imported(nullptr, releaseImport);
   auto fail = [&](const QString &error) -> AVFrame * {
     state.error = error;
     av_frame_free(&output);
@@ -268,9 +277,13 @@ AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
     av_frame_free(&drm);
     return nullptr;
   };
-  if (input.drmFormat != DRM_FORMAT_XRGB8888 || input.dmaBufFd < 0 ||
+  const auto layout = input.dmaBufLayout();
+  const auto &primary = layout.planes[0];
+  if (!layout.count || layout.count > DmaBufLayout::maxPlanes ||
+      input.drmFormat != DRM_FORMAT_XRGB8888 || primary.fd < 0 ||
       input.width <= 0 || input.height <= 0 || input.width > 65535 || input.height > 65535 ||
-      input.dmaBufStride < int64_t(input.width) * 4 || input.dmaBufOffset < 0)
+      primary.stride < int64_t(input.width) * 4 ||
+      (!input.dmaBufStorage && !input.dmaBufPlanes.count && input.dmaBufOffset < 0))
     return fail(QStringLiteral("Unsupported VA-API DMA-BUF descriptor"));
   if (!state.device) state.device = av_buffer_ref(device);
   if (!state.device) return fail(QStringLiteral("VA-API device reference failed"));
@@ -287,63 +300,75 @@ AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
   if (!state.processor->initialize(native->display, pool->width, pool->height, targets))
     return fail(state.processor->error());
 
-  // Import RGB into a separate source-sized context, NOT the encoder's NV12
-  // pool. A successful RGB import alone is not an encodable NV12 surface.
-  if (state.inputFrames) {
-    auto *frames = reinterpret_cast<AVHWFramesContext *>(state.inputFrames->data);
-    if (frames->width != input.width || frames->height != input.height)
-      av_buffer_unref(&state.inputFrames);
-  }
-  if (!state.inputFrames) {
-    state.inputFrames = av_hwframe_ctx_alloc(device);
-    if (!state.inputFrames) return fail(QStringLiteral("VA-API import pool allocation failed"));
-    auto *frames = reinterpret_cast<AVHWFramesContext *>(state.inputFrames->data);
-    frames->format = AV_PIX_FMT_VAAPI;
-    frames->sw_format = AV_PIX_FMT_BGR0;
-    frames->width = input.width;
-    frames->height = input.height;
-    if (av_hwframe_ctx_init(state.inputFrames) < 0) {
-      av_buffer_unref(&state.inputFrames);
-      return fail(QStringLiteral("VA-API RGB import context initialization failed"));
+  if (layout.count > 1) {
+    // Explicit PRIME_2 import must not retry a rejected compressed layout
+    // through FFmpeg's legacy modifier-less DRM_PRIME mapper.
+    if (!state.multiPlaneImporter)
+      state.multiPlaneImporter = std::make_unique<VaapiDmaBufImporter>();
+    imported.reset(state.multiPlaneImporter.get());
+    if (!imported->import(native->display, input))
+      return fail(imported->error());
+    output = av_frame_alloc();
+    if (!output) return fail(QStringLiteral("VA-API frame allocation failed"));
+  } else {
+    // Import RGB into a separate source-sized context, NOT the encoder's NV12
+    // pool. A successful RGB import alone is not an encodable NV12 surface.
+    if (state.inputFrames) {
+      auto *frames = reinterpret_cast<AVHWFramesContext *>(state.inputFrames->data);
+      if (frames->width != input.width || frames->height != input.height)
+        av_buffer_unref(&state.inputFrames);
     }
+    if (!state.inputFrames) {
+      state.inputFrames = av_hwframe_ctx_alloc(device);
+      if (!state.inputFrames) return fail(QStringLiteral("VA-API import pool allocation failed"));
+      auto *frames = reinterpret_cast<AVHWFramesContext *>(state.inputFrames->data);
+      frames->format = AV_PIX_FMT_VAAPI;
+      frames->sw_format = AV_PIX_FMT_BGR0;
+      frames->width = input.width;
+      frames->height = input.height;
+      if (av_hwframe_ctx_init(state.inputFrames) < 0) {
+        av_buffer_unref(&state.inputFrames);
+        return fail(QStringLiteral("VA-API RGB import context initialization failed"));
+      }
+    }
+    drm = av_frame_alloc(); mapped = av_frame_alloc(); output = av_frame_alloc();
+    if (!drm || !mapped || !output) return fail(QStringLiteral("VA-API frame allocation failed"));
+    auto *desc = static_cast<AVDRMFrameDescriptor *>(av_mallocz(sizeof(AVDRMFrameDescriptor)));
+    if (!desc) return fail(QStringLiteral("VA-API DRM descriptor allocation failed"));
+    auto *lease = new (std::nothrow) std::shared_ptr<const OwnedDmaBuf>(input.dmaBufStorage);
+    const int fd = fcntl(input.dmaBufFd, F_DUPFD_CLOEXEC, 0);
+    if (!lease || fd < 0) {
+      delete lease; if (fd >= 0) close(fd); av_free(desc);
+      return fail(QStringLiteral("VA-API DMA-BUF ownership failed"));
+    }
+    desc->nb_objects = 1;
+    desc->objects[0].fd = fd;
+    desc->objects[0].size = size_t(input.dmaBufStride) * input.height + input.dmaBufOffset;
+    desc->objects[0].format_modifier = input.drmModifier;
+    desc->nb_layers = 1;
+    desc->layers[0].format = input.drmFormat;
+    desc->layers[0].nb_planes = 1;
+    desc->layers[0].planes[0].pitch = input.dmaBufStride;
+    desc->layers[0].planes[0].offset = input.dmaBufOffset;
+    drm->buf[0] = av_buffer_create(reinterpret_cast<uint8_t *>(desc), sizeof(*desc),
+        [](void *opaque, uint8_t *bytes) {
+          auto *descriptor = reinterpret_cast<AVDRMFrameDescriptor *>(bytes);
+          close(descriptor->objects[0].fd);
+          av_free(descriptor);
+          delete static_cast<std::shared_ptr<const OwnedDmaBuf> *>(opaque);
+        }, lease, 0);
+    if (!drm->buf[0]) {
+      delete lease; close(fd); av_free(desc);
+      return fail(QStringLiteral("VA-API DRM buffer allocation failed"));
+    }
+    drm->data[0] = reinterpret_cast<uint8_t *>(desc);
+    drm->format = AV_PIX_FMT_DRM_PRIME;
+    drm->width = input.width; drm->height = input.height;
+    mapped->format = AV_PIX_FMT_VAAPI;
+    mapped->hw_frames_ctx = av_buffer_ref(state.inputFrames);
+    if (!mapped->hw_frames_ctx || av_hwframe_map(mapped, drm, AV_HWFRAME_MAP_READ) < 0)
+      return fail(QStringLiteral("VA-API DMA-BUF RGB import failed"));
   }
-  drm = av_frame_alloc(); mapped = av_frame_alloc(); output = av_frame_alloc();
-  if (!drm || !mapped || !output) return fail(QStringLiteral("VA-API frame allocation failed"));
-  auto *desc = static_cast<AVDRMFrameDescriptor *>(av_mallocz(sizeof(AVDRMFrameDescriptor)));
-  if (!desc) return fail(QStringLiteral("VA-API DRM descriptor allocation failed"));
-  auto *lease = new (std::nothrow) std::shared_ptr<void>(input.bufferLease);
-  const int fd = dup(input.dmaBufFd);
-  if (!lease || fd < 0) {
-    delete lease; if (fd >= 0) close(fd); av_free(desc);
-    return fail(QStringLiteral("VA-API DMA-BUF ownership failed"));
-  }
-  desc->nb_objects = 1;
-  desc->objects[0].fd = fd;
-  desc->objects[0].size = size_t(input.dmaBufStride) * input.height + input.dmaBufOffset;
-  desc->objects[0].format_modifier = input.drmModifier;
-  desc->nb_layers = 1;
-  desc->layers[0].format = input.drmFormat;
-  desc->layers[0].nb_planes = 1;
-  desc->layers[0].planes[0].pitch = input.dmaBufStride;
-  desc->layers[0].planes[0].offset = input.dmaBufOffset;
-  drm->buf[0] = av_buffer_create(reinterpret_cast<uint8_t *>(desc), sizeof(*desc),
-      [](void *opaque, uint8_t *bytes) {
-        auto *descriptor = reinterpret_cast<AVDRMFrameDescriptor *>(bytes);
-        close(descriptor->objects[0].fd);
-        av_free(descriptor);
-        delete static_cast<std::shared_ptr<void> *>(opaque);
-      }, lease, 0);
-  if (!drm->buf[0]) {
-    delete lease; close(fd); av_free(desc);
-    return fail(QStringLiteral("VA-API DRM buffer allocation failed"));
-  }
-  drm->data[0] = reinterpret_cast<uint8_t *>(desc);
-  drm->format = AV_PIX_FMT_DRM_PRIME;
-  drm->width = input.width; drm->height = input.height;
-  mapped->format = AV_PIX_FMT_VAAPI;
-  mapped->hw_frames_ctx = av_buffer_ref(state.inputFrames);
-  if (!mapped->hw_frames_ctx || av_hwframe_map(mapped, drm, AV_HWFRAME_MAP_READ) < 0)
-    return fail(QStringLiteral("VA-API DMA-BUF RGB import failed"));
   if (av_hwframe_get_buffer(outputFrames, output, 0) < 0)
     return fail(QStringLiteral("VA-API output surface allocation failed"));
   const QRect fit = fitVideoFrame(input.width, input.height, pool->width, pool->height, 2, 2);
@@ -352,7 +377,9 @@ AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
   const bool padded = fit != QRect(0, 0, pool->width, pool->height);
   if (padded && !ensureVaapiBlackFrame(state, outputFrames))
     return fail(state.error);
-  if (!state.processor->process(VASurfaceID(uintptr_t(mapped->data[3])),
+  const VASurfaceID source = imported ? imported->surface()
+                                     : VASurfaceID(uintptr_t(mapped->data[3]));
+  if (!state.processor->process(source,
                                 VASurfaceID(uintptr_t(output->data[3])),
                                 input.width, input.height, region,
                                 padded ? VASurfaceID(uintptr_t(state.black->data[3])) : VA_INVALID_SURFACE))
@@ -522,7 +549,7 @@ CudaImportState::CacheEntry *cudaImportCacheAcquire(CudaImportState &st,
   }
   ++st.cacheMisses;
 
-  const int fd = dup(frame.dmaBufFd);
+  const int fd = fcntl(frame.dmaBufFd, F_DUPFD_CLOEXEC, 0);
   if (fd < 0) {
     st.error = QStringLiteral("dup(dmabuf) failed");
     return nullptr;
@@ -623,6 +650,12 @@ AVFrame *cudaImportBgr0(CudaImportState &st, const VideoFrame &frame,
     return nullptr;
   };
 
+  // Check before cache lookup: an old plane-zero registration is not a
+  // registration for the same allocation with auxiliary metadata planes.
+  if (frame.dmaBufLayout().count > 1) {
+    st.error = QStringLiteral("Multi-plane EGL/CUDA import is not supported");
+    return nullptr;
+  }
   if (!cudaImportEnsure(st))
     return nullptr;
   if (frame.drmFormat != DRM_FORMAT_XRGB8888 || frame.width <= 0 ||
@@ -809,6 +842,7 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   m_eglImportFrames = 0;
   m_gpuScaledFrames = 0;
   m_vaapiVppFrames = 0;
+  m_multiPlaneVppFrames = 0;
   m_fallbackFrames = 0;
   m_droppedFrames = 0;
   m_sendFailures = 0;
@@ -969,9 +1003,21 @@ int FFmpegEncoder::submitFrame(AVFrame *frame, std::vector<EncodedPacket> &packe
       }, frame == nullptr);
 }
 
-bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
+bool FFmpegEncoder::encodeFrames(const VideoFrame &input,
                                   std::vector<EncodedPacket> &packets) {
   if (!m_initialized || !m_codecCtx) return false;
+  // Queued frames already share an immutable owner. Normalize direct callers
+  // as well, so all legacy single-plane importers see the canonical plane zero.
+  std::optional<VideoFrame> owned;
+  if (input.isDmaBuf) {
+    owned = input;
+    if (!owned->retainDmaBuf()) {
+      ++m_droppedFrames;
+      if (input.requestCpuFallback) input.requestCpuFallback();
+      return false;
+    }
+  }
+  const VideoFrame &frame = owned ? *owned : input;
   if (&packets != &m_pendingPackets) {
     for (auto &packet : m_pendingPackets) packets.push_back(std::move(packet));
     m_pendingPackets.clear();
@@ -986,6 +1032,13 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
 #ifdef HAVE_VAAPI
   useVaapiVpp = m_codecName.contains("vaapi");
 #endif
+  // Every non-VA-API importer below still handles one plane only. Do not
+  // silently construct a plane-zero descriptor or consult a stale CUDA cache.
+  if (frame.isDmaBuf && frame.dmaBufLayout().count > 1 && !useVaapiVpp) {
+    ++m_droppedFrames;
+    if (frame.requestCpuFallback) frame.requestCpuFallback();
+    return false;
+  }
   // Without VPP support, mismatched direct mappings still need SHM.
   if (frame.isDmaBuf &&
       !m_codecName.contains("nvenc") && !useVaapiVpp &&
@@ -1034,7 +1087,7 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
     if (desc) {
         // Duplicate FD so we own the lifetime
         desc->nb_objects = 1;
-        desc->objects[0].fd = dup(frame.dmaBufFd); 
+        desc->objects[0].fd = fcntl(frame.dmaBufFd, F_DUPFD_CLOEXEC, 0);
         desc->objects[0].size = frame.height * frame.dmaBufStride; 
         desc->objects[0].format_modifier = frame.drmModifier;
         
@@ -1061,13 +1114,13 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
         
         // VA-API may retain the mapped source beyond send_frame. Attach the
         // producer lease to its AVBuffer lifetime, not just this stack frame.
-        auto *lease = new std::shared_ptr<void>(frame.bufferLease);
+        auto *lease = new std::shared_ptr<const OwnedDmaBuf>(frame.dmaBufStorage);
         drm_frame->buf[0] = av_buffer_create((uint8_t *)desc, sizeof(*desc),
             [](void *opaque, uint8_t* data) {
                 auto *d = reinterpret_cast<AVDRMFrameDescriptor*>(data);
                 if (d->objects[0].fd >= 0) close(d->objects[0].fd);
                 av_free(d);
-                delete static_cast<std::shared_ptr<void> *>(opaque);
+                delete static_cast<std::shared_ptr<const OwnedDmaBuf> *>(opaque);
             }, lease, 0);
 
         if (!drm_frame->buf[0]) {
@@ -1144,6 +1197,8 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
       finalFrame = tempHwFrame;
       source = FrameSource::VaapiVpp;
       ++m_vaapiVppFrames;
+      if (frame.dmaBufLayout().count > 1 && ++m_multiPlaneVppFrames == 1)
+        qDebug() << "FFmpegEncoder: explicit multi-plane PRIME_2 import/VPP active";
       if (frame.width != m_config.width || frame.height != m_config.height)
         ++m_gpuScaledFrames;
       m_lastImportSucceeded = true;
@@ -1182,7 +1237,8 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &frame,
 #endif
 
   // 3. Software Fallback Path
-  if (!finalFrame && frame.data) {
+  if (!finalFrame && frame.data &&
+      (!frame.isDmaBuf || frame.dmaBufLayout().count == 1)) {
     if (convertSoftwareFrame(frame)) {
       if (isHardwareEncoder()) {
         tempHwFrame = av_frame_alloc();
@@ -1352,6 +1408,7 @@ void FFmpegEncoder::logSummary() {
             << "egl-import:" << m_eglImportFrames
             << "GPU-scaled:" << m_gpuScaledFrames
             << "VA-API-VPP:" << m_vaapiVppFrames
+            << "(multi-plane subset:" << m_multiPlaneVppFrames << ")"
            << "CPU-fallback:" << m_fallbackFrames
            << "dropped:" << m_droppedFrames
            << "backpressure:" << m_backpressureFrames

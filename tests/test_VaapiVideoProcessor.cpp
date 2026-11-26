@@ -1,6 +1,8 @@
 #include "encoding/VaapiVideoProcessor.h"
+#include "encoding/VaapiDmaBufImporter.h"
 #include <gtest/gtest.h>
 #include <string>
+#include <sys/mman.h>
 
 using namespace TrophyBackend;
 
@@ -19,6 +21,8 @@ struct FakeVa {
   };
   std::vector<Submission> submissions;
   bool bt601 = true;
+  int importFd = -1;
+  std::weak_ptr<int> inputLease;
   uint32_t maxInput = 8192;
   FakeVa() { current = this; }
   ~FakeVa() { current = nullptr; }
@@ -80,7 +84,32 @@ struct FakeVa {
     ops.end = [](VADisplay, VAContextID id) {
       EXPECT_EQ(id, 12u); return call("end");
     };
-    ops.sync = [](VADisplay, VASurfaceID id) { return call(id == 101 ? "sync-output" : "sync-source"); };
+    ops.sync = [](VADisplay, VASurfaceID id) {
+      if (current->importFd >= 0) {
+        EXPECT_GE(fcntl(current->importFd, F_GETFD), 0);
+        EXPECT_FALSE(current->inputLease.expired());
+      }
+      return call(id == 101 ? "sync-output" : "sync-source");
+    };
+    return ops;
+  }
+  static VaapiDmaBufImporter::Ops importOps() {
+    VaapiDmaBufImporter::Ops ops;
+    ops.create = [](VADisplay, unsigned, unsigned, unsigned, VASurfaceID *surface,
+                     unsigned, VASurfaceAttrib *attrs, unsigned) {
+      EXPECT_EQ(attrs[0].value.value.i, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+      const auto *desc = static_cast<VADRMPRIMESurfaceDescriptor *>(attrs[1].value.value.p);
+      EXPECT_EQ(desc->layers[0].num_planes, 2u);
+      current->importFd = desc->objects[0].fd;
+      *surface = 99;
+      return call("import-source");
+    };
+    ops.destroy = [](VADisplay, VASurfaceID *surface, int) {
+      EXPECT_EQ(*surface, 99u);
+      EXPECT_GE(fcntl(current->importFd, F_GETFD), 0);
+      EXPECT_FALSE(current->inputLease.expired());
+      return call("destroy-source");
+    };
     return ops;
   }
 };
@@ -118,6 +147,47 @@ TEST(VaapiVideoProcessorTest, FitsAndConvertsWithBlackPaddingAndSynchronizesBefo
   }
   EXPECT_EQ(fake.calls[fake.calls.size() - 2], "destroy-context");
   EXPECT_EQ(fake.calls.back(), "destroy-config");
+}
+
+TEST(VaapiVideoProcessorTest, ImportedMultiPlaneSourceOutlivesVppDrainOnSuccessAndErrors) {
+  for (const auto *failure : {"", "render", "end", "sync-output"}) {
+    SCOPED_TRACE(failure);
+    FakeVa fake;
+    VaapiVideoProcessor processor(FakeVa::ops());
+    ASSERT_TRUE(processor.initialize(display, 640, 360, targets));
+    const int fd = memfd_create("trophy-prime2-vpp-test", MFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(ftruncate(fd, 65536), 0);
+    VideoFrame frame{};
+    frame.isDmaBuf = true; frame.width = 64; frame.height = 32;
+    frame.drmFormat = DRM_FORMAT_XRGB8888;
+    frame.drmModifier = 0x0200000000000001ULL;
+    frame.dmaBufPlanes.count = 2;
+    frame.dmaBufPlanes.planes[0] = {fd, 256, 0, 0};
+    frame.dmaBufPlanes.planes[1] = {fd, 64, 32768, 0};
+    auto lease = std::make_shared<int>(1);
+    fake.inputLease = lease;
+    frame.bufferLease = lease;
+    {
+      VaapiDmaBufImporter importer(FakeVa::importOps());
+      ASSERT_TRUE(importer.import(display, frame));
+      close(fd);
+      frame.bufferLease.reset(); lease.reset();
+      fake.failAt = failure;
+      fake.failSource = 99; // Fail RGB after the padded clear has completed.
+      EXPECT_EQ(processor.process(importer.surface(), 101, 64, 32,
+                                  {0, 20, 640, 320}, 98), fake.failAt.empty());
+      EXPECT_FALSE(fake.inputLease.expired());
+      EXPECT_EQ(fake.calls.back(), "destroy-buffer");
+    }
+    EXPECT_EQ(fake.calls.back(), "destroy-source");
+    EXPECT_TRUE(fake.inputLease.expired());
+    EXPECT_LT(fcntl(fake.importFd, F_GETFD), 0);
+    auto destroy = std::find(fake.calls.begin(), fake.calls.end(), "destroy-source");
+    EXPECT_NE(std::find(fake.calls.begin(), destroy, "sync-output"), destroy);
+    if (!fake.failAt.empty())
+      EXPECT_NE(std::find(fake.calls.begin(), destroy, "sync-source"), destroy);
+  }
 }
 
 TEST(VaapiVideoProcessorTest, ReusesOutputContextAcrossInputResizesAndRebuildsForReplacement) {

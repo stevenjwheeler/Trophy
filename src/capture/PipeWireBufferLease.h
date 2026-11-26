@@ -15,6 +15,12 @@ namespace TrophyBackend {
 // Returns happen on the native loop, never from an arbitrary encoder thread.
 class PipeWireBufferLease : public std::enable_shared_from_this<PipeWireBufferLease> {
 public:
+  struct Ops {
+    decltype(&pw_stream_queue_buffer) queue = pw_stream_queue_buffer;
+    decltype(&pw_stream_update_params) update = pw_stream_update_params;
+  };
+  PipeWireBufferLease() = default;
+  explicit PipeWireBufferLease(Ops ops) : m_ops(ops) {}
   bool initialize(pw_loop *loop, pw_stream *stream) {
     m_loop = loop;
     m_stream = stream;
@@ -31,13 +37,13 @@ public:
       for (const auto &entry : returned) {
         // remove_buffer runs on this same loop, never concurrently here.
         if (entry->buffer)
-          pw_stream_queue_buffer(self->m_stream, entry->buffer);
+          self->m_ops.queue(self->m_stream, entry->buffer);
       }
       if (sharedMemory) {
         uint8_t storage[512];
         auto builder = SPA_POD_BUILDER_INIT(storage, sizeof(storage));
         const spa_pod *format = buildPipeWireVideoFormat(&builder);
-        pw_stream_update_params(self->m_stream, &format, 1);
+        self->m_ops.update(self->m_stream, &format, 1);
       }
     }, this);
     return m_event != nullptr;
@@ -93,6 +99,7 @@ public:
   }
 
 private:
+  Ops m_ops;
   struct Entry { pw_buffer *buffer = nullptr; };
   std::mutex m_mutex;
   pw_loop *m_loop = nullptr;

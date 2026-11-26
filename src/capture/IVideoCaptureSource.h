@@ -7,9 +7,11 @@
 
 #pragma once
 
+#include "DmaBufFrame.h"
 #include <QObject>
 #include <QSize>
 #include <cstdint>
+#include <climits>
 #include <functional>
 #include <memory>
 #include <unistd.h> // ::dup(), ::close()
@@ -35,21 +37,51 @@ struct VideoFrame {
   uint64_t drmModifier = 0;
   int dmaBufStride = 0;
   int dmaBufOffset = 0;
+  DmaBufLayout dmaBufPlanes; // Borrowed unless dmaBufStorage is populated.
+  std::shared_ptr<const OwnedDmaBuf> dmaBufStorage;
   std::shared_ptr<void> bufferLease; // delays producer reuse, separate from fd ownership
   std::function<void()> requestCpuFallback;
   // Optional immutable CPU snapshot, independent of the producer's mapping.
   std::shared_ptr<const std::vector<uint8_t>> cpuStorage;
+
+  DmaBufLayout dmaBufLayout() const {
+    if (dmaBufStorage) return dmaBufStorage->layout();
+    if (dmaBufPlanes.count) return dmaBufPlanes;
+    DmaBufLayout result;
+    result.count = 1;
+    result.planes[0] = {dmaBufFd, dmaBufStride, uint32_t(dmaBufOffset), 0};
+    return result;
+  }
+  bool retainDmaBuf() {
+    if (!isDmaBuf) return false;
+    const auto layout = dmaBufLayout();
+    if (!layout.count || layout.count > DmaBufLayout::maxPlanes ||
+        layout.planes[0].offset > uint32_t(INT_MAX))
+      return false; // Legacy primary-offset view is signed.
+    if (!dmaBufStorage) {
+      if (!dmaBufPlanes.count && dmaBufOffset < 0) return false;
+      dmaBufStorage = OwnedDmaBuf::retain(dmaBufLayout(), bufferLease);
+    }
+    if (!dmaBufStorage) return false;
+    // Legacy fields are views of plane zero, never additional owned handles.
+    dmaBufPlanes = dmaBufStorage->layout();
+    const auto &primary = dmaBufPlanes.planes[0];
+    dmaBufFd = primary.fd;
+    dmaBufStride = primary.stride;
+    dmaBufOffset = int(primary.offset);
+    return true;
+  }
 };
 
 /**
  * @brief Frame with owned data for queuing
  *
  * For DMA-BUF frames the pixel data lives in GPU memory (no CPU pointer).
- * We dup() the fd on construction and retain the producer buffer lease so
- * PipeWire cannot overwrite pixels before consumption. The destructor closes
- * the duped fd and releases the lease.
+ * Borrowed handles are duplicated once into a shared immutable owner; queued
+ * and retained still frames share that owner and the producer buffer lease.
+ * The last consumer closes every plane FD and releases the lease.
  *
-  * Borrowed shared-memory frames are copied: the producer reuses its buffer as
+ * Borrowed shared-memory frames are copied: the producer reuses its buffer as
  * soon as we give it back, and holding it instead would throttle capture to
  * the encoder's pace.
  * Copying is deleted to prevent double-close; use move semantics instead.
@@ -71,11 +103,12 @@ struct QueuedFrame : public VideoFrame {
       ownedData.assign(other.data,
                        other.data + (size_t(other.stride) * other.height));
       data = ownedData.data();
-    } else if (other.isDmaBuf && other.dmaBufFd >= 0) {
-      // Dup pins allocation lifetime; bufferLease separately prevents reuse.
-      dmaBufFd = ::dup(other.dmaBufFd);
-      if (dmaBufFd < 0)
-        isDmaBuf = false; // dup failed – frame is unusable, drop silently
+    } else if (other.isDmaBuf) {
+      if (!retainDmaBuf()) {
+        isDmaBuf = false;
+        dmaBufFd = -1;
+        data = nullptr;
+      }
     }
   }
 
@@ -86,18 +119,18 @@ struct QueuedFrame : public VideoFrame {
     if (!ownedData.empty())
       data = ownedData.data();
     other.dmaBufFd = -1;
+    other.dmaBufPlanes = {};
   }
 
   // Move assignment – transfer fd ownership
   QueuedFrame &operator=(QueuedFrame &&other) noexcept {
     if (this != &other) {
-      if (isDmaBuf && dmaBufFd >= 0)
-        ::close(dmaBufFd);
       static_cast<VideoFrame &>(*this) = static_cast<VideoFrame &&>(other);
       ownedData = std::move(other.ownedData);
       if (!ownedData.empty())
         data = ownedData.data();
       other.dmaBufFd = -1;
+      other.dmaBufPlanes = {};
     }
     return *this;
   }
@@ -105,10 +138,7 @@ struct QueuedFrame : public VideoFrame {
   QueuedFrame(const QueuedFrame &) = delete;
   QueuedFrame &operator=(const QueuedFrame &) = delete;
 
-  ~QueuedFrame() {
-    if (isDmaBuf && dmaBufFd >= 0)
-      ::close(dmaBufFd);
-  }
+  ~QueuedFrame() = default;
 };
 
 /**
@@ -121,6 +151,7 @@ struct CaptureConfig {
   bool captureMouseCursor = true;
   bool useDmaBuf = true;
   QString waylandRestoreToken;
+  bool persistPermission = true; // Diagnostics request an ephemeral grant.
   // Game-targeted recordings (auto-detect) offer windows only in the
   // portal picker; manual recordings offer monitors + windows.
   bool windowOnly = false;

@@ -18,6 +18,7 @@ Page {
     property var preferences: typeof settingsManager !== "undefined" ? settingsManager : null // qmllint disable unqualified
     property var audioDevices: typeof audioDeviceEnumerator !== "undefined" ? audioDeviceEnumerator : null // qmllint disable unqualified
     property var libraryDetector: typeof gameDetector !== "undefined" ? gameDetector : null // qmllint disable unqualified
+    property var dmaBufTester: typeof dmaBufTroubleshooter !== "undefined" ? dmaBufTroubleshooter : null // qmllint disable unqualified
 
     // Voice choices update from the shared audio registry automatically.
     onVisibleChanged: {
@@ -74,6 +75,8 @@ Page {
             card = shortcutsCard;
         else if (sectionTitle === "Customization")
             card = customizationCard;
+        else if (sectionTitle === "Troubleshooter")
+            card = troubleshooterCard;
 
         if (!card)
             return;
@@ -1496,9 +1499,28 @@ Page {
                     }
                 }
 
+                SectionCard {
+                    id: troubleshooterCard
+                    objectName: "troubleshooterSection"
+                    Layout.row: 11
+                    sectionTitle: qsTr("Troubleshooter")
+                    iconSource: "qrc:/icons/settings.svg"
+
+                    SettingRow {
+                        label: qsTr("DMA-BUF Tester")
+                        help: qsTr("Check actual single-plane or multi-plane capture, GPU encoding and decoding without changing your settings.")
+                        TrophyButton {
+                            objectName: "openDmaBufTester"
+                            text: qsTr("Open Wizard")
+                            enabled: root.dmaBufTester !== null
+                            onClicked: dmaBufTestDialog.open()
+                        }
+                    }
+                }
+
                 // --- FOOTER ACTIONS ---
                 RowLayout {
-                    Layout.row: 11
+                    Layout.row: 12
                     Layout.fillWidth: true
                     Layout.topMargin: Theme.spacingSmall
                     spacing: Theme.spacingMedium
@@ -1522,7 +1544,7 @@ Page {
                 }
 
                 Item {
-                    Layout.row: 12
+                    Layout.row: 13
                     Layout.preferredHeight: Theme.spacingMedium
                 }
             }
@@ -1545,6 +1567,11 @@ Page {
     }
 
     // --- DIALOGS ---
+    DmaBufTestDialog {
+        id: dmaBufTestDialog
+        tester: root.dmaBufTester
+    }
+
     FolderDialog {
         id: folderDialog
 

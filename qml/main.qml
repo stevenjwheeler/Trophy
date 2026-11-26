@@ -368,7 +368,8 @@ ApplicationWindow {
             { name: "System Tray", section: "System Tray", keywords: ["tray", "system tray", "minimize", "close", "start minimized", "login", "autostart", "background"] },
             { name: "Notifications", section: "Notifications", keywords: ["notification", "notices", "alerts", "popup", "clips", "notify", "recording notices", "clip notices", "storage notices", "sound", "chime", "ping", "test", "update", "updates", "automatic checks"] },
             { name: "Discord Rich Presence", section: "Discord Rich Presence", keywords: ["discord", "rich presence", "activity", "profile", "privacy", "game names", "idle"] },
-            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "original", "navy", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] }
+            { name: "Customization", section: "Customization", keywords: ["theme", "appearance", "customization", "color", "accent", "default", "original", "navy", "dark", "charcoal", "amoled", "black", "rose", "blue", "purple", "teal", "orange", "cyan", "pink"] },
+            { name: "DMA-BUF Tester", section: "Troubleshooter", keywords: ["troubleshooter", "diagnostics", "dma-buf", "dmabuf", "zero-copy", "single-plane", "multi-plane", "gpu", "capture", "test"] }
         ];
 
         for (let j = 0; j < settings.length; j++) {

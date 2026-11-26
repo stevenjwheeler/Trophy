@@ -16,6 +16,7 @@
 #include <QThread>
 #include <QSignalSpy>
 #include <QTest>
+#include <QTemporaryFile>
 #include <condition_variable>
 #include <future>
 #include <chrono>
@@ -25,6 +26,8 @@
 #include <gtest/gtest.h>
 
 #include "capture/WaylandPortalCapture.h"
+#include "PipeWireLeaseFixture.h"
+#include <libdrm/drm_fourcc.h>
 
 // Runs in a child process under dbus-run-session. Tests explicitly send
 // each Response, so ordering is controlled rather than based on sleeps.
@@ -42,8 +45,10 @@ class FakeScreenCast : public QObject, protected QDBusContext {
 public slots:
   QDBusObjectPath CreateSession(const QVariantMap &options) { return request("CreateSession", options); }
   QDBusObjectPath SelectSources(const QDBusObjectPath &, const QVariantMap &options) {
+    m_lastSelectOptions = options;
     return request("SelectSources", options);
   }
+  QVariantMap LastSelectOptions() { return m_lastSelectOptions; }
   QDBusObjectPath Start(const QDBusObjectPath &, const QString &, const QVariantMap &options) {
     return request("Start", options);
   }
@@ -102,6 +107,7 @@ private:
     return QDBusObjectPath(path);
   }
   QString m_mode;
+  QVariantMap m_lastSelectOptions;
   QDBusMessage m_held;
   QString m_heldPath;
 };
@@ -244,6 +250,23 @@ protected:
     capture.m_nativeGeneration.store(generation);
     capture.m_nativeEventsEnabled.store(true);
   }
+  static void bufferSource(WaylandPortalCapture &capture,
+                           const std::shared_ptr<PipeWireBufferLease> &leases,
+                           int width = 64, int height = 32) {
+    enableNative(capture, 7);
+    capture.m_bufferLeases = leases;
+    capture.m_resolutionWidth = width;
+    capture.m_resolutionHeight = height;
+    capture.m_negotiatedFormat = DRM_FORMAT_XRGB8888;
+    capture.m_negotiatedModifier = 0x0200000000000001ULL; // Fixture, not GPU evidence.
+  }
+  static bool deliverBuffer(WaylandPortalCapture &capture, pw_buffer &buffer) {
+    return capture.processBuffer(&buffer);
+  }
+  static void stopBuffers(WaylandPortalCapture &capture) {
+    capture.m_nativeEventsEnabled = false;
+    capture.stopPipeWireStream();
+  }
   static void postNative(WaylandPortalCapture &capture, quint64 generation) {
     capture.postNativeReady(generation);
     capture.postNativeError("old native error", generation);
@@ -351,6 +374,209 @@ static const auto *portalTestEnvironment =
     testing::AddGlobalTestEnvironment(new PortalTestEnvironment);
 
 using namespace TrophyBackend;
+
+TEST_F(WaylandPortalCaptureTest, DiagnosticGrantIsEphemeralWithoutChangingRecordingDefault) {
+  if (!startFake()) GTEST_SKIP() << "Requires the private portal launcher";
+  for (bool persistent : {false, true}) {
+    WaylandPortalCapture capture;
+    CaptureConfig config;
+    config.useDmaBuf = false;
+    config.persistPermission = persistent;
+    ASSERT_TRUE(capture.initialize(config));
+    ASSERT_TRUE(capture.startCapture());
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+    ASSERT_EQ(control("Respond", {pendingPath(capture), 0u,
+        QVariantMap{{"session_handle", QStringLiteral("/test/session")}}}).type(),
+        QDBusMessage::ReplyMessage);
+    ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+    QVariantMap options;
+    ASSERT_TRUE(waitUntil([&] {
+      const auto reply = control("LastSelectOptions", {});
+      if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return false;
+      options = qdbus_cast<QVariantMap>(reply.arguments().front());
+      return !options.value("handle_token").toString().isEmpty() &&
+          pendingPath(capture).endsWith(options.value("handle_token").toString());
+    }));
+    EXPECT_EQ(options.value("persist_mode").toUInt(), persistent ? 2u : 0u);
+    EXPECT_FALSE(options.contains("restore_token"));
+    capture.stopCapture();
+  }
+}
+
+namespace {
+struct CaptureBuffer {
+  QTemporaryFile allocation;
+  spa_chunk chunks[4]{};
+  spa_data data[4]{};
+  spa_buffer buffer{};
+  pw_buffer native{};
+  explicit CaptureBuffer(uint32_t planes = 2) {
+    if (!allocation.open() || !allocation.resize(65536))
+      return;
+    for (uint32_t i = 0; i < 4; ++i) {
+      chunks[i].stride = i ? 64 : 256;
+      chunks[i].offset = i ? 32768 + (i - 1) * 4096 : 0;
+      data[i].type = SPA_DATA_DmaBuf;
+      data[i].fd = allocation.handle();
+      data[i].chunk = &chunks[i];
+    }
+    buffer.datas = data; buffer.n_datas = planes;
+    native.buffer = &buffer;
+  }
+};
+} // namespace
+
+TEST_F(WaylandPortalCaptureTest, MultiPlaneCallbacksSurviveRemovalResizeAndShmTransition) {
+  PipeWireLeaseFixture native;
+  ASSERT_TRUE(native.leases);
+  WaylandPortalCapture capture;
+  bufferSource(capture, native.leases);
+  std::vector<QueuedFrame> received;
+  capture.setFrameCallback([&](const VideoFrame &frame) { received.emplace_back(frame); });
+  CaptureBuffer first;
+  ASSERT_TRUE(first.allocation.isOpen());
+  ASSERT_TRUE(deliverBuffer(capture, first.native));
+  ASSERT_EQ(received.size(), 1u);
+  const int firstAux = received[0].dmaBufLayout().planes[1].fd;
+  EXPECT_EQ(received[0].data, nullptr);
+  native.drain();
+  EXPECT_TRUE(native.returned.empty());
+
+  native.leases->removed(&first.native);
+  first.allocation.close();
+  EXPECT_GE(fcntl(firstAux, F_GETFD), 0); // Queued snapshot owns all plane handles.
+  // Simulate the format boundary; real IPC/SHM format changes are covered by
+  // RecordingFailureTest. These callbacks exercise the multi-plane data path.
+  bufferSource(capture, native.leases, 128, 64);
+  CaptureBuffer resized(4);
+  resized.chunks[0].stride = 512;
+  ASSERT_TRUE(deliverBuffer(capture, resized.native));
+  ASSERT_EQ(received.size(), 2u);
+  EXPECT_EQ(received[1].width, 128);
+  EXPECT_EQ(received[1].height, 64);
+  EXPECT_EQ(received[1].dmaBufLayout().count, 4u);
+  received[1].requestCpuFallback();
+  received[1].requestCpuFallback();
+  native.drain();
+  EXPECT_EQ(native.fallbacks, 1);
+
+  std::vector<uint8_t> pixels(128 * 64 * 4, 71);
+  spa_chunk chunk{0, uint32_t(pixels.size()), 512, 0};
+  spa_data data{};
+  data.type = SPA_DATA_MemPtr; data.data = pixels.data();
+  data.maxsize = pixels.size(); data.chunk = &chunk;
+  spa_buffer shm{}; shm.n_datas = 1; shm.datas = &data;
+  pw_buffer shared{}; shared.buffer = &shm;
+  EXPECT_FALSE(deliverBuffer(capture, shared)); // Wrapper immediately returns SHM.
+  ASSERT_EQ(received.size(), 3u);
+  EXPECT_FALSE(received[2].isDmaBuf);
+  EXPECT_FALSE(received[2].bufferLease);
+  pixels[0] = 99;
+  EXPECT_EQ(received[2].data[0], 71); // Borrowed SHM was copied before return.
+  received.clear();
+  native.drain();
+  ASSERT_EQ(native.returned.size(), 1u);
+  EXPECT_EQ(native.returned[0], &resized.native); // Removed first buffer is never queued.
+  EXPECT_LT(fcntl(firstAux, F_GETFD), 0);
+}
+
+TEST_F(WaylandPortalCaptureTest, StopWithQueuedMultiPlaneFramesDisarmsLateReturnsAndFallback) {
+  PipeWireLeaseFixture native;
+  ASSERT_TRUE(native.leases);
+  WaylandPortalCapture capture;
+  bufferSource(capture, native.leases);
+  std::unique_ptr<QueuedFrame> queued;
+  int callbacks = 0;
+  capture.setFrameCallback([&](const VideoFrame &frame) {
+    ++callbacks; queued = std::make_unique<QueuedFrame>(frame);
+  });
+  CaptureBuffer buffer;
+  ASSERT_TRUE(deliverBuffer(capture, buffer.native));
+  ASSERT_TRUE(queued);
+  const int auxiliary = queued->dmaBufLayout().planes[1].fd;
+  stopBuffers(capture);
+  buffer.allocation.close();
+  EXPECT_GE(fcntl(auxiliary, F_GETFD), 0);
+  queued->requestCpuFallback();
+  std::thread worker([frame = std::move(queued)]() mutable { frame.reset(); });
+  worker.join();
+  native.drain();
+  EXPECT_TRUE(native.returned.empty());
+  EXPECT_EQ(native.fallbacks, 0);
+  EXPECT_LT(fcntl(auxiliary, F_GETFD), 0);
+  EXPECT_FALSE(deliverBuffer(capture, buffer.native));
+  EXPECT_EQ(callbacks, 1);
+}
+
+TEST_F(WaylandPortalCaptureTest, MalformedAuxiliaryPlanesRequestFallbackOnceWithoutDelivery) {
+  PipeWireLeaseFixture native;
+  ASSERT_TRUE(native.leases);
+  WaylandPortalCapture capture;
+  bufferSource(capture, native.leases);
+  int callbacks = 0;
+  capture.setFrameCallback([&](const VideoFrame &) { ++callbacks; });
+  for (int kind = 0; kind < 5; ++kind) {
+    SCOPED_TRACE(kind);
+    CaptureBuffer bad;
+    switch (kind) {
+    case 0: bad.buffer.n_datas = 5; break;
+    case 1: bad.data[1].type = 5; break; // SyncObj protocol tag; also reject on older SPA headers.
+    case 2: bad.data[1].fd = -1; break;
+    case 3: bad.data[1].mapoffset = 4096; break;
+    case 4: bad.chunks[1].flags = SPA_CHUNK_FLAG_CORRUPTED; break;
+    }
+    EXPECT_FALSE(deliverBuffer(capture, bad.native));
+  }
+  native.drain();
+  EXPECT_EQ(callbacks, 0);
+  EXPECT_EQ(native.fallbacks, 1);
+  EXPECT_TRUE(native.returned.empty()); // No retained leases for rejected buffers.
+  CaptureBuffer single(1);
+  EXPECT_TRUE(deliverBuffer(capture, single.native));
+  EXPECT_EQ(callbacks, 1);
+  native.drain();
+  ASSERT_EQ(native.returned.size(), 1u);
+  EXPECT_EQ(native.returned[0], &single.native);
+}
+
+TEST_F(WaylandPortalCaptureTest, ClearingCallbackWaitsForInFlightMultiPlaneDelivery) {
+  PipeWireLeaseFixture native;
+  ASSERT_TRUE(native.leases);
+  WaylandPortalCapture capture;
+  bufferSource(capture, native.leases);
+  CaptureBuffer buffer;
+  std::promise<void> entered, finish, clearing;
+  auto enteredFuture = entered.get_future();
+  auto finishFuture = finish.get_future().share();
+  auto clearingFuture = clearing.get_future();
+  std::atomic<int> calls{0};
+  capture.setFrameCallback([&](const VideoFrame &frame) {
+    EXPECT_EQ(frame.dmaBufLayout().count, 2u);
+    if (++calls == 1) entered.set_value();
+    EXPECT_EQ(finishFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  });
+  auto delivery = std::async(std::launch::async, [&] {
+    return deliverBuffer(capture, buffer.native);
+  });
+  ASSERT_EQ(enteredFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  auto clear = std::async(std::launch::async, [&] {
+    clearing.set_value();
+    capture.setFrameCallback({});
+  });
+  ASSERT_EQ(clearingFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_EQ(clear.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  finish.set_value();
+  ASSERT_EQ(delivery.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_TRUE(delivery.get());
+  clear.get();
+  native.drain();
+  ASSERT_EQ(native.returned.size(), 1u);
+  EXPECT_TRUE(deliverBuffer(capture, buffer.native));
+  native.drain();
+  EXPECT_EQ(calls.load(), 1);
+  EXPECT_EQ(native.returned.size(), 2u);
+}
 
 TEST_F(WaylandPortalCaptureTest, ExplicitCancellationIsDistinctFromPortalFailureAtEveryStage) {
   if (!startFake()) GTEST_SKIP() << "Requires private portal launcher";

@@ -311,6 +311,10 @@ set(SETTINGS_SOURCES
     src/settings/SettingsManager.cpp
 )
 
+set(TROUBLESHOOTER_SOURCES
+    src/troubleshooters/DmaBufTroubleshooter.cpp
+)
+
 # Header files (for MOC)
 set(CORE_HEADERS
     src/core/DeletionQueue.h
@@ -396,6 +400,10 @@ set(LIBRARY_HEADERS
     src/library/PreviewCache.h
 )
 
+set(TROUBLESHOOTER_HEADERS
+    src/troubleshooters/DmaBufTroubleshooter.h
+)
+
 set(SETTINGS_HEADERS
     src/settings/SettingsManager.h
 )
@@ -403,6 +411,7 @@ set(SETTINGS_HEADERS
 # Combine all sources
 set(ALL_SOURCES
     ${CORE_SOURCES}
+    ${TROUBLESHOOTER_SOURCES}
     ${CAPTURE_SOURCES}
     ${AUDIO_SOURCES}
     ${ENCODING_SOURCES}
@@ -414,6 +423,7 @@ set(ALL_SOURCES
 
 set(ALL_HEADERS
     ${CORE_HEADERS}
+    ${TROUBLESHOOTER_HEADERS}
     ${CAPTURE_HEADERS}
     ${AUDIO_HEADERS}
     ${ENCODING_HEADERS}
@@ -476,6 +486,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/controls/TrophyTextField.qml
         qml/controls/TrophySearchBox.qml
         qml/controls/TrophyDialog.qml
+        qml/controls/DmaBufTestDialog.qml
         qml/controls/ReleaseNotesView.qml
         qml/controls/TrophyWindowButton.qml
     SOURCES

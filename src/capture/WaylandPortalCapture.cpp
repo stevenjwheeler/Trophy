@@ -520,6 +520,7 @@ bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
   m_lastFormatModifier = 0;
   m_multiPlaneWarned = false;
   m_gpuOnlyWarned = false;
+  m_lastDmaBufPlaneCount = 0;
 
   qDebug() << "Wayland Portal capture initialized. Restore token available:"
            << !m_restoreToken.isEmpty()
@@ -817,7 +818,7 @@ void WaylandPortalCapture::requestSelectSources() {
       m_config.windowOnly ? 2u : (1u | 2u);
   options["types"] = sourceTypes;
   options["cursor_mode"] = static_cast<unsigned int>(2); // Embedded = 2
-  options["persist_mode"] = static_cast<unsigned int>(2);
+  options["persist_mode"] = static_cast<unsigned int>(m_config.persistPermission ? 2 : 0);
 
   if (!m_restoreToken.isEmpty()) {
     options["restore_token"] = m_restoreToken;
@@ -1546,13 +1547,7 @@ void WaylandPortalCapture::on_stream_param_changed(
       // Tiled DMA-BUF and shared memory cannot share the same negotiated
       // format. SHM fallback requires the modifier-less format above.
       const spa_pod *bufParams[1];
-      bufParams[0] = reinterpret_cast<const spa_pod *>(spa_pod_builder_add_object(
-          &bb,
-          SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-          SPA_PARAM_BUFFERS_buffers,  SPA_POD_CHOICE_RANGE_Int(4, 1, 32),
-          SPA_PARAM_BUFFERS_blocks,   SPA_POD_Int(1),
-          SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
-              pipeWireVideoBufferTypes(param, self->m_useDmaBuf))));
+      bufParams[0] = buildPipeWireBufferRequest(&bb, param, self->m_useDmaBuf);
 
       pw_stream_update_params(self->m_pw_stream, bufParams, 1);
       qDebug() << "Wayland Portal: requested buffer transport:"
@@ -1587,13 +1582,19 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   pw_buffer *b = pw_stream_dequeue_buffer(self->m_pw_stream);
   if (!b)
     return;
+  if (!self->processBuffer(b))
+    pw_stream_queue_buffer(self->m_pw_stream, b);
+}
 
+bool WaylandPortalCapture::processBuffer(pw_buffer *b) {
+  auto *self = this;
+  if (!b || !self->m_nativeEventsEnabled.load())
+    return false;
   spa_buffer *buf = b->buffer;
   if (!buf || !buf->datas || buf->n_datas == 0 || !buf->datas[0].chunk ||
       (buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
     ++self->m_droppedBuffers;
-    pw_stream_queue_buffer(self->m_pw_stream, b);
-    return;
+    return false;
   }
   const auto &d = buf->datas[0];
 
@@ -1623,20 +1624,23 @@ void WaylandPortalCapture::on_stream_process(void *data) {
   frame.timestamp = ts;
 
   if (d.type == SPA_DATA_DmaBuf && d.fd >= 0) {
-    // This importer supports one image plane only; never misinterpret an
-    // auxiliary compression plane as an ordinary single-plane RGB buffer.
-    if (buf->n_datas != 1 || d.chunk->stride <= 0) {
+    if (!pipeWireVideoDmaBufLayout(*buf, frame.dmaBufPlanes)) {
       if (!self->m_multiPlaneWarned) {
         self->m_multiPlaneWarned = true;
-        qWarning() << "Unsupported DMA-BUF plane count/stride:"
+        qWarning() << "Unsupported DMA-BUF plane layout:"
                    << buf->n_datas << d.chunk->stride;
       }
       ++self->m_droppedBuffers;
       self->m_bufferLeases->requestSharedMemory();
-      pw_stream_queue_buffer(self->m_pw_stream, b);
-      return;
+      return false;
     }
     frame.bufferLease = self->m_bufferLeases->retain(b);
+    if (self->m_lastDmaBufPlaneCount != frame.dmaBufPlanes.count) {
+      self->m_lastDmaBufPlaneCount = frame.dmaBufPlanes.count;
+      qDebug() << "WaylandPortalCapture: DMA-BUF layout planes:"
+               << frame.dmaBufPlanes.count << "modifier:"
+               << QString::number(self->m_negotiatedModifier, 16);
+    }
     frame.requestCpuFallback = [leases = self->m_bufferLeases] {
       leases->requestSharedMemory();
     };
@@ -1681,8 +1685,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
         qWarning() << "PipeWire: invalid shared-memory video buffer"
                    << "offset/size/maxsize/stride:" << d.chunk->offset
                    << d.chunk->size << d.maxsize << d.chunk->stride;
-      pw_stream_queue_buffer(self->m_pw_stream, b);
-      return;
+      return false;
     }
     frame.stride      = d.chunk->stride;
     frame.pixelFormat = AV_PIX_FMT_BGRA;
@@ -1710,8 +1713,7 @@ void WaylandPortalCapture::on_stream_process(void *data) {
     }
   }
 
-  if (!frame.bufferLease)
-    pw_stream_queue_buffer(self->m_pw_stream, b);
+  return bool(frame.bufferLease);
 }
 
 } // namespace TrophyBackend

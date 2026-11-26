@@ -3,6 +3,18 @@ find_package(GTest REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
+add_executable(test_DmaBufTroubleshooter test_DmaBufTroubleshooter.cpp)
+target_include_directories(test_DmaBufTroubleshooter PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test_DmaBufTroubleshooter PRIVATE
+    DMABUF_DIALOG_FILE="${CMAKE_SOURCE_DIR}/qml/controls/DmaBufTestDialog.qml"
+    SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DmaBufTroubleshooter PRIVATE ${PROJECT_NAME}
+    GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test PkgConfig::AVUTIL)
+if(GBM_FOUND AND LIBDRM_FOUND)
+    target_link_libraries(test_DmaBufTroubleshooter PRIVATE PkgConfig::GBM PkgConfig::LIBDRM)
+endif()
+gtest_discover_tests(test_DmaBufTroubleshooter PROPERTIES TIMEOUT 60)
+
 add_executable(detection_probe detection_probe.cpp)
 target_include_directories(detection_probe PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(detection_probe PRIVATE ${PROJECT_NAME} Qt6::Core)
@@ -804,6 +816,11 @@ gtest_discover_tests(test_DmaBufCudaImport)
 endif()
 
 if(VAAPI_FOUND)
+    add_executable(test_VaapiDmaBufImporter test_VaapiDmaBufImporter.cpp)
+    target_include_directories(test_VaapiDmaBufImporter PRIVATE ${TEST_INCLUDE_DIRS})
+    target_link_libraries(test_VaapiDmaBufImporter PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
+    gtest_discover_tests(test_VaapiDmaBufImporter)
+
     add_executable(test_VaapiVideoProcessor test_VaapiVideoProcessor.cpp)
     target_include_directories(test_VaapiVideoProcessor PRIVATE ${TEST_INCLUDE_DIRS})
     target_link_libraries(test_VaapiVideoProcessor PRIVATE ${TEST_LINK_LIBS} ${CMAKE_DL_LIBS})
@@ -811,6 +828,16 @@ if(VAAPI_FOUND)
 endif()
 
 # --- EncoderFactory (detection + fallback, HW tests skip gracefully) ---
+add_executable(test_DmaBufFrame test_DmaBufFrame.cpp)
+target_include_directories(test_DmaBufFrame PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_DmaBufFrame PRIVATE ${TEST_LINK_LIBS})
+gtest_discover_tests(test_DmaBufFrame)
+
+add_executable(test_PipeWireLeaseEvents test_PipeWireLeaseEvents.cpp)
+target_include_directories(test_PipeWireLeaseEvents PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireLeaseEvents PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+gtest_discover_tests(test_PipeWireLeaseEvents)
+
 add_executable(test_EncoderFactory test_EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/core/RuntimeLibraries.cpp

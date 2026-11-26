@@ -14,6 +14,31 @@ fails, Trophy reports that save failure without stopping a healthy DVR buffer.
 
 Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
+### DMA-BUF troubleshooter
+
+Open **Settings → Troubleshooter → DMA-BUF Tester → Open Wizard**. Stop recording
+and Background Clips first. Select an animated window or screen in the portal,
+then keep it moving for the short test. Cancel closes the diagnostic capture;
+starting an ordinary recording/background capture cancels the test instead.
+
+The test requests DMA-BUF independently of your saved settings, uses the first
+available H.264 hardware encoder, and decodes its output in memory. It records
+no audio, writes no video files, uploads nothing, and requests no persistent
+portal permission. No game approval or capture preference is saved.
+
+Results distinguish actual DMA-BUF delivery, successfully imported single-plane
+and multi-plane buffers, direct mapping, EGL plus GPU copy, VA-API conversion,
+and shared-memory/CPU fallback. **Passed** requires multiple GPU-imported frames
+and a clean decoded frame for every accepted input, without fallback or drops.
+Only the layout actually delivered by the compositor is tested; zero
+multi-plane frames does not mean multi-plane support is broken. If nothing
+changes on screen, retry with moving content. Driver/portal errors and fallback
+are reported separately from an inconclusive low-frame-count result.
+
+This checks the selected source and encoder, not every GPU, window, layout or
+codec. A clean decode does not prove visual fidelity, literal zero-copy,
+long-session reliability or gameplay performance.
+
 ### Games and library entries
 
 The **Games** tab prelists usable installed games from supported local launcher
