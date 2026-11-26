@@ -9,6 +9,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <map>
+#include <list>
 #include <mutex>
 #include <thread>
 #include <pipewire/pipewire.h>
@@ -27,13 +28,14 @@ struct AudioApplicationRegistry::Private {
     struct Entry {
       Session *owner = nullptr;
       uint32_t id = 0;
-      bool node = false, current = false;
+      bool node = false, current = false, retired = false;
       detail::AudioLookupProperties properties;
       pw_proxy *proxy = nullptr;
-      spa_hook listener{};
+      spa_hook listener{}, proxyListener{};
       ~Entry() {
         if (proxy) {
           spa_hook_remove(&listener);
+          spa_hook_remove(&proxyListener);
           pw_proxy_destroy(proxy);
         }
       }
@@ -45,9 +47,14 @@ struct AudioApplicationRegistry::Private {
     spa_hook coreListener{}, registryListener{};
     spa_source *wakeEvent = nullptr;
     std::map<uint32_t, std::unique_ptr<Entry>> entries;
+    // A global removal can arrive before a pending bind is rejected. Keep its
+    // local proxy until PipeWire acknowledges removal of that specific proxy;
+    // destroying it earlier sends destroy for a resource that may never exist.
+    std::list<std::unique_ptr<Entry>> retiredEntries;
     bool failed = false, pending = false, again = false, ready = false, dirty = true;
     int sequence = -1;
     QString failure;
+    std::function<void(uint32_t)> beforeBind;
 
     bool fail(const char *stage, int result) {
       if (!failed)
@@ -58,6 +65,7 @@ struct AudioApplicationRegistry::Private {
 
     ~Session() {
       entries.clear();
+      retiredEntries.clear();
       if (registry) {
         spa_hook_remove(&registryListener);
         pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
@@ -82,7 +90,7 @@ struct AudioApplicationRegistry::Private {
     }
     static void nodeInfo(void *data, const pw_node_info *info) {
       auto &entry = *static_cast<Entry *>(data);
-      if (!info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
+      if (entry.retired || !info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
         return;
       entry.properties.updateInfo(info->props, true);
       entry.current = true;
@@ -90,7 +98,7 @@ struct AudioApplicationRegistry::Private {
     }
     static void clientInfo(void *data, const pw_client_info *info) {
       auto &entry = *static_cast<Entry *>(data);
-      if (!info || !(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS))
+      if (entry.retired || !info || !(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS))
         return;
       entry.properties.updateInfo(info->props, true);
       entry.current = true;
@@ -101,17 +109,27 @@ struct AudioApplicationRegistry::Private {
       auto &self = *static_cast<Session *>(data);
       const bool node = strcmp(type, PW_TYPE_INTERFACE_Node) == 0;
       const bool client = strcmp(type, PW_TYPE_INTERFACE_Client) == 0;
-      if ((!node && !client) || self.entries.size() >= 4096 || self.entries.contains(id))
+      if ((!node && !client) || self.entries.size() + self.retiredEntries.size() >= 4096 ||
+          self.entries.contains(id))
         return;
       auto entry = std::make_unique<Entry>();
       entry->owner = &self;
       entry->id = id;
       entry->node = node;
       entry->properties.update(props);
+      if (self.beforeBind)
+        self.beforeBind(id);
       entry->proxy = static_cast<pw_proxy *>(pw_registry_bind(self.registry, id, type,
           std::min(version, uint32_t(node ? PW_VERSION_NODE : PW_VERSION_CLIENT)), 0));
       if (!entry->proxy)
         return;
+      static const pw_proxy_events proxies = [] {
+        pw_proxy_events events{};
+        events.version = PW_VERSION_PROXY_EVENTS;
+        events.removed = proxyRemoved;
+        return events;
+      }();
+      pw_proxy_add_listener(entry->proxy, &entry->proxyListener, &proxies, entry.get());
       static const pw_node_events nodes = [] {
         pw_node_events events{};
         events.version = PW_VERSION_NODE_EVENTS;
@@ -135,8 +153,31 @@ struct AudioApplicationRegistry::Private {
     }
     static void removed(void *data, uint32_t id) {
       auto &self = *static_cast<Session *>(data);
-      if (self.entries.erase(id))
+      if (const auto entry = self.entries.find(id); entry != self.entries.end()) {
+        entry->second->retired = true;
+        entry->second->current = false;
+        self.retiredEntries.push_back(std::move(entry->second));
+        self.entries.erase(entry);
         self.changed();
+      }
+    }
+    static void proxyRemoved(void *data) {
+      auto *entry = static_cast<Entry *>(data);
+      auto &self = *entry->owner;
+      // The native proxy is now marked removed: its destructor frees only the
+      // local object and does not send another core destroy request.
+      if (entry->retired) {
+        const auto retired = std::find_if(self.retiredEntries.begin(), self.retiredEntries.end(),
+                                         [entry](const auto &item) { return item.get() == entry; });
+        if (retired != self.retiredEntries.end())
+          self.retiredEntries.erase(retired);
+      } else {
+        const auto current = self.entries.find(entry->id);
+        if (current != self.entries.end() && current->second.get() == entry) {
+          self.entries.erase(current);
+          self.changed();
+        }
+      }
     }
     static void done(void *data, uint32_t id, int sequence) {
       auto &self = *static_cast<Session *>(data);
@@ -225,6 +266,7 @@ struct AudioApplicationRegistry::Private {
       QString failure;
       {
         Session session;
+        session.beforeBind = owner->m_beforeBindForTesting;
         ++connectionAttempts;
         if (session.connect()) {
           {
