@@ -24,6 +24,7 @@
 #include "DiscordPresence.h"
 #include "GlobalShortcutManager.h"
 #include "HardwareInfo.h"
+#include "troubleshooters/DmaBufTroubleshooter.h"
 #include "InstallInfo.h"
 #include "NotificationService.h"
 #include "RecordingManager.h"
@@ -133,6 +134,7 @@ Application::~Application() {
   if (m_recordingManager) disconnect(m_recordingManager.get(), nullptr, this, nullptr);
   if (m_replayManager) disconnect(m_replayManager.get(), nullptr, this, nullptr);
   m_engine.reset();
+  m_dmaBufTroubleshooter.reset();
   m_shareExporter.reset();
   m_deletionQueue.reset();
   m_controlServer.reset();
@@ -430,6 +432,12 @@ void Application::initializeServices() {
   m_gameDetector->setAudioApplicationRegistry(m_audioApplicationRegistry.get());
   m_audioApplicationRegistry->start();
   m_recordingEngine = std::make_shared<RecordingEngine>();
+  m_dmaBufTroubleshooter = std::make_unique<DmaBufTroubleshooter>(this);
+  connect(m_recordingEngine.get(), &RecordingEngine::stateChanged, this, [this] {
+    if (m_dmaBufTroubleshooter)
+      m_dmaBufTroubleshooter->setAvailable(
+          m_recordingEngine->state() == RecordingEngine::State::Idle);
+  });
   m_recordingEngine->setSettingsManager(m_settingsManager.get());
   m_recordingEngine->setAudioMixer(m_audioMixer.get());
   m_recordingEngine->setGameDetectionService(m_gameDetector.get());
@@ -606,6 +614,7 @@ void Application::exposeServicesToQml() {
   context->setContextProperty("gameDetector", m_gameDetector.get());
   context->setContextProperty("notificationService", m_notificationService.get());
   context->setContextProperty("hardwareInfo", m_hardwareInfo.get());
+  context->setContextProperty("dmaBufTroubleshooter", m_dmaBufTroubleshooter.get());
   context->setContextProperty("audioMixer", m_audioMixer.get());
   context->setContextProperty("audioDeviceEnumerator", m_audioDeviceEnumerator.get());
   context->setContextProperty("globalShortcuts", m_shortcutManager.get());

@@ -151,6 +151,7 @@ struct CaptureConfig {
   bool captureMouseCursor = true;
   bool useDmaBuf = true;
   QString waylandRestoreToken;
+  bool persistPermission = true; // Diagnostics request an ephemeral grant.
   // Game-targeted recordings (auto-detect) offer windows only in the
   // portal picker; manual recordings offer monitors + windows.
   bool windowOnly = false;

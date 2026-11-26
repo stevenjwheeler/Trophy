@@ -35,6 +35,7 @@ class GameDetectionService;
 class NotificationService;
 class AudioMixer;
 class HardwareInfo;
+class DmaBufTroubleshooter;
 class AudioDeviceEnumerator;
 class AudioApplicationRegistry;
 class SystemTrayManager;
@@ -207,6 +208,7 @@ private:
   std::unique_ptr<GameDetectionService> m_gameDetector;
   std::unique_ptr<NotificationService> m_notificationService;
   std::unique_ptr<HardwareInfo> m_hardwareInfo;
+  std::unique_ptr<DmaBufTroubleshooter> m_dmaBufTroubleshooter;
   std::unique_ptr<AudioMixer> m_audioMixer;
   std::unique_ptr<AudioDeviceEnumerator> m_audioDeviceEnumerator;
   std::unique_ptr<SystemTrayManager> m_trayManager;

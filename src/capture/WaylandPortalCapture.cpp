@@ -818,7 +818,7 @@ void WaylandPortalCapture::requestSelectSources() {
       m_config.windowOnly ? 2u : (1u | 2u);
   options["types"] = sourceTypes;
   options["cursor_mode"] = static_cast<unsigned int>(2); // Embedded = 2
-  options["persist_mode"] = static_cast<unsigned int>(2);
+  options["persist_mode"] = static_cast<unsigned int>(m_config.persistPermission ? 2 : 0);
 
   if (!m_restoreToken.isEmpty()) {
     options["restore_token"] = m_restoreToken;

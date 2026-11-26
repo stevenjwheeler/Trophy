@@ -3,6 +3,18 @@ find_package(GTest REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
 include(GoogleTest)
+add_executable(test_DmaBufTroubleshooter test_DmaBufTroubleshooter.cpp)
+target_include_directories(test_DmaBufTroubleshooter PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test_DmaBufTroubleshooter PRIVATE
+    DMABUF_DIALOG_FILE="${CMAKE_SOURCE_DIR}/qml/controls/DmaBufTestDialog.qml"
+    SETTINGS_QML_FILE="${CMAKE_SOURCE_DIR}/qml/pages/SettingsPage.qml")
+target_link_libraries(test_DmaBufTroubleshooter PRIVATE ${PROJECT_NAME}
+    GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test PkgConfig::AVUTIL)
+if(GBM_FOUND AND LIBDRM_FOUND)
+    target_link_libraries(test_DmaBufTroubleshooter PRIVATE PkgConfig::GBM PkgConfig::LIBDRM)
+endif()
+gtest_discover_tests(test_DmaBufTroubleshooter PROPERTIES TIMEOUT 60)
+
 add_executable(detection_probe detection_probe.cpp)
 target_include_directories(detection_probe PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(detection_probe PRIVATE ${PROJECT_NAME} Qt6::Core)

@@ -45,8 +45,10 @@ class FakeScreenCast : public QObject, protected QDBusContext {
 public slots:
   QDBusObjectPath CreateSession(const QVariantMap &options) { return request("CreateSession", options); }
   QDBusObjectPath SelectSources(const QDBusObjectPath &, const QVariantMap &options) {
+    m_lastSelectOptions = options;
     return request("SelectSources", options);
   }
+  QVariantMap LastSelectOptions() { return m_lastSelectOptions; }
   QDBusObjectPath Start(const QDBusObjectPath &, const QString &, const QVariantMap &options) {
     return request("Start", options);
   }
@@ -105,6 +107,7 @@ private:
     return QDBusObjectPath(path);
   }
   QString m_mode;
+  QVariantMap m_lastSelectOptions;
   QDBusMessage m_held;
   QString m_heldPath;
 };
@@ -371,6 +374,35 @@ static const auto *portalTestEnvironment =
     testing::AddGlobalTestEnvironment(new PortalTestEnvironment);
 
 using namespace TrophyBackend;
+
+TEST_F(WaylandPortalCaptureTest, DiagnosticGrantIsEphemeralWithoutChangingRecordingDefault) {
+  if (!startFake()) GTEST_SKIP() << "Requires the private portal launcher";
+  for (bool persistent : {false, true}) {
+    WaylandPortalCapture capture;
+    CaptureConfig config;
+    config.useDmaBuf = false;
+    config.persistPermission = persistent;
+    ASSERT_TRUE(capture.initialize(config));
+    ASSERT_TRUE(capture.startCapture());
+    ASSERT_TRUE(waitUntil([&] { return !pendingPath(capture).isEmpty(); }));
+    ASSERT_EQ(control("Respond", {pendingPath(capture), 0u,
+        QVariantMap{{"session_handle", QStringLiteral("/test/session")}}}).type(),
+        QDBusMessage::ReplyMessage);
+    ASSERT_TRUE(waitUntil([&] { return captureStageIsSelect(capture); }));
+    QVariantMap options;
+    ASSERT_TRUE(waitUntil([&] {
+      const auto reply = control("LastSelectOptions", {});
+      if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return false;
+      options = qdbus_cast<QVariantMap>(reply.arguments().front());
+      return !options.value("handle_token").toString().isEmpty() &&
+          pendingPath(capture).endsWith(options.value("handle_token").toString());
+    }));
+    EXPECT_EQ(options.value("persist_mode").toUInt(), persistent ? 2u : 0u);
+    EXPECT_FALSE(options.contains("restore_token"));
+    capture.stopCapture();
+  }
+}
 
 namespace {
 struct CaptureBuffer {
