@@ -531,6 +531,77 @@ TEST_F(RecordingEngineTest, DisablingLateVoiceRetiresActualSlotAndPreservesMicro
   EXPECT_TRUE(mixer.sourceIsCapturing(1));
 }
 
+class RestoreCapabilityTest : public RecordingEngineTest,
+                              public ::testing::WithParamInterface<int> {};
+TEST_P(RestoreCapabilityTest, RevocationIsScopedToTheOriginatingAttemptAndToken) {
+  const int scenario = GetParam(); // Identity key, legacy name, newer token, old source.
+  SettingsManager settings;
+  const QString key = "steam_app_42424242", name = "Same name";
+  settings.setRestoreToken(scenario == 1 ? name : key, "old-token");
+  settings.setRestoreToken("steam_app_42424243", "other-game-token");
+  if (scenario == 2) settings.setRestoreToken(key, "new-token");
+  int destroyed = 0, stale = 0;
+  Source source(destroyed);
+  CaptureLifecycle lifecycle;
+  lifecycle.configure(nullptr, &settings);
+  lifecycle.bindSource(&source, name, key, false,
+      [scenario] { return scenario != 3; }, [] {}, [](const QString &) {},
+      [&](const QString &) { ++stale; });
+  emit source.restoreTokenStale("old-token");
+  EXPECT_EQ(stale, scenario == 3 ? 0 : 1);
+  EXPECT_EQ(settings.getRestoreTokenForIdentity(key, name),
+            scenario == 2 ? "new-token" : scenario == 3 ? "old-token" : "");
+  EXPECT_EQ(settings.getRestoreToken("steam_app_42424243"), "other-game-token");
+}
+INSTANTIATE_TEST_SUITE_P(AttemptAndTokenIdentity, RestoreCapabilityTest, ::testing::Range(0, 4));
+
+class EngineRestoreAuthorizationTest : public RecordingEngineTest,
+                                       public ::testing::WithParamInterface<bool> {};
+TEST_P(EngineRestoreAuthorizationTest, RejectedRestoreNotifiesConsumerAndWaitsForAuthorization) {
+  const bool recovery = GetParam();
+  const QString key = "steam_app_42424242", name = "Restore fixture";
+  SettingsManager settings;
+  settings.setRestoreTokenForIdentity(key, name, "rejected-token");
+  GameDetectionService detector;
+  detector.addToWhitelist(key, name);
+  DetectionFixture::publish(detector, QCoreApplication::applicationPid(), key);
+  const auto clear = qScopeGuard([&] { DetectionFixture::clear(detector); });
+  int starts = 0, destroyed = 0;
+  QPointer<Source> capture;
+  RecordingEngine engine;
+  engine.setSettingsManager(&settings);
+  engine.setGameDetectionService(&detector);
+  RecordingEngineTestAccess::install(engine, starts, destroyed);
+  RecordingEngineTestAccess::source(engine, starts, destroyed, capture, {}, 0, false);
+  RecordingEngineTestAccess::shortenRecovery(engine);
+  auto output = std::make_shared<Output>();
+  const auto id = engine.attach(output, name);
+  QSignalSpy authorization(&engine, &RecordingEngine::restoreAuthNeeded);
+  QSignalSpy stopped(&engine, &RecordingEngine::outputStopped);
+  ASSERT_TRUE(QTest::qWaitFor([&] { return capture && starts == 1; }));
+  if (recovery) {
+    emit capture->ready();
+    ASSERT_TRUE(QTest::qWaitFor([&] { return engine.state() == RecordingEngine::State::Running; }));
+    RecordingEngineTestAccess::packet(engine, 0);
+    capture->errorKind = IVideoCaptureSource::CaptureErrorKind::SourceDestroyed;
+    emit capture->captureError("captured window destroyed");
+    ASSERT_TRUE(QTest::qWaitFor([&] { return starts == 2 && capture; }));
+  }
+  ASSERT_EQ(capture->config.waylandRestoreToken, "rejected-token");
+  emit capture->restoreTokenStale("rejected-token");
+  EXPECT_TRUE(settings.getRestoreTokenForIdentity(key, name).isEmpty());
+  ASSERT_TRUE(QTest::qWaitFor([&] { return stopped.size() == 1; }));
+  ASSERT_EQ(authorization.size(), 1);
+  EXPECT_EQ(authorization.first()[0].toULongLong(), id);
+  EXPECT_EQ(authorization.first()[1].toString(), name);
+  EXPECT_EQ(authorization.first()[2].toString(), key);
+  QTest::qWait(100);
+  EXPECT_EQ(starts, recovery ? 2 : 1);
+  EXPECT_EQ(engine.state(), RecordingEngine::State::Idle);
+  EXPECT_FALSE(engine.hasDemand());
+}
+INSTANTIATE_TEST_SUITE_P(InitialAndRecovery, EngineRestoreAuthorizationTest, ::testing::Bool());
+
 class EngineCensusTest : public RecordingEngineTest,
                          public ::testing::WithParamInterface<int> {};
 TEST_P(EngineCensusTest, LauncherLossWaitsOnlyForApprovedExactInstance) {

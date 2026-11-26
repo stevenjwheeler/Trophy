@@ -711,29 +711,10 @@ void Application::connectSignals() {
   connect(m_audioWaitTimer, &QTimer::timeout,
           this, &Application::onAudioWaitTimeout);
   connect(m_recordingManager.get(), &RecordingManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
-            if (!isCurrentCaptureGame(game) || identity != m_gameDetector->currentGameKey())
-              return;
-            // Stale token: delete it so the next attempt can't reuse it,
-            // then authorize again through the prompt. The picker that may
-            // follow the click is the user's own action, never a surprise.
-            qCDebug(appLog) << "Restore token stale for" << game
-                            << "- re-authorizing via prompt";
-            m_settingsManager->removeRestoreToken(game);
-            m_settingsManager->removeRestoreToken(m_gameDetector->captureKeyForGame(game));
-            m_pendingAutoRecordGame = game;
-            m_authorizePromptTokenInvalid = true;
-            m_detectionDebounceTimer->start();
+            onRestoreAuthorizationNeeded(game, identity, true);
           });
   connect(m_replayManager.get(), &ReplayManager::restoreAuthNeeded, this, [this](const QString &game, const QString &identity) {
-            if (!isCurrentCaptureGame(game) || identity != m_gameDetector->currentGameKey())
-              return;
-            qCDebug(appLog) << "DVR restore token stale for" << game
-                            << "- re-authorizing via prompt";
-            m_settingsManager->removeRestoreToken(game);
-            m_settingsManager->removeRestoreToken(m_gameDetector->captureKeyForGame(game));
-            m_pendingDvrGame = game;
-            m_authorizePromptTokenInvalid = true;
-            m_detectionDebounceTimer->start();
+            onRestoreAuthorizationNeeded(game, identity, false);
           });
   // Unblocking the live game re-arms its prompt: the debounce dropped it
   // as blocked, and same-game re-detects never refire. Tokened games
@@ -1388,8 +1369,16 @@ void Application::onInstantReplayEnabledChanged() {
     m_replayManager->stopDvr();
   } else if (!stopPendingCaptureForSelection() && m_gameDetector &&
              !m_gameDetector->currentGameName().isEmpty() &&
-             !m_recordingManager->isRecording() &&
-             !m_recordingManager->isRecoveringCapture()) {
+              !m_recordingManager->isRecording() &&
+              !m_recordingManager->isRecoveringCapture()) {
+    const QString game = m_gameDetector->currentGameName();
+    if (restoreTokenForGame(game).isEmpty()) {
+      // Enabling replay is not consent to a portal picker. This also fences
+      // settings changes after a rejected restore while authorization waits.
+      m_pendingDvrGame = game;
+      m_detectionDebounceTimer->start();
+      return;
+    }
     startWhenWindowReady(m_gameDetector->currentGameName(), false);
   }
 }
@@ -1472,11 +1461,37 @@ void Application::onWindowWaitTimeout() {
     m_detectionDebounceTimer->start();
 }
 
+void Application::onRestoreAuthorizationNeeded(const QString &game,
+                                               const QString &identity,
+                                               bool isRecord) {
+  if (!m_gameDetector || m_gameDetector->currentGameName() != game ||
+      identity != m_gameDetector->currentGameKey() || isGameBlocked(game) ||
+      !restoreTokenForGame(game).isEmpty())
+    return;
+  // Revocation is attempt-scoped in CaptureLifecycle, before teardown. Do not
+  // delete a newer token here, or let old audio/window waits reopen a picker.
+  cancelPendingCapture();
+  qCInfo(appLog) << "Restore attempt ended for" << game
+                << "- waiting for explicit authorization";
+  if (isRecord)
+    m_pendingAutoRecordGame = game;
+  else
+    m_pendingDvrGame = game;
+  m_authorizePromptTokenInvalid = true;
+  m_detectionDebounceTimer->start();
+}
+
 void Application::onAuthorizeDebounceFired() {
   const QString pending = !m_pendingAutoRecordGame.isEmpty()
                               ? m_pendingAutoRecordGame
                               : m_pendingDvrGame;
   if (pending.isEmpty())
+    return;
+  // A launcher PID may have exited while the portal was replying. Keep the
+  // authorization pending for its payload rather than dropping it as dead.
+  if (m_gameDetector && m_gameDetector->currentGameName() == pending &&
+      !isGameBlocked(pending) && restoreTokenForGame(pending).isEmpty() &&
+      !m_gameDetector->isGamePayloadReady())
     return;
   if (!shouldShowAuthorizePrompt(pending)) {
     m_authorizePromptTokenInvalid = false;
