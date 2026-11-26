@@ -63,27 +63,41 @@ Rectangle {
                 color: Theme.textSecondaryColor
             }
 
-            ColumnLayout {
+            // A layout's computed maximum width can shrink to its only visible
+            // label when the description is hidden. A plain expanding wrapper
+            // keeps the chevron at the card edge independently of the copy.
+            Item {
                 Layout.fillWidth: true
-                spacing: 2
+                Layout.minimumWidth: 0
+                implicitHeight: headerLabels.implicitHeight
 
-                Label {
-                    text: sectionCard.sectionTitle
-                    font.pixelSize: Theme.fontSizeLarge
-                    font.weight: Font.Medium
-                    color: Theme.textColor
-                }
-                Label {
-                    Layout.fillWidth: true
-                    text: sectionCard.description
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: sectionCard.descriptionColor
-                    wrapMode: Text.WordWrap
-                    visible: text.length > 0
+                ColumnLayout {
+                    id: headerLabels
+                    width: parent.width
+                    spacing: 2
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: sectionCard.sectionTitle
+                        font.pixelSize: Theme.fontSizeLarge
+                        font.weight: Font.Medium
+                        color: Theme.textColor
+                        wrapMode: Text.WordWrap
+                    }
+                    Label {
+                        objectName: "settingsSectionDescription"
+                        Layout.fillWidth: true
+                        text: sectionCard.description
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: sectionCard.descriptionColor
+                        wrapMode: Text.WordWrap
+                        visible: text.length > 0
+                    }
                 }
             }
 
             Label {
+                objectName: "settingsSectionChevron"
                 text: "›"
                 font.pixelSize: 26
                 color: Theme.textSecondaryColor

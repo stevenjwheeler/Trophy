@@ -3,7 +3,11 @@
 #include "encoding/EncoderFactory.h"
 #include "settings/SettingsManager.h"
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
 #include <QGuiApplication>
+#include <QFont>
+#include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQmlContext>
@@ -166,6 +170,10 @@ protected:
   bool hardwareAvailable() {
     return EncoderFactory::isAvailable(IEncoder::EncoderType::NVENC_H264) ||
         EncoderFactory::isAvailable(IEncoder::EncoderType::VAAPI_H264);
+  }
+  void setReport(const QVariantMap &report) {
+    tester.m_result = report;
+    emit tester.changed();
   }
 };
 
@@ -347,6 +355,7 @@ TEST_F(DmaBufTroubleshooterTest, WizardLoadsStartsCancelsAndReportsWithoutPortal
   QTest::qWait(250);
   auto *start = dialog->findChild<QObject *>("startDmaBufTest");
   ASSERT_NE(start, nullptr);
+  EXPECT_GE(dialog->property("padding").toDouble(), 16);
   EXPECT_TRUE(start->property("enabled").toBool());
   ASSERT_TRUE(QMetaObject::invokeMethod(start, "clicked"));
   EXPECT_TRUE(tester.busy());
@@ -382,10 +391,13 @@ TEST_F(DmaBufTroubleshooterTest, SettingsSectionNavigationOpensWizardAndTracksCa
   item->setSize(QSizeF(1024, 720));
   window.show();
   ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "scrollToSection",
-      Q_ARG(QVariant, QVariant(QStringLiteral("Troubleshooter")))));
+      Q_ARG(QVariant, QVariant(QStringLiteral("Troubleshooters")))));
   QTest::qWait(500);
   auto *section = page->findChild<QObject *>("troubleshooterSection");
   ASSERT_NE(section, nullptr);
+  EXPECT_FALSE(section->property("description").toString().trimmed().isEmpty());
+  EXPECT_EQ(section->property("sectionTitle").toString(), QStringLiteral("Troubleshooters"));
+  EXPECT_TRUE(section->property("iconSource").toUrl().path().endsWith("/wrench.svg"));
   EXPECT_TRUE(section->property("expanded").toBool());
   auto *open = page->findChild<QObject *>("openDmaBufTester");
   ASSERT_NE(open, nullptr);
@@ -404,6 +416,87 @@ TEST_F(DmaBufTroubleshooterTest, SettingsSectionNavigationOpensWizardAndTracksCa
   EXPECT_TRUE(tester.busy());
   ASSERT_TRUE(QMetaObject::invokeMethod(wizard, "close"));
   settle();
+  EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+TEST_F(DmaBufTroubleshooterTest, SectionChevronStaysAtFarEdgeWithOrWithoutDescription) {
+  QQmlEngine engine;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(
+      QFileInfo(DMABUF_DIALOG_FILE).dir().filePath("SettingsSectionCard.qml")));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  QQuickWindow window;
+  window.resize(900, 600);
+  auto object = std::unique_ptr<QObject>(component.createWithInitialProperties({
+      {"parent", QVariant::fromValue(window.contentItem())},
+      {"sectionTitle", QStringLiteral("Diagnostic")}}));
+  auto *card = qobject_cast<QQuickItem *>(object.get());
+  ASSERT_NE(card, nullptr);
+  auto *arrow = card->findChild<QQuickItem *>("settingsSectionChevron");
+  ASSERT_NE(arrow, nullptr);
+  window.show();
+  for (int width : {360, 800}) {
+    card->setWidth(width);
+    for (const auto &description : {QString(), QStringLiteral("A long diagnostic description that wraps on a narrow card.")}) {
+      card->setProperty("description", description);
+      for (bool expanded : {false, true}) {
+        card->setProperty("expanded", expanded);
+        QTest::qWait(250);
+        EXPECT_NEAR(arrow->parentItem()->mapToItem(card, arrow->position()).x() + arrow->width(),
+                    width - 16, 2) << width << " expanded=" << expanded;
+      }
+    }
+  }
+}
+TEST_F(DmaBufTroubleshooterTest, WizardHasPaddedReadableContentAndPinnedActionsOnSmallWindows) {
+  QQmlEngine engine;
+  QStringList warnings;
+  QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+                   [&](const QList<QQmlError> &items) {
+    for (const auto &item : items) warnings << item.toString();
+  });
+  QQmlComponent component(&engine, QUrl::fromLocalFile(DMABUF_DIALOG_FILE));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  QQuickWindow window;
+  window.resize(800, 800);
+  window.show();
+  auto dialog = std::unique_ptr<QObject>(component.createWithInitialProperties({
+      {"parent", QVariant::fromValue(window.contentItem())},
+      {"tester", QVariant::fromValue<QObject *>(&tester)}}));
+  ASSERT_NE(dialog, nullptr) << component.errorString().toStdString();
+  ASSERT_TRUE(QMetaObject::invokeMethod(dialog.get(), "open"));
+  QTest::qWait(250); // onOpened initializes the wizard after its transition.
+  const auto captureDirectory = qEnvironmentVariable("TROPHY_UI_CAPTURE_DIR");
+  if (!captureDirectory.isEmpty()) {
+    ASSERT_TRUE(QDir().mkpath(captureDirectory));
+    EXPECT_TRUE(window.grabWindow().save(captureDirectory + "/wizard-intro.png"));
+  }
+  setReport({{"status", "failed"},
+             {"summary", QStringLiteral("Diagnostic explanation with wrapping. ").repeated(100)},
+             {"encoder", "Example hardware encoder"}});
+  dialog->setProperty("started", true);
+  auto *background = dialog->property("background").value<QQuickItem *>();
+  auto *title = dialog->findChild<QQuickItem *>("dmaBufWizardTitle");
+  auto *start = dialog->findChild<QQuickItem *>("startDmaBufTest");
+  auto *scroll = dialog->findChild<QQuickItem *>("dmaBufWizardScroll");
+  ASSERT_NE(background, nullptr);
+  ASSERT_NE(title, nullptr);
+  ASSERT_NE(start, nullptr);
+  ASSERT_NE(scroll, nullptr);
+  EXPECT_EQ(title->property("font").value<QFont>().pixelSize(), 20);
+  for (const auto &size : {QSize(800, 800), QSize(520, 360)}) {
+    window.resize(size);
+    QTest::qWait(300);
+    const auto topLeft = title->mapToItem(background, QPointF());
+    const auto actionEnd = start->mapToItem(background, QPointF(start->width(), start->height()));
+    EXPECT_GE(topLeft.x(), 23);
+    EXPECT_GE(topLeft.y(), 23);
+    EXPECT_LE(actionEnd.x(), background->width() - 23);
+    EXPECT_LE(actionEnd.y(), background->height() - 23);
+    EXPECT_LE(dialog->property("height").toDouble(), size.height() - 47);
+    EXPECT_GT(scroll->property("contentHeight").toDouble(), scroll->height());
+    if (!captureDirectory.isEmpty())
+      EXPECT_TRUE(window.grabWindow().save(captureDirectory +
+          QStringLiteral("/wizard-results-%1.png").arg(size.width())));
+  }
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
 }
 } // namespace TrophyBackend

@@ -16,7 +16,7 @@ Recordings use **MKV**. To create a broadly compatible MP4, use share export.
 
 ### DMA-BUF troubleshooter
 
-Open **Settings → Troubleshooter → DMA-BUF Tester → Open Wizard**. Stop recording
+Open **Settings → Troubleshooters → DMA-BUF Tester → Open Wizard**. Stop recording
 and Background Clips first. Select an animated window or screen in the portal,
 then keep it moving for the short test. Cancel closes the diagnostic capture;
 starting an ordinary recording/background capture cancels the test instead.

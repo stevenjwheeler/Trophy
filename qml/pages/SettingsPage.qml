@@ -75,7 +75,7 @@ Page {
             card = shortcutsCard;
         else if (sectionTitle === "Customization")
             card = customizationCard;
-        else if (sectionTitle === "Troubleshooter")
+        else if (sectionTitle === "Troubleshooters" || sectionTitle === "Troubleshooter")
             card = troubleshooterCard;
 
         if (!card)
@@ -1503,8 +1503,9 @@ Page {
                     id: troubleshooterCard
                     objectName: "troubleshooterSection"
                     Layout.row: 11
-                    sectionTitle: qsTr("Troubleshooter")
-                    iconSource: "qrc:/icons/settings.svg"
+                    sectionTitle: qsTr("Troubleshooters")
+                    iconSource: "qrc:/icons/wrench.svg"
+                    description: qsTr("Guided checks to diagnose capture and system compatibility issues.")
 
                     SettingRow {
                         label: qsTr("DMA-BUF Tester")
