@@ -16,6 +16,11 @@ struct LauncherGame {
   bool bootstrap = false;
   QStringList sources{};
   bool runtimeTool = false;
+  // Store identity is evidence for merging metadata, not capture approval.
+  QString productId{};
+  // Canonical installation identity computed on the census worker. QML/model
+  // rebuilds must not resolve paths on the GUI thread.
+  QStringList installation{};
 };
 
 // Local installed metadata only. Call on the census worker, never from QML.

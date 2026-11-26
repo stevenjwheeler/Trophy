@@ -321,6 +321,36 @@ TEST_F(GameDetectionServiceTest, CompletedLibraryScansRefreshGamesCountsAndKeepC
   EXPECT_EQ(model->sectionCount("Custom Games"), 1);
 }
 
+TEST_F(GameDetectionServiceTest, SharedItchInstallationAliasesProduceOneUnapprovedGamesRow) {
+  GameDetectionService service;
+  LauncherGame first{0, "itch-shared Game", "/itch-shared", "/itch-shared/game",
+                     {}, false, {"Heroic (itch.io)", "itch.io"}};
+  first.productId = "itch:123";
+  first.installation = {first.productId, "/itch-shared", ""};
+  auto alias = first;
+  alias.executable = "/itch-shared/alternative";
+  publishCatalogue(service, {first, alias});
+  auto *model = qobject_cast<GameListFilterModel *>(service.gamesModel());
+  ASSERT_NE(model, nullptr);
+  model->setFilterText("itch-shared");
+  ASSERT_EQ(model->matchingGameCount(), 1);
+  const auto index = model->index(0, 0);
+  EXPECT_EQ(index.data(GameListModel::SectionRole).toString(), "itch.io");
+  EXPECT_FALSE(index.data(GameListModel::HasTokenRole).toBool());
+  EXPECT_FALSE(service.whitelist().contains("exe:/itch-shared/game"));
+  first.sources = {"itch.io"};
+  alias.sources = first.sources;
+  publishCatalogue(service, {first, alias});
+  ASSERT_EQ(model->matchingGameCount(), 1);
+  EXPECT_EQ(model->index(0, 0).data(GameListModel::SectionRole).toString(), "itch.io");
+  auto other = first;
+  other.directory = "/itch-shared-other";
+  other.executable = "/itch-shared-other/game";
+  other.installation = {other.productId, other.directory, ""};
+  publishCatalogue(service, {first, alias, other});
+  EXPECT_EQ(model->matchingGameCount(), 2);
+}
+
 TEST_F(GameDetectionServiceTest, InstallerAndAccessibilityHelpersAreReadOnlyDefaultExclusions) {
   GameDetectionService service;
   auto *model = qobject_cast<GameListFilterModel *>(service.gamesModel());
@@ -559,7 +589,7 @@ TEST_F(GameDetectionServiceTest, LibraryLocationsPersistAndCanBeReset) {
   ASSERT_TRUE(root.isValid());
   {
     GameDetectionService service;
-    ASSERT_EQ(service.gameLibraries().size(), 6);
+    ASSERT_EQ(service.gameLibraries().size(), 7);
     service.setLibraryAutomatic("heroic", false);
     service.addLibraryLocation("heroic", QUrl::fromLocalFile(root.path()));
     service.addLibraryLocation("heroic", QUrl::fromLocalFile(root.path()));
@@ -579,7 +609,14 @@ TEST_F(GameDetectionServiceTest, LibraryLocationsPersistAndCanBeReset) {
   restored.addLibraryLocation("faugus", QUrl::fromLocalFile(root.path()));
   EXPECT_FALSE(restored.gameLibraries()[5].toMap().value("automatic").toBool());
   EXPECT_EQ(restored.gameLibraries()[5].toMap().value("paths").toStringList(),
+             QStringList{root.path()});
+  restored.setLibraryAutomatic("itch", false);
+  restored.addLibraryLocation("itch", QUrl::fromLocalFile(root.path()));
+  EXPECT_FALSE(restored.gameLibraries()[6].toMap().value("automatic").toBool());
+  EXPECT_EQ(restored.gameLibraries()[6].toMap().value("paths").toStringList(),
             QStringList{root.path()});
+  restored.resetLibraryLocations("itch");
+  EXPECT_TRUE(restored.gameLibraries()[6].toMap().value("automatic").toBool());
   const auto before = settings.value("detection/libraryLocations");
   restored.addLibraryLocation("invalid-launcher", QUrl::fromLocalFile(root.path()));
   restored.addLibraryLocation("heroic", QUrl("https://example.invalid/metadata"));

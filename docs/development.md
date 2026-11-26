@@ -85,7 +85,7 @@ libx264, uses single-threaded codecs, and never modifies the buffered originals.
 - Qt 6 development packages: Core, Gui, Qml, Quick, QuickControls2, Multimedia, DBus, Concurrent, Network, and Widgets.
 - FFmpeg development libraries: libavcodec, libavformat, libavutil, libswscale, and libswresample.
 - PipeWire development libraries.
-- libyaml and SQLite development libraries (read-only local launcher metadata).
+- libyaml, SQLite and zlib development libraries (read-only local launcher metadata and gzip-compressed itch.io installation receipts).
 - Optional libva/libva-drm for VA-API, libdrm and EGL for DMA-BUF support, and GBM for related tests.
 - GoogleTest and Qt Test when building tests (enabled by default).
 
@@ -106,7 +106,7 @@ Arch/CachyOS:
 
 ```bash
 sudo pacman -S --needed base-devel cmake qt6-base qt6-declarative qt6-multimedia \
-    ffmpeg pipewire libva pkgconf libyaml sqlite \
+    ffmpeg pipewire libva pkgconf libyaml sqlite zlib \
     libdrm mesa gtest
 ```
 
@@ -114,7 +114,7 @@ Fedora (FFmpeg development package availability depends on enabled repositories)
 
 ```bash
 sudo dnf install gcc-c++ make cmake qt6-qtbase-devel qt6-qtdeclarative-devel \
-    qt6-qtmultimedia-devel ffmpeg-devel pipewire-devel libva-devel libyaml-devel sqlite-devel \
+    qt6-qtmultimedia-devel ffmpeg-devel pipewire-devel libva-devel libyaml-devel sqlite-devel zlib-devel \
     libdrm-devel mesa-libEGL-devel \
     mesa-libgbm-devel gtest-devel
 ```
@@ -124,7 +124,7 @@ Ubuntu/Debian:
 ```bash
 sudo apt install build-essential cmake pkg-config qt6-base-dev qt6-declarative-dev \
     qt6-multimedia-dev libavcodec-dev libavformat-dev libavutil-dev \
-    libswscale-dev libswresample-dev libpipewire-0.3-dev libva-dev libyaml-dev libsqlite3-dev \
+    libswscale-dev libswresample-dev libpipewire-0.3-dev libva-dev libyaml-dev libsqlite3-dev zlib1g-dev \
     libgtest-dev libdrm-dev libegl-dev libgbm-dev
 ```
 

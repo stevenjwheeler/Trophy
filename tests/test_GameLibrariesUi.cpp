@@ -232,19 +232,24 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
       QCoreApplication::processEvents();
       EXPECT_EQ(count->property("text").toString(), "0");
       EXPECT_TRUE(visibleText(item, "No supported launcher games found. You can still add games manually."));
-      const QVariantMap sharedGame{{"name", "Shared Game"}, {"directory", "/games/shared"}};
+      const QVariantMap sharedGame{{"name", "Shared Game"}, {"directory", "/games/shared"},
+          {"installation", QStringList{"steam:123", "/games/shared", ""}}};
+      auto heroicAlias = sharedGame;
+      heroicAlias["name"] = "Different Heroic Title";
+      heroicAlias["directory"] = "/games/symlink";
       detector.rows = {
           QVariantMap{{"id", "steam"}, {"name", "Steam"}, {"detected", true},
               {"games", QVariantList{sharedGame, QVariantMap{{"name", "Other Game"}, {"directory", "/games/other"}}}}},
           QVariantMap{{"id", "heroic"}, {"name", "Heroic"}, {"detected", true},
-              {"games", QVariantList{sharedGame}}},
+              {"games", QVariantList{heroicAlias}}},
           QVariantMap{{"id", "lutris"}, {"name", "Lutris"}, {"detected", true}, {"games", QVariantList{}}},
+          QVariantMap{{"id", "itch"}, {"name", "itch.io"}, {"detected", true}, {"games", QVariantList{}}},
           QVariantMap{{"id", "nile"}, {"name", "Nile"}, {"detected", false}, {"games", QVariantList{}}}};
       emit detector.changed();
       QTest::qWait(50);
       EXPECT_EQ(count->property("text").toString(), "2");
       EXPECT_TRUE(visibleText(item, "Games found in your launcher libraries"));
-      for (const auto *id : {"steam", "heroic", "lutris"}) {
+      for (const auto *id : {"steam", "heroic", "lutris", "itch"}) {
         auto *icon = findItem(item, QString("wizardLauncherIcon_") + id);
         ASSERT_NE(icon, nullptr);
         EXPECT_TRUE(icon->isVisible());
@@ -280,9 +285,9 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
       QCoreApplication::processEvents();
       EXPECT_EQ(count->property("text").toString(), "3");
       EXPECT_EQ(findItem(item, "wizardLauncherIcon_steam"), steamIcon.data());
-      auto nile = detector.rows[3].toMap();
+      auto nile = detector.rows[4].toMap();
       nile["detected"] = true;
-      detector.rows[3] = nile;
+      detector.rows[4] = nile;
       emit detector.changed();
       QTest::qWait(20);
       auto *nileIcon = findItem(item, "wizardLauncherIcon_nile");
@@ -314,7 +319,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   LibraryUiApp app;
   SetupUiAudio audio;
   LibraryUiBackend backend;
-  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus"};
+  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch"};
   for (const auto &id : ids)
     backend.rows.append(QVariantMap{{"id", id}, {"name", id},
         {"automatic", true}, {"paths", QStringList{}}, {"locations", QVariantList{}},
@@ -404,7 +409,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   EXPECT_TRUE(card->property("expanded").toBool());
   auto *table = findItem(item, "gameLibrariesTable");
   ASSERT_NE(table, nullptr);
-  EXPECT_LT(table->height(), 410);
+  EXPECT_LT(table->height(), 98 + 52 * ids.size());
   auto *refresh = page->findChild<QObject *>("rescanGameLibrariesButton");
   ASSERT_NE(refresh, nullptr);
   EXPECT_TRUE(refresh->property("enabled").toBool());
@@ -498,7 +503,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
     }
     QMetaObject::invokeMethod(locationPopup, "close");
   }
-  EXPECT_EQ(missingLaunchers(item), 5);
+  EXPECT_EQ(missingLaunchers(item), ids.size() - 1);
   ASSERT_TRUE(QMetaObject::invokeMethod(refresh, "clicked"));
   QCoreApplication::processEvents();
   EXPECT_EQ(backend.rescans, 1);
@@ -526,6 +531,50 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   EXPECT_TRUE(updatedPopup->property("visible").toBool());
   QMetaObject::invokeMethod(updatedPopup, "close");
   EXPECT_TRUE(refresh->property("enabled").toBool());
+  auto faugus = backend.rows[5].toMap();
+  faugus["detected"] = true;
+  faugus["count"] = 0;
+  faugus["locations"] = QVariantList{QVariantMap{{"path", "/config/faugus-launcher"},
+      {"status", "Detected"}, {"count", 0}}};
+  backend.rows[5] = faugus;
+  emit backend.changed();
+  QCoreApplication::processEvents();
+  auto *faugusStatus = findItem(item, "faugusLibraryStatus");
+  auto *faugusIndicator = findItem(item, "faugusLibraryStatusIndicator");
+  auto *faugusGames = findItem(item, "faugusDetectedGamesDropdown");
+  ASSERT_NE(faugusStatus, nullptr);
+  ASSERT_NE(faugusIndicator, nullptr);
+  ASSERT_NE(faugusGames, nullptr);
+  EXPECT_EQ(faugusStatus->property("text").toString(), "Detected");
+  EXPECT_EQ(faugusIndicator->property("color").value<QColor>().alpha(), 255);
+  EXPECT_TRUE(containsText(faugusGames, "0"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(faugusGames, "clicked"));
+  QTest::qWait(180);
+  auto *faugusPopup = faugusGames->findChild<QObject *>("faugusDetectedGamesPopup");
+  ASSERT_NE(faugusPopup, nullptr);
+  auto *faugusContent = faugusPopup->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(faugusContent, nullptr);
+  EXPECT_TRUE(containsText(faugusContent, "No usable games detected"));
+  QMetaObject::invokeMethod(faugusPopup, "close");
+  for (int i = 0; i < backend.rows.size(); ++i) {
+    auto row = backend.rows[i].toMap();
+    row["detected"] = true;
+    row["count"] = 0;
+    row["games"] = QVariantList{};
+    row["locations"] = QVariantList{QVariantMap{{"path", "/config/launcher"},
+        {"status", "Detected"}, {"count", 0}}};
+    backend.rows[i] = row;
+  }
+  emit backend.changed();
+  QCoreApplication::processEvents();
+  for (const auto &id : ids) {
+    auto *status = findItem(item, id + "LibraryStatus");
+    auto *games = findItem(item, id + "DetectedGamesDropdown");
+    ASSERT_NE(status, nullptr);
+    ASSERT_NE(games, nullptr);
+    EXPECT_EQ(status->property("text").toString(), "Detected");
+    EXPECT_TRUE(containsText(games, "0"));
+  }
   item->setWidth(640);
   window.resize(640, 720);
   QTest::qWait(100);

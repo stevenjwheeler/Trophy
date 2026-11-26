@@ -248,13 +248,13 @@ Page {
                             spacing: 8
                             Image {
                                 readonly property string launcher: groupHeader.section.toLowerCase()
-                                visible: ["steam", "heroic", "legendary", "nile", "lutris", "faugus"].indexOf(launcher) >= 0
+                                visible: ["steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch.io"].indexOf(launcher) >= 0
                                 Layout.preferredWidth: 20
                                 Layout.preferredHeight: 20
                                 sourceSize: Qt.size(40, 40)
                                 fillMode: Image.PreserveAspectFit
                                 source: !visible ? "" : launcher === "steam" ? "qrc:/icons/default-apps/steam.svg"
-                                    : "qrc:/icons/launchers/" + launcher + (launcher === "legendary" ? ".ico" : ".svg")
+                                    : "qrc:/icons/launchers/" + (launcher === "itch.io" ? "itch" : launcher) + (launcher === "legendary" ? ".ico" : ".svg")
                             }
                             Label {
                                 objectName: "gamesSectionHeading"

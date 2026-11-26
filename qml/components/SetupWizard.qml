@@ -32,7 +32,8 @@ Rectangle {
                 continue
             launchers.push({id: library.id, name: library.name})
             for (var game of (library.games || []))
-                installations.add(JSON.stringify([game.name, game.directory]))
+                installations.add(JSON.stringify(game.installation && game.installation.length
+                    ? game.installation : [game.name, game.directory]))
         }
         if (libraryGameCount !== installations.size)
             libraryGameCount = installations.size
