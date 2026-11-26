@@ -68,6 +68,41 @@ Item {
 }
 )";
 
+// A ScrollView's internal Flickable is clipped, and the library lists set
+// clip: true. Those views may stretch past an end: nothing spills over the
+// page below.
+const char *kClippedFlickable = R"(
+import QtQuick
+
+Item {
+    width: 400
+    height: 300
+    Flickable {
+        objectName: "flick"
+        anchors.fill: parent
+        clip: true
+        contentWidth: width
+        contentHeight: 4000
+    }
+}
+)";
+
+const char *kClippedHorizontalFlickable = R"(
+import QtQuick
+
+Item {
+    width: 400
+    height: 300
+    Flickable {
+        objectName: "flick"
+        anchors.fill: parent
+        clip: true
+        contentWidth: 4000
+        contentHeight: height
+    }
+}
+)";
+
 const char *kNestedFlickables = R"(
 import QtQuick
 
@@ -111,6 +146,34 @@ Item {
                 width: 400
                 height: 150
                 contentHeight: 100
+            }
+        }
+    }
+}
+)";
+
+// The same nesting with both views clipped: the outer one may rubber-band, but
+// the inner one still has to hand the wheel over when it runs out of travel.
+const char *kClippedNestedFlickables = R"(
+import QtQuick
+
+Item {
+    width: 400
+    height: 300
+    Flickable {
+        objectName: "outer"
+        anchors.fill: parent
+        clip: true
+        contentHeight: 4000
+        Item {
+            width: 400
+            height: 150
+            Flickable {
+                objectName: "inner"
+                width: 400
+                height: 150
+                clip: true
+                contentHeight: 4000
             }
         }
     }
@@ -181,9 +244,10 @@ void wheel(QQuickWindow *window, QPoint position, QPoint angleDelta,
         QTest::wheelEvent(window, position, angleDelta);
 }
 
-// Wheel steps glide for 110 ms and a step that reaches an end springs back over
-// a further 260 ms; wait for the longest sequence to come to rest.
-constexpr int kSettleMs = 450;
+// Wheel steps glide for 110 ms. Reaching an end starts a 120 ms quiet period
+// before the band lets go, and the spring back runs for 380 ms; wait for the
+// longest sequence to come to rest.
+constexpr int kSettleMs = 700;
 void settle() { QTest::qWait(kSettleMs); }
 
 qreal contentPosition(const Scene &scene, const char *name, const char *axis) {
@@ -369,9 +433,10 @@ Item {
     EXPECT_NEAR(contentY(scene), 710.0, 0.01);
 }
 
-// The outermost Flickable cannot hand the wheel to anyone, so the end of the
-// content answers with a small recoil instead of dead silence.
-TEST(WheelScrollNormalizer, OutermostFlickableBouncesAndSettlesAtTheEnd) {
+// An unclipped Flickable cannot show content outside its own rectangle without
+// drawing it over the page below, so the end of the content answers with a
+// small inward recoil rather than a stretch.
+TEST(WheelScrollNormalizer, UnclippedFlickableRecoilsAndSettlesAtTheEnd) {
     Scene scene(kSingleFlickable);
     QQuickItem *flick = scene.item("flick");
     ASSERT_NE(flick, nullptr);
@@ -388,7 +453,7 @@ TEST(WheelScrollNormalizer, OutermostFlickableBouncesAndSettlesAtTheEnd) {
     EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
 }
 
-TEST(WheelScrollNormalizer, BounceRecoilsAtTheTopToo) {
+TEST(WheelScrollNormalizer, UnclippedBounceRecoilsAtTheTopToo) {
     Scene scene(kSingleFlickable);
     QQuickItem *flick = scene.item("flick");
     ASSERT_NE(flick, nullptr);
@@ -401,7 +466,7 @@ TEST(WheelScrollNormalizer, BounceRecoilsAtTheTopToo) {
 
 // The same recoil applies to the axis that ran out of travel, whichever that
 // is: here the view scrolls sideways only.
-TEST(WheelScrollNormalizer, HorizontalBounceRecoilsAtTheRightEdge) {
+TEST(WheelScrollNormalizer, UnclippedHorizontalBounceRecoilsAtTheRightEdge) {
     Scene scene(kHorizontalFlickable);
     QQuickItem *flick = scene.item("flick");
     ASSERT_NE(flick, nullptr);
@@ -416,6 +481,136 @@ TEST(WheelScrollNormalizer, HorizontalBounceRecoilsAtTheRightEdge) {
     EXPECT_NEAR(contentX(scene), 3600.0, 0.01);
 }
 
+// A clipped view can reveal the page below while the content is pulled past an
+// end, so there the wheel gets a real rubber band: the content really moves
+// outwards, then springs back.
+TEST(WheelScrollNormalizer, ClippedViewStretchesPastTheBottom) {
+    Scene scene(kClippedFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 60);
+    settle();
+    ASSERT_NEAR(contentY(scene), 3700.0, 0.01);
+
+    const auto range = trackPosition(flick, "contentY", 3700.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    settle();
+    // One notch of pull is a good fraction of the 48 px cap for a 300 px
+    // viewport, and the band lands back exactly on the extent.
+    EXPECT_GE(range->maximum, 3700.0 + 20.0);
+    EXPECT_LE(range->maximum, 3700.0 + 48.0);
+    EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
+}
+
+// Holding the wheel against an end must stop stretching after a short distance
+// instead of dragging the content away without limit.
+TEST(WheelScrollNormalizer, ClippedStretchSaturates) {
+    Scene scene(kClippedFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 60);
+    settle();
+    ASSERT_NEAR(contentY(scene), 3700.0, 0.01);
+
+    const auto range = trackPosition(flick, "contentY", 3700.0);
+    for (int i = 0; i < 8; ++i) {
+        QTest::wheelEvent(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+        QTest::qWait(5);
+    }
+    settle();
+    // Eight notches pull far past one notch, but never past the cap.
+    EXPECT_GE(range->maximum, 3700.0 + 35.0);
+    EXPECT_LE(range->maximum, 3700.0 + 48.0);
+    EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
+}
+
+// The release is a spring, not a straight line: it overshoots a little way back
+// into the content once before settling on the bound.
+TEST(WheelScrollNormalizer, ClippedStretchSpringsBackElastically) {
+    Scene scene(kClippedFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 60);
+    settle();
+    ASSERT_NEAR(contentY(scene), 3700.0, 0.01);
+
+    const auto range = trackPosition(flick, "contentY", 3700.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    settle();
+    // Past the bound outwards, then past it inwards by a couple of pixels.
+    EXPECT_GE(range->maximum, 3700.0 + 20.0);
+    EXPECT_LE(range->minimum, 3699.0);
+    EXPECT_GE(range->minimum, 3680.0);
+    EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
+}
+
+// Turning the wheel back while the band is still held lets go at once: the
+// reversal must not wait out the quiet period or the spring.
+TEST(WheelScrollNormalizer, ClippedStretchReleasesImmediatelyOnReversal) {
+    Scene scene(kClippedFlickable);
+    ASSERT_NE(scene.item("flick"), nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch), 60);
+    settle();
+    ASSERT_NEAR(contentY(scene), 3700.0, 0.01);
+
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
+    QTest::qWait(60); // still inside the 120 ms hold
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch));
+    QTest::qWait(200);
+    EXPECT_LT(contentY(scene), 3660.0);
+    settle();
+    EXPECT_NEAR(contentY(scene), 3700.0 - notchDistance(), 0.01);
+}
+
+TEST(WheelScrollNormalizer, ClippedStretchWorksAtTheTopToo) {
+    Scene scene(kClippedFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    const auto range = trackPosition(flick, "contentY", 0.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(0, kNotch));
+    settle();
+    EXPECT_LE(range->minimum, -20.0);
+    EXPECT_GE(range->minimum, -48.0);
+    EXPECT_NEAR(contentY(scene), 0.0, 0.01);
+}
+
+TEST(WheelScrollNormalizer, ClippedStretchWorksHorizontally) {
+    Scene scene(kClippedHorizontalFlickable);
+    QQuickItem *flick = scene.item("flick");
+    ASSERT_NE(flick, nullptr);
+    wheel(&scene.window, QPoint(200, 150), QPoint(-kNotch, 0), 60);
+    settle();
+    ASSERT_NEAR(contentX(scene), 3600.0, 0.01);
+
+    const auto range = trackPosition(flick, "contentX", 3600.0);
+    wheel(&scene.window, QPoint(200, 150), QPoint(-kNotch, 0));
+    settle();
+    // 400 px wide viewport: the cap is 64 px.
+    EXPECT_GE(range->maximum, 3600.0 + 20.0);
+    EXPECT_LE(range->maximum, 3600.0 + 64.0);
+    EXPECT_NEAR(contentX(scene), 3600.0, 0.01);
+}
+
+// A clipped inner view must still hand the wheel to its ancestor rather than
+// pulling a rubber band of its own.
+TEST(WheelScrollNormalizer, NestedClippedFlickableStillHandsOff) {
+    Scene scene(kClippedNestedFlickables);
+    QQuickItem *inner = scene.item("inner");
+    ASSERT_NE(inner, nullptr);
+    ASSERT_NE(scene.item("outer"), nullptr);
+    wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch), 54);
+    settle();
+    EXPECT_NEAR(contentY(scene, "inner"), 3850.0, 0.01);
+    EXPECT_NEAR(contentY(scene, "outer"), 0.0, 0.01);
+
+    const auto innerRange = trackPosition(inner, "contentY", 3850.0);
+    wheel(&scene.window, QPoint(200, 75), QPoint(0, -kNotch));
+    settle();
+    EXPECT_NEAR(innerRange->maximum, 3850.0, 0.01);
+    EXPECT_NEAR(contentY(scene, "inner"), 3850.0, 0.01);
+    EXPECT_NEAR(contentY(scene, "outer"), notchDistance(), 0.01);
+}
+
 // A view whose content fits in its viewport has nowhere to go: it must not
 // fake a bounce, and the wheel event stays available for anything else.
 TEST(WheelScrollNormalizer, ContentThatFitsDoesNotBounce) {
@@ -428,6 +623,7 @@ Item {
     Flickable {
         objectName: "flick"
         anchors.fill: parent
+        clip: true
         contentHeight: 100
         contentWidth: width
     }
