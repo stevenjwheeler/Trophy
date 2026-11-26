@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "AudioApplicationRegistry.h"
 #include "ApplicationAudioLookup.h"
+#include "AudioDiscoveryDiagnostics.h"
 #include <QDebug>
 #include <algorithm>
 #include <atomic>
@@ -46,6 +47,14 @@ struct AudioApplicationRegistry::Private {
     std::map<uint32_t, std::unique_ptr<Entry>> entries;
     bool failed = false, pending = false, again = false, ready = false, dirty = true;
     int sequence = -1;
+    QString failure;
+
+    bool fail(const char *stage, int result) {
+      if (!failed)
+        failure = detail::audioDiscoveryFailure(stage, result);
+      failed = true;
+      return false;
+    }
 
     ~Session() {
       entries.clear();
@@ -69,7 +78,7 @@ struct AudioApplicationRegistry::Private {
       }
       pending = true;
       sequence = pw_core_sync(core, PW_ID_CORE, 0);
-      if (sequence < 0) failed = true;
+      if (sequence < 0) fail("registry sync", sequence);
     }
     static void nodeInfo(void *data, const pw_node_info *info) {
       auto &entry = *static_cast<Entry *>(data);
@@ -141,18 +150,26 @@ struct AudioApplicationRegistry::Private {
         self.ready = true;
       }
     }
-    static void error(void *data, uint32_t id, int, int result, const char *) {
-      if (id == PW_ID_CORE || result == -EPIPE)
-        static_cast<Session *>(data)->failed = true;
+    static void error(void *data, uint32_t id, int sequence, int result, const char *message) {
+      if (id == PW_ID_CORE || result == -EPIPE) {
+        auto &self = *static_cast<Session *>(data);
+        if (!self.failed) {
+          self.fail("PipeWire core error", result);
+          self.failure += QStringLiteral("; object %1, sequence %2; %3")
+              .arg(id).arg(sequence)
+              .arg(QString::fromUtf8(message ? message : "").left(512)
+                       .replace('\n', ' ').replace('\r', ' '));
+        }
+      }
     }
     bool connect() {
       loop = pw_main_loop_new(nullptr);
-      if (!loop) return false;
+      if (!loop) return fail("create main loop", -errno);
       context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
-      if (!context) return false;
+      if (!context) return fail("create context", -errno);
       core = pw_context_connect(context, pw_properties_new(
           PW_KEY_APP_NAME, "Trophy audio application discovery", nullptr), 0);
-      if (!core) return false;
+      if (!core) return fail("connect to PipeWire", -errno);
       static const pw_core_events cores = [] {
         pw_core_events events{};
         events.version = PW_VERSION_CORE_EVENTS;
@@ -162,7 +179,7 @@ struct AudioApplicationRegistry::Private {
       }();
       pw_core_add_listener(core, &coreListener, &cores, this);
       registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-      if (!registry) return false;
+      if (!registry) return fail("get registry", -errno);
       static const pw_registry_events globals = [] {
         pw_registry_events events{};
         events.version = PW_VERSION_REGISTRY_EVENTS;
@@ -205,6 +222,7 @@ struct AudioApplicationRegistry::Private {
     bool warned = false;
     int retryMs = 250;
     while (!stopping) {
+      QString failure;
       {
         Session session;
         ++connectionAttempts;
@@ -218,12 +236,20 @@ struct AudioApplicationRegistry::Private {
           QVariantList previous;
           bool published = false;
           while (!stopping && !session.failed) {
-            if (pw_loop_iterate(pw_main_loop_get_loop(session.loop),
-                                session.ready && session.wakeEvent ? -1 : 100) < 0)
+            const int result = pw_loop_iterate(pw_main_loop_get_loop(session.loop),
+                                               session.ready && session.wakeEvent ? -1 : 100);
+            // A signal interrupting the wait is not a lost connection.
+            if (detail::audioDiscoveryLoopInterrupted(result))
+              continue;
+            if (result < 0) {
+              session.fail("event-loop iteration", result);
               break;
+            }
             if (!session.ready && std::chrono::steady_clock::now() - started >
-                                      std::chrono::seconds(5))
+                                      std::chrono::seconds(5)) {
+              session.fail("initial registry sync exceeded 5 seconds", -ETIMEDOUT);
               break;
+            }
             if (session.ready && !session.pending && session.dirty) {
               auto apps = session.snapshot();
               if (!published || apps != previous) {
@@ -242,11 +268,13 @@ struct AudioApplicationRegistry::Private {
             activeWake = nullptr;
           }
         }
+        failure = session.failure;
       } // Tear down all native proxies before reconnecting.
       if (stopping) break;
       send({}, false); // Never retain stale node IDs across a service restart.
       if (!warned) {
-        qWarning() << "Audio application discovery disconnected; retrying in the background";
+        qWarning().noquote() << "Audio application discovery disconnected; retrying in the background:"
+                             << failure;
         warned = true;
       }
       std::unique_lock lock(mutex);
