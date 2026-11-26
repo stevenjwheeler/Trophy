@@ -62,6 +62,7 @@ public:
   int64_t eglImportFrames() const { return m_eglImportFrames.load(); }
   int64_t gpuScaledFrames() const { return m_gpuScaledFrames.load(); }
   int64_t vaapiVppFrames() const { return m_vaapiVppFrames.load(); }
+  int64_t multiPlaneVppFrames() const { return m_multiPlaneVppFrames.load(); }
   int64_t fallbackFrames() const { return m_fallbackFrames.load(); }
   int64_t droppedFrames() const { return m_droppedFrames.load(); }
   // DMA-BUF registration cache: hits reuse an existing EGL/CUDA registration
@@ -117,6 +118,7 @@ private:
   std::atomic<int64_t> m_eglImportFrames{0};
   std::atomic<int64_t> m_gpuScaledFrames{0};
   std::atomic<int64_t> m_vaapiVppFrames{0};
+  std::atomic<int64_t> m_multiPlaneVppFrames{0}; // Subset, not additional frames.
   std::atomic<int64_t> m_fallbackFrames{0};
   std::atomic<int64_t> m_droppedFrames{0};
   std::atomic<int64_t> m_sendFailures{0};

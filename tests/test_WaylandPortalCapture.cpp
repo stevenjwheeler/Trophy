@@ -380,8 +380,8 @@ struct CaptureBuffer {
   spa_buffer buffer{};
   pw_buffer native{};
   explicit CaptureBuffer(uint32_t planes = 2) {
-    allocation.open();
-    allocation.resize(65536);
+    if (!allocation.open() || !allocation.resize(65536))
+      return;
     for (uint32_t i = 0; i < 4; ++i) {
       chunks[i].stride = i ? 64 : 256;
       chunks[i].offset = i ? 32768 + (i - 1) * 4096 : 0;
@@ -489,7 +489,7 @@ TEST_F(WaylandPortalCaptureTest, MalformedAuxiliaryPlanesRequestFallbackOnceWith
     CaptureBuffer bad;
     switch (kind) {
     case 0: bad.buffer.n_datas = 5; break;
-    case 1: bad.data[1].type = SPA_DATA_SyncObj; break;
+    case 1: bad.data[1].type = 5; break; // SyncObj protocol tag; also reject on older SPA headers.
     case 2: bad.data[1].fd = -1; break;
     case 3: bad.data[1].mapoffset = 4096; break;
     case 4: bad.chunks[1].flags = SPA_CHUNK_FLAG_CORRUPTED; break;
@@ -506,6 +506,44 @@ TEST_F(WaylandPortalCaptureTest, MalformedAuxiliaryPlanesRequestFallbackOnceWith
   native.drain();
   ASSERT_EQ(native.returned.size(), 1u);
   EXPECT_EQ(native.returned[0], &single.native);
+}
+
+TEST_F(WaylandPortalCaptureTest, ClearingCallbackWaitsForInFlightMultiPlaneDelivery) {
+  PipeWireLeaseFixture native;
+  ASSERT_TRUE(native.leases);
+  WaylandPortalCapture capture;
+  bufferSource(capture, native.leases);
+  CaptureBuffer buffer;
+  std::promise<void> entered, finish, clearing;
+  auto enteredFuture = entered.get_future();
+  auto finishFuture = finish.get_future().share();
+  auto clearingFuture = clearing.get_future();
+  std::atomic<int> calls{0};
+  capture.setFrameCallback([&](const VideoFrame &frame) {
+    EXPECT_EQ(frame.dmaBufLayout().count, 2u);
+    if (++calls == 1) entered.set_value();
+    EXPECT_EQ(finishFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  });
+  auto delivery = std::async(std::launch::async, [&] {
+    return deliverBuffer(capture, buffer.native);
+  });
+  ASSERT_EQ(enteredFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  auto clear = std::async(std::launch::async, [&] {
+    clearing.set_value();
+    capture.setFrameCallback({});
+  });
+  ASSERT_EQ(clearingFuture.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_EQ(clear.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  finish.set_value();
+  ASSERT_EQ(delivery.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+  EXPECT_TRUE(delivery.get());
+  clear.get();
+  native.drain();
+  ASSERT_EQ(native.returned.size(), 1u);
+  EXPECT_TRUE(deliverBuffer(capture, buffer.native));
+  native.drain();
+  EXPECT_EQ(calls.load(), 1);
+  EXPECT_EQ(native.returned.size(), 2u);
 }
 
 TEST_F(WaylandPortalCaptureTest, ExplicitCancellationIsDistinctFromPortalFailureAtEveryStage) {

@@ -14,6 +14,7 @@
 #include <gbm.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -131,10 +132,14 @@ struct TestDmaBuf {
   int fd = -1;
   int stride = 0;
   uint64_t modifier = 0;
+  DmaBufLayout planes;
   bool mappedFill = false;
   ~TestDmaBuf() {
-    if (fd >= 0)
+    if (planes.count) {
+      for (uint32_t i = 0; i < planes.count; ++i) close(planes.planes[i].fd);
+    } else if (fd >= 0) {
       close(fd);
+    }
     if (bo)
       gbm_bo_destroy(bo);
     if (gbm)
@@ -198,13 +203,26 @@ static bool fillGpuGradient(TestDmaBuf &buf, int width, int height, bool quadran
   if (context == EGL_NO_CONTEXT || surface == EGL_NO_SURFACE ||
       !eglMakeCurrent(display, surface, surface, context))
     return done(false);
-  const EGLAttrib attrs[] = {EGL_WIDTH, width, EGL_HEIGHT, height,
-      EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_XRGB8888,
-      EGL_DMA_BUF_PLANE0_FD_EXT, buf.fd, EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-      EGL_DMA_BUF_PLANE0_PITCH_EXT, buf.stride,
-      EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGLAttrib(buf.modifier & 0xffffffffu),
-      EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGLAttrib(buf.modifier >> 32), EGL_NONE};
-  image = eglCreateImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
+  const EGLAttrib fdKeys[] = {EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
+      EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT};
+  const EGLAttrib offsetKeys[] = {EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+      EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT};
+  const EGLAttrib pitchKeys[] = {EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT,
+      EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT};
+  const EGLAttrib loKeys[] = {EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+      EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT};
+  const EGLAttrib hiKeys[] = {EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+      EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT};
+  std::vector<EGLAttrib> attrs{EGL_WIDTH, width, EGL_HEIGHT, height,
+      EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_XRGB8888};
+  for (uint32_t i = 0; i < buf.planes.count; ++i) {
+    const auto &plane = buf.planes.planes[i];
+    attrs.insert(attrs.end(), {fdKeys[i], plane.fd, offsetKeys[i], plane.offset,
+        pitchKeys[i], plane.stride, loKeys[i], EGLAttrib(buf.modifier & 0xffffffffu),
+        hiKeys[i], EGLAttrib(buf.modifier >> 32)});
+  }
+  attrs.push_back(EGL_NONE);
+  image = eglCreateImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs.data());
   if (image == EGL_NO_IMAGE) return done(false);
   constexpr unsigned texture2d = 0x0DE1, fbo = 0x8D40;
   genTextures(1, &texture);
@@ -236,7 +254,8 @@ static bool fillGpuGradient(TestDmaBuf &buf, int width, int height, bool quadran
 }
 
 // Horizontal gradient so decoded luma has a known mean (~mid-grey).
-static std::unique_ptr<TestDmaBuf> makeXrgbDmaBuf(int w, int h, bool quadrants = false) {
+static std::unique_ptr<TestDmaBuf> makeXrgbDmaBuf(
+    int w, int h, bool quadrants = false, bool requireMultiPlane = false) {
   auto buf = std::make_unique<TestDmaBuf>();
   buf->drmFd = open("/dev/dri/renderD128", O_RDWR);
   if (buf->drmFd < 0)
@@ -245,7 +264,27 @@ static std::unique_ptr<TestDmaBuf> makeXrgbDmaBuf(int w, int h, bool quadrants =
   if (!buf->gbm)
     return nullptr;
   buf->bo = gbm_bo_create(buf->gbm, w, h, GBM_FORMAT_XRGB8888,
-                           GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+                            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+  if (requireMultiPlane && (!buf->bo || gbm_bo_get_plane_count(buf->bo) <= 1 ||
+      gbm_bo_get_modifier(buf->bo) == DRM_FORMAT_MOD_LINEAR ||
+      gbm_bo_get_modifier(buf->bo) == DRM_FORMAT_MOD_INVALID)) {
+    if (buf->bo) gbm_bo_destroy(buf->bo);
+    buf->bo = nullptr;
+    // Default scanout allocations need not enable compression even on a GPU
+    // that supports it. Ask for actual importable modifiers, not a fake extra
+    // plane added to a linear image.
+    for (const uint64_t modifier : queryDmaBufModifiers(DRM_FORMAT_XRGB8888)) {
+      if (modifier == DRM_FORMAT_MOD_LINEAR || modifier == DRM_FORMAT_MOD_INVALID)
+        continue;
+      gbm_bo *candidate = gbm_bo_create_with_modifiers2(
+          buf->gbm, w, h, GBM_FORMAT_XRGB8888, &modifier, 1, GBM_BO_USE_RENDERING);
+      if (candidate && gbm_bo_get_plane_count(candidate) > 1) {
+        buf->bo = candidate;
+        break;
+      }
+      if (candidate) gbm_bo_destroy(candidate);
+    }
+  }
   if (!buf->bo)
     return nullptr;
   buf->fd = gbm_bo_get_fd(buf->bo);
@@ -253,6 +292,18 @@ static std::unique_ptr<TestDmaBuf> makeXrgbDmaBuf(int w, int h, bool quadrants =
   buf->modifier = gbm_bo_get_modifier(buf->bo);
   if (buf->fd < 0 || buf->stride < w * 4)
     return nullptr;
+  const int count = gbm_bo_get_plane_count(buf->bo);
+  if (count < 1 || count > int(DmaBufLayout::maxPlanes))
+    return nullptr;
+  buf->planes.count = 1;
+  buf->planes.planes[0] = {buf->fd, buf->stride, gbm_bo_get_offset(buf->bo, 0), 0};
+  for (int i = 1; i < count; ++i) {
+    const int fd = gbm_bo_get_fd_for_plane(buf->bo, i);
+    if (fd < 0) return nullptr;
+    buf->planes.planes[i] = {fd, int32_t(gbm_bo_get_stride_for_plane(buf->bo, i)),
+                            gbm_bo_get_offset(buf->bo, i), 0};
+    ++buf->planes.count;
+  }
   uint32_t stride = 0;
   void *mapData = nullptr;
   void *ptr = gbm_bo_map(buf->bo, 0, 0, w, h, GBM_BO_TRANSFER_WRITE, &stride,
@@ -349,6 +400,7 @@ TEST(DmaBufCudaImportTest, NvencEglImportEncodesDmaBuf) {
     frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
     frame.isDmaBuf = true;
     frame.dmaBufFd = dma->fd; // borrowed; encoder dups internally
+    frame.dmaBufPlanes = dma->planes;
     frame.drmFormat = DRM_FORMAT_XRGB8888;
     frame.drmModifier = dma->modifier;
     frame.dmaBufStride = dma->stride;
@@ -484,17 +536,33 @@ TEST(DmaBufCudaImportTest, InvalidFdFallsBackWithoutCrash) {
   EXPECT_FALSE(messages.contains(QtWarningMsg, "using CPU fallback"));
 }
 
-static void checkGpuResize(bool vaapi) {
+static void checkGpuResize(bool vaapi, bool requireMultiPlane = false) {
   if (!vaapi && !eglImportUsable())
     GTEST_SKIP() << "no EGL device with dma-buf import";
-  auto original = makeXrgbDmaBuf(640, 360, true);
+  auto original = makeXrgbDmaBuf(640, 360, true, requireMultiPlane);
   auto smaller = makeXrgbDmaBuf(320, 240, true);
   auto larger = makeXrgbDmaBuf(1280, 360, true);
   auto odd = makeXrgbDmaBuf(137, 79, true);
   if (!original || !smaller || !larger || !odd)
-    GTEST_SKIP() << "no GBM XRGB DMA-BUF";
+    GTEST_SKIP() << (requireMultiPlane ? "No compressed multi-plane GBM allocation"
+                                     : "no GBM XRGB DMA-BUF");
   if (!original->mappedFill || !smaller->mappedFill || !larger->mappedFill || !odd->mappedFill)
     GTEST_SKIP() << "GBM buffers cannot be filled for decoded-content checks";
+  if (requireMultiPlane) {
+    if (original->planes.count <= 1 || original->modifier == DRM_FORMAT_MOD_LINEAR ||
+        original->modifier == DRM_FORMAT_MOD_INVALID)
+      GTEST_SKIP() << "Producer did not allocate a genuinely multi-plane compressed buffer";
+    struct stat primary{};
+    ASSERT_EQ(fstat(original->fd, &primary), 0);
+    for (uint32_t i = 1; i < original->planes.count; ++i) {
+      struct stat plane{};
+      ASSERT_EQ(fstat(original->planes.planes[i].fd, &plane), 0);
+      if (plane.st_dev != primary.st_dev || plane.st_ino != primary.st_ino)
+        GTEST_SKIP() << "Producer uses distinct allocations, outside initial multi-plane import scope";
+    }
+    qInfo() << "Real GBM multi-plane test:" << original->planes.count
+            << "planes, modifier" << QString::number(original->modifier, 16);
+  }
   FFmpegEncoder encoder(vaapi ? IEncoder::EncoderType::VAAPI_H264 : IEncoder::EncoderType::NVENC_H264,
                          vaapi ? "h264_vaapi" : "h264_nvenc");
   EncoderConfig config;
@@ -505,12 +573,16 @@ static void checkGpuResize(bool vaapi) {
   int requests = 0;
   std::vector<EncodedPacket> packets;
   auto submit = [&](TestDmaBuf &buffer, int width, int height, int index) {
+    if (requireMultiPlane)
+      ASSERT_TRUE(refillPixels(buffer, width, height, index % 2 == 0))
+          << "Cannot update the compressed allocation for fresh-pixel verification";
     VideoFrame frame{};
     frame.width = width; frame.height = height;
     frame.timestamp = int64_t(index) * 33333;
     frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
     frame.isDmaBuf = true;
     frame.dmaBufFd = buffer.fd;
+    frame.dmaBufPlanes = buffer.planes;
     frame.dmaBufStride = buffer.stride;
     frame.drmFormat = DRM_FORMAT_XRGB8888;
     frame.drmModifier = buffer.modifier;
@@ -525,8 +597,12 @@ static void checkGpuResize(bool vaapi) {
                            {original.get(), 640, 360}};
   int submitted = 0;
   submit(*original, 640, 360, submitted++);
-  if (vaapi && encoder.vaapiVppFrames() == 0 && requests > 0)
+  if (vaapi && !requireMultiPlane && encoder.vaapiVppFrames() == 0 && requests > 0)
     GTEST_SKIP() << "VA-API driver cannot import/convert this XRGB DMA-BUF with VPP";
+  if (requireMultiPlane) {
+    ASSERT_EQ(requests, 0) << "Compressed PRIME_2 import/VPP was rejected";
+    ASSERT_EQ(encoder.multiPlaneVppFrames(), 1);
+  }
   for (auto stage : stages) {
     for (int i = 0; i < 6; ++i) {
       if (stage.buffer == original.get() && submitted == 1 && i == 0)
@@ -537,6 +613,7 @@ static void checkGpuResize(bool vaapi) {
   EXPECT_EQ(requests, 0);
   EXPECT_EQ(encoder.eglImportFrames(), vaapi ? 0 : submitted);
   EXPECT_EQ(encoder.vaapiVppFrames(), vaapi ? submitted : 0);
+  if (requireMultiPlane) EXPECT_GT(encoder.multiPlaneVppFrames(), 0);
   EXPECT_EQ(encoder.gpuScaledFrames(), 18);
   EXPECT_EQ(encoder.droppedFrames(), 0);
   EXPECT_EQ(encoder.fallbackFrames(), 0);
@@ -583,10 +660,11 @@ static void checkGpuResize(bool vaapi) {
       auto luma = [&](int px, int py) {
         return decoder.frame->data[0][py * decoder.frame->linesize[0] + px];
       };
-      EXPECT_NEAR(luma(x + width / 4, y + height / 4), 81, 14); // red
-      EXPECT_NEAR(luma(x + width * 3 / 4, y + height / 4), 145, 14); // green
-      EXPECT_NEAR(luma(x + width / 4, y + height * 3 / 4), 41, 14); // blue
-      EXPECT_NEAR(luma(x + width * 3 / 4, y + height * 3 / 4), 235, 14); // white
+      const bool gradient = requireMultiPlane && decoded % 2 == 1;
+      EXPECT_NEAR(luma(x + width / 4, y + height / 4), gradient ? 71 : 81, 14);
+      EXPECT_NEAR(luma(x + width * 3 / 4, y + height / 4), gradient ? 180 : 145, 14);
+      EXPECT_NEAR(luma(x + width / 4, y + height * 3 / 4), gradient ? 71 : 41, 14);
+      EXPECT_NEAR(luma(x + width * 3 / 4, y + height * 3 / 4), gradient ? 180 : 235, 14);
       if (stage == 1 || stage == 3) {
         EXPECT_LT(luma(2, 180), 26);
         EXPECT_LT(luma(637, 180), 26);
@@ -624,6 +702,14 @@ TEST(DmaBufVaapiImportTest, RealResizedBuffersConvertScaleAndPadOnGpuWhenSupport
 #endif
 }
 
+TEST(DmaBufVaapiImportTest, RealMultiPlaneCompressedBuffersEncodeResizeAndDecodeWithoutShm) {
+#ifdef HAVE_VAAPI
+  checkGpuResize(true, true);
+#else
+  GTEST_SKIP() << "VA-API VPP support not compiled";
+#endif
+}
+
 namespace {
 EncoderConfig lifetimeConfig() {
   EncoderConfig config;
@@ -636,6 +722,7 @@ void submitLifetimeFrame(FFmpegEncoder &encoder, TestDmaBuf &buffer, int timesta
   frame.width = 640; frame.height = 360; frame.timestamp = timestamp;
   frame.isDmaBuf = true; frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
   frame.dmaBufFd = buffer.fd; frame.dmaBufStride = buffer.stride;
+  frame.dmaBufPlanes = buffer.planes;
   frame.drmFormat = DRM_FORMAT_XRGB8888; frame.drmModifier = buffer.modifier;
   frame.requestCpuFallback = [&] { ++fallbackRequests; };
   EncodedPacket packet;
@@ -716,6 +803,7 @@ VideoFrame borrowFrame(TestDmaBuf &dma, int w, int h, int64_t timestamp) {
   frame.pixelFormat = AV_PIX_FMT_DRM_PRIME;
   frame.isDmaBuf = true;
   frame.dmaBufFd = dma.fd;
+  frame.dmaBufPlanes = dma.planes;
   frame.drmFormat = DRM_FORMAT_XRGB8888;
   frame.drmModifier = dma.modifier;
   frame.dmaBufStride = dma.stride;
@@ -723,6 +811,47 @@ VideoFrame borrowFrame(TestDmaBuf &dma, int w, int h, int64_t timestamp) {
   return frame;
 }
 } // namespace
+
+TEST(DmaBufCudaImportTest, AuxiliaryPlaneCannotReuseCachedSinglePlaneRegistration) {
+  if (!eglImportUsable()) GTEST_SKIP() << "no EGL DMA-BUF import";
+  auto dma = makeXrgbDmaBuf(320, 180);
+  if (!dma || dma->planes.count != 1 || !dma->mappedFill)
+    GTEST_SKIP() << "No fillable single-plane GBM allocation for the NVIDIA regression";
+  FFmpegEncoder encoder(IEncoder::EncoderType::NVENC_H264, "h264_nvenc");
+  EncoderConfig config;
+  config.width = 320; config.height = 180; config.fps = 30; config.bitrate = 2000;
+  if (!encoder.initialize(config)) GTEST_SKIP() << "NVENC unavailable";
+  std::vector<EncodedPacket> packets;
+  auto frame = borrowFrame(*dma, 320, 180, 0);
+  encoder.encodeFrames(frame, packets);
+  ASSERT_EQ(encoder.eglImportFrames(), 1);
+  const auto hits = encoder.importCacheHits(), misses = encoder.importCacheMisses();
+
+  // Deliberately invalid extra plane on a real single-plane image. This tests
+  // rejection before cache lookup, NOT multi-plane NVIDIA import support.
+  frame.dmaBufPlanes.count = 2;
+  frame.dmaBufPlanes.planes[1] = frame.dmaBufPlanes.planes[0];
+  frame.timestamp += 33333;
+  int requests = 0;
+  frame.requestCpuFallback = [&] { ++requests; };
+  EXPECT_FALSE(encoder.encodeFrames(frame, packets));
+  EXPECT_EQ(requests, 1);
+  EXPECT_EQ(encoder.importCacheHits(), hits);
+  EXPECT_EQ(encoder.importCacheMisses(), misses);
+  EXPECT_EQ(encoder.eglImportFrames(), 1);
+
+  frame.dmaBufPlanes = dma->planes;
+  frame.timestamp += 33333;
+  encoder.encodeFrames(frame, packets);
+  EXPECT_EQ(requests, 1);
+  EXPECT_EQ(encoder.importCacheHits(), hits + 1);
+  EXPECT_EQ(encoder.importCacheMisses(), misses);
+  EXPECT_EQ(encoder.eglImportFrames(), 2);
+  EXPECT_EQ(encoder.droppedFrames(), 1);
+  EXPECT_EQ(encoder.fallbackFrames(), 0);
+  encoder.flush(packets);
+  EXPECT_EQ(packets.size(), 2u);
+}
 
 TEST(DmaBufCudaImportTest, EglImportRegistrationIsReusedPerProducerBuffer) {
   if (avcodec_find_encoder_by_name("h264_nvenc") == nullptr)

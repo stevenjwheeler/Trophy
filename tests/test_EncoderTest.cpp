@@ -153,6 +153,7 @@ TEST(EncoderDmaBufTest, UnsupportedMultiPlanePathsNeverUsePlaneZeroOrCpuPointer)
     EXPECT_FALSE(encoder.encodeFrames(frame, packets));
     EXPECT_TRUE(packets.empty());
     EXPECT_EQ(fallbacks, 1);
+    EXPECT_EQ(encoder.multiPlaneVppFrames(), 0);
   }
 }
 

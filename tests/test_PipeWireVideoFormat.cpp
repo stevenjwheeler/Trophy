@@ -186,7 +186,7 @@ TEST(PipeWireVideoFormatTest, RejectsMalformedMixedAndExplicitSyncBlocksWithoutP
     data[1] = original; chunks[1].flags = 0; chunks[1].stride = 256;
     switch (kind) {
     case 0: data[1].type = SPA_DATA_MemFd; break;
-    case 1: data[1].type = SPA_DATA_SyncObj; break;
+    case 1: data[1].type = 5; break; // SPA_DATA_SyncObj tag, absent from older SPA headers.
     case 2: data[1].fd = int64_t(INT_MAX) + 1; break;
     case 3: data[1].fd = -1; break;
     case 4: data[1].mapoffset = 4096; break;
