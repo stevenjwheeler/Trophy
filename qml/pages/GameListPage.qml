@@ -215,6 +215,11 @@ Page {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
+                    // Keep Qt's virtualized viewport inside its top extent:
+                    // otherwise section-size estimation triggers native fixups
+                    // during a rapid wheel pull. Only the visual layer stretches.
+                    property real wheelTopStretch: 0
+                    contentItem.transform: Translate { y: -gamesList.wheelTopStretch }
                     spacing: 0
                     visible: count > 0
                     model: root.detector ? root.detector.gamesModel : null

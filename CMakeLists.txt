@@ -256,6 +256,7 @@ set(CORE_SOURCES
     src/core/ReleaseNotes.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowChrome.cpp
+    src/core/WheelScrollNormalizer.cpp
 )
 
 set(CAPTURE_SOURCES
@@ -336,6 +337,7 @@ set(CORE_HEADERS
     src/core/ReleaseNotes.h
     src/core/UpdateInstaller.h
     src/core/WindowChrome.h
+    src/core/WheelScrollNormalizer.h
 )
 
 set(CAPTURE_HEADERS
