@@ -632,19 +632,13 @@ install(FILES resources/icons/trophy.svg
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
 )
 
-install(FILES resources/icons/default-apps/README.md
+install(FILES resources/icons/default-apps/README.md LICENSE.md
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
 )
 install(FILES resources/icons/launchers/README.md
     resources/icons/launchers/Legendary-LICENSE
     resources/icons/launchers/Nile-LICENSE
-    resources/icons/launchers/Faugus-LICENSE
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/launcher-icons
-)
-install(FILES LICENSE.md RENAME LICENSE
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/default-app-icons
-)
-install(FILES LICENSE.md RENAME LICENSE
+    resources/icons/launchers/Faugus-LICENSE LICENSE.md
     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/licenses/trophy/launcher-icons
 )
 

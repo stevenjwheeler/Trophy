@@ -6,7 +6,7 @@
 </div>
 
 [![Latest Release](https://img.shields.io/github/v/release/stevenjwheeler/Trophy?color=blue&label=Latest%20Release)](https://github.com/stevenjwheeler/Trophy/releases/latest)
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE.md)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%2F%20Wayland-green.svg)
 
 <p align="center">
@@ -82,7 +82,7 @@ Found a problem or have an idea? [Open an issue](https://github.com/stevenjwheel
 
 Code and documentation contributions are welcome. See the [development guide](https://gettrophy.app/docs/development.html) for build, test and packaging instructions.
 
-Trophy is free and open-source software under the [GNU GPL v3](LICENSE), built with [Qt](https://www.qt.io/), [FFmpeg](https://ffmpeg.org/), and [PipeWire](https://pipewire.org/).
+Trophy is free and open-source software under the [GNU GPL v3](LICENSE.md), built with [Qt](https://www.qt.io/), [FFmpeg](https://ffmpeg.org/), and [PipeWire](https://pipewire.org/).
 
 ## Development disclosure
 

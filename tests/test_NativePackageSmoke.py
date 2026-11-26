@@ -33,7 +33,7 @@ class NativePackageSmokeTest(unittest.TestCase):
             "bin/trophy", f"{libdir}/libTrophy.so",
             "share/applications/io.github.stevenjwheeler.Trophy.desktop",
             "share/icons/hicolor/scalable/apps/trophy.svg",
-            "share/licenses/trophy/default-app-icons/LICENSE",
+            "share/licenses/trophy/default-app-icons/LICENSE.md",
             "share/licenses/trophy/default-app-icons/README.md",
         ):
             path = self.prefix / relative

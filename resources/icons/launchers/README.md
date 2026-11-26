@@ -10,11 +10,11 @@ implying endorsement.
   `papirus-icon-theme` package `20260801-1`.
   Upstream: https://github.com/PapirusDevelopmentTeam/papirus-icon-theme
   Full license: Trophy's root `LICENSE.md`, embedded as `Papirus-LICENSE` and
-  installed alongside this notice as `LICENSE`.
+  installed alongside this notice as `LICENSE.md`.
 - `itch.svg`: Papirus Development Team and contributors, GPL-3.0.
   Source: `Papirus/48x48/apps/itch.svg` at commit
   `4256be4cf56870aa1fbd85c48cafeafa187160e0` of the same Papirus repository.
-  Full license: the same `Papirus-LICENSE` / installed `LICENSE`.
+  Full license: the same `Papirus-LICENSE` / installed `LICENSE.md`.
 - Steam uses the existing `../default-apps/steam.svg`; see that directory's
   notice and GPL license.
 - `legendary.ico`: Legendary project contributors, GPLv3, from

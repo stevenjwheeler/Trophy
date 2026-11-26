@@ -19,7 +19,7 @@ Page {
     property int installKindValue: typeof installKind !== "undefined" ? installKind : 4 // qmllint disable unqualified
     property string appVersion: typeof AppVersion !== "undefined" ? AppVersion : "" // qmllint disable unqualified
 
-    signal reportBugRequested()
+    signal reportBugRequested
 
     // Update-check state (fed by updateChecker.checkFinished).
     // updateNewer tints the status; the notice action carries
@@ -39,46 +39,43 @@ Page {
     // app theme before handing them to the dialog; re-evaluates when the
     // body or the theme colours change.
     readonly property string updateNotesHtml: {
-        if (!root.updates || root.updateLatestVersion === "" ||
-                typeof root.updates.formatReleaseNotes !== "function")
-            return ""
-        return root.updates.formatReleaseNotes(root.updates.latestReleaseNotes,
-                                               Theme.accentColor,
-                                               Theme.cardColor)
+        if (!root.updates || root.updateLatestVersion === "" || typeof root.updates.formatReleaseNotes !== "function")
+            return "";
+        return root.updates.formatReleaseNotes(root.updates.latestReleaseNotes, Theme.accentColor, Theme.cardColor);
     }
     readonly property Flickable scrollContent: infoScroll.contentItem as Flickable
 
     Connections {
         target: root.updates
         function onCheckFinished(newerAvailable, latestVersion, releaseUrl) {
-            root.updateChecking = false
-            root.updateNewer = newerAvailable
-            root.updateLatestVersion = newerAvailable ? latestVersion : ""
-            root.updateReleaseUrl = newerAvailable ? releaseUrl : ""
+            root.updateChecking = false;
+            root.updateNewer = newerAvailable;
+            root.updateLatestVersion = newerAvailable ? latestVersion : "";
+            root.updateReleaseUrl = newerAvailable ? releaseUrl : "";
             if (newerAvailable) {
                 // Names both versions (they differ) and stays up:
                 // it's actionable.
-                updateDismissTimer.stop()
-                root.updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, root.appVersion)
+                updateDismissTimer.stop();
+                root.updateStatus = qsTr("Version %1 is available — you're on %2.").arg(latestVersion, root.appVersion);
             } else {
                 // The badge right above already shows the
                 // version; this confirmation fades shortly.
-                root.updateStatus = qsTr("You're on the latest version.")
-                updateDismissTimer.restart()
+                root.updateStatus = qsTr("You're on the latest version.");
+                updateDismissTimer.restart();
             }
         }
         function onCheckFailed() {
-            root.updateChecking = false
-            root.updateNewer = false
-            root.updateLatestVersion = ""
-            root.updateReleaseUrl = ""
-            root.updateStatus = qsTr("Failed to check for updates.")
-            updateDismissTimer.restart()
+            root.updateChecking = false;
+            root.updateNewer = false;
+            root.updateLatestVersion = "";
+            root.updateReleaseUrl = "";
+            root.updateStatus = qsTr("Failed to check for updates.");
+            updateDismissTimer.restart();
         }
         function onDetailsReady(assetUrl, assetFileName, digest) {
-            root.updateAssetUrl = assetUrl
-            root.updateAssetFileName = assetFileName
-            root.updateDigest = digest
+            root.updateAssetUrl = assetUrl;
+            root.updateAssetFileName = assetFileName;
+            root.updateDigest = digest;
         }
     }
 
@@ -87,8 +84,8 @@ Page {
         interval: 4000
         repeat: false
         onTriggered: {
-            root.updateStatus = ""
-            root.updateNewer = false
+            root.updateStatus = "";
+            root.updateNewer = false;
         }
     }
 
@@ -225,12 +222,7 @@ Page {
 
                         Label {
                             Layout.alignment: Qt.AlignHCenter
-                            text: qsTr("Install method: %1").arg(
-                                root.installKindValue === 0 ? qsTr("AppImage") :
-                                root.installKindValue === 1 ? qsTr("Debian package") :
-                                root.installKindValue === 2 ? qsTr("RPM package") :
-                                root.installKindValue === 3 ? qsTr("Portable install") :
-                                qsTr("Unknown"))
+                            text: qsTr("Install method: %1").arg(root.installKindValue === 0 ? qsTr("AppImage") : root.installKindValue === 1 ? qsTr("Debian package") : root.installKindValue === 2 ? qsTr("RPM package") : root.installKindValue === 3 ? qsTr("Portable install") : qsTr("Unknown"))
                             color: Theme.textMutedColor
                             font.pixelSize: Theme.fontSizeSmall
                             horizontalAlignment: Text.AlignHCenter
@@ -240,13 +232,11 @@ Page {
                         TrophyButton {
                             Layout.alignment: Qt.AlignHCenter
                             visible: !(root.installer && root.installer.busy)
-                            text: root.installKindValue === 0
-                                ? qsTr("Update now")
-                                : qsTr("Download update")
+                            text: root.installKindValue === 0 ? qsTr("Update now") : qsTr("Download update")
                             enabled: !(recordingManager && recordingManager.isRecording)
                             opacity: enabled ? 1 : 0.5
                             onClicked: {
-                                root.showUpdateDialog = true
+                                root.showUpdateDialog = true;
                             }
                         }
 
@@ -262,11 +252,7 @@ Page {
                         Label {
                             Layout.alignment: Qt.AlignHCenter
                             visible: root.installKindValue !== 0 && root.updateAssetFileName !== ""
-                            text: root.installKindValue === 1
-                                ? qsTr("Then run: sudo apt install ./%1").arg(root.updateAssetFileName)
-                                : root.installKindValue === 2
-                                ? qsTr("Then run: sudo dnf install ./%1").arg(root.updateAssetFileName)
-                                : qsTr("Extract with: tar -xf %1").arg(root.updateAssetFileName)
+                            text: root.installKindValue === 1 ? qsTr("Then run: sudo apt install ./%1").arg(root.updateAssetFileName) : root.installKindValue === 2 ? qsTr("Then run: sudo dnf install ./%1").arg(root.updateAssetFileName) : qsTr("Extract with: tar -xf %1").arg(root.updateAssetFileName)
                             color: Theme.textMutedColor
                             font.pixelSize: Theme.fontSizeSmall
                             horizontalAlignment: Text.AlignHCenter
@@ -279,11 +265,9 @@ Page {
                             Layout.preferredHeight: 8
                             visible: root.installer !== null && root.installer.busy
                             from: 0
-                            to: (root.installer && root.installer.totalBytes > 0)
-                                ? root.installer.totalBytes : 100
+                            to: (root.installer && root.installer.totalBytes > 0) ? root.installer.totalBytes : 100
                             value: root.installer ? root.installer.progressBytes : 0
-                            indeterminate: root.installer !== null &&
-                                           root.installer.totalBytes <= 0
+                            indeterminate: root.installer !== null && root.installer.totalBytes <= 0
 
                             background: Rectangle {
                                 implicitWidth: 200
@@ -294,9 +278,7 @@ Page {
                             contentItem: Rectangle {
                                 color: Theme.accentColor || "#3498db"
                                 radius: 4
-                                width: (root.installer && root.installer.totalBytes > 0)
-                                    ? (parent.width * (root.installer.progressBytes / root.installer.totalBytes))
-                                    : (root.installer && root.installer.totalBytes <= 0 ? parent.width : 0)
+                                width: (root.installer && root.installer.totalBytes > 0) ? (parent.width * (root.installer.progressBytes / root.installer.totalBytes)) : (root.installer && root.installer.totalBytes <= 0 ? parent.width : 0)
                                 height: parent.height
                             }
                         }
@@ -332,12 +314,11 @@ Page {
                     TapHandler {
                         enabled: typeof updateChecker !== "undefined"
                         onTapped: {
-                            root.updateChecking = true
-                            root.updates.checkNow()
+                            root.updateChecking = true;
+                            root.updates.checkNow();
                         }
                     }
                 }
-
             }
 
             // Breathing room between the header block and the
@@ -364,15 +345,13 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Record games and save recent moments on Linux. Trophy recognizes running games from local process and launcher metadata, with capture authorized through your desktop's ScreenCast portal.")
+                        text: qsTr("Capture your best gaming moments on Linux with zero hassle. Trophy provides high-performance recording, one-press clipping, smart game detection, and separate audio tracks for easier editing.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
                         horizontalAlignment: Text.AlignHCenter
                     }
-
                 }
-
             }
 
             // Features Section
@@ -411,13 +390,13 @@ Page {
                         FeatureItem {
                             iconSource: "qrc:/icons/volume-high.svg"
                             title: qsTr("Multi-Track Audio")
-                            description: qsTr("Optional separate game, voice and mic tracks; desktop fallback may include voice")
+                            description: qsTr("Optional separate game, voice and mic tracks with desktop audio fallback")
                         }
 
                         FeatureItem {
                             iconSource: "qrc:/icons/gamepad.svg"
                             title: qsTr("Auto Game Detection")
-                            description: qsTr("Process-based detection with local launcher libraries and custom rules; recording requires authorization")
+                            description: qsTr("Process-based detection with local launcher libraries and custom rules")
                         }
 
                         FeatureItem {
@@ -437,11 +416,8 @@ Page {
                             title: qsTr("Update Checks")
                             description: qsTr("Daily release checks with download links; AppImage updates install when you choose")
                         }
-
                     }
-
                 }
-
             }
 
             // Acknowledgments Section
@@ -467,60 +443,161 @@ Page {
 
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Thanks to the projects behind Trophy's recording, interface and artwork:")
+                        text: qsTr("Trophy is made possible by the work of the open-source community and the following projects and contributors.")
                         wrapMode: Text.WordWrap
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
                     }
 
+                    // Core Technologies
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: Theme.spacingTiny
 
-                        CreditLabel {
-                            text: qsTr('• <a href="https://ffmpeg.org/">FFmpeg</a> for multimedia processing (<a href="https://ffmpeg.org/legal.html">LGPL/GPL, build-dependent</a>)')
+                        Label {
+                            text: qsTr("Core Technologies")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.weight: Font.DemiBold
                         }
 
                         CreditLabel {
-                            text: qsTr('• <a href="https://www.qt.io/">Qt</a> for the application framework (<a href="https://doc.qt.io/qt-6/licensing.html">LGPLv3/GPLv3 and other licensing options</a>)')
+                            text: qsTr('• <a href="https://www.qt.io/">Qt</a> — Application framework and user interface (<a href="https://doc.qt.io/qt-6/licensing.html">LGPLv3/GPLv3, component-dependent</a>)')
                         }
 
                         CreditLabel {
-                            text: qsTr('• <a href="https://flatpak.github.io/xdg-desktop-portal/">xdg-desktop-portal</a> and desktop portal backends for capture authorization and global shortcuts (<a href="https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES">LGPLv2.1+ and component licenses</a>)')
+                            text: qsTr('• <a href="https://ffmpeg.org/">FFmpeg</a> — Multimedia encoding, decoding and processing (<a href="https://ffmpeg.org/legal.html">LGPL/GPL, build-dependent; GPL in the Trophy AppImage</a>)')
                         }
 
                         CreditLabel {
-                            text: qsTr('• <a href="https://pipewire.org/">PipeWire</a> for Linux audio and video transport (<a href="https://github.com/PipeWire/pipewire/blob/master/COPYING">MIT</a>)')
+                            text: qsTr('• <a href="https://pipewire.org/">PipeWire</a> — Linux audio and video capture (MIT)')
                         }
 
                         CreditLabel {
-                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for the Steam, Heroic, Lutris and itch.io icons, and other bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                            text: qsTr('• <a href="https://flatpak.github.io/xdg-desktop-portal/">xdg-desktop-portal</a> and desktop portal backends — Capture authorization and global shortcuts (LGPLv2.1+ and component licenses)')
                         }
 
                         CreditLabel {
-                            text: qsTr('• <a href="https://github.com/legendary-gl/legendary">Legendary</a> and <a href="https://github.com/imLinguin/nile">Nile</a> contributors for bundled launcher artwork (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                            text: qsTr('• <a href="https://wayland.freedesktop.org/">Wayland</a> — Linux display protocol (MIT)')
                         }
 
                         CreditLabel {
-                            text: qsTr('• Felix Ribeiro for the <a href="https://github.com/Faugus/faugus-launcher">Faugus Launcher</a> icon, copyright 2026, used unmodified (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>)')
+                            text: qsTr('• <a href="https://github.com/yaml/libyaml">LibYAML</a> — Game launcher configuration parsing (MIT)')
                         }
 
                         CreditLabel {
-                            text: qsTr("• The open-source community for inspiration and support")
+                            text: qsTr('• <a href="https://sqlite.org/">SQLite</a> — Game launcher database access (Public Domain)')
                         }
-
                     }
 
+                    // Encoding and Graphics
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingTiny
+
+                        Label {
+                            text: qsTr("Encoding and Graphics")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.weight: Font.DemiBold
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://www.videolan.org/developers/x264.html">x264</a> — Software H.264 video encoding (GPLv2 or later)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://opus-codec.org/">Opus</a> — Audio encoding (BSD 3-Clause)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://zlib.net/">zlib</a> — Compression support (zlib License)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://gitlab.freedesktop.org/mesa/libdrm">libdrm</a> — Direct Rendering Manager and DMA-BUF interoperability (MIT and component licenses)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/intel/libva">libva</a> — Hardware-accelerated video processing and encoding (MIT)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://www.khronos.org/egl/">Khronos Group / EGL</a> — Graphics interoperability and DMA-BUF support (implementation-dependent licensing)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/FFmpeg/nv-codec-headers">NVIDIA Video Codec Headers</a> — NVIDIA hardware encoding integration through FFmpeg (MIT)')
+                        }
+                    }
+
+                    // Artwork and Icons
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingTiny
+
+                        Label {
+                            text: qsTr("Artwork and Icons")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.weight: Font.DemiBold
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> — Bundled application icons, including Steam, Heroic, Lutris and itch.io (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/legendary-gl/legendary">Legendary</a> contributors — Legendary launcher artwork (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://github.com/imLinguin/nile">Nile</a> contributors — Nile launcher artwork (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• Felix Ribeiro — <a href="https://github.com/Faugus/faugus-launcher">Faugus Launcher</a> artwork, copyright © 2026, used unmodified (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>)')
+                        }
+                    }
+
+                    // Special Thanks
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingTiny
+
+                        Label {
+                            text: qsTr("Special Thanks")
+                            color: Theme.textColor
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.weight: Font.DemiBold
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• <a href="https://appimage.org/">AppImage</a> and <a href="https://github.com/linuxdeploy/linuxdeploy">linuxdeploy</a> for portable Linux application distribution')
+                        }
+
+                        CreditLabel {
+                            text: qsTr('• All <a href="https://github.com/stevenjwheeler/Trophy/graphs/contributors">Trophy contributors</a> for their contributions to the project')
+                        }
+
+                        CreditLabel {
+                            text: qsTr("• The Trophy community for testing, feedback, suggestions and bug reports")
+                        }
+
+                        CreditLabel {
+                            text: qsTr("• The wider open-source community for its continued contributions to the Linux ecosystem")
+                        }
+                    }
+
+                    // Licensing and Trademark Notice
                     Label {
                         Layout.fillWidth: true
-                        text: qsTr("Bundled artwork notices and licenses are included with the application. Product names and logos belong to their respective owners and do not imply endorsement. Dependency licenses vary by component and build.")
+                        text: qsTr("Third-party components and artwork remain subject to their respective licenses. Dependency licenses and availability may vary by distribution and build. Product names, logos and trademarks belong to their respective owners. Their use does not imply affiliation or endorsement.")
                         wrapMode: Text.WordWrap
                         color: Theme.textMutedColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
-
                 }
-
             }
 
             // License Section
@@ -548,7 +625,9 @@ Page {
                             iconSource: "qrc:/icons/file-text.svg"
                         }
 
-                        Item { Layout.fillWidth: true }
+                        Item {
+                            Layout.fillWidth: true
+                        }
 
                         Label {
                             text: qsTr("Copyright © 2026")
@@ -564,9 +643,7 @@ Page {
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeNormal
                     }
-
                 }
-
             }
 
             // AI Disclaimer Section
@@ -598,9 +675,7 @@ Page {
                         color: Theme.textColor
                         font.pixelSize: Theme.fontSizeSmall
                     }
-
                 }
-
             }
 
             // Links
@@ -623,15 +698,12 @@ Page {
                     text: qsTr("Releases")
                     url: "https://github.com/stevenjwheeler/Trophy/releases"
                 }
-
             }
 
             Item {
                 Layout.preferredHeight: Theme.spacingLarge
             }
-
         }
-
     }
 
     Rectangle {
@@ -643,8 +715,14 @@ Page {
         opacity: root.scrollContent ? Math.max(0, Math.min(1, (root.scrollContent.contentHeight - root.scrollContent.height - root.scrollContent.contentY) / height)) : 0
         visible: opacity > 0
         gradient: Gradient {
-            GradientStop { position: 0; color: Qt.alpha(Theme.backgroundColor, 0) }
-            GradientStop { position: 1; color: Theme.backgroundColor }
+            GradientStop {
+                position: 0
+                color: Qt.alpha(Theme.backgroundColor, 0)
+            }
+            GradientStop {
+                position: 1
+                color: Theme.backgroundColor
+            }
         }
     }
 
@@ -678,13 +756,16 @@ Page {
     // Shared rich-text credit style keeps project/license links usable and
     // wraps long acknowledgments without widening the scroll view.
     component CreditLabel: Label {
+        objectName: "infoCredit"
         Layout.fillWidth: true
         textFormat: Text.RichText
         wrapMode: Text.WordWrap
         color: Theme.textColor
         linkColor: Theme.highlightedColor
         font.pixelSize: Theme.fontSizeNormal
-        onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+        onLinkActivated: function (link) {
+            Qt.openUrlExternally(link);
+        }
 
         HoverHandler {
             cursorShape: parent.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -743,7 +824,6 @@ Page {
                 font.pixelSize: Theme.fontSizeSmall
             }
         }
-
     }
 
     // Footer link: same hover language as the
@@ -758,11 +838,11 @@ Page {
         property string url: ""
         property string iconSource: ""
 
-        signal activated()
+        signal activated
 
         onActivated: {
             if (url !== "")
-                Qt.openUrlExternally(url)
+                Qt.openUrlExternally(url);
         }
 
         spacing: 4
@@ -805,34 +885,25 @@ Page {
         width: Math.min(parent.width - 40, 560)
         visible: root.showUpdateDialog
         onRejected: root.showUpdateDialog = false
-        title: root.updateLatestVersion !== ""
-            ? qsTr("Version %1").arg(root.updateLatestVersion)
-            : qsTr("Update available")
-        message: root.updateNotesHtml === ""
-            ? qsTr("No release notes were provided for this release.")
-            : ""
+        title: root.updateLatestVersion !== "" ? qsTr("Version %1").arg(root.updateLatestVersion) : qsTr("Update available")
+        message: root.updateNotesHtml === "" ? qsTr("No release notes were provided for this release.") : ""
         notesHtml: root.updateNotesHtml
-        warningMessage: (recordingManager && recordingManager.isRecording)
-            ? qsTr("Recording in progress. Stop recording to update.")
-            : ""
-        confirmText: root.installKindValue === 0
-            ? qsTr("Auto-Update")
-            : qsTr("Download")
+        warningMessage: (recordingManager && recordingManager.isRecording) ? qsTr("Recording in progress. Stop recording to update.") : ""
+        confirmText: root.installKindValue === 0 ? qsTr("Auto-Update") : qsTr("Download")
         cancelText: qsTr("Cancel")
         confirmEnabled: !(recordingManager && recordingManager.isRecording)
         confirmColor: Theme.accentColor || "#3498db"
         onAccepted: {
-            root.showUpdateDialog = false
+            root.showUpdateDialog = false;
             if (root.installKindValue === 0) {
                 if (root.installer && !root.installer.busy)
-                    app.installUpdate()
+                    app.installUpdate();
             } else {
                 if (root.updateAssetUrl !== "")
-                    Qt.openUrlExternally(root.updateAssetUrl)
+                    Qt.openUrlExternally(root.updateAssetUrl);
                 else if (root.updateReleaseUrl !== "")
-                    Qt.openUrlExternally(root.updateReleaseUrl)
+                    Qt.openUrlExternally(root.updateReleaseUrl);
             }
         }
     }
-
 }
