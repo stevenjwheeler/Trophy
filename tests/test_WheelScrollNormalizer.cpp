@@ -537,10 +537,11 @@ TEST(WheelScrollNormalizer, ClippedStretchSpringsBackElastically) {
     const auto range = trackPosition(flick, "contentY", 3700.0);
     wheel(&scene.window, QPoint(200, 150), QPoint(0, -kNotch));
     settle();
-    // Past the bound outwards, then past it inwards by a couple of pixels.
+    // Past the bound outwards, then a gentle overshoot back inside: a couple
+    // of pixels for a one-notch pull, never a hard bounce.
     EXPECT_GE(range->maximum, 3700.0 + 20.0);
     EXPECT_LE(range->minimum, 3699.0);
-    EXPECT_GE(range->minimum, 3680.0);
+    EXPECT_GE(range->minimum, 3696.0);
     EXPECT_NEAR(contentY(scene), 3700.0, 0.01);
 }
 

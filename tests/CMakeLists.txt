@@ -98,6 +98,7 @@ gtest_discover_tests(test_Theme)
 add_executable(test_GameIconProvider test_GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
+    ${CMAKE_SOURCE_DIR}/src/core/WheelScrollNormalizer.cpp
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
 target_include_directories(test_GameIconProvider PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_GameIconProvider PRIVATE

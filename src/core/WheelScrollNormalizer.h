@@ -40,6 +40,9 @@ namespace TrophyBackend {
  * stretches past the end and springs back elastically once the wheel stops,
  * while an unclipped view (whose content would spill over the page below)
  * recoils a few pixels inward instead. Both consume the event.
+ * A view exposing wheelTopStretch renders that signed top overscroll with a
+ * content-item Translate instead of moving its native viewport out of bounds.
+ * Games uses this to avoid section-estimation fixups during rapid top pulls.
  *
  * Any external content move (a section jump animation, a drag, a layout
  * change) cancels the current animation and the rubber band so the two never

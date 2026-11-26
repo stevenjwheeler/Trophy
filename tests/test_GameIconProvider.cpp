@@ -2,6 +2,9 @@
 #include "detection/GameIconProvider.h"
 #include "detection/GameListModel.h"
 #include "detection/DefaultAppCatalog.h"
+#include "core/WheelScrollNormalizer.h"
+#include <QTimer>
+#include <QStyleHints>
 
 #include <QDir>
 #include <QCryptographicHash>
@@ -1177,6 +1180,164 @@ TEST_F(GameIconTest, PromptBlockRebuildKeepsScrolledFilteredPageAndDelegate) {
     EXPECT_EQ(list->size(), size);
   }
   EXPECT_EQ(resets.size(), 0);
+}
+enum class GamesWheelFinish { Release, Reverse, Jump, ApproachFromInside };
+
+static void checkGamesWheelRelease(int updatesMs, bool collapsedTail = false,
+                                  bool atTop = false, int pullSteps = 1,
+                                  int pullIntervalMs = 16, int wheelUnits = 120,
+                                  GamesWheelFinish finish = GamesWheelFinish::Release) {
+  QList<GameListEntry> entries;
+  for (int s = 0; s < 4; ++s)
+    for (int i = 0; i < 10; ++i) {
+      GameListEntry entry;
+      entry.key = QString("steam_app_%1").arg(s * 100 + i);
+      entry.display = QString("Game %1").arg(s * 100 + i);
+      entry.section = QString("Section %1").arg(s);
+      entries.append(entry);
+    }
+  entries[0].running = true;
+  entries[0].pid = 100;
+  GameListModel model;
+  model.setEntries(entries);
+  GameListFilterModel proxy;
+  proxy.setSourceModel(&model);
+  if (collapsedTail)
+    proxy.setCollapsedSections({"Section 1", "Section 3"});
+  QQmlEngine engine;
+  engine.rootContext()->setContextProperty("gameDetector", QVariantMap{
+      {"gamesModel", QVariant::fromValue(static_cast<QObject *>(&proxy))},
+      {"gameFilterText", ""}, {"showDefaultExclusions", false}});
+  QQuickWindow window;
+  QQmlComponent component(&engine, QUrl::fromLocalFile(GAMES_QML_FILE));
+  std::unique_ptr<QObject> object(component.create());
+  ASSERT_NE(object, nullptr);
+  auto *page = qobject_cast<QQuickItem *>(object.get());
+  page->setParentItem(window.contentItem());
+  window.resize(1113, 900);
+  page->setSize({1113, 900});
+  window.show();
+  QTest::qWait(300);
+  auto *list = object->findChild<QQuickItem *>("gamesList");
+  ASSERT_NE(list, nullptr);
+  TrophyBackend::WheelScrollNormalizer::install();
+  const QPointF center = list->mapToScene(QPointF(list->width() / 2, list->height() / 2));
+  const int notch = -120;
+  for (int i = 0; i < 120; ++i) {
+    QTest::wheelEvent(&window, center, QPoint(0, notch));
+    QTest::qWait(16);
+  }
+  QTest::qWait(900);
+  // Compare against Qt's own end position, not a duplicate of the filter's
+  // extent calculation. Sections give this virtualized list a shifted origin.
+  ASSERT_TRUE(QMetaObject::invokeMethod(list, atTop ? "positionViewAtBeginning" : "positionViewAtEnd"));
+  QTest::qWait(300);
+  const qreal bound = list->property("contentY").toReal();
+  auto visualPosition = [&] {
+    return list->property("contentY").toReal() +
+           list->property("wheelTopStretch").toReal();
+  };
+  auto *content = list->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(content, nullptr);
+  const qreal viewportTop = list->mapToScene(QPointF()).y();
+  if (!collapsedTail && !atTop)
+    ASSERT_GT(qAbs(list->property("originY").toReal()), 1.0);
+  QTimer updater;
+  qint64 pid = 100;
+  if (updatesMs > 0) {
+    QObject::connect(&updater, &QTimer::timeout, [&] {
+      entries[0].pid = (pid += 2);
+      model.setEntries(entries);
+    });
+    updater.start(updatesMs);
+  }
+  qreal min = bound, max = bound;
+  QElapsedTimer timer; timer.start();
+  if (finish == GamesWheelFinish::ApproachFromInside)
+    list->setProperty("contentY", bound + 180);
+  for (int i = 0; i < pullSteps; ++i) {
+    const qreal previous = visualPosition();
+    QTest::wheelEvent(&window, center, QPoint(0, atTop ? wheelUnits : -wheelUnits));
+    QTest::qWait(pullIntervalMs);
+    if (atTop) {
+      EXPECT_LE(visualPosition(), previous + 0.5)
+          << "The top pull must not snap inward while the wheel keeps pulling";
+      EXPECT_GE(list->property("contentY").toReal(), bound - 0.5);
+    }
+    EXPECT_NEAR(content->mapToScene(QPointF()).y(),
+                viewportTop - visualPosition(), 0.5);
+  }
+  if (finish == GamesWheelFinish::Jump || finish == GamesWheelFinish::Reverse) {
+    if (finish == GamesWheelFinish::Jump)
+      list->setProperty("contentY", bound + 120);
+    else
+      QTest::wheelEvent(&window, center, QPoint(0, -120));
+    QTest::qWait(700);
+    EXPECT_DOUBLE_EQ(list->property("wheelTopStretch").toReal(), 0.0);
+    const qreal destination = finish == GamesWheelFinish::Jump
+        ? bound + 120
+        : bound + QGuiApplication::styleHints()->wheelScrollLines() * 24.0;
+    EXPECT_NEAR(list->property("contentY").toReal(), destination, 0.5);
+    return;
+  }
+  timer.restart();
+  while (timer.elapsed() < 700) {
+    QTest::qWait(2);
+    const qreal y = visualPosition();
+    EXPECT_NEAR(content->mapToScene(QPointF()).y(), viewportTop - y, 0.5);
+    min = qMin(min, y); max = qMax(max, y);
+  }
+  updater.stop();
+  EXPECT_GT(atTop ? bound - min : max - bound, 20.0);
+  EXPECT_GT(atTop ? max - bound : bound - min, 1.0);
+  EXPECT_LT(atTop ? max - bound : bound - min, pullSteps > 1 ? 10.0 : 4.0);
+  EXPECT_NEAR(list->property("contentY").toReal(), bound, 0.5);
+  EXPECT_DOUBLE_EQ(list->property("wheelTopStretch").toReal(), 0.0);
+}
+
+TEST(GameListPageUiTest, WheelStretchReturnsToQtBottomWithShiftedOrigin) {
+  checkGamesWheelRelease(0);
+}
+
+TEST(GameListPageUiTest, WheelStretchSurvivesLiveRowUpdates) {
+  checkGamesWheelRelease(100);
+}
+
+TEST(GameListPageUiTest, WheelStretchWithCollapsedSections) {
+  checkGamesWheelRelease(100, true);
+}
+
+TEST(GameListPageUiTest, WheelStretchAtTopWithCollapsedSections) {
+  checkGamesWheelRelease(100, true, true);
+}
+
+TEST(GameListPageUiTest, WheelStretchHeldAgainstCollapsedTail) {
+  checkGamesWheelRelease(100, true, false, 24);
+}
+
+TEST(GameListPageUiTest, WheelStretchHeldAgainstTop) {
+  checkGamesWheelRelease(100, false, true, 24);
+}
+
+TEST(GameListPageUiTest, WheelStretchHeldAgainstCollapsedTop) {
+  checkGamesWheelRelease(100, true, true, 24);
+}
+
+TEST(GameListPageUiTest, RapidHighResolutionTopPullDoesNotFightQt) {
+  checkGamesWheelRelease(100, true, true, 192, 1, 15);
+}
+
+TEST(GameListPageUiTest, TopVisualStretchClearsOnReversal) {
+  checkGamesWheelRelease(100, true, true, 24, 16, 120, GamesWheelFinish::Reverse);
+}
+
+TEST(GameListPageUiTest, ExternalJumpCancelsTopVisualStretch) {
+  checkGamesWheelRelease(100, true, true, 24, 16, 120, GamesWheelFinish::Jump);
+}
+
+TEST(GameListPageUiTest, FastApproachToTopFlowsIntoVisualStretch) {
+  checkGamesWheelRelease(100, true, true, 24, 16, 120,
+                        GamesWheelFinish::ApproachFromInside);
 }
 } // namespace
 

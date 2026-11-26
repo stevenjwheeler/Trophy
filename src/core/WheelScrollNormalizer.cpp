@@ -63,11 +63,12 @@ constexpr qreal kMaxStretch = 120.0;
 constexpr int kStretchStepDurationMs = 90;
 // The wheel has to stay quiet this long before the band lets go.
 constexpr int kStretchReleaseDelayMs = 120;
-// Springing back is quick and overshoots slightly into the content before
-// settling, which is what makes the release feel elastic.
-constexpr int kStretchReleaseDurationMs = 380;
-constexpr qreal kReleaseAmplitude = 2.0;
-constexpr qreal kReleasePeriod = 0.55;
+// Springing back is a single gentle lobe, not a hard bounce: the band returns
+// to the bound, overshoots a few percent into the content and eases back. A
+// larger amplitude or a shorter period turns that into a violent snap.
+constexpr int kStretchReleaseDurationMs = 400;
+constexpr qreal kReleaseAmplitude = 1.0;
+constexpr qreal kReleasePeriod = 0.9;
 
 // Values closer than this are treated as "did not move": the filter must not
 // consume an event that changed nothing, or a parent scrollable never sees it.
@@ -97,14 +98,13 @@ ScrollRange rangeOf(qreal minExtent, qreal maxExtent) {
 }
 
 // The extents behind QQuickFlickable::minYExtent()/maxYExtent(), expressed
-// through their public properties. minYExtent() is topMargin (originY is
-// derived as -minYExtent + topMargin, i.e. 0 for Flickable, ListView and
-// GridView) and maxYExtent() is min(minYExtent, height - contentHeight -
-// bottomMargin). Same for X.
+// through their public properties. Item views can have a non-zero origin
+// as delegates are added/removed, so both ends must include it. Same for X.
 ScrollRange verticalRange(const QObject *flickable) {
     const qreal minExtent =
         realProperty(flickable, "topMargin") - realProperty(flickable, "originY");
-    const qreal maxExtent = qMin(minExtent, realProperty(flickable, "height") -
+    const qreal maxExtent = qMin(minExtent, -realProperty(flickable, "originY") +
+                                               realProperty(flickable, "height") -
                                                realProperty(flickable, "contentHeight") -
                                                realProperty(flickable, "bottomMargin"));
     return rangeOf(minExtent, maxExtent);
@@ -113,10 +113,33 @@ ScrollRange verticalRange(const QObject *flickable) {
 ScrollRange horizontalRange(const QObject *flickable) {
     const qreal minExtent =
         realProperty(flickable, "leftMargin") - realProperty(flickable, "originX");
-    const qreal maxExtent = qMin(minExtent, realProperty(flickable, "width") -
+    const qreal maxExtent = qMin(minExtent, -realProperty(flickable, "originX") +
+                                               realProperty(flickable, "width") -
                                                realProperty(flickable, "contentWidth") -
                                                realProperty(flickable, "rightMargin"));
     return rangeOf(minExtent, maxExtent);
+}
+
+// A virtualized view can opt into a visual-only top stretch. Moving its real
+// viewport above the first row can change delegate/section size estimates,
+// which makes Qt fix up contentY while our animation is still running.
+// wheelTopStretch is a signed content-position offset; the view renders its
+// content with a Translate of the opposite sign. Ordinary scrolling and the
+// bottom spring continue to use the native content position.
+QPointF contentPosition(const QObject *flickable) {
+    return {realProperty(flickable, "contentX"),
+            realProperty(flickable, "contentY") +
+                realProperty(flickable, "wheelTopStretch")};
+}
+
+void writeContentY(QObject *flickable, qreal position) {
+    if (flickable->property("wheelTopStretch").isValid()) {
+        const qreal top = verticalRange(flickable).low;
+        flickable->setProperty("wheelTopStretch", qMin(0.0, position - top));
+        flickable->setProperty("contentY", qMax(top, position));
+    } else {
+        flickable->setProperty("contentY", position);
+    }
 }
 
 // The visual parent of a QQuickItem is exposed as the "parent" property, so
@@ -201,6 +224,9 @@ void stopAnimation(ScrollAnimation *state) {
     state->stretchActive = false;
     if (state->releaseTimer)
         state->releaseTimer->stop();
+    if (state->flickable &&
+        state->flickable->property("wheelTopStretch").isValid())
+        state->flickable->setProperty("wheelTopStretch", 0.0);
 }
 
 void forgetFlickable(QObject *flickable) {
@@ -248,8 +274,7 @@ ScrollAnimation *stateFor(QObject *flickable) {
                          // it, something else moved it (a section jump, a drag,
                          // a layout change). That owner wins: abandon the glide
                          // instead of fighting it.
-                         const QPointF actual(realProperty(flickable, "contentX"),
-                                              realProperty(flickable, "contentY"));
+                         const QPointF actual = contentPosition(flickable);
                          if (qAbs(actual.x() - current->lastWritten.x()) >
                                  kBoundEpsilon ||
                              qAbs(actual.y() - current->lastWritten.y()) >
@@ -266,7 +291,7 @@ ScrollAnimation *stateFor(QObject *flickable) {
                          }
                          if (!qFuzzyCompare(position.y(), current->lastWritten.y())) {
                              current->lastWritten.setY(position.y());
-                             flickable->setProperty("contentY", position.y());
+                             writeContentY(flickable, position.y());
                          }
                      });
     QObject::connect(animation, &QVariantAnimation::finished, flickable,
@@ -337,8 +362,7 @@ bool startBounce(QObject *flickable, ScrollAnimation *state, bool vertical) {
     if (qAbs(inward - bound) < 1.0)
         return false;
 
-    const QPointF start(realProperty(flickable, "contentX"),
-                        realProperty(flickable, "contentY"));
+    const QPointF start = contentPosition(flickable);
     QPointF peak = start;
     QPointF end = start;
     if (vertical) {
@@ -387,8 +411,7 @@ QPointF stretchTarget(QObject *flickable, const ScrollAnimation *state) {
 
     QPointF target = (state->gliding || state->bouncing)
                          ? state->target
-                         : QPointF(realProperty(flickable, "contentX"),
-                                   realProperty(flickable, "contentY"));
+                         : contentPosition(flickable);
     target.setX(qBound(horizontalExtent.low, target.x(), horizontalExtent.high));
     target.setY(qBound(verticalExtent.low, target.y(), verticalExtent.high));
     if (vertical)
@@ -405,8 +428,7 @@ void startStretchStep(QObject *flickable, ScrollAnimation *state) {
     if (!animation || qFuzzyIsNull(state->stretchRaw))
         return;
 
-    const QPointF from(realProperty(flickable, "contentX"),
-                       realProperty(flickable, "contentY"));
+    const QPointF from = contentPosition(flickable);
     const QPointF to = stretchTarget(flickable, state);
 
     state->reconfiguring = true;
@@ -453,8 +475,7 @@ void releaseStretch(QObject *flickable, ScrollAnimation *state) {
     if (!animation)
         return;
 
-    const QPointF from(realProperty(flickable, "contentX"),
-                       realProperty(flickable, "contentY"));
+    const QPointF from = contentPosition(flickable);
     QPointF to = from;
     if (vertical)
         to.setY(bound);
@@ -498,7 +519,7 @@ void animationFinished(QObject *flickable) {
         // on the bound so the next wheel step starts from the extent.
         state->lastWritten = state->target;
         flickable->setProperty("contentX", state->target.x());
-        flickable->setProperty("contentY", state->target.y());
+        writeContentY(flickable, state->target.y());
         return;
     }
     if (!qFuzzyIsNull(state->stretchRaw) && !state->stretchActive) {
@@ -506,8 +527,7 @@ void animationFinished(QObject *flickable) {
         startStretchStep(flickable, state);
         return;
     }
-    state->target = QPointF(realProperty(flickable, "contentX"),
-                            realProperty(flickable, "contentY"));
+    state->target = contentPosition(flickable);
     state->lastWritten = state->target;
     if (wasBouncing)
         return;
@@ -568,7 +588,7 @@ bool WheelScrollNormalizer::consumeWheel(QObject *receiver, QWheelEvent *event) 
     const ScrollRange vertical = verticalRange(receiver);
     const ScrollRange horizontal = horizontalRange(receiver);
     const qreal currentX = contentXProperty.toReal();
-    const qreal currentY = contentYProperty.toReal();
+    const qreal currentY = contentPosition(receiver).y();
     // QQuickFlickable moves its content position by -angleDelta/120 * step, so
     // a positive angleDelta (wheel turned away from the user) decreases
     // contentY/contentX. Mirroring that keeps the direction identical to the
