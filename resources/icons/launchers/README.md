@@ -9,8 +9,12 @@ implying endorsement.
   GPL-3.0. Imported from `Papirus/48x48/apps/` in the signed Arch Linux
   `papirus-icon-theme` package `20260801-1`.
   Upstream: https://github.com/PapirusDevelopmentTeam/papirus-icon-theme
-  Full license: Trophy's root `LICENSE`, embedded as `Papirus-LICENSE` and
+  Full license: Trophy's root `LICENSE.md`, embedded as `Papirus-LICENSE` and
   installed alongside this notice as `LICENSE`.
+- `itch.svg`: Papirus Development Team and contributors, GPL-3.0.
+  Source: `Papirus/48x48/apps/itch.svg` at commit
+  `4256be4cf56870aa1fbd85c48cafeafa187160e0` of the same Papirus repository.
+  Full license: the same `Papirus-LICENSE` / installed `LICENSE`.
 - Steam uses the existing `../default-apps/steam.svg`; see that directory's
   notice and GPL license.
 - `legendary.ico`: Legendary project contributors, GPLv3, from

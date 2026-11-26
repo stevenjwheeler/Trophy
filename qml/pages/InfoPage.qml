@@ -494,7 +494,7 @@ Page {
                         }
 
                         CreditLabel {
-                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for the Steam, Heroic and Lutris icons, and other bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
+                            text: qsTr('• The <a href="https://github.com/PapirusDevelopmentTeam/papirus-icon-theme">Papirus Development Team and contributors</a> for the Steam, Heroic, Lutris and itch.io icons, and other bundled application icons (<a href="https://www.gnu.org/licenses/gpl-3.0.html">GPLv3</a>)')
                         }
 
                         CreditLabel {

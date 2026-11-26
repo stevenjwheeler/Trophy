@@ -575,7 +575,7 @@ gtest_discover_tests(test_Recording)
 
 add_executable(test_LauncherLibrary test_LauncherLibrary.cpp)
 target_link_libraries(test_LauncherLibrary PRIVATE trophy_processes
-    GTest::GTest GTest::gtest_main PkgConfig::SQLITE3)
+    GTest::GTest GTest::gtest_main PkgConfig::SQLITE3 ZLIB::ZLIB)
 gtest_discover_tests(test_LauncherLibrary)
 
 add_executable(test_GameDetectionService test_GameDetectionService.cpp)

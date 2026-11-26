@@ -167,8 +167,9 @@ verified game-specific launcher can establish a game's identity while Trophy
 waits for its game payload before automatic capture. Use Games to block
 applications, define standalone games, or select among concurrent instances.
 
-Supported local metadata sources include **Steam**, **Heroic** (Epic, GOG and
-Amazon), **Legendary** (Epic), **Nile** (Amazon), **Lutris** and **Faugus**. Games without a
+Supported local metadata sources include **Steam**, **Heroic** (Epic, GOG,
+Amazon, Steam and itch.io), **Legendary** (Epic), **Nile** (Amazon), **Lutris**,
+**Faugus** and the native **itch.io** app. Games without a
 usable metadata match can be added manually through **Games → Add Game**; see
 [Adding a standalone game](#adding-a-standalone-game).
 View discovered libraries and configure their locations in

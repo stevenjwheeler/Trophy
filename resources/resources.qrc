@@ -64,11 +64,12 @@
     <file>icons/launchers/nile.svg</file>
     <file>icons/launchers/lutris.svg</file>
     <file>icons/launchers/faugus.svg</file>
+    <file>icons/launchers/itch.svg</file>
     <file>icons/launchers/README.md</file>
     <file>icons/launchers/Legendary-LICENSE</file>
     <file>icons/launchers/Nile-LICENSE</file>
     <file>icons/launchers/Faugus-LICENSE</file>
-    <file alias="icons/launchers/Papirus-LICENSE">../LICENSE</file>
+    <file alias="icons/launchers/Papirus-LICENSE">../LICENSE.md</file>
     <file>icons/default-apps/discord.svg</file>
     <file>icons/default-apps/obs.svg</file>
     <file>icons/default-apps/firefox.svg</file>
@@ -105,7 +106,7 @@
     <file>icons/default-apps/generic-game.svg</file>
     <file>icons/default-apps/generic-cube.svg</file>
     <file>icons/default-apps/README.md</file>
-    <file alias="icons/default-apps/LICENSE">../LICENSE</file>
+    <file alias="icons/default-apps/LICENSE">../LICENSE.md</file>
     <file>sounds/clip-saved.wav</file>
     <file>sounds/recording-stopped.wav</file>
   </qresource>
