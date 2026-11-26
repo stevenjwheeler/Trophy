@@ -126,6 +126,7 @@ qt_policy(SET QTP0004 NEW)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBYAML REQUIRED IMPORTED_TARGET yaml-0.1)
 pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+find_package(ZLIB REQUIRED)
 
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
@@ -221,7 +222,7 @@ add_library(trophy_processes STATIC
     src/detection/GameLaunchContext.cpp
     src/detection/GameWhitelist.cpp)
 set_target_properties(trophy_processes PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(trophy_processes PUBLIC Qt6::Core PRIVATE PkgConfig::LIBYAML PkgConfig::SQLITE3)
+target_link_libraries(trophy_processes PUBLIC Qt6::Core PRIVATE PkgConfig::LIBYAML PkgConfig::SQLITE3 ZLIB::ZLIB)
 target_include_directories(trophy_processes PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(trophy_processes PRIVATE -Wall -Wextra -Wpedantic)
@@ -256,6 +257,7 @@ set(CORE_SOURCES
     src/core/ReleaseNotes.cpp
     src/core/UpdateInstaller.cpp
     src/core/WindowChrome.cpp
+    src/core/WheelScrollNormalizer.cpp
 )
 
 set(CAPTURE_SOURCES
@@ -340,6 +342,7 @@ set(CORE_HEADERS
     src/core/ReleaseNotes.h
     src/core/UpdateInstaller.h
     src/core/WindowChrome.h
+    src/core/WheelScrollNormalizer.h
 )
 
 set(CAPTURE_HEADERS

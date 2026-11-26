@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "core/WheelScrollNormalizer.h"
 #include "settings/SettingsManager.h"
 #include <QFont>
 #include <QGuiApplication>
@@ -7,7 +8,11 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QStyleHints>
 #include <QTest>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextFragment>
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -227,19 +232,24 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
       QCoreApplication::processEvents();
       EXPECT_EQ(count->property("text").toString(), "0");
       EXPECT_TRUE(visibleText(item, "No supported launcher games found. You can still add games manually."));
-      const QVariantMap sharedGame{{"name", "Shared Game"}, {"directory", "/games/shared"}};
+      const QVariantMap sharedGame{{"name", "Shared Game"}, {"directory", "/games/shared"},
+          {"installation", QStringList{"steam:123", "/games/shared", ""}}};
+      auto heroicAlias = sharedGame;
+      heroicAlias["name"] = "Different Heroic Title";
+      heroicAlias["directory"] = "/games/symlink";
       detector.rows = {
           QVariantMap{{"id", "steam"}, {"name", "Steam"}, {"detected", true},
               {"games", QVariantList{sharedGame, QVariantMap{{"name", "Other Game"}, {"directory", "/games/other"}}}}},
           QVariantMap{{"id", "heroic"}, {"name", "Heroic"}, {"detected", true},
-              {"games", QVariantList{sharedGame}}},
+              {"games", QVariantList{heroicAlias}}},
           QVariantMap{{"id", "lutris"}, {"name", "Lutris"}, {"detected", true}, {"games", QVariantList{}}},
+          QVariantMap{{"id", "itch"}, {"name", "itch.io"}, {"detected", true}, {"games", QVariantList{}}},
           QVariantMap{{"id", "nile"}, {"name", "Nile"}, {"detected", false}, {"games", QVariantList{}}}};
       emit detector.changed();
       QTest::qWait(50);
       EXPECT_EQ(count->property("text").toString(), "2");
       EXPECT_TRUE(visibleText(item, "Games found in your launcher libraries"));
-      for (const auto *id : {"steam", "heroic", "lutris"}) {
+      for (const auto *id : {"steam", "heroic", "lutris", "itch"}) {
         auto *icon = findItem(item, QString("wizardLauncherIcon_") + id);
         ASSERT_NE(icon, nullptr);
         EXPECT_TRUE(icon->isVisible());
@@ -275,9 +285,9 @@ TEST(SetupWizardUiTest, SevenPagesNavigateFinishAndSummarizeLibrariesWithoutRefr
       QCoreApplication::processEvents();
       EXPECT_EQ(count->property("text").toString(), "3");
       EXPECT_EQ(findItem(item, "wizardLauncherIcon_steam"), steamIcon.data());
-      auto nile = detector.rows[3].toMap();
+      auto nile = detector.rows[4].toMap();
       nile["detected"] = true;
-      detector.rows[3] = nile;
+      detector.rows[4] = nile;
       emit detector.changed();
       QTest::qWait(20);
       auto *nileIcon = findItem(item, "wizardLauncherIcon_nile");
@@ -309,7 +319,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   LibraryUiApp app;
   SetupUiAudio audio;
   LibraryUiBackend backend;
-  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus"};
+  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch"};
   for (const auto &id : ids)
     backend.rows.append(QVariantMap{{"id", id}, {"name", id},
         {"automatic", true}, {"paths", QStringList{}}, {"locations", QVariantList{}},
@@ -399,7 +409,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   EXPECT_TRUE(card->property("expanded").toBool());
   auto *table = findItem(item, "gameLibrariesTable");
   ASSERT_NE(table, nullptr);
-  EXPECT_LT(table->height(), 410);
+  EXPECT_LT(table->height(), 98 + 52 * ids.size());
   auto *refresh = page->findChild<QObject *>("rescanGameLibrariesButton");
   ASSERT_NE(refresh, nullptr);
   EXPECT_TRUE(refresh->property("enabled").toBool());
@@ -493,7 +503,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
     }
     QMetaObject::invokeMethod(locationPopup, "close");
   }
-  EXPECT_EQ(missingLaunchers(item), 5);
+  EXPECT_EQ(missingLaunchers(item), ids.size() - 1);
   ASSERT_TRUE(QMetaObject::invokeMethod(refresh, "clicked"));
   QCoreApplication::processEvents();
   EXPECT_EQ(backend.rescans, 1);
@@ -521,6 +531,50 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
   EXPECT_TRUE(updatedPopup->property("visible").toBool());
   QMetaObject::invokeMethod(updatedPopup, "close");
   EXPECT_TRUE(refresh->property("enabled").toBool());
+  auto faugus = backend.rows[5].toMap();
+  faugus["detected"] = true;
+  faugus["count"] = 0;
+  faugus["locations"] = QVariantList{QVariantMap{{"path", "/config/faugus-launcher"},
+      {"status", "Detected"}, {"count", 0}}};
+  backend.rows[5] = faugus;
+  emit backend.changed();
+  QCoreApplication::processEvents();
+  auto *faugusStatus = findItem(item, "faugusLibraryStatus");
+  auto *faugusIndicator = findItem(item, "faugusLibraryStatusIndicator");
+  auto *faugusGames = findItem(item, "faugusDetectedGamesDropdown");
+  ASSERT_NE(faugusStatus, nullptr);
+  ASSERT_NE(faugusIndicator, nullptr);
+  ASSERT_NE(faugusGames, nullptr);
+  EXPECT_EQ(faugusStatus->property("text").toString(), "Detected");
+  EXPECT_EQ(faugusIndicator->property("color").value<QColor>().alpha(), 255);
+  EXPECT_TRUE(containsText(faugusGames, "0"));
+  ASSERT_TRUE(QMetaObject::invokeMethod(faugusGames, "clicked"));
+  QTest::qWait(180);
+  auto *faugusPopup = faugusGames->findChild<QObject *>("faugusDetectedGamesPopup");
+  ASSERT_NE(faugusPopup, nullptr);
+  auto *faugusContent = faugusPopup->property("contentItem").value<QQuickItem *>();
+  ASSERT_NE(faugusContent, nullptr);
+  EXPECT_TRUE(containsText(faugusContent, "No usable games detected"));
+  QMetaObject::invokeMethod(faugusPopup, "close");
+  for (int i = 0; i < backend.rows.size(); ++i) {
+    auto row = backend.rows[i].toMap();
+    row["detected"] = true;
+    row["count"] = 0;
+    row["games"] = QVariantList{};
+    row["locations"] = QVariantList{QVariantMap{{"path", "/config/launcher"},
+        {"status", "Detected"}, {"count", 0}}};
+    backend.rows[i] = row;
+  }
+  emit backend.changed();
+  QCoreApplication::processEvents();
+  for (const auto &id : ids) {
+    auto *status = findItem(item, id + "LibraryStatus");
+    auto *games = findItem(item, id + "DetectedGamesDropdown");
+    ASSERT_NE(status, nullptr);
+    ASSERT_NE(games, nullptr);
+    EXPECT_EQ(status->property("text").toString(), "Detected");
+    EXPECT_TRUE(containsText(games, "0"));
+  }
   item->setWidth(640);
   window.resize(640, 720);
   QTest::qWait(100);
@@ -543,7 +597,7 @@ TEST(GameLibrariesUiTest, ListsMissingLaunchersShowsGamesAndRequestsRefresh) {
         << error.toStdString();
 }
 
-TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
+TEST(InformationUiTest, LoadsFeatureCardsAndCreditLinksWithoutDependingOnCopy) {
   QQmlEngine engine;
   engine.rootContext()->setContextProperty("recordingManager", static_cast<QObject *>(nullptr));
   QStringList warnings;
@@ -556,22 +610,125 @@ TEST(InformationUiTest, DescribesCurrentFeaturesAndCreditsActualIntegrations) {
   ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
   std::unique_ptr<QObject> page(component.create());
   ASSERT_NE(page, nullptr) << component.errorString().toStdString();
-  QString text;
-  for (auto *child : page->findChildren<QObject *>()) {
-    text += child->property("text").toString() + '\n';
-    text += child->property("description").toString() + '\n';
-    text += child->property("title").toString() + '\n';
+  const auto features = page->findChildren<QObject *>("infoFeature");
+  const auto credits = page->findChildren<QObject *>("infoCredit");
+  ASSERT_FALSE(features.isEmpty());
+  ASSERT_FALSE(credits.isEmpty());
+  const auto verifyStructure = [&] {
+    for (auto *feature : features) {
+      EXPECT_FALSE(feature->property("title").toString().trimmed().isEmpty());
+      EXPECT_FALSE(feature->property("description").toString().trimmed().isEmpty());
+      const auto icon = feature->property("iconSource").toUrl();
+      EXPECT_TRUE(icon.isValid() && !icon.isEmpty());
+    }
+    int links = 0;
+    for (auto *credit : credits) {
+      QTextDocument document;
+      document.setHtml(credit->property("text").toString());
+      EXPECT_FALSE(document.toPlainText().trimmed().isEmpty());
+      for (auto block = document.begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+          const auto format = it.fragment().charFormat();
+          if (!format.isAnchor())
+            continue;
+          const QUrl link(format.anchorHref());
+          EXPECT_TRUE(link.isValid() && !link.host().isEmpty());
+          EXPECT_TRUE(link.scheme() == "https" || link.scheme() == "http");
+          ++links;
+        }
+      }
+    }
+    EXPECT_GT(links, 0);
+  };
+  verifyStructure();
+
+  // Editorial changes and translations must not be a CI contract. Exercise
+  // different copy on the real components without changing their structure.
+  for (auto *feature : features) {
+    feature->setProperty("title", QStringLiteral("Reworded feature heading"));
+    feature->setProperty("description", QStringLiteral("A revised feature description."));
   }
-  for (const auto *expected : {"Process-based detection", "recording requires authorization",
-       "desktop fallback may include voice", "bookmark a full recording",
-        "install when you choose", "Steam, Heroic and Lutris icons", "Papirus",
-        "Legendary", "Nile", "Felix Ribeiro", "CC BY 4.0"})
-    EXPECT_TRUE(text.contains(expected)) << expected;
-  for (const auto *obsolete : {"KDE KWin", "Hyprland", "Sway", "GNOME / Mutter",
-        "Automatic Updates", "save recent moments anytime", "SQLite", "LibYAML",
-        "Khronos", "Vulkan-Headers", "linuxdeploy"})
-    EXPECT_FALSE(text.contains(obsolete)) << obsolete;
+  for (auto *credit : credits)
+    credit->setProperty("text", QStringLiteral(
+        "Reworded acknowledgment: <a href=\"https://example.org/project\">Project</a>"));
+  verifyStructure();
   EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST(SettingsPageUiTest, WheelScrollStepsAndSectionJumpsAnimate) {
+  TrophyBackend::SettingsManager settings;
+  LibraryUiApp app;
+  SetupUiAudio audio;
+  LibraryUiBackend backend;
+  QQmlEngine engine;
+  engine.rootContext()->setContextProperty("settingsManager", &settings);
+  engine.rootContext()->setContextProperty("gameDetector", &backend);
+  engine.rootContext()->setContextProperty("app", &app);
+  engine.rootContext()->setContextProperty("audioDeviceEnumerator", &audio);
+  for (const auto *name : {"recordingManager", "replayManager", "storageManager",
+                           "globalShortcuts", "hardwareInfo",
+                           "desktopIntegration"})
+    engine.rootContext()->setContextProperty(name, static_cast<QObject *>(nullptr));
+  QStringList errors;
+  QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+      [&](const QList<QQmlError> &warnings) {
+        for (const auto &warning : warnings)
+          errors.append(warning.toString());
+      });
+  QQmlComponent component(&engine, QUrl::fromLocalFile(SETTINGS_QML_FILE));
+  ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+  std::unique_ptr<QObject> page(component.create());
+  ASSERT_NE(page, nullptr) << component.errorString().toStdString();
+  auto *item = qobject_cast<QQuickItem *>(page.get());
+  ASSERT_NE(item, nullptr);
+  QQuickWindow window;
+  window.resize(1024, 720);
+  item->setParentItem(window.contentItem());
+  item->setSize(QSizeF(1024, 720));
+  window.show();
+  QTest::qWait(50);
+  auto *flick = findItem(item, "settingsFlick");
+  ASSERT_NE(flick, nullptr);
+  // Install the application-wide normalizer that main() also uses; without it
+  // Qt animates these writes and the assertions below would see partial moves.
+  TrophyBackend::WheelScrollNormalizer::install();
+  // The empty gutter left of the settings cards is part of the Flickable.
+  const QPointF gutter = flick->mapToScene(QPointF(4, flick->height() / 2));
+  const qreal step = QGuiApplication::styleHints()->wheelScrollLines() * 24.0;
+  // Each wheel event adds its rotation-derived distance and the normalizer
+  // glides there (one 110 ms ease-out per step). A `Behavior on contentY`
+  // would animate every event separately, which is exactly what throttles
+  // high-resolution wheels.
+  QTest::wheelEvent(&window, gutter, QPoint(0, -120));
+  QTest::qWait(250);
+  EXPECT_NEAR(flick->property("contentY").toReal(), step, 0.5);
+  QTest::wheelEvent(&window, gutter, QPoint(0, -15));
+  QTest::qWait(250);
+  EXPECT_NEAR(flick->property("contentY").toReal(), step + step / 8.0, 0.5);
+  // Section jumps keep their animation through the explicit animation.
+  ASSERT_TRUE(QMetaObject::invokeMethod(page.get(), "scrollToSection",
+      Q_ARG(QVariant, QVariant(QStringLiteral("Customization")))));
+  QCoreApplication::processEvents();
+  auto *animation = page->findChild<QObject *>("sectionScrollAnimation");
+  ASSERT_NE(animation, nullptr);
+  ASSERT_TRUE(animation->property("running").toBool());
+  const qreal destination = animation->property("to").toReal();
+  EXPECT_GT(destination, step);
+  // Expanding the target section grows contentHeight, which re-targets the
+  // animation once the expansion finishes, so wait for the settled final run.
+  qreal lastContentY = -1.0;
+  bool settled = false;
+  for (int i = 0; i < 60 && !settled; ++i) {
+    QTest::qWait(50);
+    const qreal contentY = flick->property("contentY").toReal();
+    settled = !animation->property("running").toBool() &&
+              qAbs(contentY - lastContentY) < 0.01;
+    lastContentY = contentY;
+  }
+  EXPECT_TRUE(settled);
+  EXPECT_NEAR(flick->property("contentY").toReal(),
+              animation->property("to").toReal(), 1.0);
+  EXPECT_TRUE(errors.isEmpty()) << errors.join('\n').toStdString();
 }
 
 int main(int argc, char **argv) {

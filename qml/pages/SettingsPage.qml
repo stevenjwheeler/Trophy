@@ -35,7 +35,13 @@ Page {
     function scrollSectionIntoView(card) {
         var target = Math.max(0, card.y - Theme.spacingSmall);
         var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height);
-        settingsFlick.contentY = Math.min(target, maxY);
+        var destination = Math.min(target, maxY);
+        if (Math.abs(settingsFlick.contentY - destination) < 0.5)
+            return;
+        sectionScrollAnimation.stop();
+        sectionScrollAnimation.from = settingsFlick.contentY;
+        sectionScrollAnimation.to = destination;
+        sectionScrollAnimation.start();
     }
 
     Connections {
@@ -234,6 +240,7 @@ Page {
         // --- CONTENT ---
         Flickable {
             id: settingsFlick
+            objectName: "settingsFlick"
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.topMargin: Theme.spacingMedium
@@ -241,11 +248,17 @@ Page {
             contentHeight: contentCol.implicitHeight + Theme.spacingLarge
             clip: true
 
-            Behavior on contentY {
-                NumberAnimation {
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
+            // Section jumps animate explicitly (scrollSectionIntoView) instead
+            // of using `Behavior on contentY`: a Behavior would also animate
+            // every mouse-wheel step, which throttles high-resolution wheels
+            // back to the per-event animation problem it is meant to avoid.
+            NumberAnimation {
+                id: sectionScrollAnimation
+                objectName: "sectionScrollAnimation"
+                target: settingsFlick
+                property: "contentY"
+                duration: 250
+                easing.type: Easing.OutCubic
             }
 
             ScrollBar.vertical: TrophyScrollBar {}

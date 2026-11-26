@@ -11,6 +11,7 @@
 #include "core/Application.h"
 #include "core/DesktopIntegration.h"
 #include "core/ControlServer.h"
+#include "core/WheelScrollNormalizer.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QIcon>
@@ -87,6 +88,12 @@ int main(int argc, char *argv[]) {
 
   // Create application
   TrophyBackend::Application app(argc, argv);
+
+  // Mouse-wheel scrolling must travel the distance the wheel rotated, not the
+  // part of QQuickFlickable's animation that ran before the next event. Without
+  // this, high-resolution wheels (sub-notch HID++ events) scroll several times
+  // slower than conventional ones.
+  TrophyBackend::WheelScrollNormalizer::install();
 
   // Handle termination signals gracefully via a self-pipe: the
   // handler only writes a byte (async-signal-safe) and the GUI

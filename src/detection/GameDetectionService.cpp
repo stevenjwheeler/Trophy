@@ -73,7 +73,7 @@ void GameDetectionService::updateLibraryWatches(const QStringList &paths) {
 }
 void GameDetectionService::saveLibraryPreferences(
     const QString &id, const QVariantMap &preference) {
-  if (!QStringList{"steam", "heroic", "legendary", "nile", "lutris", "faugus"}.contains(id))
+  if (!QStringList{"steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch"}.contains(id))
     return;
   m_libraryPreferences[id] = preference;
   ++m_libraryGeneration; // Only preference changes invalidate in-flight results.
@@ -232,8 +232,8 @@ GameDetectionService::GameDetectionService(QObject *parent)
       m_gamesFilter(new GameListFilterModel(this)) {
   m_whitelist->load();
   m_libraryPreferences = QSettings().value("detection/libraryLocations").toMap();
-  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus"};
-  const QStringList names{"Steam", "Heroic", "Legendary", "Nile", "Lutris", "Faugus"};
+  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch"};
+  const QStringList names{"Steam", "Heroic", "Legendary", "Nile", "Lutris", "Faugus", "itch.io"};
   for (int i = 0; i < ids.size(); ++i) {
     const auto preference = m_libraryPreferences.value(ids[i]).toMap();
     m_libraryStatus.append(QVariantMap{{"id", ids[i]}, {"name", names[i]},
@@ -719,7 +719,7 @@ QUrl GameDetectionService::iconSourceForGame(const QString &name) const {
 void GameDetectionService::rebuildModels() {
   QList<GameListEntry> rows;
   QSet<QString> claimed;
-  const QStringList libraryOrder{"Steam", "Heroic", "Legendary", "Nile", "Lutris", "Faugus"};
+  const QStringList libraryOrder{"Steam", "itch.io", "Heroic", "Legendary", "Nile", "Lutris", "Faugus"};
   const auto customKeys = m_whitelist->customKeys();
   QSet<QString> knownKeys(m_recentKeys.begin(), m_recentKeys.end());
   knownKeys.unite(m_tokenGames);
@@ -748,7 +748,7 @@ void GameDetectionService::rebuildModels() {
   for (const auto &game : m_catalogue) {
     if (!game.steamId && game.executable.isEmpty())
       continue;
-    const QStringList identity = game.steamId
+    const QStringList identity = !game.installation.isEmpty() ? game.installation : game.steamId
         ? QStringList{"steam", QString::number(game.steamId)}
         : QStringList{game.name, game.directory, game.winePrefix};
     installations[identity].append(&game);

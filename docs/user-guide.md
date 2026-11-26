@@ -75,7 +75,7 @@ remains local and read-only. Trophy does not launch games or modify launcher fil
 ### Game library locations
 
 Open **Settings → Game Detection & Libraries → Game Libraries** to see Steam, Heroic, Legendary, Nile,
-Lutris and Faugus, including launchers marked **Not detected**. Detection refers to local
+Lutris, Faugus and itch.io, including launchers marked **Not detected**. Detection refers to local
 metadata, not a running launcher. Each dropdown lists the usable installed games
 found for that launcher: use the arrow beside its game count to open the list.
 The table's status indicators distinguish detected, missing and invalid metadata.
@@ -90,17 +90,42 @@ scans. The setup wizard keeps the previous game count and launcher icons visible
 while refreshing in the background, updating them only when results change.
 
 Automatic discovery checks standard XDG locations and common Steam, Heroic,
-Lutris and Faugus Flatpak locations. Use **Add location…** for a custom launcher metadata
+Lutris, Faugus and itch.io Flatpak locations. Use **Add location…** for a custom launcher metadata
 directory, not a game installation folder. The section explains which directory
 each launcher expects. You can add multiple locations, remove them, turn off
 **Use automatic locations** to replace the defaults, or **Reset to automatic**.
 For a custom Lutris location, the selected directory needs both `pga.db` and the
 `games/` YAML files.
+Every supported launcher can show **Detected** with **0** games when its
+recognized configuration exists but no usable installed games are recorded.
+Empty directories alone do not count, and existing library errors remain visible.
+Detection does not require installing a game first.
+
 For Faugus, select the directory containing `games.json` (normally
-`~/.local/share/faugus-launcher`). Exact Windows game paths with their configured
+`~/.local/share/faugus-launcher`), or its configuration directory containing
+`config.json`. A valid configuration is detected with zero games even before
+Faugus creates its first game-library file. Exact Windows game paths with their configured
 Wine prefix and explicit Linux-native executable entries are supported. Steam
 shortcuts, shared storefronts, script/batch launch tasks and generic launchers
 without installation evidence may still need an exact Trophy rule.
+For itch.io, select its configuration directory containing `db/butler.db`
+(normally `~/.config/itch`). Trophy reads installed game records and their
+recorded Linux or Windows executables; browser games, scripts, shared runtimes
+and installer tasks are not inferred. Heroic 3's itch.io installations are also
+read from its local library cache.
+On Linux, itch.io can store an empty host-filtered launch list for a Windows
+game. Trophy also checks that installed game's `.itch/receipt.json.gz` for
+recorded Windows executables, so games runnable through Proton/Wine can still
+be recognized. It does not launch or configure Proton/Wine.
+
+The same physical installation reported by Steam and Heroic, or itch.io and
+Heroic, is grouped using its store ID and canonical installation directory, not
+its title. Recognition retains both sources. Each launcher's own dropdown can
+still list that installation: these are source inventories, not duplicate Games
+page entries. Separate installation directories and Wine-prefix scopes are not
+collapsed into one installation record.
+When native itch.io and Heroic report the same itch.io installation, its Games
+page entry belongs to the itch.io group; both recognition sources are retained.
 
 All reads are local and read-only. An empty list does not necessarily mean you
 have no games: unsupported launch tasks or missing executable metadata cannot

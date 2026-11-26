@@ -17,18 +17,21 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QProcess>
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QSignalSpy>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 
@@ -51,6 +54,9 @@ class AudioApplicationRegistryTest : public ::testing::Test {
 protected:
   static unsigned attempts(const AudioApplicationRegistry &registry) {
     return registry.connectionAttempts();
+  }
+  static void beforeBind(AudioApplicationRegistry &registry, std::function<void(uint32_t)> hook) {
+    registry.m_beforeBindForTesting = std::move(hook);
   }
 };
 struct RecordingEngineTestAccess {
@@ -82,6 +88,35 @@ public:
 };
 
 namespace {
+std::mutex discoveryWarningsMutex;
+QStringList discoveryWarnings;
+struct DiscoveryWarningCapture {
+  bool warningEnabled = QLoggingCategory::defaultCategory()->isWarningEnabled();
+  QtMessageHandler previous = nullptr;
+  DiscoveryWarningCapture() {
+    {
+      std::lock_guard lock(discoveryWarningsMutex);
+      discoveryWarnings.clear();
+    }
+    QLoggingCategory::defaultCategory()->setEnabled(QtWarningMsg, true);
+    previous = qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &,
+                                         const QString &message) {
+      if (type == QtWarningMsg && message.startsWith("Audio application discovery disconnected")) {
+        std::lock_guard lock(discoveryWarningsMutex);
+        discoveryWarnings.append(message);
+      }
+    });
+  }
+  ~DiscoveryWarningCapture() {
+    qInstallMessageHandler(previous);
+    QLoggingCategory::defaultCategory()->setEnabled(QtWarningMsg, warningEnabled);
+  }
+  QStringList messages() const {
+    std::lock_guard lock(discoveryWarningsMutex);
+    return discoveryWarnings;
+  }
+};
+
 uint32_t fixtureNode(const QString &value, QString *name = nullptr,
                      QString *serial = nullptr, bool appId = true) {
   for (const auto &app : PipeWireAudioSource::enumerateAudioApps()) {
@@ -261,6 +296,69 @@ QVariantMap cachedNode(const AudioApplicationRegistry &registry, const QString &
   return {};
 }
 
+TEST_F(AudioApplicationRegistryTest, RemovedPlaybackResourcesDoNotReconnectDiscovery) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-removal-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  AudioApplicationRegistry registry;
+  registry.start();
+  ASSERT_TRUE(waitFor([&] { return registry.available(); }));
+  const auto connections = attempts(registry);
+  QSignalSpy availability(&registry, &AudioApplicationRegistry::availabilityChanged);
+  PlaybackClient playback;
+  for (int i = 0; i < 30; ++i) {
+    auto *stream = playback.add(0.1f, "registry-removal-node", "registry-removal-binary");
+    ASSERT_TRUE(waitFor([&] { return !cachedNode(registry, "registry-removal-node").isEmpty(); }));
+    playback.remove(stream);
+    ASSERT_TRUE(waitFor([&] { return cachedNode(registry, "registry-removal-node").isEmpty(); }));
+    // Let queued protocol errors and any reconnect attempt become observable.
+    QTest::qWait(30);
+    ASSERT_TRUE(registry.available()) << "removal cycle " << i;
+    ASSERT_EQ(attempts(registry), connections) << "removal cycle " << i;
+  }
+  EXPECT_EQ(availability.count(), 0);
+}
+
+TEST_F(AudioApplicationRegistryTest, GlobalDisappearingBeforeBindDoesNotDestroyUnknownResource) {
+  if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
+    GTEST_SKIP() << "Requires the private PipeWire launcher";
+  int argc = 1;
+  char name[] = "audio-registry-stale-bind-test";
+  char *argv[] = {name, nullptr};
+  QCoreApplication application(argc, argv);
+  DiscoveryWarningCapture warnings;
+  PlaybackClient playback;
+  auto *stream = playback.add(0.1f, "registry-stale-bind-node", "registry-stale-bind-binary");
+  const auto target = privateCaptureNode("registry-stale-bind-node");
+  ASSERT_NE(target, PW_ID_ANY);
+  QSemaphore entered, resume;
+  std::atomic_bool gated{false};
+  AudioApplicationRegistry registry;
+  beforeBind(registry, [&](uint32_t id) {
+    if (id == target && !gated.exchange(true)) {
+      entered.release();
+      resume.acquire();
+    }
+  });
+  const auto release = qScopeGuard([&] { resume.release(); registry.stop(); });
+  registry.start();
+  ASSERT_TRUE(entered.tryAcquire(1, 5000));
+  playback.remove(stream);
+  ASSERT_TRUE(waitFor([&] { return privateCaptureNode("registry-stale-bind-node") == PW_ID_ANY; }));
+  resume.release();
+  ASSERT_TRUE(waitFor([&] { return registry.available(); }));
+  // A protocol sync after the failed bind must settle without reconnecting.
+  auto *successor = playback.add(0.2f, "registry-after-stale-bind", "registry-after-binary");
+  ASSERT_TRUE(waitFor([&] { return !cachedNode(registry, "registry-after-stale-bind").isEmpty(); }));
+  EXPECT_TRUE(cachedNode(registry, "registry-stale-bind-node").isEmpty());
+  EXPECT_EQ(attempts(registry), 1u);
+  EXPECT_TRUE(warnings.messages().isEmpty()) << warnings.messages().join('\n').toStdString();
+  playback.remove(successor);
+}
+
 TEST_F(AudioApplicationRegistryTest, SharedConsumersReceiveChangesWithoutPeriodicConnections) {
   if (qEnvironmentVariable("TROPHY_PRIVATE_PIPEWIRE_TEST") != "1")
     GTEST_SKIP() << "Requires the private PipeWire launcher";
@@ -411,6 +509,7 @@ TEST_F(AudioApplicationRegistryTest, ServiceRestartClearsStaleNodesAndRebuildsCa
   char name[] = "audio-registry-reconnect-test";
   char *argv[] = {name, nullptr};
   QCoreApplication application(argc, argv);
+  DiscoveryWarningCapture warnings;
   AudioApplicationRegistry registry;
   registry.start();
   auto playback = std::make_unique<PlaybackClient>();
@@ -421,6 +520,7 @@ TEST_F(AudioApplicationRegistryTest, ServiceRestartClearsStaleNodesAndRebuildsCa
   ASSERT_TRUE(privateServices("stop"));
   stopped = true;
   ASSERT_TRUE(waitFor([&] { return !registry.available() && registry.applications().isEmpty(); }));
+  ASSERT_TRUE(waitFor([&] { return !warnings.messages().isEmpty(); }));
   playback.reset();
   ASSERT_TRUE(privateServices("start"));
   stopped = false;

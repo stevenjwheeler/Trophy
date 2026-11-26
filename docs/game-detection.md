@@ -23,7 +23,7 @@ There are five domain components:
   Zombies, unreadable processes and oversized input are skipped.
 * `src/detection/LauncherLibrary.{h,cpp}` reads installed-game metadata from
   local launchers into one catalogue. Steam discovery lives here alongside
-  Heroic, Legendary, Nile, Lutris and Faugus; process identification does not enumerate
+  Heroic, Legendary, Nile, Lutris, Faugus and itch.io; process identification does not enumerate
   launcher files.
   The Games page prelists non-runtime catalogue entries. Running games lead in
   Now Playing; inactive games group by local launcher provenance, with ready
@@ -121,33 +121,74 @@ one catalogue:
 | Launcher | Local source | Recognition evidence |
 | --- | --- | --- |
 | Steam | `steamapps/libraryfolders.vdf` and `appmanifest_*.acf` | Installed app directory, with App ID corroboration when present |
+| Heroic Steam | `heroic/steam_store/installed.json` plus `store_cache/steam_library.json` | Installed App ID and directory, including installations without a discoverable Steam manifest |
 | Legendary / Heroic Epic | `legendary/installed.json` or `heroic/legendaryConfig/legendary/installed.json` under XDG config | Exact installed executable |
 | Heroic GOG | `heroic/gog_store/installed.json` and the installed product's `goggame-<id>.info` | Matching product ID and primary file launch task |
 | Nile / Heroic Amazon | `nile/` or `heroic/nile_config/nile/` under XDG config | Installed ID joined to local `library.json` title and `fuel.json` main executable |
 | Lutris | XDG data `lutris/pga.db` and XDG config `lutris/games/<configpath>.yml` | Installed Linux/Wine entry's exact executable, plus configured Wine prefix |
 | Faugus | XDG data `faugus-launcher/games.json` (also checks the config directory and standard Flatpak data/config locations) | Exact configured `path`, with configured `prefix` for Windows entries; explicit `Linux-Native` ELF entries need no Wine prefix |
+| itch.io app | XDG config `itch/db/butler.db` (also checks `io.itch.itch` Flatpak config) and each installation's `.itch/receipt.json.gz` | Installed Butler cave joined to its game and install location, with explicit launch candidates and receipt-listed Windows executables |
+| Heroic itch.io | `heroic/store_cache/itchio_library.json` | Installed game ID, directory and exact recorded executable |
 
 Steam discovery reads local libraryfolders and app
 manifests, including extra drives and common Flatpak locations. Heroic and Lutris
-also check their standard Flatpak metadata directories, as does Faugus.
+also check their standard Flatpak metadata directories, as do Faugus and itch.io.
 **Settings → Game Detection & Libraries → Game Libraries**
 shows every supported launcher, including **Not detected** entries, discovered
 metadata locations, read errors and usable-game counts. Each launcher's dropdown
 lists its usable installed games. **Rescan now** requests a fresh background scan.
+All launchers can show **Detected** with **0** games from recognized configuration
+alone; game counts still come only from usable installed-game metadata. Empty
+directories do not qualify. Configuration evidence is Steam `config/config.vdf`
+(`InstallConfigStore`), Heroic/Faugus `config.json` objects, Legendary `config.ini`
+with a `[Legendary]` section, Nile `current_user.json` objects or `library.json`
+arrays, Lutris `lutris.conf` with a `[lutris]` section, and itch.io `config.json`
+or `preferences.json` objects. These bounded, read-only checks also watch for
+configuration and library creation/removal. Valid configuration does not hide
+errors in existing library metadata.
 Legendary's `LEGENDARY_CONFIG_PATH` is honored when inherited by Trophy and set
 to an absolute directory.
 Users can add up to 16 custom metadata directories per launcher, remove them,
 disable automatic locations or reset to automatic discovery. Overrides supplement
 automatic discovery unless it is disabled; canonical paths are deduplicated.
-Custom Lutris directories contain `pga.db` and a `games/` YAML subdirectory;
+Custom Lutris directories contain `pga.db` and a `games/` YAML subdirectory,
+or `lutris.conf` for configuration-only detection;
 automatic native/Flatpak discovery pairs separate config and data directories.
-Custom Faugus directories contain `games.json`. Faugus entries must name an
+Custom Faugus directories contain `games.json` or `config.json`. A valid config
+object detects an empty setup before its first library is created; configuration
+is never interpreted as game entries and cannot conceal an invalid `games.json`.
+Faugus entries must name an
 existing ELF (explicit `Linux-Native` runner) or PE payload with an absolute host
 Wine prefix. Home-relative `~/` paths are supported; arbitrary environment
 expansion, command/script launch tasks, Steam-ID entries and additional-app batch
 mode are not inferred. Shared storefronts are excluded. A configured Faugus
 path does not attest an installation root, so it cannot grant generic-bootstrap,
 directory-wide, prefix-wide or private-runtime sibling ownership.
+Custom itch.io directories contain `db/butler.db`, `config.json` or
+`preferences.json`. Database reads are read-only,
+with a short lock timeout, bounded column sizes and a query work budget; WAL
+changes are watched as well. Only game/install tables are queried, never login
+profiles or tokens. No Butler daemon or migration is run. Explicit non-game
+classifications, morphing/uninstalled caves, scripts, HTML, emulators and
+installer candidates are excluded. Executables must exist inside the declared
+installation, including after symlink resolution; there is no folder scan fallback.
+Butler's verdict is host-filtered, so a Windows game installed on Linux can have
+no candidates even though it can run under Proton/Wine. A gzip receipt belonging
+to the same installed game ID supplements that list: only recorded `.exe` paths
+with executable, non-DLL Windows PE headers are accepted. Crash handlers, common
+installer/uninstaller names and paths explicitly marked as installers by the
+verdict are excluded. Receipt files and their metadata directories cannot be
+symlinks; payload symlinks must stay inside the installation. Gzip integrity,
+compressed/decoded byte budgets and file-list limits are enforced, and receipts
+are watched for changes. No external gzip/Butler command or launch is performed.
+
+Store IDs plus canonical installation paths and Wine-prefix scopes merge
+overlapping metadata despite different launcher titles. Exact path aliases
+remain available for recognition, with a shared display name and combined source
+attribution. Steam manifests take display-name precedence over Heroic's cache.
+Different store IDs or physical installations are not merged; without a store ID,
+conflicting launcher names still require a user rule. Per-launcher inventories
+may each list a shared installation, but the Games page groups its aliases.
 An executable must be inside an installed app's directory; a matching
 Steam App ID is strong corroboration when available. Inherited
 `SteamAppId` alone does not make Steam, Proton, a runtime helper or Wine

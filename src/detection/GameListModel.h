@@ -75,14 +75,34 @@ public:
     for (qsizetype i = 0; sameKeys && i < entries.size(); ++i)
       sameKeys = entries.at(i).key == m_entries.at(i).key;
     if (sameKeys) {
-      QList<int> changedRows;
+      QList<QPair<int, QList<int>>> changedRows;
       for (qsizetype i = 0; i < entries.size(); ++i) {
-        if (entries.at(i) != m_entries.at(i))
-          changedRows.append(static_cast<int>(i));
+        const auto &before = m_entries.at(i);
+        const auto &after = entries.at(i);
+        QList<int> roles;
+        if (before.display != after.display)
+          roles << DisplayRole << Qt::DisplayRole;
+        if (before.pid != after.pid) roles << PidRole;
+        if (before.running != after.running) roles << RunningRole;
+        if (before.steamAppId != after.steamAppId)
+          roles << SteamAppIdRole << IconSourceRole;
+        if (before.listed != after.listed) roles << ListedRole;
+        if (before.isDefault != after.isDefault)
+          roles << DefaultRole << IdentifiersRole;
+        if (before.hasToken != after.hasToken) roles << HasTokenRole;
+        if (before.tokenKey != after.tokenKey) roles << TokenKeyRole;
+        if (before.section != after.section) roles << SectionRole;
+        if (before.library != after.library) roles << LibraryRole;
+        if (before.blockKey != after.blockKey) roles << BlockKeyRole;
+        if (before.supportTool != after.supportTool) roles << SupportToolRole;
+        if (!roles.isEmpty())
+          changedRows.append({static_cast<int>(i), roles});
       }
       m_entries = std::move(entries);
-      for (int row : changedRows)
-        emit dataChanged(index(row), index(row));
+      // Section changes force a ListView relayout/fixup even when its geometry
+      // did not change. Do not announce one for ordinary PID/state refreshes.
+      for (const auto &[row, roles] : changedRows)
+        emit dataChanged(index(row), index(row), roles);
       return;
     }
     beginResetModel();

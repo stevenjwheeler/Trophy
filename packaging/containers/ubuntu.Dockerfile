@@ -10,5 +10,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     qt6-svg-plugins libpipewire-0.3-common pipewire-bin \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
     libpipewire-0.3-dev libva-dev libdrm-dev libegl-dev libgbm-dev \
-    libyaml-dev libsqlite3-dev \
+    libyaml-dev libsqlite3-dev zlib1g-dev \
     dpkg-dev desktop-file-utils appstream

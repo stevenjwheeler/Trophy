@@ -250,11 +250,13 @@ ColumnLayout {
                                         }
                                         Label {
                                             Layout.fillWidth: true
-                                            text: launcherRow.library.id === "steam" ? qsTr("Select the Steam directory containing steamapps.")
-                                                : launcherRow.library.id === "faugus" ? qsTr("Select the Faugus data directory containing games.json.")
-                                                : launcherRow.library.id === "heroic" ? qsTr("Select the heroic config directory containing legendaryConfig, gog_store or nile_config.")
-                                                : launcherRow.library.id === "lutris" ? qsTr("Select the Lutris data directory containing pga.db and the games subdirectory with its YAML files.")
-                                                : qsTr("Select the launcher metadata directory containing installed.json.")
+                                            text: launcherRow.library.id === "steam" ? qsTr("Select the Steam directory containing steamapps or config/config.vdf.")
+                                                : launcherRow.library.id === "faugus" ? qsTr("Select the Faugus data directory containing games.json, or its config directory containing config.json.")
+                                                : launcherRow.library.id === "heroic" ? qsTr("Select the heroic config directory containing config.json or its store library metadata.")
+                                                : launcherRow.library.id === "itch" ? qsTr("Select the itch config directory containing config.json, preferences.json or db/butler.db.")
+                                                : launcherRow.library.id === "lutris" ? qsTr("Select the Lutris data directory containing pga.db and game YAML files, or its config directory containing lutris.conf.")
+                                                : launcherRow.library.id === "legendary" ? qsTr("Select the Legendary directory containing config.ini or installed.json.")
+                                                : qsTr("Select the Nile directory containing current_user.json, library.json or installed.json.")
                                             wrapMode: Text.WordWrap
                                             color: Theme.textSecondaryColor
                                             font.pixelSize: Theme.fontSizeSmall

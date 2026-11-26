@@ -9,9 +9,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
+#include <QElapsedTimer>
+#include <QtEndian>
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 #include <algorithm>
+#include <sys/stat.h>
+#include <zlib.h>
 
 using namespace TrophyBackend;
 class LauncherLibraryTest : public ::testing::Test {
@@ -41,6 +45,102 @@ protected:
   QJsonObject epic() {
     return {{"title", "An Epic Game"}, {"install_path", directory},
             {"executable", "bin\\Game.exe"}, {"platform", "Windows"}};
+  }
+  void heroicSteam(const QString &title = "Heroic Steam Title", const QString &id = "12345",
+                   const QString &installDirectory = {}) {
+    const auto path = installDirectory.isEmpty() ? directory : installDirectory;
+    object(config + "/heroic/steam_store/installed.json",
+           {{"installed", QJsonArray{QJsonObject{{"appName", id}, {"install_path", path},
+                                               {"platform", "windows"}, {"is_dlc", false}}}}});
+    object(config + "/heroic/store_cache/steam_library.json",
+           {{"games", QJsonArray{QJsonObject{{"app_name", id}, {"title", title}}}}});
+  }
+  void heroicItch(const QString &title = "Heroic itch Title", const QString &id = "123",
+                  const QString &installDirectory = {}, const QString &payload = {}) {
+    object(config + "/heroic/store_cache/itchio_library.json",
+           {{"library", QJsonArray{QJsonObject{{"app_name", "itchio-" + id}, {"title", title},
+               {"is_installed", true}, {"install", QJsonObject{
+                   {"install_path", installDirectory.isEmpty() ? directory : installDirectory},
+                   {"executable", payload.isEmpty() ? exe : payload}, {"platform", "windows"}}}}}}});
+  }
+  QJsonObject verdict(const QString &path = "bin/Game.exe", const QString &flavor = "windows") {
+    return {{"basePath", "/stale/path"}, {"candidates", QJsonArray{
+        QJsonObject{{"path", path}, {"flavor", flavor}}}}};
+  }
+  void pe(const QString &path, quint16 flags = 0x0002, quint16 subsystem = 2,
+          quint16 magic = 0x020b) {
+    QByteArray header(512, '\0');
+    header.replace(0, 2, "MZ");
+    qToLittleEndian<quint32>(128, header.data() + 0x3c);
+    header.replace(128, 4, QByteArray("PE\0\0", 4));
+    qToLittleEndian<quint16>(magic == 0x010b ? 0x014c : 0x8664, header.data() + 132);
+    qToLittleEndian<quint16>(magic == 0x010b ? 224 : 240, header.data() + 148);
+    qToLittleEndian<quint16>(flags, header.data() + 150);
+    qToLittleEndian<quint16>(magic, header.data() + 152);
+    qToLittleEndian<quint16>(subsystem, header.data() + 220);
+    write(path, header);
+  }
+  QByteArray gzip(const QByteArray &input) {
+    z_stream stream{};
+    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16,
+                     8, Z_DEFAULT_STRATEGY) != Z_OK) {
+      ADD_FAILURE() << "Cannot initialize gzip fixture";
+      return {};
+    }
+    QByteArray output(compressBound(input.size()) + 64, '\0');
+    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.constData()));
+    stream.avail_in = static_cast<uInt>(input.size());
+    stream.next_out = reinterpret_cast<Bytef *>(output.data());
+    stream.avail_out = static_cast<uInt>(output.size());
+    const auto result = deflate(&stream, Z_FINISH);
+    const auto length = stream.total_out;
+    deflateEnd(&stream);
+    EXPECT_EQ(result, Z_STREAM_END);
+    output.resize(length);
+    return output;
+  }
+  void receipt(const QJsonArray &files, const QString &id = "123",
+               const QString &classification = "game") {
+    write(directory + "/.itch/receipt.json.gz", gzip(QJsonDocument(QJsonObject{
+        {"game", QJsonObject{{"id", id.toLongLong()}, {"classification", classification}}},
+        {"files", files}, {"installerName", "archive"}}).toJson()));
+  }
+  void itch(const QJsonObject &launch, const QString &title = "Native itch Title",
+            const QString &id = "123", const QString &custom = {},
+            const QString &locationRoot = {}, const QString &classification = "game") {
+    const auto root = locationRoot.isEmpty() ? config + "/itch" : locationRoot;
+    ASSERT_TRUE(QDir().mkpath(root + "/db"));
+    sqlite3 *db = nullptr;
+    ASSERT_EQ(sqlite3_open(QFile::encodeName(root + "/db/butler.db").constData(), &db), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY,title TEXT,classification TEXT);"
+        "CREATE TABLE IF NOT EXISTS install_locations(id TEXT PRIMARY KEY,path TEXT);"
+        "CREATE TABLE IF NOT EXISTS caves(id TEXT,game_id INTEGER,install_location_id TEXT,"
+        "install_folder_name TEXT,custom_install_folder TEXT,verdict TEXT,installed_at TEXT,morphing INTEGER);",
+        nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_stmt *statement = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO games VALUES(?,?,?)",
+                                -1, &statement, nullptr), SQLITE_OK);
+    const QStringList fields{id, title, classification};
+    for (int i = 0; i < fields.size(); ++i)
+      sqlite3_bind_text(statement, i + 1, fields[i].toUtf8().constData(), -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(statement), SQLITE_DONE);
+    sqlite3_finalize(statement);
+    ASSERT_EQ(sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO install_locations VALUES('main',?)",
+                                -1, &statement, nullptr), SQLITE_OK);
+    const auto parent = QFileInfo(directory).absolutePath().toUtf8();
+    sqlite3_bind_text(statement, 1, parent.constData(), -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(statement), SQLITE_DONE);
+    sqlite3_finalize(statement);
+    ASSERT_EQ(sqlite3_prepare_v2(db, "INSERT INTO caves VALUES(?,?,'main',?,?,?,'2026-11-26',0)",
+                                -1, &statement, nullptr), SQLITE_OK);
+    const QStringList caveFields{"cave-" + id, id, QFileInfo(directory).fileName(), custom,
+        QString::fromUtf8(QJsonDocument(launch).toJson())};
+    for (int i = 0; i < caveFields.size(); ++i)
+      sqlite3_bind_text(statement, i + 1, caveFields[i].toUtf8().constData(), -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(statement), SQLITE_DONE);
+    sqlite3_finalize(statement);
+    ASSERT_EQ(sqlite3_close(db), SQLITE_OK);
   }
   void lutris(const QString &yaml, const QString &runner = "wine",
               bool installed = true, const QString &configId = "a-game") {
@@ -116,13 +216,582 @@ protected:
 
 TEST_F(LauncherLibraryTest, DiscoveryAlwaysListsSupportedLaunchers) {
   const auto result = LauncherLibrary::discover(home, config, data);
-  ASSERT_EQ(result.launchers.size(), 6);
+  ASSERT_EQ(result.launchers.size(), 7);
   for (const auto &value : result.launchers) {
     const auto launcher = value.toMap();
     EXPECT_FALSE(launcher.value("detected").toBool());
     EXPECT_TRUE(launcher.value("automatic").toBool());
     EXPECT_EQ(launcher.value("count").toInt(), 0);
     EXPECT_TRUE(launcher.value("games").toList().isEmpty());
+  }
+}
+
+TEST_F(LauncherLibraryTest, HeroicSteamSupplementsManifestsWithoutDuplicatingRenamedTitles) {
+  write(home + "/.steam/steam/steamapps/appmanifest_12345.acf",
+        "\"appid\" \"12345\" \"name\" \"Steam Title\" \"installdir\" \"Shared\"");
+  const auto steamDirectory = home + "/.steam/steam/steamapps/common/Shared";
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(steamDirectory).absolutePath()));
+  ASSERT_TRUE(QFile::link(directory, steamDirectory));
+  heroicSteam("A Different Heroic Title", "12345", directory);
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 2); // Two path spellings, one physical installation.
+  EXPECT_EQ(result.games.first().steamId, 12345u);
+  EXPECT_EQ(result.games.first().name, "Steam Title");
+  EXPECT_EQ(result.games.first().sources, (QStringList{"Steam", "Heroic (Steam)"}));
+  EXPECT_EQ(result.launchers[0].toMap().value("count").toInt(), 1);
+  EXPECT_EQ(result.launchers[1].toMap().value("count").toInt(), 1);
+  EXPECT_EQ(result.games[0].installation, result.games[1].installation);
+  auto p = process();
+  p.steamId = 12345;
+  const auto detected = identify({{p.pid, p}}, result.games);
+  ASSERT_EQ(detected.size(), 1);
+  EXPECT_EQ(detected.first().detectionSources, (QStringList{"Steam", "Heroic (Steam)"}));
+  EXPECT_TRUE(result.watchPaths.contains(config + "/heroic/store_cache/steam_library.json"));
+}
+
+TEST_F(LauncherLibraryTest, HeroicSteamWorksWithoutManifestsButKeepsSeparateInstallations) {
+  heroicSteam();
+  auto games = read();
+  ASSERT_EQ(games.size(), 1);
+  EXPECT_EQ(games.first().sources, QStringList{"Heroic (Steam)"});
+  auto p = process();
+  p.steamId = 12345;
+  ASSERT_EQ(identify({{p.pid, p}}, games).size(), 1);
+  const auto steamRoot = home + "/.steam/steam/steamapps";
+  ASSERT_TRUE(QDir().mkpath(steamRoot + "/common/Other"));
+  write(steamRoot + "/appmanifest_12345.acf",
+        "\"appid\" \"12345\" \"name\" \"Steam Title\" \"installdir\" \"Other\"");
+  games = read();
+  ASSERT_EQ(games.size(), 2);
+  EXPECT_NE(games[0].installation, games[1].installation);
+}
+
+TEST_F(LauncherLibraryTest, HeroicSteamRejectsInvalidIdsMissingInstallsAndSupportTools) {
+  heroicSteam("Invalid", "4294967296");
+  EXPECT_TRUE(read().isEmpty());
+  heroicSteam("Missing", "12345", home + "/missing");
+  EXPECT_TRUE(read().isEmpty());
+  heroicSteam("Proton", "1493710");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_TRUE(result.games.first().runtimeTool);
+  EXPECT_EQ(result.launchers[1].toMap().value("count").toInt(), 0);
+}
+
+TEST_F(LauncherLibraryTest, HeroicAndNativeItchMergeSameInstallDespiteDifferentTitles) {
+  heroicItch();
+  itch(verdict());
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  const auto &game = result.games.first();
+  EXPECT_EQ(game.productId, "itch:123");
+  EXPECT_EQ(game.sources, (QStringList{"Heroic (itch.io)", "itch.io"}));
+  EXPECT_EQ(game.executable, exe);
+  EXPECT_EQ(result.launchers[1].toMap().value("count").toInt(), 1);
+  EXPECT_EQ(result.launchers[6].toMap().value("count").toInt(), 1);
+  auto p = process();
+  p.winePrefix = home + "/Wine";
+  const auto detected = identify({{p.pid, p}}, result.games);
+  ASSERT_EQ(detected.size(), 1);
+  EXPECT_EQ(detected.first().detectionSources, game.sources);
+  p.executable = directory + "/Unrelated.exe";
+  p.arguments = {p.executable};
+  EXPECT_TRUE(identify({{p.pid, p}}, result.games).isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchUsesCurrentLocationAndExactRecordedLinuxBinary) {
+  const auto native = directory + "/NativeGame";
+  write(native, QByteArray("\x7f""ELFfixture", 11));
+  itch(verdict("NativeGame", "linux"));
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().executable, native);
+  EXPECT_EQ(result.games.first().sources, QStringList{"itch.io"});
+  EXPECT_TRUE(result.watchPaths.contains(config + "/itch/db/butler.db"));
+  const auto p = process();
+  EXPECT_TRUE(identify({{p.pid, p}}, result.games).isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchSupportsCustomInstallFoldersAndFlatpakConfiguration) {
+  const auto other = home + "/Other install";
+  write(other + "/Game.exe", "MZfixture");
+  const auto flatpak = home + "/.var/app/io.itch.itch/config/itch";
+  itch(verdict("Game.exe"), "Custom", "321", other, flatpak);
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().executable, other + "/Game.exe");
+  EXPECT_TRUE(result.launchers[6].toMap().value("detected").toBool());
+  EXPECT_TRUE(result.watchPaths.contains(flatpak + "/db/butler.db"));
+}
+
+TEST_F(LauncherLibraryTest, ItchDoesNotMergeDifferentProductsOrDifferentInstallationsByTitle) {
+  heroicItch("Same Title");
+  itch(verdict(), "Same Title", "456");
+  EXPECT_EQ(read().size(), 2); // Same path, conflicting product identity.
+  const auto other = home + "/Other";
+  write(other + "/Game.exe", "MZfixture");
+  itch(verdict("Game.exe"), "Same Title", "123", other);
+  const auto games = read();
+  ASSERT_EQ(games.size(), 3);
+  EXPECT_NE(games[0].installation, games[2].installation);
+}
+
+TEST_F(LauncherLibraryTest, ItchRejectsNonGamesScriptsBrowsersInstallersAndEscapingCandidates) {
+  const auto outside = home + "/Outside.exe";
+  write(outside, "MZfixture");
+  write(directory + "/start.sh", "#!/bin/sh\nexec something");
+  ASSERT_TRUE(QFile::link(outside, directory + "/escaped.exe"));
+  const QJsonArray candidates{
+      QJsonObject{{"path", "start.sh"}, {"flavor", "script"}},
+      QJsonObject{{"path", "bin/Game.exe"}, {"flavor", "html"}},
+      QJsonObject{{"path", "../../Outside.exe"}, {"flavor", "windows"}},
+      QJsonObject{{"path", "escaped.exe"}, {"flavor", "windows"}},
+      QJsonObject{{"path", "bin/Game.exe"}, {"flavor", "windows"},
+                  {"windowsInfo", QJsonObject{{"installerType", "inno"}}}},
+      QJsonObject{{"path", "bin/Game.exe"}, {"flavor", "linux"}}};
+  itch({{"candidates", candidates}});
+  EXPECT_TRUE(read().isEmpty());
+  itch(verdict(), "Editor", "456", {}, {}, "tool");
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchCustomLocationsRespectAutomaticToggleAndNeverCreateDatabases) {
+  EXPECT_TRUE(read().isEmpty());
+  EXPECT_FALSE(QFileInfo::exists(config + "/itch/db/butler.db"));
+  itch(verdict(), "Custom", "123", {}, home + "/custom-itch");
+  itch(verdict(), "Automatic");
+  const auto result = LauncherLibrary::discover(home, config, data,
+      {{"itch", QVariantMap{{"automatic", false}, {"paths", QStringList{"~/custom-itch"}}}}});
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().name, "Custom");
+  EXPECT_EQ(result.launchers[6].toMap().value("locations").toList().size(), 1);
+  EXPECT_FALSE(result.launchers[6].toMap().value("automatic").toBool());
+}
+
+TEST_F(LauncherLibraryTest, ItchInvalidSchemaIsReportedWithoutChangingDatabase) {
+  write(config + "/itch/db/butler.db", "Not a database");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.games.isEmpty());
+  const auto locations = result.launchers[6].toMap().value("locations").toList();
+  ASSERT_EQ(locations.size(), 1);
+  EXPECT_EQ(locations[0].toMap().value("status").toString(), "Unreadable or invalid metadata");
+  QFile file(config + "/itch/db/butler.db");
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  EXPECT_EQ(file.readAll(), "Not a database");
+}
+
+TEST_F(LauncherLibraryTest, ItchReadOnlyWalSnapshotAndLockBudgetAndInstallState) {
+  itch(verdict());
+  const auto path = config + "/itch/db/butler.db";
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto before = file.readAll();
+  file.close();
+  ASSERT_EQ(read().size(), 1);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  EXPECT_EQ(file.readAll(), before);
+  file.close();
+  sqlite3 *db = nullptr;
+  ASSERT_EQ(sqlite3_open(QFile::encodeName(path).constData(), &db), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(db, "PRAGMA journal_mode=WAL;"
+      "UPDATE games SET title='Updated in WAL';BEGIN IMMEDIATE;"
+      "UPDATE games SET title='Uncommitted';", nullptr, nullptr, nullptr), SQLITE_OK);
+  const auto snapshot = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(snapshot.games.size(), 1);
+  EXPECT_EQ(snapshot.games.first().name, "Updated in WAL");
+  EXPECT_TRUE(snapshot.watchPaths.contains(path + "-wal"));
+  ASSERT_EQ(sqlite3_exec(db, "ROLLBACK;UPDATE caves SET morphing=1",
+                        nullptr, nullptr, nullptr), SQLITE_OK);
+  EXPECT_TRUE(read().isEmpty());
+  ASSERT_EQ(sqlite3_exec(db, "UPDATE caves SET morphing=0,installed_at=NULL",
+                        nullptr, nullptr, nullptr), SQLITE_OK);
+  EXPECT_TRUE(read().isEmpty());
+  ASSERT_EQ(sqlite3_exec(db, "PRAGMA journal_mode=DELETE;BEGIN EXCLUSIVE",
+                        nullptr, nullptr, nullptr), SQLITE_OK);
+  QElapsedTimer timer;
+  timer.start();
+  EXPECT_TRUE(read().isEmpty());
+  EXPECT_LT(timer.elapsed(), 500);
+  ASSERT_EQ(sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
+  ASSERT_EQ(sqlite3_close(db), SQLITE_OK);
+}
+
+TEST_F(LauncherLibraryTest, HeroicItchOnlyAcceptsInstalledExecutableRecords) {
+  const auto file = config + "/heroic/store_cache/itchio_library.json";
+  heroicItch();
+  ASSERT_EQ(read().size(), 1);
+  QFile input(file);
+  ASSERT_TRUE(input.open(QIODevice::ReadOnly));
+  const auto valid = QJsonDocument::fromJson(input.readAll()).object().value("library").toArray()[0].toObject();
+  input.close();
+  for (const auto &field : QStringList{"is_installed", "app_name", "install", "classification"}) {
+    auto entry = valid;
+    entry[field] = field == "is_installed" ? QJsonValue(false)
+        : field == "app_name" ? QJsonValue("itchio-0")
+        : field == "classification" ? QJsonValue("tool") : QJsonValue(QJsonObject{});
+    object(file, {{"library", QJsonArray{entry}}});
+    EXPECT_TRUE(read().isEmpty()) << field.toStdString();
+  }
+  for (const auto &field : QStringList{"install_path", "executable", "platform"}) {
+    auto entry = valid;
+    auto install = entry.value("install").toObject();
+    install[field] = field == "executable" ? "https://example.invalid/game"
+        : field == "platform" ? "osx" : "/missing";
+    entry["install"] = install;
+    object(file, {{"library", QJsonArray{entry}}});
+    EXPECT_TRUE(read().isEmpty()) << field.toStdString();
+  }
+  object(file, {{"library", "wrong shape"}});
+  EXPECT_TRUE(read().isEmpty());
+  write(file, "{bad json");
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchNeverOpensNamedPipesAsExecutablePayloads) {
+  const auto pipe = directory + "/pipe.exe";
+  ASSERT_EQ(::mkfifo(QFile::encodeName(pipe).constData(), 0600), 0);
+  itch(verdict("pipe.exe"));
+  heroicItch("Pipe", "123", directory, pipe);
+  QElapsedTimer timer;
+  timer.start();
+  EXPECT_TRUE(read().isEmpty());
+  EXPECT_LT(timer.elapsed(), 500);
+}
+
+TEST_F(LauncherLibraryTest, LegendaryAndHeroicMergeOnlyMatchingProductsAndPhysicalInstalls) {
+  auto first = epic();
+  auto second = first;
+  second["title"] = "A Different Legendary Title";
+  object(config + "/heroic/legendaryConfig/legendary/installed.json", {{"same-id", first}});
+  object(config + "/legendary/installed.json", {{"same-id", second}});
+  auto games = read();
+  ASSERT_EQ(games.size(), 1);
+  EXPECT_EQ(games.first().sources, (QStringList{"Legendary", "Heroic (Epic)"}));
+  object(config + "/legendary/installed.json", {{"different-id", second}});
+  games = read();
+  EXPECT_EQ(games.size(), 2);
+}
+
+TEST_F(LauncherLibraryTest, CanonicalPrefixGroupingRetainsEveryExactPrefixAlias) {
+  ASSERT_TRUE(QDir().mkpath(home + "/prefix"));
+  ASSERT_TRUE(QDir().mkpath(home + "/different-prefix"));
+  ASSERT_TRUE(QFile::link(home + "/prefix", home + "/prefix-alias"));
+  QJsonArray entries;
+  for (const auto &prefix : QStringList{home + "/prefix", home + "/prefix-alias",
+                                       home + "/different-prefix"})
+    entries.append(QJsonObject{{"title", "Prefix Game"}, {"path", exe},
+                                {"prefix", prefix}, {"runner", "Default"}});
+  array(data + "/faugus-launcher/games.json", entries);
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 3);
+  EXPECT_EQ(result.launchers[5].toMap().value("count").toInt(), 2);
+  for (const auto &prefix : QStringList{home + "/prefix", home + "/prefix-alias",
+                                       home + "/different-prefix"}) {
+    auto p = process();
+    p.winePrefix = prefix;
+    ASSERT_EQ(identify({{p.pid, p}}, result.games).size(), 1);
+  }
+}
+
+TEST_F(LauncherLibraryTest, ItchNullHostVerdictUsesReceiptWindowsGameForProton) {
+  const auto gamePath = directory + "/HiddenPaws/Hidden Paws.exe";
+  pe(gamePath);
+  pe(directory + "/HiddenPaws/UnityCrashHandler64.exe");
+  itch({{"candidates", QJsonValue(QJsonValue::Null)}}, "Hidden Paws");
+  receipt({"HiddenPaws/Hidden Paws.exe", "HiddenPaws/UnityCrashHandler64.exe",
+           "HiddenPaws/UnityPlayer.dll"});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().name, "Hidden Paws");
+  EXPECT_EQ(result.games.first().executable, gamePath);
+  EXPECT_EQ(result.games.first().productId, "itch:123");
+  EXPECT_EQ(result.games.first().sources, QStringList{"itch.io"});
+  EXPECT_TRUE(result.watchPaths.contains(directory + "/.itch/receipt.json.gz"));
+  auto p = process();
+  p.executable = "/Proton/files/bin/wine64-preloader";
+  p.arguments = {p.executable, gamePath};
+  p.winePrefix = home + "/Proton prefix";
+  const auto identified = identify({{p.pid, p}}, result.games);
+  ASSERT_EQ(identified.size(), 1);
+  EXPECT_EQ(identified.first().name, "Hidden Paws");
+  EXPECT_TRUE(identified.first().key.startsWith("wine:"));
+  EXPECT_EQ(identified.first().detectionSources, QStringList{"itch.io"});
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptComplementsNativeVerdictWithoutDuplicatingPayloads) {
+  pe(exe);
+  const auto native = directory + "/NativeGame";
+  write(native, QByteArray("\x7f""ELFfixture", 11));
+  itch(verdict("NativeGame", "linux"));
+  receipt({"bin/Game.exe", "bin/Game.exe"});
+  auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 2);
+  EXPECT_EQ(result.games[0].installation, result.games[1].installation);
+  EXPECT_EQ(result.launchers[6].toMap().value("count").toInt(), 1);
+  // Re-publish a verdict which already includes the same Windows payload.
+  sqlite3 *db = nullptr;
+  ASSERT_EQ(sqlite3_open(QFile::encodeName(config + "/itch/db/butler.db").constData(), &db), SQLITE_OK);
+  const auto sql = "UPDATE caves SET verdict='" +
+      QJsonDocument(verdict()).toJson(QJsonDocument::Compact) + "'";
+  ASSERT_EQ(sqlite3_exec(db, sql.constData(), nullptr, nullptr, nullptr), SQLITE_OK);
+  ASSERT_EQ(sqlite3_close(db), SQLITE_OK);
+  result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().executable, exe);
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptMustBelongToInstalledProductAndBeAGame) {
+  pe(exe);
+  itch({});
+  receipt({"bin/Game.exe"}, "456");
+  EXPECT_TRUE(read().isEmpty());
+  receipt({"bin/Game.exe"}, "123", "tool");
+  EXPECT_TRUE(read().isEmpty());
+  receipt({"bin/Game.exe"});
+  ASSERT_EQ(read().size(), 1);
+  const auto path = directory + "/.itch/receipt.json.gz";
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto before = file.readAll();
+  file.close();
+  ASSERT_EQ(read().size(), 1);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  EXPECT_EQ(file.readAll(), before);
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptRejectsHelpersInstallersDllsAndInvalidPeImages) {
+  itch({});
+  const QStringList rejected{"setup.exe", "unins000.exe", "UnityCrashHandler64.exe",
+      "Game.dll", "RenamedDll.exe", "Driver.exe", "Truncated.exe", "NotPe.exe", "Forged.exe"};
+  for (const auto &name : rejected)
+    pe(directory + "/" + name);
+  pe(directory + "/RenamedDll.exe", 0x2002);
+  pe(directory + "/Driver.exe", 0x0002, 1);
+  write(directory + "/Truncated.exe", "MZ");
+  write(directory + "/NotPe.exe", QByteArray(512, 'x'));
+  QByteArray forged(512, '\0');
+  forged.replace(0, 2, "MZ");
+  qToLittleEndian<quint32>(0xfffffff0, forged.data() + 0x3c);
+  write(directory + "/Forged.exe", forged);
+  QJsonArray files;
+  for (const auto &name : rejected)
+    files.append(name);
+  receipt(files);
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptCannotReintroduceExplicitlyRejectedInstaller) {
+  pe(exe);
+  auto candidate = QJsonObject{{"path", "bin/Game.exe"}, {"flavor", "windows"},
+      {"windowsInfo", QJsonObject{{"installerType", "inno"}}}};
+  itch({{"candidates", QJsonArray{candidate}}});
+  receipt({"bin/Game.exe"});
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptRejectsEscapesForeignSymlinksAndSpecialFiles) {
+  itch({});
+  const auto outside = home + "/Outside.exe";
+  pe(outside);
+  ASSERT_TRUE(QFile::link(outside, directory + "/escape.exe"));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(directory + "/pipe.exe").constData(), 0600), 0);
+  receipt({"../../Outside.exe", outside, "escape.exe", "pipe.exe"});
+  EXPECT_TRUE(read().isEmpty());
+  pe(exe);
+  receipt({"bin/Game.exe"});
+  const auto path = directory + "/.itch/receipt.json.gz";
+  ASSERT_TRUE(QFile::rename(path, home + "/foreign-receipt.gz"));
+  ASSERT_TRUE(QFile::link(home + "/foreign-receipt.gz", path));
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptChecksGzipIntegrityAndDecodedSizeBeforeParsing) {
+  pe(exe);
+  itch({});
+  receipt({"bin/Game.exe"});
+  const auto path = directory + "/.itch/receipt.json.gz";
+  QFile file(path);
+  ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+  const auto valid = file.readAll();
+  file.close();
+  auto corrupt = valid;
+  corrupt[corrupt.size() - 8] = static_cast<char>(corrupt[corrupt.size() - 8] ^ 0x40);
+  for (const auto &input : QList<QByteArray>{valid.left(valid.size() / 2), corrupt,
+       valid + valid, QByteArray("not gzip"), gzip(QByteArray(17 * 1024 * 1024, ' '))}) {
+    write(path, input);
+    EXPECT_TRUE(read().isEmpty());
+  }
+  write(path, valid);
+  ASSERT_EQ(read().size(), 1);
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptWatchRepairsMissingReceiptWithoutDatabaseChanges) {
+  pe(exe);
+  itch({});
+  auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.games.isEmpty());
+  EXPECT_TRUE(result.watchPaths.contains(directory));
+  receipt({"bin/Game.exe"});
+  result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_TRUE(result.watchPaths.contains(directory + "/.itch/receipt.json.gz"));
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptSupportsBothPe32AndPe64ConsoleGames) {
+  itch({});
+  pe(directory + "/Game32.exe", 0x0002, 3, 0x010b);
+  pe(directory + "/Game64.exe", 0x0002, 3, 0x020b);
+  receipt({"Game32.exe", "Game64.exe"});
+  const auto result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.games.size(), 2);
+  EXPECT_EQ(result.games[0].installation, result.games[1].installation);
+  EXPECT_EQ(result.launchers[6].toMap().value("count").toInt(), 1);
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptRejectsLinkedMetadataDirectoryAndFifoReceipt) {
+  itch({});
+  pe(exe);
+  receipt({"bin/Game.exe"});
+  const auto metadata = directory + "/.itch";
+  ASSERT_TRUE(QDir().rename(metadata, home + "/foreign-metadata"));
+  ASSERT_TRUE(QFile::link(home + "/foreign-metadata", metadata));
+  EXPECT_TRUE(read().isEmpty());
+  ASSERT_TRUE(QFile::remove(metadata)); // Remove only the fixture symlink.
+  ASSERT_TRUE(QDir().mkpath(metadata));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(metadata + "/receipt.json.gz").constData(), 0600), 0);
+  EXPECT_TRUE(read().isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, ItchReceiptBoundsCompressedInputAndFileList) {
+  itch({});
+  pe(exe);
+  write(directory + "/.itch/receipt.json.gz", QByteArray(4 * 1024 * 1024 + 1, '!'));
+  EXPECT_TRUE(read().isEmpty());
+  QJsonArray files;
+  for (int i = 0; i <= 32768; ++i)
+    files.append("bin/Game.exe");
+  receipt(files);
+  EXPECT_TRUE(read().isEmpty());
+  receipt({"bin/Game.exe"});
+  ASSERT_EQ(read().size(), 1);
+}
+
+TEST_F(LauncherLibraryTest, EveryLauncherDetectsConfigurationWithoutInstalledGames) {
+  const QStringList roots{data + "/Steam", config + "/heroic", config + "/legendary",
+      config + "/nile", config + "/lutris", config + "/faugus-launcher", config + "/itch"};
+  const QStringList files{"config/config.vdf", "config.json", "config.ini",
+      "current_user.json", "lutris.conf", "config.json", "config.json"};
+  const QList<QByteArray> contents{
+      "\"InstallConfigStore\" { \"Software\" { \"Valve\" {} } }\n",
+      "{}", "[Legendary]\ninstall_dir = ~/Games\n", "{}", "[lutris]\n", "{}", "{}"};
+  for (int i = 0; i < roots.size(); ++i) {
+    SCOPED_TRACE(i);
+    write(roots[i] + "/" + files[i], contents[i]);
+  }
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.games.isEmpty());
+  for (int i = 0; i < roots.size(); ++i) {
+    SCOPED_TRACE(i);
+    const auto launcher = result.launchers[i].toMap();
+    EXPECT_TRUE(launcher.value("detected").toBool());
+    EXPECT_EQ(launcher.value("count").toInt(), 0);
+    EXPECT_TRUE(launcher.value("games").toList().isEmpty());
+    const auto locations = launcher.value("locations").toList();
+    ASSERT_FALSE(locations.isEmpty());
+    EXPECT_EQ(locations.first().toMap().value("status").toString(), "Detected");
+    EXPECT_TRUE(result.watchPaths.contains(roots[i] + "/" + files[i]));
+  }
+}
+
+TEST_F(LauncherLibraryTest, ConfigurationOnlyDetectionRespectsCustomAndDisabledLocations) {
+  const QStringList ids{"steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch"};
+  const QStringList files{"config/config.vdf", "config.json", "config.ini",
+      "library.json", "lutris.conf", "config.json", "preferences.json"};
+  const QList<QByteArray> contents{"\"InstallConfigStore\" {}", "{}",
+      "[Legendary]\n", "[]", "[lutris]\n", "{}", "{}"};
+  QVariantMap preferences;
+  for (int i = 0; i < ids.size(); ++i) {
+    const auto root = home + "/custom-" + ids[i];
+    write(root + "/" + files[i], contents[i]);
+    preferences[ids[i]] = QVariantMap{{"automatic", false}, {"paths", QStringList{root}}};
+  }
+  auto result = LauncherLibrary::discover(home, config, data, preferences);
+  EXPECT_TRUE(result.games.isEmpty());
+  for (const auto &row : result.launchers) {
+    EXPECT_TRUE(row.toMap().value("detected").toBool());
+    EXPECT_EQ(row.toMap().value("count").toInt(), 0);
+  }
+  for (const auto &id : ids)
+    preferences[id] = QVariantMap{{"automatic", false}};
+  result = LauncherLibrary::discover(home, config, data, preferences);
+  for (const auto &row : result.launchers)
+    EXPECT_FALSE(row.toMap().value("detected").toBool());
+}
+
+TEST_F(LauncherLibraryTest, ConfigurationOnlyDetectionSupportsFlatpakRoots) {
+  object(home + "/.var/app/com.heroicgameslauncher.hgl/config/heroic/config.json", {});
+  object(home + "/.var/app/io.itch.itch/config/itch/preferences.json", {});
+  write(home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam/config/config.vdf",
+        "\"InstallConfigStore\" {}");
+  write(home + "/.var/app/net.lutris.Lutris/config/lutris/lutris.conf", "[lutris]\n");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  for (const auto i : {0, 1, 4, 6}) {
+    SCOPED_TRACE(i);
+    EXPECT_TRUE(result.launchers[i].toMap().value("detected").toBool());
+    EXPECT_EQ(result.launchers[i].toMap().value("count").toInt(), 0);
+  }
+}
+
+TEST_F(LauncherLibraryTest, ConfigurationDoesNotHideInvalidLibraries) {
+  object(config + "/heroic/config.json", {});
+  write(config + "/heroic/gog_store/installed.json", "{broken");
+  write(config + "/legendary/config.ini", "[Legendary]\n");
+  write(config + "/legendary/installed.json", "{broken");
+  object(config + "/nile/current_user.json", {});
+  write(config + "/nile/installed.json", "{broken");
+  write(config + "/lutris/lutris.conf", "[lutris]\n");
+  write(data + "/lutris/pga.db", "not a database");
+  object(config + "/itch/config.json", {});
+  write(config + "/itch/db/butler.db", "not a database");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.games.isEmpty());
+  for (const auto i : {1, 2, 3, 4, 6}) {
+    SCOPED_TRACE(i);
+    const auto row = result.launchers[i].toMap();
+    EXPECT_TRUE(row.value("detected").toBool());
+    ASSERT_FALSE(row.value("locations").toList().isEmpty());
+    EXPECT_EQ(row.value("locations").toList().first().toMap().value("status").toString(),
+              "Unreadable or invalid metadata");
+  }
+}
+
+TEST_F(LauncherLibraryTest, EmptyDirectoriesAndInvalidConfigurationDoNotDetectLaunchers) {
+  const QStringList roots{data + "/Steam", config + "/heroic", config + "/legendary",
+      config + "/nile", config + "/lutris", config + "/faugus-launcher", config + "/itch"};
+  const QStringList files{"config/config.vdf", "config.json", "config.ini",
+      "current_user.json", "lutris.conf", "config.json", "config.json"};
+  for (const auto &root : roots)
+    ASSERT_TRUE(QDir().mkpath(root));
+  auto result = LauncherLibrary::discover(home, config, data);
+  for (const auto &row : result.launchers)
+    EXPECT_FALSE(row.toMap().value("detected").toBool());
+  for (const auto &bad : QList<QByteArray>{"garbage", "[]", QByteArray(4 * 1024 * 1024 + 1, 'x')}) {
+    for (int i = 0; i < roots.size(); ++i)
+      write(roots[i] + "/" + files[i], bad);
+    result = LauncherLibrary::discover(home, config, data);
+    EXPECT_TRUE(result.games.isEmpty());
+    for (const auto &row : result.launchers)
+      EXPECT_FALSE(row.toMap().value("detected").toBool());
+  }
+}
+
+TEST_F(LauncherLibraryTest, SteamConfigurationRejectsTruncatedOrUnrelatedVdf) {
+  for (const auto &bad : QList<QByteArray>{"\"InstallConfigStore\" {", "\"Other\" {}",
+          "\"InstallConfigStore\" { \"key\" }", "\"InstallConfigStore\" {} trailing",
+          "\"InstallConfigStore\" {} }"}) {
+    write(data + "/Steam/config/config.vdf", bad);
+    EXPECT_FALSE(LauncherLibrary::discover(home, config, data).launchers[0].toMap()
+                     .value("detected").toBool());
   }
 }
 
@@ -148,6 +817,89 @@ TEST_F(LauncherLibraryTest, FaugusReadsExactWinePayloadAndConfiguredPrefix) {
   p.executable = directory + "/Unrelated.exe";
   p.arguments = {p.executable};
   EXPECT_TRUE(identify({{p.pid, p}}, result.games).isEmpty());
+}
+
+TEST_F(LauncherLibraryTest, FaugusConfigurationDetectsFreshSetupWithZeroGames) {
+  object(config + "/faugus-launcher/config.json", {{"interface-mode", "grid"}});
+  write(data + "/faugus-launcher/version.txt", "runtime installed");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  const auto launcher = result.launchers[5].toMap();
+  EXPECT_TRUE(launcher.value("detected").toBool());
+  EXPECT_EQ(launcher.value("count").toInt(), 0);
+  EXPECT_TRUE(launcher.value("games").toList().isEmpty());
+  EXPECT_TRUE(result.games.isEmpty());
+  const auto locations = launcher.value("locations").toList();
+  ASSERT_EQ(locations.size(), 1);
+  EXPECT_EQ(locations[0].toMap().value("path").toString(), config + "/faugus-launcher");
+  EXPECT_EQ(locations[0].toMap().value("status").toString(), "Detected");
+  EXPECT_EQ(locations[0].toMap().value("count").toInt(), 0);
+  EXPECT_TRUE(result.watchPaths.contains(config + "/faugus-launcher/config.json"));
+  EXPECT_TRUE(result.watchPaths.contains(data + "/faugus-launcher"));
+  EXPECT_FALSE(QFileInfo::exists(data + "/faugus-launcher/games.json"));
+}
+
+TEST_F(LauncherLibraryTest, FaugusConfigurationDetectionSupportsFlatpakAndCustomLocations) {
+  const auto flatpak = home + "/.var/app/io.github.Faugus.faugus-launcher/config/faugus-launcher";
+  object(flatpak + "/config.json", {});
+  object(home + "/custom-faugus/config.json", {});
+  auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.launchers[5].toMap().value("detected").toBool());
+  EXPECT_EQ(result.launchers[5].toMap().value("count").toInt(), 0);
+  result = LauncherLibrary::discover(home, config, data,
+      {{"faugus", QVariantMap{{"automatic", false},
+          {"paths", QStringList{"~/custom-faugus"}}}}});
+  const auto launcher = result.launchers[5].toMap();
+  EXPECT_TRUE(launcher.value("detected").toBool());
+  EXPECT_EQ(launcher.value("count").toInt(), 0);
+  ASSERT_EQ(launcher.value("locations").toList().size(), 1);
+  EXPECT_EQ(launcher.value("locations").toList()[0].toMap().value("path").toString(),
+            home + "/custom-faugus");
+}
+
+TEST_F(LauncherLibraryTest, FaugusConfigurationDoesNotHideInvalidGameLibrary) {
+  const auto root = config + "/faugus-launcher";
+  object(root + "/config.json", {});
+  write(root + "/games.json", "{bad json");
+  const auto result = LauncherLibrary::discover(home, config, data);
+  const auto launcher = result.launchers[5].toMap();
+  EXPECT_TRUE(launcher.value("detected").toBool());
+  EXPECT_TRUE(result.games.isEmpty());
+  ASSERT_EQ(launcher.value("locations").toList().size(), 1);
+  EXPECT_EQ(launcher.value("locations").toList()[0].toMap().value("status").toString(),
+            "Unreadable or invalid metadata");
+}
+
+TEST_F(LauncherLibraryTest, FaugusConfigurationDoesNotInventGameEntriesOrAcceptWrongShape) {
+  const auto root = config + "/faugus-launcher";
+  object(root + "/config.json", {{"title", "Not a game"}, {"path", exe},
+                                {"prefix", home + "/prefix"}, {"runner", "Default"}});
+  auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.launchers[5].toMap().value("detected").toBool());
+  EXPECT_TRUE(result.games.isEmpty());
+  array(root + "/config.json", {});
+  result = LauncherLibrary::discover(home, config, data);
+  ASSERT_EQ(result.launchers[5].toMap().value("locations").toList().size(), 1);
+  EXPECT_EQ(result.launchers[5].toMap().value("locations").toList()[0].toMap()
+                .value("status").toString(), "Unreadable or invalid metadata");
+}
+
+TEST_F(LauncherLibraryTest, FaugusFreshSetupTracksGameLibraryCreationAndRemoval) {
+  object(config + "/faugus-launcher/config.json", {});
+  EXPECT_TRUE(LauncherLibrary::discover(home, config, data).launchers[5].toMap()
+                  .value("detected").toBool());
+  array(data + "/faugus-launcher/games.json", {QJsonObject{
+      {"title", "New Faugus Game"}, {"path", exe}, {"prefix", home + "/prefix"},
+      {"runner", "Default"}}});
+  auto result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.launchers[5].toMap().value("detected").toBool());
+  EXPECT_EQ(result.launchers[5].toMap().value("count").toInt(), 1);
+  ASSERT_EQ(result.games.size(), 1);
+  EXPECT_EQ(result.games.first().name, "New Faugus Game");
+  ASSERT_TRUE(QFile::remove(data + "/faugus-launcher/games.json"));
+  result = LauncherLibrary::discover(home, config, data);
+  EXPECT_TRUE(result.launchers[5].toMap().value("detected").toBool());
+  EXPECT_EQ(result.launchers[5].toMap().value("count").toInt(), 0);
+  EXPECT_TRUE(result.games.isEmpty());
 }
 
 TEST_F(LauncherLibraryTest, FaugusNativeAndFlatpakAndLegacyLocationsAreCombined) {

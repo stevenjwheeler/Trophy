@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-dev libx11-dev libxext-dev libxkbcommon-dev libwayland-dev \
     libxcb-shm0-dev libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxkbcommon-x11-0 \
     libpipewire-0.3-dev libspa-0.2-dev pipewire pipewire-bin wireplumber \
-    libyaml-dev libsqlite3-dev \
+    libyaml-dev libsqlite3-dev zlib1g-dev \
     libdrm-dev libgbm-dev libva-dev libva-drm2 libgtest-dev \
     nasm libx264-dev libopus-dev zlib1g-dev \
     desktop-file-utils appstream ffmpeg dbus-daemon nodejs \

@@ -215,6 +215,11 @@ Page {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
+                    // Keep Qt's virtualized viewport inside its top extent:
+                    // otherwise section-size estimation triggers native fixups
+                    // during a rapid wheel pull. Only the visual layer stretches.
+                    property real wheelTopStretch: 0
+                    contentItem.transform: Translate { y: -gamesList.wheelTopStretch }
                     spacing: 0
                     visible: count > 0
                     model: root.detector ? root.detector.gamesModel : null
@@ -243,13 +248,13 @@ Page {
                             spacing: 8
                             Image {
                                 readonly property string launcher: groupHeader.section.toLowerCase()
-                                visible: ["steam", "heroic", "legendary", "nile", "lutris", "faugus"].indexOf(launcher) >= 0
+                                visible: ["steam", "heroic", "legendary", "nile", "lutris", "faugus", "itch.io"].indexOf(launcher) >= 0
                                 Layout.preferredWidth: 20
                                 Layout.preferredHeight: 20
                                 sourceSize: Qt.size(40, 40)
                                 fillMode: Image.PreserveAspectFit
                                 source: !visible ? "" : launcher === "steam" ? "qrc:/icons/default-apps/steam.svg"
-                                    : "qrc:/icons/launchers/" + launcher + (launcher === "legendary" ? ".ico" : ".svg")
+                                    : "qrc:/icons/launchers/" + (launcher === "itch.io" ? "itch" : launcher) + (launcher === "legendary" ? ".ico" : ".svg")
                             }
                             Label {
                                 objectName: "gamesSectionHeading"

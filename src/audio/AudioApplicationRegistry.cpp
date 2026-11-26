@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "AudioApplicationRegistry.h"
 #include "ApplicationAudioLookup.h"
+#include "AudioDiscoveryDiagnostics.h"
 #include <QDebug>
 #include <algorithm>
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <condition_variable>
 #include <map>
+#include <list>
 #include <mutex>
 #include <thread>
 #include <pipewire/pipewire.h>
@@ -26,13 +28,14 @@ struct AudioApplicationRegistry::Private {
     struct Entry {
       Session *owner = nullptr;
       uint32_t id = 0;
-      bool node = false, current = false;
+      bool node = false, current = false, retired = false;
       detail::AudioLookupProperties properties;
       pw_proxy *proxy = nullptr;
-      spa_hook listener{};
+      spa_hook listener{}, proxyListener{};
       ~Entry() {
         if (proxy) {
           spa_hook_remove(&listener);
+          spa_hook_remove(&proxyListener);
           pw_proxy_destroy(proxy);
         }
       }
@@ -44,11 +47,25 @@ struct AudioApplicationRegistry::Private {
     spa_hook coreListener{}, registryListener{};
     spa_source *wakeEvent = nullptr;
     std::map<uint32_t, std::unique_ptr<Entry>> entries;
+    // A global removal can arrive before a pending bind is rejected. Keep its
+    // local proxy until PipeWire acknowledges removal of that specific proxy;
+    // destroying it earlier sends destroy for a resource that may never exist.
+    std::list<std::unique_ptr<Entry>> retiredEntries;
     bool failed = false, pending = false, again = false, ready = false, dirty = true;
     int sequence = -1;
+    QString failure;
+    std::function<void(uint32_t)> beforeBind;
+
+    bool fail(const char *stage, int result) {
+      if (!failed)
+        failure = detail::audioDiscoveryFailure(stage, result);
+      failed = true;
+      return false;
+    }
 
     ~Session() {
       entries.clear();
+      retiredEntries.clear();
       if (registry) {
         spa_hook_remove(&registryListener);
         pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry));
@@ -69,11 +86,11 @@ struct AudioApplicationRegistry::Private {
       }
       pending = true;
       sequence = pw_core_sync(core, PW_ID_CORE, 0);
-      if (sequence < 0) failed = true;
+      if (sequence < 0) fail("registry sync", sequence);
     }
     static void nodeInfo(void *data, const pw_node_info *info) {
       auto &entry = *static_cast<Entry *>(data);
-      if (!info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
+      if (entry.retired || !info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS))
         return;
       entry.properties.updateInfo(info->props, true);
       entry.current = true;
@@ -81,7 +98,7 @@ struct AudioApplicationRegistry::Private {
     }
     static void clientInfo(void *data, const pw_client_info *info) {
       auto &entry = *static_cast<Entry *>(data);
-      if (!info || !(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS))
+      if (entry.retired || !info || !(info->change_mask & PW_CLIENT_CHANGE_MASK_PROPS))
         return;
       entry.properties.updateInfo(info->props, true);
       entry.current = true;
@@ -92,17 +109,27 @@ struct AudioApplicationRegistry::Private {
       auto &self = *static_cast<Session *>(data);
       const bool node = strcmp(type, PW_TYPE_INTERFACE_Node) == 0;
       const bool client = strcmp(type, PW_TYPE_INTERFACE_Client) == 0;
-      if ((!node && !client) || self.entries.size() >= 4096 || self.entries.contains(id))
+      if ((!node && !client) || self.entries.size() + self.retiredEntries.size() >= 4096 ||
+          self.entries.contains(id))
         return;
       auto entry = std::make_unique<Entry>();
       entry->owner = &self;
       entry->id = id;
       entry->node = node;
       entry->properties.update(props);
+      if (self.beforeBind)
+        self.beforeBind(id);
       entry->proxy = static_cast<pw_proxy *>(pw_registry_bind(self.registry, id, type,
           std::min(version, uint32_t(node ? PW_VERSION_NODE : PW_VERSION_CLIENT)), 0));
       if (!entry->proxy)
         return;
+      static const pw_proxy_events proxies = [] {
+        pw_proxy_events events{};
+        events.version = PW_VERSION_PROXY_EVENTS;
+        events.removed = proxyRemoved;
+        return events;
+      }();
+      pw_proxy_add_listener(entry->proxy, &entry->proxyListener, &proxies, entry.get());
       static const pw_node_events nodes = [] {
         pw_node_events events{};
         events.version = PW_VERSION_NODE_EVENTS;
@@ -126,8 +153,31 @@ struct AudioApplicationRegistry::Private {
     }
     static void removed(void *data, uint32_t id) {
       auto &self = *static_cast<Session *>(data);
-      if (self.entries.erase(id))
+      if (const auto entry = self.entries.find(id); entry != self.entries.end()) {
+        entry->second->retired = true;
+        entry->second->current = false;
+        self.retiredEntries.push_back(std::move(entry->second));
+        self.entries.erase(entry);
         self.changed();
+      }
+    }
+    static void proxyRemoved(void *data) {
+      auto *entry = static_cast<Entry *>(data);
+      auto &self = *entry->owner;
+      // The native proxy is now marked removed: its destructor frees only the
+      // local object and does not send another core destroy request.
+      if (entry->retired) {
+        const auto retired = std::find_if(self.retiredEntries.begin(), self.retiredEntries.end(),
+                                         [entry](const auto &item) { return item.get() == entry; });
+        if (retired != self.retiredEntries.end())
+          self.retiredEntries.erase(retired);
+      } else {
+        const auto current = self.entries.find(entry->id);
+        if (current != self.entries.end() && current->second.get() == entry) {
+          self.entries.erase(current);
+          self.changed();
+        }
+      }
     }
     static void done(void *data, uint32_t id, int sequence) {
       auto &self = *static_cast<Session *>(data);
@@ -141,18 +191,26 @@ struct AudioApplicationRegistry::Private {
         self.ready = true;
       }
     }
-    static void error(void *data, uint32_t id, int, int result, const char *) {
-      if (id == PW_ID_CORE || result == -EPIPE)
-        static_cast<Session *>(data)->failed = true;
+    static void error(void *data, uint32_t id, int sequence, int result, const char *message) {
+      if (id == PW_ID_CORE || result == -EPIPE) {
+        auto &self = *static_cast<Session *>(data);
+        if (!self.failed) {
+          self.fail("PipeWire core error", result);
+          self.failure += QStringLiteral("; object %1, sequence %2; %3")
+              .arg(id).arg(sequence)
+              .arg(QString::fromUtf8(message ? message : "").left(512)
+                       .replace('\n', ' ').replace('\r', ' '));
+        }
+      }
     }
     bool connect() {
       loop = pw_main_loop_new(nullptr);
-      if (!loop) return false;
+      if (!loop) return fail("create main loop", -errno);
       context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
-      if (!context) return false;
+      if (!context) return fail("create context", -errno);
       core = pw_context_connect(context, pw_properties_new(
           PW_KEY_APP_NAME, "Trophy audio application discovery", nullptr), 0);
-      if (!core) return false;
+      if (!core) return fail("connect to PipeWire", -errno);
       static const pw_core_events cores = [] {
         pw_core_events events{};
         events.version = PW_VERSION_CORE_EVENTS;
@@ -162,7 +220,7 @@ struct AudioApplicationRegistry::Private {
       }();
       pw_core_add_listener(core, &coreListener, &cores, this);
       registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-      if (!registry) return false;
+      if (!registry) return fail("get registry", -errno);
       static const pw_registry_events globals = [] {
         pw_registry_events events{};
         events.version = PW_VERSION_REGISTRY_EVENTS;
@@ -205,8 +263,10 @@ struct AudioApplicationRegistry::Private {
     bool warned = false;
     int retryMs = 250;
     while (!stopping) {
+      QString failure;
       {
         Session session;
+        session.beforeBind = owner->m_beforeBindForTesting;
         ++connectionAttempts;
         if (session.connect()) {
           {
@@ -218,12 +278,20 @@ struct AudioApplicationRegistry::Private {
           QVariantList previous;
           bool published = false;
           while (!stopping && !session.failed) {
-            if (pw_loop_iterate(pw_main_loop_get_loop(session.loop),
-                                session.ready && session.wakeEvent ? -1 : 100) < 0)
+            const int result = pw_loop_iterate(pw_main_loop_get_loop(session.loop),
+                                               session.ready && session.wakeEvent ? -1 : 100);
+            // A signal interrupting the wait is not a lost connection.
+            if (detail::audioDiscoveryLoopInterrupted(result))
+              continue;
+            if (result < 0) {
+              session.fail("event-loop iteration", result);
               break;
+            }
             if (!session.ready && std::chrono::steady_clock::now() - started >
-                                      std::chrono::seconds(5))
+                                      std::chrono::seconds(5)) {
+              session.fail("initial registry sync exceeded 5 seconds", -ETIMEDOUT);
               break;
+            }
             if (session.ready && !session.pending && session.dirty) {
               auto apps = session.snapshot();
               if (!published || apps != previous) {
@@ -242,11 +310,13 @@ struct AudioApplicationRegistry::Private {
             activeWake = nullptr;
           }
         }
+        failure = session.failure;
       } // Tear down all native proxies before reconnecting.
       if (stopping) break;
       send({}, false); // Never retain stale node IDs across a service restart.
       if (!warned) {
-        qWarning() << "Audio application discovery disconnected; retrying in the background";
+        qWarning().noquote() << "Audio application discovery disconnected; retrying in the background:"
+                             << failure;
         warned = true;
       }
       std::unique_lock lock(mutex);

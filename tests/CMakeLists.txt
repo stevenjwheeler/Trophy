@@ -70,6 +70,13 @@ target_compile_definitions(test_GameLibrariesUi PRIVATE
 target_link_libraries(test_GameLibrariesUi PRIVATE ${PROJECT_NAME} GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
 gtest_discover_tests(test_GameLibrariesUi)
 
+add_executable(test_WheelScrollNormalizer test_WheelScrollNormalizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WheelScrollNormalizer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/WheelScrollNormalizer.h)
+target_include_directories(test_WheelScrollNormalizer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_WheelScrollNormalizer PRIVATE GTest::GTest Qt6::Quick Qt6::Qml Qt6::Test)
+gtest_discover_tests(test_WheelScrollNormalizer)
+
 add_executable(test_DeletionQueue test_DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/DeletionQueue.cpp
     ${CMAKE_SOURCE_DIR}/src/core/StorageManager.cpp)
@@ -103,6 +110,7 @@ gtest_discover_tests(test_Theme)
 add_executable(test_GameIconProvider test_GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameIconProvider.cpp
     ${CMAKE_SOURCE_DIR}/src/detection/GameListModel.h
+    ${CMAKE_SOURCE_DIR}/src/core/WheelScrollNormalizer.cpp
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
 target_include_directories(test_GameIconProvider PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(test_GameIconProvider PRIVATE
@@ -587,7 +595,7 @@ gtest_discover_tests(test_Recording)
 
 add_executable(test_LauncherLibrary test_LauncherLibrary.cpp)
 target_link_libraries(test_LauncherLibrary PRIVATE trophy_processes
-    GTest::GTest GTest::gtest_main PkgConfig::SQLITE3)
+    GTest::GTest GTest::gtest_main PkgConfig::SQLITE3 ZLIB::ZLIB)
 gtest_discover_tests(test_LauncherLibrary)
 
 add_executable(test_GameDetectionService test_GameDetectionService.cpp)
