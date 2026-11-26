@@ -520,6 +520,7 @@ bool WaylandPortalCapture::initialize(const CaptureConfig &config) {
   m_lastFormatModifier = 0;
   m_multiPlaneWarned = false;
   m_gpuOnlyWarned = false;
+  m_lastDmaBufPlaneCount = 0;
 
   qDebug() << "Wayland Portal capture initialized. Restore token available:"
            << !m_restoreToken.isEmpty()
@@ -1634,6 +1635,12 @@ bool WaylandPortalCapture::processBuffer(pw_buffer *b) {
       return false;
     }
     frame.bufferLease = self->m_bufferLeases->retain(b);
+    if (self->m_lastDmaBufPlaneCount != frame.dmaBufPlanes.count) {
+      self->m_lastDmaBufPlaneCount = frame.dmaBufPlanes.count;
+      qDebug() << "WaylandPortalCapture: DMA-BUF layout planes:"
+               << frame.dmaBufPlanes.count << "modifier:"
+               << QString::number(self->m_negotiatedModifier, 16);
+    }
     frame.requestCpuFallback = [leases = self->m_bufferLeases] {
       leases->requestSharedMemory();
     };

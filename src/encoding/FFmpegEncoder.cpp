@@ -23,6 +23,7 @@
 #include <limits>
 #include <optional>
 #include <unistd.h>
+#include <fcntl.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -335,7 +336,7 @@ AVFrame *vaapiImportScale(VaapiImportState &state, const VideoFrame &input,
     auto *desc = static_cast<AVDRMFrameDescriptor *>(av_mallocz(sizeof(AVDRMFrameDescriptor)));
     if (!desc) return fail(QStringLiteral("VA-API DRM descriptor allocation failed"));
     auto *lease = new (std::nothrow) std::shared_ptr<const OwnedDmaBuf>(input.dmaBufStorage);
-    const int fd = dup(input.dmaBufFd);
+    const int fd = fcntl(input.dmaBufFd, F_DUPFD_CLOEXEC, 0);
     if (!lease || fd < 0) {
       delete lease; if (fd >= 0) close(fd); av_free(desc);
       return fail(QStringLiteral("VA-API DMA-BUF ownership failed"));
@@ -548,7 +549,7 @@ CudaImportState::CacheEntry *cudaImportCacheAcquire(CudaImportState &st,
   }
   ++st.cacheMisses;
 
-  const int fd = dup(frame.dmaBufFd);
+  const int fd = fcntl(frame.dmaBufFd, F_DUPFD_CLOEXEC, 0);
   if (fd < 0) {
     st.error = QStringLiteral("dup(dmabuf) failed");
     return nullptr;
@@ -841,6 +842,7 @@ bool FFmpegEncoder::initialize(const EncoderConfig &config) {
   m_eglImportFrames = 0;
   m_gpuScaledFrames = 0;
   m_vaapiVppFrames = 0;
+  m_multiPlaneVppFrames = 0;
   m_fallbackFrames = 0;
   m_droppedFrames = 0;
   m_sendFailures = 0;
@@ -1085,7 +1087,7 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &input,
     if (desc) {
         // Duplicate FD so we own the lifetime
         desc->nb_objects = 1;
-        desc->objects[0].fd = dup(frame.dmaBufFd); 
+        desc->objects[0].fd = fcntl(frame.dmaBufFd, F_DUPFD_CLOEXEC, 0);
         desc->objects[0].size = frame.height * frame.dmaBufStride; 
         desc->objects[0].format_modifier = frame.drmModifier;
         
@@ -1195,6 +1197,8 @@ bool FFmpegEncoder::encodeFrames(const VideoFrame &input,
       finalFrame = tempHwFrame;
       source = FrameSource::VaapiVpp;
       ++m_vaapiVppFrames;
+      if (frame.dmaBufLayout().count > 1 && ++m_multiPlaneVppFrames == 1)
+        qDebug() << "FFmpegEncoder: explicit multi-plane PRIME_2 import/VPP active";
       if (frame.width != m_config.width || frame.height != m_config.height)
         ++m_gpuScaledFrames;
       m_lastImportSucceeded = true;
@@ -1404,6 +1408,7 @@ void FFmpegEncoder::logSummary() {
             << "egl-import:" << m_eglImportFrames
             << "GPU-scaled:" << m_gpuScaledFrames
             << "VA-API-VPP:" << m_vaapiVppFrames
+            << "(multi-plane subset:" << m_multiPlaneVppFrames << ")"
            << "CPU-fallback:" << m_fallbackFrames
            << "dropped:" << m_droppedFrames
            << "backpressure:" << m_backpressureFrames

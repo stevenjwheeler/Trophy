@@ -106,6 +106,7 @@ private:
   static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error);
   static void on_stream_param_changed(void *data, unsigned int id, const struct spa_pod *param);
   static void on_stream_process(void *data);
+  // True means a producer lease owns the eventual native buffer return.
   bool processBuffer(pw_buffer *buffer);
   static void on_core_error(void *data, uint32_t id, int sequence, int result,
                             const char *message);
@@ -192,6 +193,7 @@ private:
   std::atomic<int> m_lastBufferType{-1};
   bool m_multiPlaneWarned = false;
   bool m_gpuOnlyWarned = false;
+  uint32_t m_lastDmaBufPlaneCount = 0;
   // Format-negotiation dedup: ready() fires only on first negotiate or an
   // actual format change; a mid-stream renegotiation of the same format is
   // ignored so downstream encoder init is not re-fired. Touched only on

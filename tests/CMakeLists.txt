@@ -821,10 +821,10 @@ target_include_directories(test_DmaBufFrame PRIVATE ${TEST_INCLUDE_DIRS})
 target_link_libraries(test_DmaBufFrame PRIVATE ${TEST_LINK_LIBS})
 gtest_discover_tests(test_DmaBufFrame)
 
-add_executable(test_PipeWireBufferLease test_PipeWireBufferLease.cpp)
-target_include_directories(test_PipeWireBufferLease PRIVATE ${TEST_INCLUDE_DIRS})
-target_link_libraries(test_PipeWireBufferLease PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
-gtest_discover_tests(test_PipeWireBufferLease)
+add_executable(test_PipeWireLeaseEvents test_PipeWireLeaseEvents.cpp)
+target_include_directories(test_PipeWireLeaseEvents PRIVATE ${TEST_INCLUDE_DIRS})
+target_link_libraries(test_PipeWireLeaseEvents PRIVATE ${TEST_LINK_LIBS} PkgConfig::PIPEWIRE)
+gtest_discover_tests(test_PipeWireLeaseEvents)
 
 add_executable(test_EncoderFactory test_EncoderFactory.cpp
     ${CMAKE_SOURCE_DIR}/src/encoding/EncoderFactory.cpp
