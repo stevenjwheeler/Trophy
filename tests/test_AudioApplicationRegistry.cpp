@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "audio/AudioApplicationRegistry.h"
+#include "audio/AudioDiscoveryDiagnostics.h"
 #include <QCoreApplication>
 #include <QSignalSpy>
 #include <QScopeGuard>
@@ -8,6 +9,19 @@
 
 namespace {
 std::atomic<int> publicationDebugMessages{0};
+TEST(AudioDiscoveryDiagnosticsTest, InterruptedWaitIsNotADisconnection) {
+  EXPECT_TRUE(TrophyBackend::detail::audioDiscoveryLoopInterrupted(-EINTR));
+  for (int result : {0, 1, -EPIPE, -EIO, -ETIMEDOUT, -EAGAIN})
+    EXPECT_FALSE(TrophyBackend::detail::audioDiscoveryLoopInterrupted(result));
+}
+TEST(AudioDiscoveryDiagnosticsTest, FailureIdentifiesStageAndNativeCode) {
+  const auto failure = TrophyBackend::detail::audioDiscoveryFailure("event-loop iteration", -EPIPE);
+  EXPECT_TRUE(failure.contains("event-loop iteration"));
+  EXPECT_TRUE(failure.contains(QString::number(-EPIPE)));
+  EXPECT_TRUE(failure.contains(QString::fromLocal8Bit(strerror(EPIPE))));
+  EXPECT_TRUE(TrophyBackend::detail::audioDiscoveryFailure("connect", 0)
+                  .contains("no native error reported"));
+}
 }
 
 namespace TrophyBackend {
