@@ -2,6 +2,8 @@
 #pragma once
 #include <QObject>
 #include <QVariantList>
+#include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace TrophyBackend {
@@ -30,5 +32,7 @@ private:
   QVariantList m_applications;
   bool m_available = false, m_running = false;
   quint64 m_generation = 0;
+  // Set by the friend fixture before start; immutable until stop joins.
+  std::function<void(uint32_t)> m_beforeBindForTesting;
 };
 } // namespace TrophyBackend
